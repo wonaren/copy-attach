@@ -281,11 +281,16 @@ fn load_history_from_db(conn: &Connection) -> Vec<ClipboardEntry> {
     };
 
     let mut result = Vec::new();
+    let mut skipped = 0u32;
     for row in rows {
         let (entry_type, db_id, text, width, height, _thumb_data,
              thumb_width, thumb_height, hash, timestamp, source_name, source_bundle_id) = match row {
             Ok(r) => r,
-            Err(e) => { eprintln!("CopyAttach: row read error: {}", e); continue; }
+            Err(e) => {
+                eprintln!("CopyAttach: row read error at index {}: {}", result.len() + skipped as usize + 1, e);
+                skipped += 1;
+                continue;
+            }
         };
         match entry_type {
             0 => result.push(ClipboardEntry::Text {
@@ -307,8 +312,14 @@ fn load_history_from_db(conn: &Connection) -> Vec<ClipboardEntry> {
                 source_bundle_id,
                 db_id,
             }),
-            _ => eprintln!("CopyAttach: unknown entry_type {} in DB", entry_type),
+            _ => {
+                eprintln!("CopyAttach: unknown entry_type {} in DB, skipped", entry_type);
+                skipped += 1;
+            }
         }
+    }
+    if skipped > 0 {
+        eprintln!("CopyAttach: skipped {} corrupt or unknown row(s) during history load", skipped);
     }
     result
 }
@@ -573,16 +584,25 @@ mod mac {
         }
     }
 
-    pub fn simulate_cmd_v() {
+    /// Returns true if Cmd+V was successfully simulated, false if CGEvent
+    /// creation failed (e.g., accessibility permissions revoked).
+    pub fn simulate_cmd_v() -> bool {
         let source = CGEventSource::new(CGEventSourceStateID::Private);
         let source = source.as_ref().map(|s| &**s);
-        if let Some(ev) = CGEvent::new_keyboard_event(source, 9, true) {
-            CGEvent::set_flags(Some(&*ev), CGEventFlags::MaskCommand);
-            CGEvent::post(CGEventTapLocation::SessionEventTap, Some(&*ev));
-        }
-        if let Some(ev) = CGEvent::new_keyboard_event(source, 9, false) {
-            CGEvent::set_flags(Some(&*ev), CGEventFlags::MaskCommand);
-            CGEvent::post(CGEventTapLocation::SessionEventTap, Some(&*ev));
+        let key_down = CGEvent::new_keyboard_event(source, 9, true);
+        let key_up = CGEvent::new_keyboard_event(source, 9, false);
+        match (key_down, key_up) {
+            (Some(kd), Some(ku)) => {
+                CGEvent::set_flags(Some(&*kd), CGEventFlags::MaskCommand);
+                CGEvent::post(CGEventTapLocation::SessionEventTap, Some(&*kd));
+                CGEvent::set_flags(Some(&*ku), CGEventFlags::MaskCommand);
+                CGEvent::post(CGEventTapLocation::SessionEventTap, Some(&*ku));
+                true
+            }
+            _ => {
+                eprintln!("CopyAttach: failed to create CGEvent for paste simulation");
+                false
+            }
         }
     }
 }
@@ -591,8 +611,9 @@ mod mac {
 mod mac {
     pub fn check_permission() -> bool { true }
     pub fn open_preferences() {}
-    pub fn simulate_cmd_v() {
+    pub fn simulate_cmd_v() -> bool {
         eprintln!("Warning: paste simulation only supported on macOS");
+        false
     }
     pub fn pasteboard_change_count() -> Option<i64> { None }
 }
@@ -664,9 +685,14 @@ fn clipboard_monitor(
                     let thumb = create_thumbnail(
                         img_data.width as u32, img_data.height as u32, &img_data.bytes, 300,
                     );
-                    let (thumb_data, thumb_w, thumb_h) = thumb.unwrap_or_else(|| {
-                        (png_data.clone(), img_data.width as u32, img_data.height as u32)
-                    });
+                    let (thumb_data, thumb_w, thumb_h) = match thumb {
+                        Some(t) => t,
+                        None => {
+                            eprintln!("CopyAttach: thumbnail creation failed for image {}x{}",
+                                      img_data.width, img_data.height);
+                            (Vec::new(), 0, 0)
+                        }
+                    };
 
                     let item = ClipboardEntry::Image {
                         png_data: Vec::new(),
@@ -934,11 +960,17 @@ pub extern "C" fn clipboard_get_image_thumb(index: c_int, out_len: *mut c_int) -
 
     let thumb_data = match backend().db.lock() {
         Ok(conn) => {
-            conn.query_row(
+            match conn.query_row(
                 "SELECT thumb_data FROM clipboard_history WHERE id = ?",
                 rusqlite::params![db_id],
                 |row| row.get::<_, Vec<u8>>(0),
-            ).unwrap_or_default()
+            ) {
+                Ok(data) => data,
+                Err(e) => {
+                    eprintln!("CopyAttach: failed to load thumbnail for db_id={}: {}", db_id, e);
+                    return std::ptr::null_mut();
+                }
+            }
         }
         Err(_) => return std::ptr::null_mut(),
     };
@@ -970,11 +1002,17 @@ pub extern "C" fn clipboard_get_image_full(index: c_int, out_len: *mut c_int) ->
         // Load full image from DB on demand
         match backend().db.lock() {
             Ok(conn) => {
-                conn.query_row(
+                match conn.query_row(
                     "SELECT png_data FROM clipboard_history WHERE id = ?",
                     rusqlite::params![db_id],
                     |row| row.get(0),
-                ).unwrap_or_default()
+                ) {
+                    Ok(data) => data,
+                    Err(e) => {
+                        eprintln!("CopyAttach: failed to load full image for db_id={}: {}", db_id, e);
+                        return std::ptr::null_mut();
+                    }
+                }
             }
             Err(_) => return std::ptr::null_mut(),
         }
@@ -1115,7 +1153,7 @@ pub extern "C" fn clipboard_select_and_paste(index: c_int) -> c_int {
 
     thread::sleep(Duration::from_millis(50));
     #[cfg(target_os = "macos")]
-    { if mac::check_permission() { mac::simulate_cmd_v(); } }
+    { if mac::check_permission() && !mac::simulate_cmd_v() { return 0; } }
     1
 }
 
