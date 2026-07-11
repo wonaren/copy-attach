@@ -155,7 +155,12 @@ class ClipboardBackend: ObservableObject {
     }
 
     func selectAndPaste(at index: Int) -> Bool {
-        return clipboard_select_and_paste(Int32(index)) != 0
+        let result = clipboard_select_and_paste(Int32(index)) != 0
+        if result {
+            // History order changed (selected item moved to top) — force UI refresh
+            reloadItems()
+        }
+        return result
     }
 
     func checkPermission() -> Bool {

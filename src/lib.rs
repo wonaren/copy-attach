@@ -682,6 +682,14 @@ pub extern "C" fn clipboard_select_and_paste(index: c_int) -> c_int {
         }
     }
 
+    // Move the selected item to top of history immediately so the UI
+    // reflects the new order right away, without waiting for the monitor thread.
+    {
+        let mut hist = backend().history.lock().unwrap();
+        let new_hist = add_to_history(std::mem::take(&mut *hist), item);
+        *hist = new_hist;
+    }
+
     thread::sleep(Duration::from_millis(50));
     #[cfg(target_os = "macos")]
     { if mac::check_permission() { mac::simulate_cmd_v(); } }
