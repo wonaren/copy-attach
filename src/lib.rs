@@ -5,43 +5,79 @@
 #![allow(dead_code)]
 
 use std::ffi::{c_char, c_int, c_longlong, CStr, CString};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use arboard::Clipboard;
+use serde::{Deserialize, Serialize};
+
+// ═══════════════════════════════════════════
+// serde helpers — base64 for binary Vec<u8>
+// ═══════════════════════════════════════════
+
+mod base64_serde {
+    use base64::{Engine as _, engine::general_purpose};
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(bytes: &Vec<u8>, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&general_purpose::STANDARD.encode(bytes))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
+        <String as Deserialize>::deserialize(deserializer).and_then(|s| {
+            general_purpose::STANDARD.decode(&s).map_err(serde::de::Error::custom)
+        })
+    }
+}
 
 // ═══════════════════════════════════════════
 // Types
 // ═══════════════════════════════════════════
 
 /// Source app info
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct SourceApp {
     name: String,
     bundle_id: String,
 }
 
 /// A clipboard history entry
-#[derive(Clone, Debug)]
+///
+/// NOTE: When adding new fields to any variant, make sure to add `#[serde(default)]`
+/// to maintain forward compatibility with previously persisted files.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 enum ClipboardEntry {
     Text {
         text: String,
+        #[serde(default)]
         timestamp: u64,
+        #[serde(default)]
         source_name: String,
+        #[serde(default)]
         source_bundle_id: String,
     },
     Image {
+        #[serde(with = "base64_serde")]
         png_data: Vec<u8>,
         width: u32,
         height: u32,
+        /// Thumbnail PNG data. Uses empty vec as default for forward compat.
+        #[serde(default, with = "base64_serde")]
         thumb_data: Vec<u8>,
+        #[serde(default)]
         thumb_width: u32,
+        #[serde(default)]
         thumb_height: u32,
+        #[serde(default)]
         hash: u64,
+        #[serde(default)]
         timestamp: u64,
+        #[serde(default)]
         source_name: String,
+        #[serde(default)]
         source_bundle_id: String,
     },
 }
@@ -93,7 +129,7 @@ impl ClipboardEntry {
                 }
             }
             ClipboardEntry::Image { width, height, .. } => {
-                format!("📷 Image ({}×{})", width, height)
+                format!("📷 图片 ({}×{})", width, height)
             }
         }
     }
@@ -115,6 +151,7 @@ struct Backend {
     running: Arc<AtomicBool>,
     monitor_handle: Mutex<Option<thread::JoinHandle<()>>>,
     source_app: Arc<Mutex<SourceApp>>,
+    save_needed: Arc<AtomicBool>,
 }
 
 static BACKEND: OnceLock<Backend> = OnceLock::new();
@@ -160,16 +197,9 @@ fn create_thumbnail(width: u32, height: u32, rgba_bytes: &[u8], max_dim: u32) ->
 fn image_hash(data: &[u8], width: u32, height: u32) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    data.len().hash(&mut hasher);
     width.hash(&mut hasher);
     height.hash(&mut hasher);
-    if !data.is_empty() {
-        data[0].hash(&mut hasher);
-    }
-    if data.len() > 10 {
-        data[data.len() / 2].hash(&mut hasher);
-        data[data.len() - 1].hash(&mut hasher);
-    }
+    data.hash(&mut hasher);
     hasher.finish()
 }
 
@@ -196,7 +226,64 @@ fn add_to_history(mut history: Vec<ClipboardEntry>, item: ClipboardEntry) -> Vec
     while history.len() > MAX_HISTORY {
         history.pop();
     }
+    // Mark save needed (done periodically from monitor thread)
+    if let Some(b) = BACKEND.get() {
+        b.save_needed.store(true, Ordering::SeqCst);
+    }
     history
+}
+
+// ═══════════════════════════════════════════
+// Persistence
+// ═══════════════════════════════════════════
+
+/// Returns the path to the history JSON file.
+fn get_persist_path() -> Option<PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    let dir = PathBuf::from(&home).join("Library/Application Support/CopyAttach");
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir.join("history.json"))
+}
+
+/// Load history from the persistence file.
+fn load_history_from_file() -> Vec<ClipboardEntry> {
+    let path = match get_persist_path() {
+        Some(p) => p,
+        None => return Vec::new(),
+    };
+    let data = match std::fs::read(&path) {
+        Ok(d) => d,
+        Err(_) => return Vec::new(),
+    };
+    serde_json::from_slice(&data).unwrap_or_else(|e| {
+        eprintln!("CopyAttach: failed to parse history file: {}", e);
+        Vec::new()
+    })
+}
+
+/// Save history to the persistence file atomically (write to temp, then rename).
+fn save_history_to_file(history: &[ClipboardEntry]) {
+    let path = match get_persist_path() {
+        Some(p) => p,
+        None => return,
+    };
+    let json = match serde_json::to_string(history) {
+        Ok(j) => j,
+        Err(e) => {
+            eprintln!("CopyAttach: failed to serialize history: {}", e);
+            return;
+        }
+    };
+    // Write to a temp file first, then atomically rename to avoid corruption on crash.
+    let tmp = path.with_extension("json.tmp");
+    if let Err(e) = std::fs::write(&tmp, &json) {
+        eprintln!("CopyAttach: failed to write history file: {}", e);
+        return;
+    }
+    if let Err(e) = std::fs::rename(&tmp, &path) {
+        eprintln!("CopyAttach: failed to rename history file: {}", e);
+        let _ = std::fs::remove_file(&tmp);
+    }
 }
 
 // ═══════════════════════════════════════════
@@ -258,6 +345,7 @@ fn clipboard_monitor(
     history: Arc<Mutex<Vec<ClipboardEntry>>>,
     running: Arc<AtomicBool>,
     source_app: Arc<Mutex<SourceApp>>,
+    save_needed: Arc<AtomicBool>,
 ) {
     let mut cb = match Clipboard::new() {
         Ok(c) => c,
@@ -331,20 +419,31 @@ fn clipboard_monitor(
                 };
 
                 if !text.is_empty() && is_new {
-                    let item = ClipboardEntry::Text {
-                        text: text.clone(),
-                        timestamp: now,
-                        source_name: src.name,
-                        source_bundle_id: src.bundle_id,
-                    };
+                    // Skip very short or whitespace-only text (likely system artifacts)
+                    let trimmed = text.trim();
+                    if trimmed.len() >= 2 {
+                        let item = ClipboardEntry::Text {
+                            text: text.clone(),
+                            timestamp: now,
+                            source_name: src.name,
+                            source_bundle_id: src.bundle_id,
+                        };
 
-                    let mut hist = history.lock().unwrap();
-                    let new_hist = add_to_history(std::mem::take(&mut *hist), item);
-                    *hist = new_hist;
+                        let mut hist = history.lock().unwrap();
+                        let new_hist = add_to_history(std::mem::take(&mut *hist), item);
+                        *hist = new_hist;
+                    }
                     last_text = Some(text);
                     last_image_hash = None;
                 }
             }
+        }
+
+        // Periodically save history if needed
+        if save_needed.load(Ordering::Relaxed) {
+            let hist_copy = history.lock().unwrap().clone();
+            save_history_to_file(&hist_copy);
+            save_needed.store(false, Ordering::SeqCst);
         }
 
         for _ in 0..10 {
@@ -360,37 +459,63 @@ fn clipboard_monitor(
 
 #[no_mangle]
 pub extern "C" fn clipboard_init() -> c_int {
-    let history: Arc<Mutex<Vec<ClipboardEntry>>> = Arc::new(Mutex::new(Vec::new()));
+    // Load persisted history from disk
+    let saved = load_history_from_file();
+    // Trim to MAX_HISTORY in case the file grew beyond the cap
+    let saved: Vec<ClipboardEntry> = saved.into_iter().take(MAX_HISTORY).collect();
+
+    let history: Arc<Mutex<Vec<ClipboardEntry>>> = Arc::new(Mutex::new(saved));
     let running = Arc::new(AtomicBool::new(true));
     let source_app = Arc::new(Mutex::new(SourceApp::default()));
-
-    let h = Arc::clone(&history);
-    let r = Arc::clone(&running);
-    let s = Arc::clone(&source_app);
-    let handle = thread::spawn(|| clipboard_monitor(h, r, s));
+    let save_needed = Arc::new(AtomicBool::new(false));
 
     let backend = Backend {
-        history,
-        running,
-        monitor_handle: Mutex::new(Some(handle)),
-        source_app,
+        history: Arc::clone(&history),
+        running: Arc::clone(&running),
+        monitor_handle: Mutex::new(None),
+        source_app: Arc::clone(&source_app),
+        save_needed: Arc::clone(&save_needed),
     };
 
-    match BACKEND.set(backend) {
-        Ok(()) => 1,
-        Err(_) => 0,
+    // Set BACKEND BEFORE spawning the monitor thread, so add_to_history
+    // can always find the global and set save_needed correctly.
+    let prev = BACKEND.set(backend);
+    match prev {
+        Err(_) => return 0, // Already initialized
+        Ok(()) => {}
     }
+
+    // Spawn the monitor thread after BACKEND is live.
+    let handle = thread::spawn(|| clipboard_monitor(
+        history, running, source_app, save_needed,
+    ));
+
+    // Store the join handle so cleanup can join it.
+    if let Some(b) = BACKEND.get() {
+        if let Ok(mut h) = b.monitor_handle.lock() {
+            *h = Some(handle);
+        }
+    }
+
+    1
 }
 
 #[no_mangle]
 pub extern "C" fn clipboard_cleanup() {
     if let Some(b) = BACKEND.get() {
+        // Signal the monitor thread to stop FIRST, before any save.
         b.running.store(false, Ordering::SeqCst);
+
+        // Wait for the monitor to finish (it may do a final save).
         if let Ok(mut handle) = b.monitor_handle.lock() {
             if let Some(h) = handle.take() {
                 let _ = h.join();
             }
         }
+
+        // Now it's safe to do a final save — no concurrent writes.
+        let hist_copy = b.history.lock().unwrap().clone();
+        save_history_to_file(&hist_copy);
     }
 }
 
@@ -575,6 +700,24 @@ pub extern "C" fn clipboard_check_permission() -> c_int {
 pub extern "C" fn clipboard_open_preferences() {
     #[cfg(target_os = "macos")]
     mac::open_preferences();
+}
+
+#[no_mangle]
+pub extern "C" fn clipboard_clear_history() {
+    if let Some(b) = BACKEND.get() {
+        // Clear in-memory history
+        {
+            let mut hist = b.history.lock().unwrap();
+            hist.clear();
+        }
+        // Delete the persistence file
+        if let Some(path) = get_persist_path() {
+            let _ = std::fs::remove_file(&path);
+            // Also remove temp file if present
+            let tmp = path.with_extension("json.tmp");
+            let _ = std::fs::remove_file(&tmp);
+        }
+    }
 }
 
 // ═══════════════════════════════════════════
@@ -773,7 +916,7 @@ mod tests {
     fn test_label_image() {
         let img_data = make_test_image_rgba(1920, 1080, 128);
         let i = make_image(&img_data, 1920, 1080, 100);
-        assert_eq!(i.label(), "📷 Image (1920×1080)");
+        assert_eq!(i.label(), "📷 图片 (1920×1080)");
     }
 
     #[test]

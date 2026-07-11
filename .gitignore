@@ -1,1 +1,8 @@
 /target
+.DS_Store
+CopyAttach.app/
+*.swp
+*.swo
+.build/
+.vscode/
+.idea/

@@ -25,7 +25,7 @@ class HistoryPopupWindow: NSPanel {
         self.isReleasedWhenClosed = false
         self.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         self.hasShadow = true
-        self.title = "Clipboard History"
+        self.title = "剪贴板历史"
         self.isMovableByWindowBackground = true
     }
     
@@ -137,17 +137,22 @@ struct HistoryPopupContent: View {
         .onKeyPress(.upArrow) {
             if selectedIndex > 0 {
                 selectedIndex -= 1
+                hoveredIndex = nil
             }
             return .handled
         }
         .onKeyPress(.downArrow) {
             if selectedIndex < backend.items.count - 1 {
                 selectedIndex += 1
+                hoveredIndex = nil
             }
             return .handled
         }
         .onKeyPress(.return) {
-            selectCurrentItem()
+            let targetIndex = hoveredIndex ?? selectedIndex
+            if targetIndex < backend.items.count {
+                selectItem(at: targetIndex)
+            }
             return .handled
         }
         .onKeyPress(.escape) {
@@ -167,7 +172,7 @@ struct HistoryPopupContent: View {
 
     private var titleBar: some View {
         HStack {
-            Text("📋 Clipboard History")
+            Text("📋 剪贴板历史")
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundColor(Color(nsColor: .lightGray))
 
@@ -199,11 +204,32 @@ struct HistoryPopupContent: View {
         HStack {
             let textCount = backend.items.filter { $0.isText }.count
             let imageCount = backend.items.filter { $0.isImage }.count
-            Text("\(backend.items.count) items (\(textCount) text, \(imageCount) images)")
+            Text("\(backend.items.count) 项 (\(textCount) 文本, \(imageCount) 图片)")
                 .font(.system(size: 10))
                 .foregroundColor(.secondary)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)
+            Spacer()
+            if !backend.items.isEmpty {
+                Button(role: .destructive) {
+                    let alert = NSAlert()
+                    alert.messageText = "清除所有剪贴板历史?"
+                    alert.informativeText = "此操作会删除所有已保存的记录，且无法撤销。"
+                    alert.alertStyle = .warning
+                    alert.addButton(withTitle: "确认清除")
+                    alert.addButton(withTitle: "取消")
+                    if alert.runModal() == .alertFirstButtonReturn {
+                        backend.clearHistory()
+                    }
+                } label: {
+                    Image(systemName: "trash")
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("清除所有历史记录")
+                .padding(.trailing, 8)
+            }
         }
     }
 
@@ -226,9 +252,6 @@ struct HistoryPopupContent: View {
                         }
                         .onHover { hovering in
                             hoveredIndex = hovering ? index : nil
-                            if hovering {
-                                selectedIndex = index
-                            }
                         }
                         .id(index)
                     }
@@ -244,11 +267,6 @@ struct HistoryPopupContent: View {
     }
 
     // MARK: - Actions
-
-    private func selectCurrentItem() {
-        guard selectedIndex < backend.items.count else { return }
-        selectItem(at: selectedIndex)
-    }
 
     private func selectItem(at index: Int) {
         if backend.selectAndPaste(at: index) {

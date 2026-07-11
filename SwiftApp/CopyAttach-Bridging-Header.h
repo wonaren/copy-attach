@@ -35,3 +35,6 @@ char* clipboard_get_item_source_bundle_id(int32_t index);
 // ─── Permissions ───
 int32_t clipboard_check_permission(void);
 void clipboard_open_preferences(void);
+
+// ─── History Management ───
+void clipboard_clear_history(void);

@@ -16,8 +16,12 @@ class ClipboardBackend: ObservableObject {
         permissionGranted = checkPermission()
     }
 
-    func start() {
+    func start() -> Bool {
         let result = clipboard_init()
+        guard result != 0 else {
+            print("[ClipboardBackend] init failed (result: \(result)) — Rust backend not available")
+            return false
+        }
         print("[ClipboardBackend] init result: \(result)")
         permissionGranted = checkPermission()
 
@@ -29,6 +33,11 @@ class ClipboardBackend: ObservableObject {
         sourceAppTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { [weak self] _ in
             self?.updateSourceApp()
         }
+
+        // Trigger an immediate refresh so the UI isn't stale for 0.5s
+        refresh()
+
+        return true
     }
 
     func stop() {
@@ -155,6 +164,15 @@ class ClipboardBackend: ObservableObject {
 
     func openPreferences() {
         clipboard_open_preferences()
+    }
+
+    func clearHistory() {
+        clipboard_clear_history()
+        // Immediately update local state
+        DispatchQueue.main.async {
+            self.count = 0
+            self.items = []
+        }
     }
 }
 

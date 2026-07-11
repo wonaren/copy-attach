@@ -8,16 +8,16 @@ struct ClipboardManagerApp: App {
 
     var body: some Scene {
         // Menu bar
-        MenuBarExtra("Clipboard", systemImage: "clipboard") {
-            Button("打开主界面 (Open CopyAttach)") {
+        MenuBarExtra("剪贴板", systemImage: "clipboard") {
+            Button("打开主界面") {
                 AppDelegate.shared?.openSettings()
             }
             Divider()
-            Button("Show History (\(HotkeyManager.shared.config.displayString))") {
+            Button("显示历史记录 (\(HotkeyManager.shared.config.displayString))") {
                 AppDelegate.shared?.togglePopup()
             }
             Divider()
-            Button("Quit") {
+            Button("退出") {
                 NSApplication.shared.terminate(nil)
             }
         }
@@ -47,7 +47,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         // Initialize Rust backend
         debugLog("Starting Rust backend...")
-        ClipboardBackend.shared.start()
+        let started = ClipboardBackend.shared.start()
+        if !started {
+            debugLog("Rust backend failed to initialize — app may not function correctly")
+        }
         debugLog("Rust backend started")
 
         // Show settings window on launch
@@ -144,12 +147,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                         .font(.system(size: 20))
                         .foregroundColor(backend.permissionGranted ? .green : .orange)
                     VStack(alignment: .leading, spacing: 4) {
-                        Text(backend.permissionGranted ? "Accessibility: Granted" : "Accessibility: Not Granted")
+                        Text(backend.permissionGranted ? "辅助功能：已授权" : "辅助功能：未授权")
                             .font(.system(size: 13, weight: .semibold))
                             .foregroundColor(backend.permissionGranted ? .green : .orange)
                         Text(backend.permissionGranted
-                             ? "Press \(hotkeyManager.config.displayString) to open clipboard history."
-                             : "The app needs Accessibility permissions for global hotkey detection and auto-paste.")
+                             ? "按 \(hotkeyManager.config.displayString) 打开剪贴板历史"
+                             : "应用需要辅助功能权限才能使用全局快捷键和自动粘贴")
                             .font(.system(size: 11)).foregroundColor(.secondary)
                     }
                     Spacer()
@@ -158,7 +161,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     Button(action: { backend.openPreferences() }) {
                         HStack(spacing: 6) {
                             Image(systemName: "shield")
-                            Text("Open System Settings → Grant Permission").font(.system(size: 12))
+                            Text("打开系统设置 → 授予权限").font(.system(size: 12))
                         }.frame(maxWidth: .infinity).padding(.vertical, 8)
                     }
                     .buttonStyle(.borderedProminent)
@@ -173,15 +176,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 HStack(spacing: 14) {
                     Image(systemName: "keyboard").font(.system(size: 20)).foregroundColor(.blue)
                     VStack(alignment: .leading, spacing: 6) {
-                        Text("Global Shortcut Key").font(.system(size: 13, weight: .semibold)).foregroundColor(.white)
-                        Text("Customize the keyboard shortcut to show clipboard history.")
+                        Text("全局快捷键").font(.system(size: 13, weight: .semibold)).foregroundColor(.white)
+                        Text("自定义显示剪贴板历史的快捷键")
                             .font(.system(size: 11)).foregroundColor(.secondary)
                     }
                     Spacer()
                 }
                 VStack(spacing: 12) {
                     HStack {
-                        Text("Current shortcut:").font(.system(size: 12)).foregroundColor(.secondary)
+                        Text("当前快捷键：").font(.system(size: 12)).foregroundColor(.secondary)
                         Text(hotkeyManager.config.displayString)
                             .font(.system(size: 14, weight: .bold, design: .monospaced))
                             .foregroundColor(.white)
@@ -193,21 +196,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                         if hotkeyManager.isRecording {
                             HStack {
                                 Image(systemName: "record.circle").foregroundColor(.red)
-                                Text("Press new shortcut...").font(.system(size: 12, weight: .medium)).foregroundColor(.red)
+                                Text("按下新的快捷键...").font(.system(size: 12, weight: .medium)).foregroundColor(.red)
                             }
                             .padding(.horizontal, 14).padding(.vertical, 8)
                             .background(Color.red.opacity(0.1)).cornerRadius(6)
                             .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.red.opacity(0.5), lineWidth: 1))
-                            Button("Cancel") { hotkeyManager.stopRecording() }
+                            Button("取消") { hotkeyManager.stopRecording() }
                                 .buttonStyle(.plain).font(.system(size: 11)).foregroundColor(.secondary)
                         } else {
                             Button(action: { hotkeyManager.startRecording() }) {
                                 HStack(spacing: 4) {
                                     Image(systemName: "arrow.triangle.branch")
-                                    Text("Change Shortcut")
+                                    Text("修改快捷键")
                                 }.font(.system(size: 12)).padding(.horizontal, 14).padding(.vertical, 8)
                             }.buttonStyle(.borderedProminent).tint(Color(nsColor: .darkGray))
-                            Button("Reset") { hotkeyManager.resetToDefault() }
+                            Button("重置") { hotkeyManager.resetToDefault() }
                                 .buttonStyle(.plain).font(.system(size: 11)).foregroundColor(.secondary)
                         }
                     }
@@ -219,14 +222,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             settingsCard {
                 HStack(spacing: 14) {
                     Image(systemName: "gearshape.fill").font(.system(size: 20)).foregroundColor(.gray)
-                    Text("General").font(.system(size: 13, weight: .semibold)).foregroundColor(.white)
+                    Text("通用").font(.system(size: 13, weight: .semibold)).foregroundColor(.white)
                     Spacer()
                 }
                 VStack(spacing: 12) {
                     HStack {
                         Image(systemName: launchAtLogin ? "power.circle.fill" : "power.circle")
                             .foregroundColor(launchAtLogin ? .green : .secondary).font(.system(size: 14))
-                        Text("Launch at Login").font(.system(size: 12)).foregroundColor(.white)
+                        Text("开机启动").font(.system(size: 12)).foregroundColor(.white)
                         Spacer()
                         Toggle("", isOn: $launchAtLogin).toggleStyle(.switch).controlSize(.small)
                             .onChange(of: launchAtLogin) { _, newValue in setLaunchAtLogin(newValue) }
@@ -235,7 +238,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     HStack {
                         Image(systemName: runInBackground ? "circle.fill" : "circle")
                             .foregroundColor(runInBackground ? .green : .secondary).font(.system(size: 14))
-                        Text("Run in Background").font(.system(size: 12)).foregroundColor(.white)
+                        Text("后台运行").font(.system(size: 12)).foregroundColor(.white)
                         Spacer()
                         Toggle("", isOn: $runInBackground).toggleStyle(.switch).controlSize(.small)
                             .onChange(of: runInBackground) { _, newValue in setRunInBackground(newValue) }
@@ -248,15 +251,34 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             settingsCard {
                 HStack(spacing: 14) {
                     Image(systemName: "chart.bar.fill").font(.system(size: 20)).foregroundColor(.green)
-                    Text("Statistics").font(.system(size: 13, weight: .semibold)).foregroundColor(.white)
+                    Text("统计数据").font(.system(size: 13, weight: .semibold)).foregroundColor(.white)
                     Spacer()
                 }
                 VStack(spacing: 6) {
-                    statRow("Total Items", "\(backend.items.count)")
-                    statRow("Text Items", "\(textCount)")
-                    statRow("Image Items", "\(imageCount)")
-                    statRow("Max Capacity", "1,000")
+                    statRow("总项目数", "\(backend.items.count)")
+                    statRow("文本项目数", "\(textCount)")
+                    statRow("图片项目数", "\(imageCount)")
+                    statRow("最大容量", "1,000")
                 }.padding(.top, 8)
+                Divider().background(Color.gray.opacity(0.3)).padding(.vertical, 8)
+                Button(role: .destructive) {
+                    let alert = NSAlert()
+                    alert.messageText = "清除所有剪贴板历史?"
+                    alert.informativeText = "此操作会删除所有已保存的剪贴板记录，且无法撤销。"
+                    alert.alertStyle = .warning
+                    alert.addButton(withTitle: "确认清除")
+                    alert.addButton(withTitle: "取消")
+                    if alert.runModal() == .alertFirstButtonReturn {
+                        backend.clearHistory()
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "trash")
+                        Text("清除所有历史").font(.system(size: 12))
+                    }.frame(maxWidth: .infinity).padding(.vertical, 8)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(Color.red.opacity(0.7))
             }
         }
         
@@ -265,8 +287,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 HStack(spacing: 14) {
                     Image(systemName: "lightbulb.fill").font(.system(size: 20)).foregroundColor(.yellow)
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("Usage Tips").font(.system(size: 13, weight: .semibold)).foregroundColor(.white)
-                        Text("• Press \(hotkeyManager.config.displayString) to show/hide clipboard history\n• ↑↓ to navigate, Enter to select and paste\n• Esc to close the popup\n• Click an item to copy and paste it")
+                        Text("使用技巧").font(.system(size: 13, weight: .semibold)).foregroundColor(.white)
+                        Text("• 按 \(hotkeyManager.config.displayString) 显示/隐藏剪贴板历史\n• ↑↓ 导航，回车选择并粘贴\n• Esc 关闭弹出窗口\n• 点击项目即可复制并粘贴")
                             .font(.system(size: 11)).foregroundColor(.secondary).lineSpacing(3)
                     }
                     Spacer()
