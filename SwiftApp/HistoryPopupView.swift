@@ -286,7 +286,7 @@ struct ItemRowView: View {
     let isHovered: Bool
 
     var body: some View {
-        HStack(alignment: .top, spacing: 8) {
+        HStack(alignment: .center, spacing: 8) {
             // App icon
             appIcon
 
@@ -297,13 +297,6 @@ struct ItemRowView: View {
                     textContent(text)
                 case .image(_, let thumbData, let width, let height, _, _, _, _):
                     imageContent(thumbData: thumbData, width: width, height: height)
-                }
-                // Source app name
-                if !item.sourceName.isEmpty {
-                    Text(item.sourceName)
-                        .font(.system(size: 9))
-                        .foregroundColor(isSelected ? .white.opacity(0.7) : .secondary.opacity(0.6))
-                        .lineLimit(1)
                 }
             }
         }
@@ -349,12 +342,24 @@ struct ItemRowView: View {
     }
 
     private func textContent(_ text: String) -> some View {
-        let preview = truncateText(text, maxLength: 200)
-        return Text(preview)
+        let stripped = text
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        let display: String
+        let visualLen = visualWidth(stripped)
+        if visualLen > 64 {
+            let prefix = String(stripped.prefix(whileVisualWidth: 32))
+            let suffix = String(stripped.suffix(whileVisualWidth: 32))
+            display = "\(prefix)......\(suffix)"
+        } else {
+            display = stripped
+        }
+        return Text(display)
             .font(.system(size: 12))
             .foregroundColor(isSelected ? .white : Color(nsColor: .lightGray))
-            .lineLimit(2)
-            .lineSpacing(2)
+            .lineLimit(1)
             .frame(maxWidth: .infinity, alignment: .leading)
     }
 
@@ -401,5 +406,34 @@ struct ItemRowView: View {
             return String(truncated[...lastSpace]) + "…"
         }
         return truncated + "…"
+    }
+}
+
+// MARK: - Visual Width Helpers
+
+/// 1 for ASCII, 2 for CJK/fullwidth characters
+private func visualWidth(_ s: String) -> Int {
+    s.reduce(0) { $0 + ($1.isASCII ? 1 : 2) }
+}
+
+extension String {
+    fileprivate func prefix(whileVisualWidth limit: Int) -> Substring {
+        var w = 0
+        return prefix(while: { char in
+            let cw = char.isASCII ? 1 : 2
+            defer { w += cw }
+            return w + cw <= limit
+        })
+    }
+
+    fileprivate func suffix(whileVisualWidth limit: Int) -> Substring {
+        var w = 0
+        let reversed = String(self.reversed())
+        let taken = reversed.prefix(while: { char in
+            let cw = char.isASCII ? 1 : 2
+            defer { w += cw }
+            return w + cw <= limit
+        })
+        return Substring(self.suffix(taken.count))
     }
 }
