@@ -18,6 +18,26 @@ mkdir -p "${APP_NAME}.app/Contents/MacOS"
 mkdir -p "${APP_NAME}.app/Contents/Frameworks"
 mkdir -p "${APP_NAME}.app/Contents/Resources"
 
+# Generate AppIcon.icns from SVG if assets/icon.svg exists
+if [ -f "assets/icon.svg" ]; then
+    echo "==> Generating AppIcon.icns from assets/icon.svg..."
+    mkdir -p AppIcon.iconset
+    # sips handles SVG rendering correctly (unlike NSImage-based Swift renderer)
+    sips -s format png assets/icon.svg --out AppIcon.iconset/base.png >/dev/null
+    for size in 16 32 128 256 512; do
+        sips -z $size $size AppIcon.iconset/base.png --out AppIcon.iconset/icon_${size}x${size}.png >/dev/null
+        double=$((size * 2))
+        sips -z $double $double AppIcon.iconset/base.png --out AppIcon.iconset/icon_${size}x${size}@2x.png >/dev/null
+    done
+    iconutil -c icns AppIcon.iconset -o assets/AppIcon.icns
+    rm -rf AppIcon.iconset
+fi
+
+# Copy AppIcon.icns to resources if it exists
+if [ -f "assets/AppIcon.icns" ]; then
+    cp "assets/AppIcon.icns" "${APP_NAME}.app/Contents/Resources/AppIcon.icns"
+fi
+
 # Copy the Rust dylib into Frameworks and set its install name
 cp "target/release/libcopy_attach.dylib" "${APP_NAME}.app/Contents/Frameworks/"
 install_name_tool -id "@rpath/libcopy_attach.dylib" "${APP_NAME}.app/Contents/Frameworks/libcopy_attach.dylib"

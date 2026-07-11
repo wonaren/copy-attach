@@ -233,7 +233,18 @@ enum ClipboardItem: Identifiable {
     }
 }
 
-// MARK: - App Icon Cache
+// MARK: - App Icon
+
+/// Returns the app's own icon as an NSImage
+extension NSImage {
+    static var appIcon: NSImage {
+        if let path = Bundle.main.path(forResource: "AppIcon", ofType: "icns"),
+           let image = NSImage(contentsOfFile: path) {
+            return image
+        }
+        return NSImage(systemSymbolName: "clipboard", accessibilityDescription: nil) ?? NSImage()
+    }
+}
 
 /// Cache app icons by bundle ID to avoid repeated lookups
 private var appIconCache: [String: NSImage] = [:]

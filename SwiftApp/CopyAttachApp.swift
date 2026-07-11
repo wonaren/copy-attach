@@ -9,19 +9,28 @@ struct ClipboardManagerApp: App {
     var body: some Scene {
         // Menu bar
         MenuBarExtra("剪贴板", systemImage: "clipboard") {
-            Button("打开主界面") {
-                AppDelegate.shared?.openSettings()
-            }
-            Divider()
-            Button("显示历史记录 (\(HotkeyManager.shared.config.displayString))") {
-                AppDelegate.shared?.togglePopup()
-            }
-            Divider()
-            Button("退出") {
-                NSApplication.shared.terminate(nil)
-            }
+            AppMenuBarContent()
         }
         .menuBarExtraStyle(.menu)
+    }
+}
+
+/// Menu bar content that dynamically observes hotkey changes
+struct AppMenuBarContent: View {
+    @ObservedObject private var hotkeyManager = HotkeyManager.shared
+
+    var body: some View {
+        Button("打开主界面") {
+            AppDelegate.shared?.openSettings()
+        }
+        Divider()
+        Button("显示历史记录 (\(hotkeyManager.config.displayString))") {
+            AppDelegate.shared?.togglePopup()
+        }
+        Divider()
+        Button("退出") {
+            NSApplication.shared.terminate(nil)
+        }
     }
 }
 
@@ -135,7 +144,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         private var header: some View {
             HStack {
-                Text("📋 CopyAttach").font(.system(size: 18, weight: .bold)).foregroundColor(.white)
+                Image(nsImage: .appIcon)
+                    .resizable()
+                    .frame(width: 48, height: 48)
+                Text("CopyAttach").font(.system(size: 18, weight: .bold)).foregroundColor(.white)
                 Spacer()
             }
         }

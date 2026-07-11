@@ -4,7 +4,7 @@ A full-featured macOS clipboard manager with a **Rust backend** and **native Swi
 
 ## Features
 
-- 📋 **Automatic clipboard monitoring** — captures both text and images in real-time
+- ![](assets/icon.svg) **Automatic clipboard monitoring** — captures both text and images in real-time
 - 🖼️ **Text & Image support** — stores content and image snapshots (up to 1000 items)
 - ⚡ **Customizable global hotkey** — defaults to ⌥⌘V, changeable via Settings
 - 🎯 **One-click select & paste** — choose an item to copy it to clipboard and auto-paste

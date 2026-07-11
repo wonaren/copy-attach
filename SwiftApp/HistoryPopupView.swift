@@ -172,7 +172,10 @@ struct HistoryPopupContent: View {
 
     private var titleBar: some View {
         HStack {
-            Text("📋 剪贴板历史")
+            Image(nsImage: .appIcon)
+                .resizable()
+                .frame(width: 24, height: 24)
+            Text("剪贴板历史")
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundColor(Color(nsColor: .lightGray))
 
