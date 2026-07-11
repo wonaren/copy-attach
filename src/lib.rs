@@ -12,72 +12,38 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use arboard::Clipboard;
-use serde::{Deserialize, Serialize};
-
-// ═══════════════════════════════════════════
-// serde helpers — base64 for binary Vec<u8>
-// ═══════════════════════════════════════════
-
-mod base64_serde {
-    use base64::{Engine as _, engine::general_purpose};
-    use serde::{Deserialize, Deserializer, Serializer};
-
-    pub fn serialize<S: Serializer>(bytes: &Vec<u8>, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&general_purpose::STANDARD.encode(bytes))
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
-        <String as Deserialize>::deserialize(deserializer).and_then(|s| {
-            general_purpose::STANDARD.decode(&s).map_err(serde::de::Error::custom)
-        })
-    }
-}
+use rusqlite::Connection;
 
 // ═══════════════════════════════════════════
 // Types
 // ═══════════════════════════════════════════
 
 /// Source app info
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default)]
 struct SourceApp {
     name: String,
     bundle_id: String,
 }
 
 /// A clipboard history entry
-///
-/// NOTE: When adding new fields to any variant, make sure to add `#[serde(default)]`
-/// to maintain forward compatibility with previously persisted files.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 enum ClipboardEntry {
     Text {
         text: String,
-        #[serde(default)]
         timestamp: u64,
-        #[serde(default)]
         source_name: String,
-        #[serde(default)]
         source_bundle_id: String,
     },
     Image {
-        #[serde(with = "base64_serde")]
         png_data: Vec<u8>,
         width: u32,
         height: u32,
-        /// Thumbnail PNG data. Uses empty vec as default for forward compat.
-        #[serde(default, with = "base64_serde")]
         thumb_data: Vec<u8>,
-        #[serde(default)]
         thumb_width: u32,
-        #[serde(default)]
         thumb_height: u32,
-        #[serde(default)]
         hash: u64,
-        #[serde(default)]
         timestamp: u64,
-        #[serde(default)]
         source_name: String,
-        #[serde(default)]
         source_bundle_id: String,
     },
 }
@@ -151,13 +117,9 @@ struct Backend {
     running: Arc<AtomicBool>,
     monitor_handle: Mutex<Option<thread::JoinHandle<()>>>,
     source_app: Arc<Mutex<SourceApp>>,
-    save_needed: Arc<AtomicBool>,
-    /// Shared tracking of the last clipboard content the monitor processed.
-    /// clipboard_select_and_paste also updates these after writing to the
-    /// system clipboard, so the monitor sees "not new" and doesn't create a
-    /// duplicate entry that would overwrite the original source app info.
     last_seen_text: Arc<Mutex<Option<String>>>,
     last_seen_image_hash: Arc<Mutex<Option<u64>>>,
+    db: Arc<Mutex<Connection>>,
 }
 
 static BACKEND: OnceLock<Backend> = OnceLock::new();
@@ -232,65 +194,323 @@ fn add_to_history(mut history: Vec<ClipboardEntry>, item: ClipboardEntry) -> Vec
     while history.len() > MAX_HISTORY {
         history.pop();
     }
-    // Mark save needed (done periodically from monitor thread)
-    if let Some(b) = BACKEND.get() {
-        b.save_needed.store(true, Ordering::SeqCst);
-    }
     history
 }
 
 // ═══════════════════════════════════════════
-// Persistence
+// Persistence — SQLite (write-through)
 // ═══════════════════════════════════════════
 
-/// Returns the path to the history JSON file.
-fn get_persist_path() -> Option<PathBuf> {
+fn get_persist_dir() -> Option<PathBuf> {
     let home = std::env::var("HOME").ok()?;
     let dir = PathBuf::from(&home).join("Library/Application Support/CopyAttach");
     std::fs::create_dir_all(&dir).ok()?;
-    Some(dir.join("history.json"))
+    Some(dir)
 }
 
-/// Load history from the persistence file.
-fn load_history_from_file() -> Vec<ClipboardEntry> {
-    let path = match get_persist_path() {
-        Some(p) => p,
-        None => return Vec::new(),
-    };
-    let data = match std::fs::read(&path) {
-        Ok(d) => d,
-        Err(_) => return Vec::new(),
-    };
-    serde_json::from_slice(&data).unwrap_or_else(|e| {
-        eprintln!("CopyAttach: failed to parse history file: {}", e);
-        Vec::new()
-    })
+fn open_db() -> Option<Connection> {
+    let db_path = get_persist_dir()?.join("history.db");
+    Connection::open(&db_path).map_err(|e| {
+        eprintln!("CopyAttach: failed to open database: {}", e);
+    }).ok()
 }
 
-/// Save history to the persistence file atomically (write to temp, then rename).
-fn save_history_to_file(history: &[ClipboardEntry]) {
-    let path = match get_persist_path() {
-        Some(p) => p,
+fn ensure_history_table(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS clipboard_history (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            entry_type      INTEGER NOT NULL,
+            text            TEXT,
+            png_data        BLOB,
+            width           INTEGER,
+            height          INTEGER,
+            thumb_data      BLOB,
+            thumb_width     INTEGER,
+            thumb_height    INTEGER,
+            hash            INTEGER,
+            timestamp       INTEGER NOT NULL,
+            source_name     TEXT NOT NULL DEFAULT '',
+            source_bundle_id TEXT NOT NULL DEFAULT ''
+        );"
+    )
+}
+
+fn load_history_from_db(conn: &Connection) -> Vec<ClipboardEntry> {
+    let mut stmt = match conn.prepare(
+        "SELECT entry_type, text, png_data, width, height,
+                thumb_data, thumb_width, thumb_height, hash,
+                timestamp, source_name, source_bundle_id
+         FROM clipboard_history
+         ORDER BY id DESC
+         LIMIT ?"
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("CopyAttach: failed to prepare load query: {}", e);
+            return Vec::new();
+        }
+    };
+
+    let rows = match stmt.query_map([MAX_HISTORY as i64], |row| {
+        let entry_type: i32 = row.get(0)?;
+        Ok((entry_type,
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, Option<Vec<u8>>>(2)?,
+            row.get::<_, Option<i64>>(3)?,
+            row.get::<_, Option<i64>>(4)?,
+            row.get::<_, Option<Vec<u8>>>(5)?,
+            row.get::<_, Option<i64>>(6)?,
+            row.get::<_, Option<i64>>(7)?,
+            row.get::<_, Option<i64>>(8)?,
+            row.get::<_, i64>(9)?,
+            row.get::<_, String>(10)?,
+            row.get::<_, String>(11)?))
+    }) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("CopyAttach: failed to query history: {}", e);
+            return Vec::new();
+        }
+    };
+
+    let mut result = Vec::new();
+    for row in rows {
+        let (entry_type, text, png_data, width, height, thumb_data,
+             thumb_width, thumb_height, hash, timestamp, source_name, source_bundle_id) = match row {
+            Ok(r) => r,
+            Err(e) => { eprintln!("CopyAttach: row read error: {}", e); continue; }
+        };
+        match entry_type {
+            0 => result.push(ClipboardEntry::Text {
+                text: text.unwrap_or_default(),
+                timestamp: timestamp as u64,
+                source_name,
+                source_bundle_id,
+            }),
+            1 => result.push(ClipboardEntry::Image {
+                png_data: png_data.unwrap_or_default(),
+                width: width.unwrap_or(0) as u32,
+                height: height.unwrap_or(0) as u32,
+                thumb_data: thumb_data.unwrap_or_default(),
+                thumb_width: thumb_width.unwrap_or(0) as u32,
+                thumb_height: thumb_height.unwrap_or(0) as u32,
+                hash: hash.unwrap_or(0) as u64,
+                timestamp: timestamp as u64,
+                source_name,
+                source_bundle_id,
+            }),
+            _ => eprintln!("CopyAttach: unknown entry_type {} in DB", entry_type),
+        }
+    }
+    result
+}
+
+fn insert_entry_to_db(conn: &Connection, entry: &ClipboardEntry) {
+    let result = match entry {
+        ClipboardEntry::Text { text, timestamp, source_name, source_bundle_id } => {
+            conn.execute(
+                "INSERT INTO clipboard_history
+                    (entry_type, text, png_data, width, height,
+                     thumb_data, thumb_width, thumb_height, hash,
+                     timestamp, source_name, source_bundle_id)
+                 VALUES (0, ?1, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?2, ?3, ?4)",
+                rusqlite::params![text, *timestamp as i64, source_name, source_bundle_id],
+            ).map(|_| ())
+        }
+        ClipboardEntry::Image { png_data, width, height, thumb_data,
+                                thumb_width, thumb_height, hash,
+                                timestamp, source_name, source_bundle_id } => {
+            conn.execute(
+                "INSERT INTO clipboard_history
+                    (entry_type, text, png_data, width, height,
+                     thumb_data, thumb_width, thumb_height, hash,
+                     timestamp, source_name, source_bundle_id)
+                 VALUES (1, NULL, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                rusqlite::params![
+                    png_data, *width as i64, *height as i64,
+                    thumb_data, *thumb_width as i64, *thumb_height as i64,
+                    *hash as i64, *timestamp as i64,
+                    source_name, source_bundle_id,
+                ],
+            ).map(|_| ())
+        }
+    };
+    if let Err(e) = result {
+        eprintln!("CopyAttach: failed to insert entry: {}", e);
+    }
+}
+
+fn delete_matching_entry(conn: &Connection, entry: &ClipboardEntry) {
+    let result = match entry {
+        ClipboardEntry::Text { text, .. } => {
+            conn.execute(
+                "DELETE FROM clipboard_history
+                 WHERE entry_type = 0 AND text = ?1
+                   AND id != (SELECT id FROM clipboard_history
+                              WHERE entry_type = 0 AND text = ?1
+                              ORDER BY id DESC LIMIT 1)",
+                rusqlite::params![text],
+            ).map(|_| ())
+        }
+        ClipboardEntry::Image { hash, .. } => {
+            conn.execute(
+                "DELETE FROM clipboard_history
+                 WHERE entry_type = 1 AND hash = ?1
+                   AND id != (SELECT id FROM clipboard_history
+                              WHERE entry_type = 1 AND hash = ?1
+                              ORDER BY id DESC LIMIT 1)",
+                rusqlite::params![*hash as i64],
+            ).map(|_| ())
+        }
+    };
+    if let Err(e) = result {
+        eprintln!("CopyAttach: failed to delete matching entry: {}", e);
+    }
+}
+
+fn trim_db_history(conn: &Connection) {
+    if let Err(e) = conn.execute(
+        "DELETE FROM clipboard_history WHERE id NOT IN (
+            SELECT id FROM clipboard_history ORDER BY id DESC LIMIT ?)",
+        rusqlite::params![MAX_HISTORY as i64],
+    ) {
+        eprintln!("CopyAttach: failed to trim DB history: {}", e);
+    }
+}
+
+// Migration from legacy JSON file (feature-gated — remove after all users have migrated)
+#[cfg(feature = "migration")]
+fn migrate_from_json_to_db(conn: &mut Connection) {
+    let dir = match get_persist_dir() {
+        Some(d) => d,
         None => return,
     };
-    let json = match serde_json::to_string(history) {
-        Ok(j) => j,
+
+    let json_path = dir.join("history.json");
+    if !json_path.exists() {
+        return;
+    }
+
+    // Skip migration if DB already has data
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM clipboard_history", [], |r| r.get(0),
+    ).unwrap_or(0);
+    if count > 0 {
+        let _ = std::fs::rename(&json_path, dir.join("history.json.migrated"));
+        return;
+    }
+
+    let content = match std::fs::read_to_string(&json_path) {
+        Ok(c) => c,
         Err(e) => {
-            eprintln!("CopyAttach: failed to serialize history: {}", e);
+            eprintln!("CopyAttach: cannot read history.json for migration: {}", e);
             return;
         }
     };
-    // Write to a temp file first, then atomically rename to avoid corruption on crash.
-    let tmp = path.with_extension("json.tmp");
-    if let Err(e) = std::fs::write(&tmp, &json) {
-        eprintln!("CopyAttach: failed to write history file: {}", e);
+
+    // Uses serde_json + base64 (transitive from serde_json feature)
+    #[derive(serde::Deserialize)]
+    struct LegacyText {
+        text: String,
+        #[serde(default)]
+        timestamp: u64,
+        #[serde(default)]
+        source_name: String,
+        #[serde(default)]
+        source_bundle_id: String,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct LegacyImage {
+        #[serde(default, deserialize_with = "decode_base64")]
+        png_data: Vec<u8>,
+        #[serde(default)]
+        width: u32,
+        #[serde(default)]
+        height: u32,
+        #[serde(default, deserialize_with = "decode_base64")]
+        thumb_data: Vec<u8>,
+        #[serde(default)]
+        thumb_width: u32,
+        #[serde(default)]
+        thumb_height: u32,
+        #[serde(default)]
+        hash: u64,
+        #[serde(default)]
+        timestamp: u64,
+        #[serde(default)]
+        source_name: String,
+        #[serde(default)]
+        source_bundle_id: String,
+    }
+
+    fn decode_base64<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+        let s = <String as serde::Deserialize>::deserialize(d)?;
+        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &s)
+            .map_err(serde::de::Error::custom)
+    }
+
+    #[derive(serde::Deserialize)]
+    enum LegacyEntry {
+        Text(LegacyText),
+        Image(LegacyImage),
+    }
+
+    let entries: Vec<LegacyEntry> = match serde_json::from_str(&content) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("CopyAttach: failed to parse history.json: {}", e);
+            return;
+        }
+    };
+
+    // Insert oldest-first so autoincrement IDs increase with age
+    let tx = match conn.transaction() {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("CopyAttach: failed to begin migration transaction: {}", e);
+            return;
+        }
+    };
+    for entry in entries.iter().rev() {
+        let result = match entry {
+            LegacyEntry::Text(lt) => {
+                tx.execute(
+                    "INSERT INTO clipboard_history (entry_type, text, timestamp, source_name, source_bundle_id)
+                     VALUES (0, ?1, ?2, ?3, ?4)",
+                    rusqlite::params![lt.text, lt.timestamp as i64, lt.source_name, lt.source_bundle_id],
+                )
+            }
+            LegacyEntry::Image(li) => {
+                tx.execute(
+                    "INSERT INTO clipboard_history (entry_type, png_data, width, height, thumb_data, thumb_width, thumb_height, hash, timestamp, source_name, source_bundle_id)
+                     VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                    rusqlite::params![
+                        li.png_data, li.width as i64, li.height as i64,
+                        li.thumb_data, li.thumb_width as i64, li.thumb_height as i64,
+                        li.hash as i64, li.timestamp as i64,
+                        li.source_name, li.source_bundle_id,
+                    ],
+                )
+            }
+        };
+        if let Err(e) = result {
+            eprintln!("CopyAttach: migration insert error: {}", e);
+            return;
+        }
+    }
+    if let Err(e) = tx.commit() {
+        eprintln!("CopyAttach: failed to commit migration: {}", e);
         return;
     }
-    if let Err(e) = std::fs::rename(&tmp, &path) {
-        eprintln!("CopyAttach: failed to rename history file: {}", e);
-        let _ = std::fs::remove_file(&tmp);
-    }
+
+    // Mark JSON as migrated
+    let _ = std::fs::rename(&json_path, dir.join("history.json.migrated"));
+    let _ = std::fs::remove_file(dir.join("history.json.tmp"));
 }
+
+#[cfg(not(feature = "migration"))]
+fn migrate_from_json_to_db(_conn: &mut Connection) {}
 
 // ═══════════════════════════════════════════
 // macOS: Paste Simulation & Permission Check
@@ -351,7 +571,7 @@ fn clipboard_monitor(
     history: Arc<Mutex<Vec<ClipboardEntry>>>,
     running: Arc<AtomicBool>,
     source_app: Arc<Mutex<SourceApp>>,
-    save_needed: Arc<AtomicBool>,
+    db: Arc<Mutex<Connection>>,
     last_seen_text: Arc<Mutex<Option<String>>>,
     last_seen_image_hash: Arc<Mutex<Option<u64>>>,
 ) {
@@ -408,10 +628,18 @@ fn clipboard_monitor(
                         source_name: src.name,
                         source_bundle_id: src.bundle_id,
                     };
+                    let db_item = item.clone();
 
                     let mut hist = history.lock().unwrap();
-                    let new_hist = add_to_history(std::mem::take(&mut *hist), item);
-                    *hist = new_hist;
+                    *hist = add_to_history(std::mem::take(&mut *hist), item);
+                    drop(hist);
+
+                    // Write-through to DB
+                    if let Ok(conn) = db.lock() {
+                        insert_entry_to_db(&conn, &db_item);
+                        delete_matching_entry(&conn, &db_item);
+                        trim_db_history(&conn);
+                    }
                 }
                 *last_seen_image_hash.lock().unwrap() = Some(hash);
                 *last_seen_text.lock().unwrap() = None;
@@ -440,22 +668,23 @@ fn clipboard_monitor(
                             source_name: src.name,
                             source_bundle_id: src.bundle_id,
                         };
+                        let db_item = item.clone();
 
                         let mut hist = history.lock().unwrap();
-                        let new_hist = add_to_history(std::mem::take(&mut *hist), item);
-                        *hist = new_hist;
+                        *hist = add_to_history(std::mem::take(&mut *hist), item);
+                        drop(hist);
+
+                        // Write-through to DB
+                        if let Ok(conn) = db.lock() {
+                            insert_entry_to_db(&conn, &db_item);
+                            delete_matching_entry(&conn, &db_item);
+                            trim_db_history(&conn);
+                        }
                     }
                     *last_seen_text.lock().unwrap() = Some(text);
                     *last_seen_image_hash.lock().unwrap() = None;
                 }
             }
-        }
-
-        // Periodically save history if needed
-        if save_needed.load(Ordering::Relaxed) {
-            let hist_copy = history.lock().unwrap().clone();
-            save_history_to_file(&hist_copy);
-            save_needed.store(false, Ordering::SeqCst);
         }
 
         for _ in 0..10 {
@@ -471,30 +700,45 @@ fn clipboard_monitor(
 
 #[no_mangle]
 pub extern "C" fn clipboard_init() -> c_int {
-    // Load persisted history from disk
-    let saved = load_history_from_file();
-    // Trim to MAX_HISTORY in case the file grew beyond the cap
+    // Open database
+    let mut conn = match open_db() {
+        Some(c) => c,
+        None => {
+            eprintln!("CopyAttach: failed to open database, init failed");
+            return 0;
+        }
+    };
+
+    // Ensure schema exists
+    if let Err(e) = ensure_history_table(&conn) {
+        eprintln!("CopyAttach: failed to create table: {}", e);
+        return 0;
+    }
+
+    // Migrate from legacy JSON if present
+    migrate_from_json_to_db(&mut conn);
+
+    // Load persisted history from DB
+    let saved = load_history_from_db(&conn);
     let saved: Vec<ClipboardEntry> = saved.into_iter().take(MAX_HISTORY).collect();
 
     let history: Arc<Mutex<Vec<ClipboardEntry>>> = Arc::new(Mutex::new(saved));
     let running = Arc::new(AtomicBool::new(true));
     let source_app = Arc::new(Mutex::new(SourceApp::default()));
-    let save_needed = Arc::new(AtomicBool::new(false));
     let last_seen_text: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let last_seen_image_hash: Arc<Mutex<Option<u64>>> = Arc::new(Mutex::new(None));
+    let db = Arc::new(Mutex::new(conn));
 
     let backend = Backend {
         history: Arc::clone(&history),
         running: Arc::clone(&running),
         monitor_handle: Mutex::new(None),
         source_app: Arc::clone(&source_app),
-        save_needed: Arc::clone(&save_needed),
         last_seen_text: Arc::clone(&last_seen_text),
         last_seen_image_hash: Arc::clone(&last_seen_image_hash),
+        db: Arc::clone(&db),
     };
 
-    // Set BACKEND BEFORE spawning the monitor thread, so add_to_history
-    // can always find the global and set save_needed correctly.
     let prev = BACKEND.set(backend);
     match prev {
         Err(_) => return 0, // Already initialized
@@ -503,7 +747,7 @@ pub extern "C" fn clipboard_init() -> c_int {
 
     // Spawn the monitor thread after BACKEND is live.
     let handle = thread::spawn(|| clipboard_monitor(
-        history, running, source_app, save_needed,
+        history, running, source_app, db,
         last_seen_text, last_seen_image_hash,
     ));
 
@@ -520,19 +764,17 @@ pub extern "C" fn clipboard_init() -> c_int {
 #[no_mangle]
 pub extern "C" fn clipboard_cleanup() {
     if let Some(b) = BACKEND.get() {
-        // Signal the monitor thread to stop FIRST, before any save.
+        // Signal the monitor thread to stop — its current iteration's
+        // write-through will complete before the thread exits.
         b.running.store(false, Ordering::SeqCst);
 
-        // Wait for the monitor to finish (it may do a final save).
+        // Wait for the monitor to finish (write-through already in sync).
         if let Ok(mut handle) = b.monitor_handle.lock() {
             if let Some(h) = handle.take() {
                 let _ = h.join();
             }
         }
-
-        // Now it's safe to do a final save — no concurrent writes.
-        let hist_copy = b.history.lock().unwrap().clone();
-        save_history_to_file(&hist_copy);
+        // No final save needed — write-through guarantees DB is in sync.
     }
 }
 
@@ -709,8 +951,16 @@ pub extern "C" fn clipboard_select_and_paste(index: c_int) -> c_int {
     // reflects the new order right away, without waiting for the monitor thread.
     {
         let mut hist = backend().history.lock().unwrap();
-        let new_hist = add_to_history(std::mem::take(&mut *hist), item);
-        *hist = new_hist;
+        *hist = add_to_history(std::mem::take(&mut *hist), item.clone());
+    }
+
+    // Write-through to DB: delete old row and insert new (gets higher id, = top)
+    if let Some(b) = BACKEND.get() {
+        if let Ok(conn) = b.db.lock() {
+            delete_matching_entry(&conn, &item);
+            insert_entry_to_db(&conn, &item);
+            trim_db_history(&conn);
+        }
     }
 
     thread::sleep(Duration::from_millis(50));
@@ -741,12 +991,11 @@ pub extern "C" fn clipboard_clear_history() {
             let mut hist = b.history.lock().unwrap();
             hist.clear();
         }
-        // Delete the persistence file
-        if let Some(path) = get_persist_path() {
-            let _ = std::fs::remove_file(&path);
-            // Also remove temp file if present
-            let tmp = path.with_extension("json.tmp");
-            let _ = std::fs::remove_file(&tmp);
+        // Clear DB
+        if let Ok(conn) = b.db.lock() {
+            if let Err(e) = conn.execute("DELETE FROM clipboard_history", []) {
+                eprintln!("CopyAttach: failed to clear DB history: {}", e);
+            }
         }
     }
 }
