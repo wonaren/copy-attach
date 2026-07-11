@@ -152,6 +152,12 @@ struct Backend {
     monitor_handle: Mutex<Option<thread::JoinHandle<()>>>,
     source_app: Arc<Mutex<SourceApp>>,
     save_needed: Arc<AtomicBool>,
+    /// Shared tracking of the last clipboard content the monitor processed.
+    /// clipboard_select_and_paste also updates these after writing to the
+    /// system clipboard, so the monitor sees "not new" and doesn't create a
+    /// duplicate entry that would overwrite the original source app info.
+    last_seen_text: Arc<Mutex<Option<String>>>,
+    last_seen_image_hash: Arc<Mutex<Option<u64>>>,
 }
 
 static BACKEND: OnceLock<Backend> = OnceLock::new();
@@ -346,6 +352,8 @@ fn clipboard_monitor(
     running: Arc<AtomicBool>,
     source_app: Arc<Mutex<SourceApp>>,
     save_needed: Arc<AtomicBool>,
+    last_seen_text: Arc<Mutex<Option<String>>>,
+    last_seen_image_hash: Arc<Mutex<Option<u64>>>,
 ) {
     let mut cb = match Clipboard::new() {
         Ok(c) => c,
@@ -354,9 +362,6 @@ fn clipboard_monitor(
             return;
         }
     };
-
-    let mut last_text: Option<String> = None;
-    let mut last_image_hash: Option<u64> = None;
 
     while running.load(Ordering::SeqCst) {
         let now = SystemTime::now()
@@ -372,9 +377,12 @@ fn clipboard_monitor(
 
         if let Ok(img_data) = image_result {
             let hash = image_hash(&img_data.bytes, img_data.width as u32, img_data.height as u32);
-            let is_new = match last_image_hash {
-                Some(h) => h != hash,
-                None => true,
+            let is_new = {
+                let last = last_seen_image_hash.lock().unwrap();
+                match *last {
+                    Some(h) => h != hash,
+                    None => true,
+                }
             };
 
             if is_new && img_data.width > 0 && img_data.height > 0 {
@@ -404,18 +412,22 @@ fn clipboard_monitor(
                     let mut hist = history.lock().unwrap();
                     let new_hist = add_to_history(std::mem::take(&mut *hist), item);
                     *hist = new_hist;
-                    last_image_hash = Some(hash);
-                    last_text = None;
                 }
+                *last_seen_image_hash.lock().unwrap() = Some(hash);
+                *last_seen_text.lock().unwrap() = None;
             } else if is_new {
-                last_image_hash = Some(hash);
+                *last_seen_image_hash.lock().unwrap() = Some(hash);
+                *last_seen_text.lock().unwrap() = None;
             }
         } else {
             // No image, try text
             if let Ok(text) = cb.get_text() {
-                let is_new = match &last_text {
-                    Some(last) => &text != last,
-                    None => !text.is_empty(),
+                let is_new = {
+                    let last = last_seen_text.lock().unwrap();
+                    match &*last {
+                        Some(last) => &text != last,
+                        None => !text.is_empty(),
+                    }
                 };
 
                 if !text.is_empty() && is_new {
@@ -433,8 +445,8 @@ fn clipboard_monitor(
                         let new_hist = add_to_history(std::mem::take(&mut *hist), item);
                         *hist = new_hist;
                     }
-                    last_text = Some(text);
-                    last_image_hash = None;
+                    *last_seen_text.lock().unwrap() = Some(text);
+                    *last_seen_image_hash.lock().unwrap() = None;
                 }
             }
         }
@@ -468,6 +480,8 @@ pub extern "C" fn clipboard_init() -> c_int {
     let running = Arc::new(AtomicBool::new(true));
     let source_app = Arc::new(Mutex::new(SourceApp::default()));
     let save_needed = Arc::new(AtomicBool::new(false));
+    let last_seen_text: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let last_seen_image_hash: Arc<Mutex<Option<u64>>> = Arc::new(Mutex::new(None));
 
     let backend = Backend {
         history: Arc::clone(&history),
@@ -475,6 +489,8 @@ pub extern "C" fn clipboard_init() -> c_int {
         monitor_handle: Mutex::new(None),
         source_app: Arc::clone(&source_app),
         save_needed: Arc::clone(&save_needed),
+        last_seen_text: Arc::clone(&last_seen_text),
+        last_seen_image_hash: Arc::clone(&last_seen_image_hash),
     };
 
     // Set BACKEND BEFORE spawning the monitor thread, so add_to_history
@@ -488,6 +504,7 @@ pub extern "C" fn clipboard_init() -> c_int {
     // Spawn the monitor thread after BACKEND is live.
     let handle = thread::spawn(|| clipboard_monitor(
         history, running, source_app, save_needed,
+        last_seen_text, last_seen_image_hash,
     ));
 
     // Store the join handle so cleanup can join it.
@@ -669,8 +686,11 @@ pub extern "C" fn clipboard_select_and_paste(index: c_int) -> c_int {
     match &item {
         ClipboardEntry::Text { text, .. } => {
             if cb.set_text(text).is_err() { return 0; }
+            let b = backend();
+            *b.last_seen_text.lock().unwrap() = Some(text.clone());
+            *b.last_seen_image_hash.lock().unwrap() = None;
         }
-        ClipboardEntry::Image { png_data, width, height, .. } => {
+        ClipboardEntry::Image { hash, png_data, width, height, .. } => {
             if let Some((rgba, _, _)) = decode_png(png_data) {
                 let img = arboard::ImageData {
                     width: *width as usize,
@@ -678,6 +698,9 @@ pub extern "C" fn clipboard_select_and_paste(index: c_int) -> c_int {
                     bytes: rgba.into(),
                 };
                 if cb.set_image(img).is_err() { return 0; }
+                let b = backend();
+                *b.last_seen_text.lock().unwrap() = None;
+                *b.last_seen_image_hash.lock().unwrap() = Some(*hash);
             } else { return 0; }
         }
     }

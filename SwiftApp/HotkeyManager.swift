@@ -98,6 +98,9 @@ class HotkeyManager: ObservableObject {
     // NSEvent global monitor
     private var nsEventMonitor: Any?
 
+    // Local event monitor for recording hotkeys
+    private var localEventMonitor: Any?
+
     // Carbon event handler ref (installed once)
     private static var eventHandlerRef: EventHandlerRef?
 
@@ -123,6 +126,7 @@ class HotkeyManager: ObservableObject {
 
     deinit {
         unregisterBoth()
+        removeLocalMonitor()
     }
 
     // MARK: - Persistence
@@ -291,10 +295,25 @@ class HotkeyManager: ObservableObject {
 
     func startRecording() {
         isRecording = true
+
+        // Install a local event monitor to capture key events while recording
+        localEventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            self?.captureKeyEvent(event)
+            // Return nil to swallow the event during recording (prevent beep)
+            return nil
+        }
     }
 
     func stopRecording() {
         isRecording = false
+        removeLocalMonitor()
+    }
+
+    private func removeLocalMonitor() {
+        if let monitor = localEventMonitor {
+            NSEvent.removeMonitor(monitor)
+            localEventMonitor = nil
+        }
     }
 
     /// Call this when a key event is captured during recording
@@ -312,7 +331,7 @@ class HotkeyManager: ObservableObject {
         if newConfig != config {
             config = newConfig
         }
-        isRecording = false
+        stopRecording()
     }
 
     /// Reset to default hotkey (⌥⌘V)
