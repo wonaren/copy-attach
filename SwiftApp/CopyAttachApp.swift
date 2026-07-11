@@ -258,7 +258,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     statRow("总项目数", "\(backend.items.count)")
                     statRow("文本项目数", "\(textCount)")
                     statRow("图片项目数", "\(imageCount)")
-                    statRow("最大容量", "1,000")
+                    statRow("自动清理阈值", "3,000")
                 }.padding(.top, 8)
                 Divider().background(Color.gray.opacity(0.3)).padding(.vertical, 8)
                 Button(role: .destructive) {

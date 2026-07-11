@@ -45,6 +45,8 @@ enum ClipboardEntry {
         timestamp: u64,
         source_name: String,
         source_bundle_id: String,
+        /// SQLite row id for loading full image on demand (0 = unset).
+        db_id: i64,
     },
 }
 
@@ -105,7 +107,7 @@ impl ClipboardEntry {
 // Constants
 // ═══════════════════════════════════════════
 
-const MAX_HISTORY: usize = 1000;
+const CLEANUP_THRESHOLD: usize = 3000;
 const POLL_INTERVAL_MS: u64 = 300;
 
 // ═══════════════════════════════════════════
@@ -191,9 +193,6 @@ fn add_to_history(mut history: Vec<ClipboardEntry>, item: ClipboardEntry) -> Vec
         }
     }
     history.insert(0, item);
-    while history.len() > MAX_HISTORY {
-        history.pop();
-    }
     history
 }
 
@@ -210,9 +209,16 @@ fn get_persist_dir() -> Option<PathBuf> {
 
 fn open_db() -> Option<Connection> {
     let db_path = get_persist_dir()?.join("history.db");
-    Connection::open(&db_path).map_err(|e| {
+    let conn = Connection::open(&db_path).map_err(|e| {
         eprintln!("CopyAttach: failed to open database: {}", e);
-    }).ok()
+    }).ok()?;
+    // Use mmap for BLOB reads (OS-managed page cache, reclaimable under pressure)
+    // + minimal SQLite page cache (512KB instead of default 2MB+)
+    let _ = conn.execute_batch(
+        "PRAGMA mmap_size = 268435456;
+         PRAGMA cache_size = -512;"
+    );
+    Some(conn)
 }
 
 fn ensure_history_table(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -237,7 +243,8 @@ fn ensure_history_table(conn: &Connection) -> Result<(), rusqlite::Error> {
 
 fn load_history_from_db(conn: &Connection) -> Vec<ClipboardEntry> {
     let mut stmt = match conn.prepare(
-        "SELECT entry_type, text, png_data, width, height,
+        "SELECT id, entry_type, text,
+                width, height,
                 thumb_data, thumb_width, thumb_height, hash,
                 timestamp, source_name, source_bundle_id
          FROM clipboard_history
@@ -251,20 +258,20 @@ fn load_history_from_db(conn: &Connection) -> Vec<ClipboardEntry> {
         }
     };
 
-    let rows = match stmt.query_map([MAX_HISTORY as i64], |row| {
-        let entry_type: i32 = row.get(0)?;
+    let rows = match stmt.query_map([CLEANUP_THRESHOLD as i64], |row| {
+        let entry_type: i32 = row.get(1)?;
         Ok((entry_type,
-            row.get::<_, Option<String>>(1)?,
-            row.get::<_, Option<Vec<u8>>>(2)?,
-            row.get::<_, Option<i64>>(3)?,
-            row.get::<_, Option<i64>>(4)?,
-            row.get::<_, Option<Vec<u8>>>(5)?,
-            row.get::<_, Option<i64>>(6)?,
-            row.get::<_, Option<i64>>(7)?,
-            row.get::<_, Option<i64>>(8)?,
-            row.get::<_, i64>(9)?,
-            row.get::<_, String>(10)?,
-            row.get::<_, String>(11)?))
+            row.get::<_, i64>(0)?,               // id
+            row.get::<_, Option<String>>(2)?,    // text
+            row.get::<_, Option<i64>>(3)?,       // width
+            row.get::<_, Option<i64>>(4)?,       // height
+            row.get::<_, Option<Vec<u8>>>(5)?,   // thumb_data
+            row.get::<_, Option<i64>>(6)?,       // thumb_width
+            row.get::<_, Option<i64>>(7)?,       // thumb_height
+            row.get::<_, Option<i64>>(8)?,       // hash
+            row.get::<_, i64>(9)?,               // timestamp
+            row.get::<_, String>(10)?,           // source_name
+            row.get::<_, String>(11)?))          // source_bundle_id
     }) {
         Ok(r) => r,
         Err(e) => {
@@ -275,7 +282,7 @@ fn load_history_from_db(conn: &Connection) -> Vec<ClipboardEntry> {
 
     let mut result = Vec::new();
     for row in rows {
-        let (entry_type, text, png_data, width, height, thumb_data,
+        let (entry_type, db_id, text, width, height, _thumb_data,
              thumb_width, thumb_height, hash, timestamp, source_name, source_bundle_id) = match row {
             Ok(r) => r,
             Err(e) => { eprintln!("CopyAttach: row read error: {}", e); continue; }
@@ -288,16 +295,17 @@ fn load_history_from_db(conn: &Connection) -> Vec<ClipboardEntry> {
                 source_bundle_id,
             }),
             1 => result.push(ClipboardEntry::Image {
-                png_data: png_data.unwrap_or_default(),
+                png_data: Vec::new(),
                 width: width.unwrap_or(0) as u32,
                 height: height.unwrap_or(0) as u32,
-                thumb_data: thumb_data.unwrap_or_default(),
+                thumb_data: Vec::new(),
                 thumb_width: thumb_width.unwrap_or(0) as u32,
                 thumb_height: thumb_height.unwrap_or(0) as u32,
                 hash: hash.unwrap_or(0) as u64,
                 timestamp: timestamp as u64,
                 source_name,
                 source_bundle_id,
+                db_id,
             }),
             _ => eprintln!("CopyAttach: unknown entry_type {} in DB", entry_type),
         }
@@ -305,7 +313,8 @@ fn load_history_from_db(conn: &Connection) -> Vec<ClipboardEntry> {
     result
 }
 
-fn insert_entry_to_db(conn: &Connection, entry: &ClipboardEntry) {
+fn insert_entry_to_db(conn: &Connection, entry: &ClipboardEntry,
+                      image_png: Option<&[u8]>, image_thumb: Option<(&[u8], u32, u32)>) {
     let result = match entry {
         ClipboardEntry::Text { text, timestamp, source_name, source_bundle_id } => {
             conn.execute(
@@ -317,9 +326,17 @@ fn insert_entry_to_db(conn: &Connection, entry: &ClipboardEntry) {
                 rusqlite::params![text, *timestamp as i64, source_name, source_bundle_id],
             ).map(|_| ())
         }
-        ClipboardEntry::Image { png_data, width, height, thumb_data,
-                                thumb_width, thumb_height, hash,
-                                timestamp, source_name, source_bundle_id } => {
+        ClipboardEntry::Image { width, height,
+                                thumb_width: _, thumb_height: _, hash,
+                                timestamp, source_name, source_bundle_id, .. } => {
+            let png = match image_png {
+                Some(data) => data,
+                None => return,
+            };
+            let (thumb_data, tw, th) = match image_thumb {
+                Some(t) => t,
+                None => return,
+            };
             conn.execute(
                 "INSERT INTO clipboard_history
                     (entry_type, text, png_data, width, height,
@@ -327,8 +344,8 @@ fn insert_entry_to_db(conn: &Connection, entry: &ClipboardEntry) {
                      timestamp, source_name, source_bundle_id)
                  VALUES (1, NULL, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 rusqlite::params![
-                    png_data, *width as i64, *height as i64,
-                    thumb_data, *thumb_width as i64, *thumb_height as i64,
+                    png, *width as i64, *height as i64,
+                    thumb_data, tw as i64, th as i64,
                     *hash as i64, *timestamp as i64,
                     source_name, source_bundle_id,
                 ],
@@ -372,7 +389,7 @@ fn trim_db_history(conn: &Connection) {
     if let Err(e) = conn.execute(
         "DELETE FROM clipboard_history WHERE id NOT IN (
             SELECT id FROM clipboard_history ORDER BY id DESC LIMIT ?)",
-        rusqlite::params![MAX_HISTORY as i64],
+        rusqlite::params![CLEANUP_THRESHOLD as i64],
     ) {
         eprintln!("CopyAttach: failed to trim DB history: {}", e);
     }
@@ -520,6 +537,7 @@ fn migrate_from_json_to_db(_conn: &mut Connection) {}
 mod mac {
     use std::ffi::c_int;
     use std::process::Command;
+    use objc2::msg_send;
     use objc2_core_graphics::{
         CGEvent, CGEventFlags, CGEventSource, CGEventSourceStateID, CGEventTapLocation,
     };
@@ -538,6 +556,21 @@ mod mac {
         let _ = Command::new("open")
             .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
             .spawn();
+    }
+
+    /// Lightweight check: returns the pasteboard change count without
+    /// reading or converting any image data. Returns None if pasteboard
+    /// is inaccessible (should not happen on a functional macOS system).
+    pub fn pasteboard_change_count() -> Option<i64> {
+        unsafe {
+            let cls = objc2::runtime::AnyClass::get(c"NSPasteboard")?;
+            let pasteboard: *mut objc2::runtime::NSObject = msg_send![cls, generalPasteboard];
+            if pasteboard.is_null() {
+                return None;
+            }
+            let count: isize = msg_send![pasteboard, changeCount];
+            Some(count as i64)
+        }
     }
 
     pub fn simulate_cmd_v() {
@@ -561,6 +594,7 @@ mod mac {
     pub fn simulate_cmd_v() {
         eprintln!("Warning: paste simulation only supported on macOS");
     }
+    pub fn pasteboard_change_count() -> Option<i64> { None }
 }
 
 // ═══════════════════════════════════════════
@@ -583,7 +617,25 @@ fn clipboard_monitor(
         }
     };
 
+    // Track NSPasteboard changeCount to avoid expensive image reads
+    // when the clipboard has not actually changed.
+    let mut last_change_count: Option<i64> = None;
+
     while running.load(Ordering::SeqCst) {
+        // Lightweight check: skip all pasteboard reads if changeCount matches.
+        match (mac::pasteboard_change_count(), last_change_count) {
+            (Some(cc), Some(last)) if cc == last => {
+                // Clipboard unchanged — sleep and retry.
+                for _ in 0..10 {
+                    if !running.load(Ordering::SeqCst) { return; }
+                    thread::sleep(Duration::from_millis(POLL_INTERVAL_MS / 10));
+                }
+                continue;
+            }
+            (Some(cc), _) => last_change_count = Some(cc),
+            _ => {} // can't check changeCount, proceed normally
+        }
+
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -617,28 +669,34 @@ fn clipboard_monitor(
                     });
 
                     let item = ClipboardEntry::Image {
-                        png_data,
+                        png_data: Vec::new(),
                         width: img_data.width as u32,
                         height: img_data.height as u32,
-                        thumb_data,
+                        thumb_data: Vec::new(),
                         thumb_width: thumb_w,
                         thumb_height: thumb_h,
                         hash,
                         timestamp: now,
                         source_name: src.name,
                         source_bundle_id: src.bundle_id,
+                        db_id: 0,
                     };
-                    let db_item = item.clone();
 
                     let mut hist = history.lock().unwrap();
                     *hist = add_to_history(std::mem::take(&mut *hist), item);
-                    drop(hist);
+                    while hist.len() > CLEANUP_THRESHOLD {
+                        hist.pop();
+                    }
 
-                    // Write-through to DB
+                    // Write-through to DB — png_data stays as local, never cloned, never enters Vec
                     if let Ok(conn) = db.lock() {
-                        insert_entry_to_db(&conn, &db_item);
-                        delete_matching_entry(&conn, &db_item);
+                        insert_entry_to_db(&conn, &hist[0], Some(&png_data), Some((&thumb_data, thumb_w, thumb_h)));
+                        delete_matching_entry(&conn, &hist[0]);
+                        let row_id = conn.last_insert_rowid();
                         trim_db_history(&conn);
+                        if let Some(ClipboardEntry::Image { db_id, .. }) = hist.get_mut(0) {
+                            *db_id = row_id;
+                        }
                     }
                 }
                 *last_seen_image_hash.lock().unwrap() = Some(hash);
@@ -668,16 +726,17 @@ fn clipboard_monitor(
                             source_name: src.name,
                             source_bundle_id: src.bundle_id,
                         };
-                        let db_item = item.clone();
 
                         let mut hist = history.lock().unwrap();
                         *hist = add_to_history(std::mem::take(&mut *hist), item);
-                        drop(hist);
+                        while hist.len() > CLEANUP_THRESHOLD {
+                            hist.pop();
+                        }
 
                         // Write-through to DB
                         if let Ok(conn) = db.lock() {
-                            insert_entry_to_db(&conn, &db_item);
-                            delete_matching_entry(&conn, &db_item);
+                            insert_entry_to_db(&conn, &hist[0], None, None);
+                            delete_matching_entry(&conn, &hist[0]);
                             trim_db_history(&conn);
                         }
                     }
@@ -718,9 +777,12 @@ pub extern "C" fn clipboard_init() -> c_int {
     // Migrate from legacy JSON if present
     migrate_from_json_to_db(&mut conn);
 
+    // Trim DB to threshold on startup
+    trim_db_history(&conn);
+
     // Load persisted history from DB
     let saved = load_history_from_db(&conn);
-    let saved: Vec<ClipboardEntry> = saved.into_iter().take(MAX_HISTORY).collect();
+    let saved: Vec<ClipboardEntry> = saved.into_iter().take(CLEANUP_THRESHOLD).collect();
 
     let history: Arc<Mutex<Vec<ClipboardEntry>>> = Arc::new(Mutex::new(saved));
     let running = Arc::new(AtomicBool::new(true));
@@ -857,30 +919,72 @@ pub extern "C" fn clipboard_get_item_text(index: c_int) -> *mut c_char {
 
 #[no_mangle]
 pub extern "C" fn clipboard_get_image_thumb(index: c_int, out_len: *mut c_int) -> *mut u8 {
-    let hist = backend().history.lock().unwrap();
-    match hist.get(index as usize) {
-        Some(ClipboardEntry::Image { thumb_data, .. }) => {
-            let len = thumb_data.len() as c_int;
-            if out_len.is_null() { return std::ptr::null_mut(); }
-            unsafe { *out_len = len; }
-            vec_to_raw(thumb_data.clone())
+    // Read db_id under history lock, then load thumb from SQLite (no history lock held)
+    let db_id = {
+        let hist = backend().history.lock().unwrap();
+        match hist.get(index as usize) {
+            Some(ClipboardEntry::Image { db_id, .. }) => *db_id,
+            _ => return std::ptr::null_mut(),
         }
-        _ => std::ptr::null_mut(),
+    };
+
+    if db_id == 0 {
+        return std::ptr::null_mut();
     }
+
+    let thumb_data = match backend().db.lock() {
+        Ok(conn) => {
+            conn.query_row(
+                "SELECT thumb_data FROM clipboard_history WHERE id = ?",
+                rusqlite::params![db_id],
+                |row| row.get::<_, Vec<u8>>(0),
+            ).unwrap_or_default()
+        }
+        Err(_) => return std::ptr::null_mut(),
+    };
+
+    let len = thumb_data.len() as c_int;
+    if out_len.is_null() { return std::ptr::null_mut(); }
+    unsafe { *out_len = len; }
+    vec_to_raw(thumb_data)
 }
 
 #[no_mangle]
 pub extern "C" fn clipboard_get_image_full(index: c_int, out_len: *mut c_int) -> *mut u8 {
-    let hist = backend().history.lock().unwrap();
-    match hist.get(index as usize) {
-        Some(ClipboardEntry::Image { png_data, .. }) => {
-            let len = png_data.len() as c_int;
-            if out_len.is_null() { return std::ptr::null_mut(); }
-            unsafe { *out_len = len; }
-            vec_to_raw(png_data.clone())
+    if out_len.is_null() { return std::ptr::null_mut(); }
+
+    // Read db_id and cached png_data under a single history lock
+    let (png_data, db_id) = {
+        let hist = backend().history.lock().unwrap();
+        match hist.get(index as usize) {
+            Some(ClipboardEntry::Image { png_data, db_id, .. }) => {
+                (png_data.clone(), *db_id)
+            }
+            _ => return std::ptr::null_mut(),
         }
-        _ => std::ptr::null_mut(),
-    }
+    };
+
+    let data = if !png_data.is_empty() {
+        png_data
+    } else if db_id != 0 {
+        // Load full image from DB on demand
+        match backend().db.lock() {
+            Ok(conn) => {
+                conn.query_row(
+                    "SELECT png_data FROM clipboard_history WHERE id = ?",
+                    rusqlite::params![db_id],
+                    |row| row.get(0),
+                ).unwrap_or_default()
+            }
+            Err(_) => return std::ptr::null_mut(),
+        }
+    } else {
+        return std::ptr::null_mut();
+    };
+
+    let len = data.len() as c_int;
+    unsafe { *out_len = len; }
+    vec_to_raw(data)
 }
 
 #[no_mangle]
@@ -923,16 +1027,47 @@ pub extern "C" fn clipboard_select_and_paste(index: c_int) -> c_int {
     };
     let item = match item { Some(i) => i, None => return 0 };
 
+    // Build a copy with full png_data and thumb_data loaded from DB in one query.
+    // The in-memory entry keeps only metadata (png_data and thumb_data stay empty).
+    let db_item = match &item {
+        ClipboardEntry::Image { db_id, .. } if *db_id != 0 => {
+            let mut loaded = item.clone();
+            if let ClipboardEntry::Image { ref mut png_data, ref mut thumb_data, ref mut thumb_width, ref mut thumb_height, .. } = loaded {
+                if let Ok(conn) = backend().db.lock() {
+                    if let Ok((png, thumb, tw, th)) = conn.query_row(
+                        "SELECT png_data, thumb_data, thumb_width, thumb_height FROM clipboard_history WHERE id = ?",
+                        rusqlite::params![*db_id],
+                        |row| Ok((
+                            row.get::<_, Vec<u8>>(0)?,
+                            row.get::<_, Vec<u8>>(1)?,
+                            row.get::<_, i64>(2)?,
+                            row.get::<_, i64>(3)?,
+                        )),
+                    ) {
+                        *png_data = png;
+                        *thumb_data = thumb;
+                        *thumb_width = tw as u32;
+                        *thumb_height = th as u32;
+                    }
+                }
+            }
+            loaded
+        }
+        _ => item.clone(),
+    };
+
+    // Paste from db_item's loaded data (or item's text for text entries).
     let mut cb = match Clipboard::new() { Ok(c) => c, Err(_) => return 0 };
 
-    match &item {
+    match &db_item {
         ClipboardEntry::Text { text, .. } => {
             if cb.set_text(text).is_err() { return 0; }
             let b = backend();
             *b.last_seen_text.lock().unwrap() = Some(text.clone());
             *b.last_seen_image_hash.lock().unwrap() = None;
         }
-        ClipboardEntry::Image { hash, png_data, width, height, .. } => {
+        ClipboardEntry::Image { png_data, width, height, hash, .. } => {
+            if png_data.is_empty() { return 0; }
             if let Some((rgba, _, _)) = decode_png(png_data) {
                 let img = arboard::ImageData {
                     width: *width as usize,
@@ -951,14 +1086,29 @@ pub extern "C" fn clipboard_select_and_paste(index: c_int) -> c_int {
     // reflects the new order right away, without waiting for the monitor thread.
     {
         let mut hist = backend().history.lock().unwrap();
-        *hist = add_to_history(std::mem::take(&mut *hist), item.clone());
+        *hist = add_to_history(std::mem::take(&mut *hist), item);
+        while hist.len() > CLEANUP_THRESHOLD {
+            hist.pop();
+        }
     }
 
     // Write-through to DB: delete old row and insert new (gets higher id, = top)
     if let Some(b) = BACKEND.get() {
         if let Ok(conn) = b.db.lock() {
-            delete_matching_entry(&conn, &item);
-            insert_entry_to_db(&conn, &item);
+            let png_for_insert = match &db_item {
+                ClipboardEntry::Image { png_data, .. } if !png_data.is_empty() => {
+                    Some(png_data.as_slice())
+                }
+                _ => None,
+            };
+            let thumb_for_insert = match &db_item {
+                ClipboardEntry::Image { thumb_data, thumb_width, thumb_height, .. } if !thumb_data.is_empty() => {
+                    Some((thumb_data.as_slice(), *thumb_width, *thumb_height))
+                }
+                _ => None,
+            };
+            delete_matching_entry(&conn, &db_item);
+            insert_entry_to_db(&conn, &db_item, png_for_insert, thumb_for_insert);
             trim_db_history(&conn);
         }
     }
@@ -1032,6 +1182,7 @@ mod tests {
             timestamp: ts,
             source_name: String::new(),
             source_bundle_id: String::new(),
+            db_id: 0,
         }
     }
 
@@ -1058,19 +1209,6 @@ mod tests {
         assert_eq!(result.len(), 1);
         if let ClipboardEntry::Text { timestamp, .. } = &result[0] {
             assert_eq!(*timestamp, 200);
-        }
-    }
-
-    #[test]
-    fn test_max_history_limit() {
-        let mut history = vec![];
-        for i in 0..MAX_HISTORY + 50 {
-            let item = make_text(&format!("item_{}", i), i as u64);
-            history = add_to_history(history, item);
-        }
-        assert_eq!(history.len(), MAX_HISTORY);
-        if let ClipboardEntry::Text { text, .. } = &history[0] {
-            assert!(text.starts_with("item_"));
         }
     }
 
