@@ -1,7 +1,32 @@
 import AppKit
 import SwiftUI
 
-/// The floating overlay window that shows clipboard history
+// MARK: - NSVisualEffectView Wrapper for SwiftUI (Liquid Glass Backdrop)
+
+struct GlassBackdropView: NSViewRepresentable {
+    private let material: NSVisualEffectView.Material
+    private let blendingMode: NSVisualEffectView.BlendingMode
+
+    init(material: NSVisualEffectView.Material = .hudWindow,
+         blendingMode: NSVisualEffectView.BlendingMode = .behindWindow) {
+        self.material = material
+        self.blendingMode = blendingMode
+    }
+
+    func makeNSView(context: Context) -> NSVisualEffectView {
+        let view = NSVisualEffectView()
+        view.material = material
+        view.blendingMode = blendingMode
+        view.state = .active
+        view.isEmphasized = true
+        return view
+    }
+
+    func updateNSView(_ nsView: NSVisualEffectView, context: Context) {}
+}
+
+// MARK: - History Popup Window (NSPanel) — Liquid Glass Panel
+
 class HistoryPopupWindow: NSPanel {
     static let shared = HistoryPopupWindow()
 
@@ -25,17 +50,17 @@ class HistoryPopupWindow: NSPanel {
         self.isReleasedWhenClosed = false
         self.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         self.hasShadow = true
-        self.title = "剪贴板历史"
+        self.title = "CopyAttach"
         self.isMovableByWindowBackground = true
+        // Force dark appearance for consistent glass rendering
+        self.appearance = NSAppearance(named: .darkAqua)
     }
-    
-    override var canBecomeKey: Bool {
-        return true
-    }
+
+    override var canBecomeKey: Bool { return true }
 
     func show() {
         debugLog("HistoryPopupWindow.show() called")
-        
+
         let contentView = HistoryPopupContent(onClose: { [weak self] in
             debugLog("HistoryPopupContent onClose callback")
             self?.close()
@@ -43,6 +68,13 @@ class HistoryPopupWindow: NSPanel {
         let hosting = PopupHostingView(rootView: contentView)
         let contentRect = self.contentRect(forFrameRect: self.frame)
         hosting.frame = contentRect
+
+        // Enable layer-backed rendering with 18px rounded corners for the glass panel
+        hosting.wantsLayer = true
+        hosting.layer?.masksToBounds = true
+        hosting.layer?.cornerRadius = 18
+        hosting.layer?.cornerCurve = .continuous
+
         self.contentView = hosting
 
         // Position at center of screen
@@ -55,21 +87,16 @@ class HistoryPopupWindow: NSPanel {
         }
 
         self.level = .floating
-        // Order front regardless of app activation state
         self.orderFrontRegardless()
         self.makeKey()
-        debugLog("Window made key and ordered front. IsVisible: \(self.isVisible) IsKeyWindow: \(self.isKeyWindow)")
 
         // Give the hosting view keyboard focus
         DispatchQueue.main.async {
-            let firstResp = self.makeFirstResponder(hosting)
-            debugLog("makeFirstResponder returned: \(firstResp)")
-            let became = hosting.becomeFirstResponder()
-            debugLog("hosting.becomeFirstResponder returned: \(became)")
-            debugLog("Current first responder: \(String(describing: self.firstResponder))")
+            _ = self.makeFirstResponder(hosting)
+            _ = hosting.becomeFirstResponder()
         }
-        
-        // Auto-close when window loses key status (user clicks outside / switches app)
+
+        // Auto-close when window loses key status
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(didResignKey),
@@ -77,7 +104,7 @@ class HistoryPopupWindow: NSPanel {
             object: self
         )
     }
-    
+
     @objc private func didResignKey(_ notification: Notification) {
         debugLog("Popup resigned key, closing")
         self.close()
@@ -102,7 +129,7 @@ class PopupHostingView: NSHostingView<HistoryPopupContent> {
     }
 }
 
-// MARK: - SwiftUI Content for Popup
+// MARK: - SwiftUI Content for Popup — Liquid Glass Interface
 
 struct HistoryPopupContent: View {
     let onClose: () -> Void
@@ -112,27 +139,49 @@ struct HistoryPopupContent: View {
     @State private var hoveredIndex: Int? = nil
     @FocusState private var isFocused: Bool
 
+    // MARK: - DESIGN.md Color Constants
+
+    private let actionBlue = Color(red: 0x00/255, green: 0x66/255, blue: 0xCC/255)      // #0066cc
+    private let focusBlue  = Color(red: 0x00/255, green: 0x71/255, blue: 0xE3/255)      // #0071e3
+    private let glassWhite = Color.white
+    private let onDarkText = Color(white: 1.0)
+    private let bodyMuted  = Color(white: 0.8)   // ~#cccccc
+    private let finePrint  = Color(white: 0.55)  // ~#8a8a8a
+
     var body: some View {
         ZStack {
-            // Background
-            Color(nsColor: NSColor(calibratedRed: 0.12, green: 0.12, blue: 0.13, alpha: 0.96))
-                .cornerRadius(12)
-                .shadow(color: .black.opacity(0.3), radius: 20, x: 0, y: 4)
+            // === Layer 0: Liquid Glass Backdrop ===
+            GlassBackdropView()
+                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
 
+            // === Layer 1: Glass Edge Border (light refraction) ===
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .strokeBorder(
+                    LinearGradient(
+                        gradient: Gradient(colors: [
+                            glassWhite.opacity(0.20),
+                            glassWhite.opacity(0.05),
+                            glassWhite.opacity(0.12),
+                        ]),
+                        startPoint: .top,
+                        endPoint: .bottom
+                    ),
+                    lineWidth: 1
+                )
+
+            // === Layer 2: Content ===
             VStack(spacing: 0) {
-                // Title bar
                 titleBar
-                divider
+                glassDivider
                 itemCountBar
-                divider
-
-                // Items list
+                glassDivider
                 itemsList
             }
-            .padding(8)
+            .padding(4)
         }
-        .frame(width: 504, height: 604)
+        .frame(width: 508, height: 608)
         .focusable()
+        .focusEffectDisabled()
         .focused($isFocused)
         .onKeyPress(.upArrow) {
             if selectedIndex > 0 {
@@ -161,58 +210,94 @@ struct HistoryPopupContent: View {
         }
         .onAppear {
             selectedIndex = 0
-            // Become focused to receive key events
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                 isFocused = true
             }
         }
     }
 
-    // MARK: - Title Bar
+    // MARK: - Title Bar (Liquid Glass)
 
     private var titleBar: some View {
-        HStack {
+        HStack(spacing: 8) {
+            // App Icon
             Image(nsImage: .appIcon)
                 .resizable()
-                .frame(width: 24, height: 24)
-            Text("剪贴板历史")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundColor(Color(nsColor: .lightGray))
+                .frame(width: 20, height: 20)
+                .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+
+            Text("CopyAttach")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundColor(onDarkText.opacity(0.9))
 
             Spacer()
 
+            // Close Button — subtle glass chip
             Button(action: onClose) {
-                Text("✕")
-                    .font(.system(size: 13))
-                    .foregroundColor(.secondary)
+                ZStack {
+                    Circle()
+                        .fill(glassWhite.opacity(0.10))
+                        .frame(width: 20, height: 20)
+
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundColor(onDarkText.opacity(0.6))
+                }
             }
             .buttonStyle(.plain)
-            .frame(width: 24, height: 24)
+            .onHover { inside in
+                if inside {
+                    NSCursor.pointingHand.push()
+                } else {
+                    NSCursor.pop()
+                }
+            }
         }
         .padding(.horizontal, 8)
-        .padding(.vertical, 6)
+        .padding(.vertical, 5)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(glassWhite.opacity(0.06))
+        )
     }
 
-    // MARK: - Divider
+    // MARK: - Glass Divider
 
-    private var divider: some View {
+    private var glassDivider: some View {
         Rectangle()
-            .fill(Color(nsColor: .darkGray).opacity(0.5))
+            .fill(glassWhite.opacity(0.06))
             .frame(height: 1)
+            .padding(.horizontal, 4)
     }
 
     // MARK: - Item Count Bar
 
     private var itemCountBar: some View {
-        HStack {
+        HStack(spacing: 6) {
             let textCount = backend.items.filter { $0.isText }.count
             let imageCount = backend.items.filter { $0.isImage }.count
-            Text("\(backend.items.count) 项 (\(textCount) 文本, \(imageCount) 图片)")
+
+            // Pill indicator for total count
+            HStack(spacing: 4) {
+                Image(systemName: "square.on.square")
+                    .font(.system(size: 9, weight: .medium))
+                Text("\(backend.items.count)")
+                    .font(.system(size: 10, weight: .medium))
+            }
+            .foregroundColor(bodyMuted)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(
+                Capsule()
+                    .fill(glassWhite.opacity(0.07))
+            )
+
+            Text("\(textCount) 文本 · \(imageCount) 图片")
                 .font(.system(size: 10))
-                .foregroundColor(.secondary)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
+                .foregroundColor(finePrint)
+
             Spacer()
+
             if !backend.items.isEmpty {
                 Button(role: .destructive) {
                     let alert = NSAlert()
@@ -226,14 +311,16 @@ struct HistoryPopupContent: View {
                     }
                 } label: {
                     Image(systemName: "trash")
-                        .font(.system(size: 10))
-                        .foregroundColor(.secondary)
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(finePrint)
                 }
                 .buttonStyle(.plain)
                 .help("清除所有历史记录")
-                .padding(.trailing, 8)
+                .padding(.trailing, 4)
             }
         }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
     }
 
     // MARK: - Items List
@@ -241,12 +328,18 @@ struct HistoryPopupContent: View {
     private var itemsList: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(spacing: 2) {
+                LazyVStack(spacing: 1) {
                     ForEach(Array(backend.items.enumerated()), id: \.element.id) { index, item in
                         ItemRowView(
                             item: item,
                             isSelected: index == selectedIndex,
-                            isHovered: index == hoveredIndex
+                            isHovered: index == hoveredIndex,
+                            actionBlue: actionBlue,
+                            focusBlue: focusBlue,
+                            glassWhite: glassWhite,
+                            onDarkText: onDarkText,
+                            bodyMuted: bodyMuted,
+                            finePrint: finePrint
                         )
                         .contentShape(Rectangle())
                         .onTapGesture {
@@ -257,12 +350,14 @@ struct HistoryPopupContent: View {
                             hoveredIndex = hovering ? index : nil
                         }
                         .id(index)
+                        .padding(.horizontal, 4)
                     }
                 }
-                .padding(4)
+                .padding(.vertical, 4)
             }
+            .scrollIndicators(.hidden)
             .onChange(of: selectedIndex) { _, newValue in
-                withAnimation {
+                withAnimation(.easeOut(duration: 0.15)) {
                     proxy.scrollTo(newValue, anchor: .center)
                 }
             }
@@ -278,12 +373,20 @@ struct HistoryPopupContent: View {
     }
 }
 
-// MARK: - Item Row View
+// MARK: - Item Row View — Liquid Glass Aesthetic
 
 struct ItemRowView: View {
     let item: ClipboardItem
     let isSelected: Bool
     let isHovered: Bool
+
+    // Color tokens passed from parent to avoid recomputation
+    let actionBlue: Color
+    let focusBlue: Color
+    let glassWhite: Color
+    let onDarkText: Color
+    let bodyMuted: Color
+    let finePrint: Color
 
     var body: some View {
         HStack(alignment: .center, spacing: 8) {
@@ -291,55 +394,92 @@ struct ItemRowView: View {
             appIcon
 
             // Content
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 0) {
                 switch item {
                 case .text(_, let text, _, _, _, _):
                     textContent(text)
-                case .image(_, let thumbData, let width, let height, _, _, _, _):
+                case .image(_, _, let thumbData, let width, let height, _, _, _, _):
                     imageContent(thumbData: thumbData, width: width, height: height)
                 }
             }
+
+            Spacer(minLength: 2)
+
+            // Source app name
+            if !item.sourceName.isEmpty {
+                Text(item.sourceName)
+                    .font(.system(size: 9, weight: .regular))
+                    .foregroundColor(finePrint)
+                    .lineLimit(1)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1)
+                    .background(
+                        Capsule()
+                            .fill(glassWhite.opacity(isSelected ? 0.15 : 0.06))
+                    )
+            }
         }
         .padding(.horizontal, 8)
-        .padding(.vertical, 6)
-        .background(
-            RoundedRectangle(cornerRadius: 6)
-                .fill(backgroundColor)
-        )
+        .padding(.vertical, 4)
+        .background(rowBackground)
         .overlay(
-            RoundedRectangle(cornerRadius: 6)
-                .stroke(isSelected ? Color.blue.opacity(0.7) : Color.clear, lineWidth: 1.5)
+            Group {
+                if isSelected {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .strokeBorder(
+                            LinearGradient(
+                                gradient: Gradient(colors: [
+                                    focusBlue.opacity(0.6),
+                                    actionBlue.opacity(0.3),
+                                ]),
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            ),
+                            lineWidth: 1
+                        )
+                }
+            }
         )
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 
+    // MARK: - Row Background & Border
+
+    private var rowBackground: some View {
+        Group {
+            if isSelected {
+                // Selected: Action Blue liquid glass fill
+                actionBlue.opacity(0.35)
+            } else if isHovered {
+                // Hovered: subtle white glass highlight
+                glassWhite.opacity(0.08)
+            } else {
+                // Default: nearly transparent — shows through to main glass backdrop
+                Color.clear
+            }
+        }
+    }
+
+    // MARK: - App Icon
+
     private var appIcon: some View {
-        VStack {
+        Group {
             if !item.sourceBundleId.isEmpty, let nsImage = getAppIcon(for: item.sourceBundleId) {
                 Image(nsImage: nsImage)
                     .resizable()
-                    .frame(width: 20, height: 20)
-                    .cornerRadius(4)
+                    .frame(width: 16, height: 16)
+                    .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
             } else {
-                // Default icon when no source app info
                 Image(systemName: "app.fill")
                     .resizable()
-                    .frame(width: 16, height: 16)
-                    .foregroundColor(.secondary.opacity(0.4))
+                    .frame(width: 12, height: 12)
+                    .foregroundColor(glassWhite.opacity(0.25))
             }
         }
-        .frame(width: 24, height: 24)
-        .padding(.top, 2)
+        .frame(width: 18, height: 18)
     }
 
-    private var backgroundColor: Color {
-        if isSelected {
-            return Color(nsColor: NSColor(calibratedRed: 0.24, green: 0.39, blue: 0.71, alpha: 1.0))
-        } else if isHovered {
-            return Color(nsColor: NSColor(calibratedRed: 0.20, green: 0.20, blue: 0.22, alpha: 1.0))
-        } else {
-            return Color(nsColor: NSColor(calibratedRed: 0.15, green: 0.15, blue: 0.165, alpha: 1.0))
-        }
-    }
+    // MARK: - Text Content
 
     private func textContent(_ text: String) -> some View {
         let stripped = text
@@ -352,66 +492,45 @@ struct ItemRowView: View {
         if visualLen > 64 {
             let prefix = String(stripped.prefix(whileVisualWidth: 32))
             let suffix = String(stripped.suffix(whileVisualWidth: 32))
-            display = "\(prefix)......\(suffix)"
+            display = "\(prefix)……\(suffix)"
         } else {
             display = stripped
         }
         return Text(display)
-            .font(.system(size: 12))
-            .foregroundColor(isSelected ? .white : Color(nsColor: .lightGray))
+            .font(.system(size: 12, weight: isSelected ? .medium : .regular))
+            .foregroundColor(isSelected ? .white : onDarkText.opacity(0.85))
             .lineLimit(1)
             .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    // MARK: - Image Content
+
     private func imageContent(thumbData: Data, width: Int, height: Int) -> some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 8) {
             if let nsImage = NSImage(data: thumbData) {
-                let imageHeight: CGFloat = 60
+                let imageHeight: CGFloat = 80
                 Image(nsImage: nsImage)
                     .resizable()
                     .aspectRatio(contentMode: .fit)
                     .frame(height: imageHeight)
-                    .cornerRadius(4)
+                    .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .stroke(glassWhite.opacity(0.08), lineWidth: 0.5)
+                    )
             } else {
-                Text("📷")
-                    .font(.system(size: 20))
-                    .frame(height: 60)
+                Image(systemName: "photo")
+                    .font(.system(size: 14))
+                    .foregroundColor(finePrint)
+                    .frame(height: 42)
             }
         }
     }
-
-    private func truncateText(_ text: String, maxLength: Int) -> String {
-        let lines: [String] = text
-            .components(separatedBy: .newlines)
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
-
-        // Take first two non-empty lines for increased density
-        let preview: String
-        if lines.count >= 2 {
-            preview = lines[0] + "\n" + lines[1]
-        } else if lines.count == 1 {
-            preview = lines[0]
-        } else {
-            preview = text.trimmingCharacters(in: .whitespaces)
-        }
-
-        if preview.count <= maxLength {
-            return preview
-        }
-
-        let truncated = String(preview.prefix(maxLength - 1))
-        // Try to break at word boundary
-        if let lastSpace = truncated.lastIndex(of: " "), lastSpace.utf16Offset(in: truncated) > maxLength / 2 {
-            return String(truncated[...lastSpace]) + "…"
-        }
-        return truncated + "…"
-    }
 }
 
-// MARK: - Visual Width Helpers
+// MARK: - Visual Width Helpers (unchanged from original)
 
-/// 1 for ASCII, 2 for CJK/fullwidth characters
+/// 1 for ASCII, 2 for CJK / fullwidth characters
 private func visualWidth(_ s: String) -> Int {
     s.reduce(0) { $0 + ($1.isASCII ? 1 : 2) }
 }

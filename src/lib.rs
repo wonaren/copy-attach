@@ -6,7 +6,7 @@
 
 use std::ffi::{c_char, c_int, c_longlong, CStr, CString};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -29,12 +29,16 @@ struct SourceApp {
 #[derive(Clone, Debug)]
 enum ClipboardEntry {
     Text {
+        /// Stable, unique entry identifier (monotonic, survives reordering).
+        id: u64,
         text: String,
         timestamp: u64,
         source_name: String,
         source_bundle_id: String,
     },
     Image {
+        /// Stable, unique entry identifier (monotonic, survives reordering).
+        id: u64,
         png_data: Vec<u8>,
         width: u32,
         height: u32,
@@ -109,6 +113,15 @@ impl ClipboardEntry {
 
 const CLEANUP_THRESHOLD: usize = 3000;
 const POLL_INTERVAL_MS: u64 = 300;
+
+/// Monotonic counter for assigning stable, unique IDs to clipboard entries.
+/// These IDs survive across history reorderings and are used by the Swift
+/// frontend to identify entries without relying on array indices.
+static NEXT_ENTRY_ID: AtomicU64 = AtomicU64::new(1);
+
+fn new_entry_id() -> u64 {
+    NEXT_ENTRY_ID.fetch_add(1, Ordering::SeqCst)
+}
 
 // ═══════════════════════════════════════════
 // Global State
@@ -294,12 +307,14 @@ fn load_history_from_db(conn: &Connection) -> Vec<ClipboardEntry> {
         };
         match entry_type {
             0 => result.push(ClipboardEntry::Text {
+                id: new_entry_id(),
                 text: text.unwrap_or_default(),
                 timestamp: timestamp as u64,
                 source_name,
                 source_bundle_id,
             }),
             1 => result.push(ClipboardEntry::Image {
+                id: new_entry_id(),
                 png_data: Vec::new(),
                 width: width.unwrap_or(0) as u32,
                 height: height.unwrap_or(0) as u32,
@@ -327,7 +342,7 @@ fn load_history_from_db(conn: &Connection) -> Vec<ClipboardEntry> {
 fn insert_entry_to_db(conn: &Connection, entry: &ClipboardEntry,
                       image_png: Option<&[u8]>, image_thumb: Option<(&[u8], u32, u32)>) {
     let result = match entry {
-        ClipboardEntry::Text { text, timestamp, source_name, source_bundle_id } => {
+        ClipboardEntry::Text { text, timestamp, source_name, source_bundle_id, .. } => {
             conn.execute(
                 "INSERT INTO clipboard_history
                     (entry_type, text, png_data, width, height,
@@ -695,6 +710,7 @@ fn clipboard_monitor(
                     };
 
                     let item = ClipboardEntry::Image {
+                        id: new_entry_id(),
                         png_data: Vec::new(),
                         width: img_data.width as u32,
                         height: img_data.height as u32,
@@ -747,6 +763,7 @@ fn clipboard_monitor(
                     let trimmed = text.trim();
                     if trimmed.len() >= 2 {
                         let item = ClipboardEntry::Text {
+                            id: new_entry_id(),
                             text: text.clone(),
                             timestamp: now,
                             source_name: src.name,
@@ -782,6 +799,56 @@ fn clipboard_monitor(
 // ═══════════════════════════════════════════
 // C FFI - Exported Functions
 // ═══════════════════════════════════════════
+
+/// Serialize all history entries to a compact JSON string under a SINGLE lock.
+/// This eliminates the race condition where the monitor thread can modify
+/// history between successive per-index FFI calls.
+fn items_to_json(hist: &[ClipboardEntry]) -> String {
+    let mut out = String::from("[");
+    for (i, item) in hist.iter().enumerate() {
+        if i > 0 { out.push(','); }
+        match item {
+            ClipboardEntry::Text { id, text, timestamp, source_name, source_bundle_id } => {
+                // Use serde_json to safely escape the text
+                let label = {
+                    let first = text.lines().find(|l| !l.trim().is_empty()).unwrap_or(text);
+                    let char_count: usize = first.chars().count();
+                    if char_count > 60 {
+                        let truncated: String = first.chars().take(59).collect();
+                        format!("{}…", truncated)
+                    } else {
+                        first.to_string()
+                    }
+                };
+                out.push_str(&format!(
+                    r#"{{"ty":0,"id":{},"tx":{},"ts":{},"lb":{},"sn":{},"sb":{}}}"#,
+                    id,
+                    serde_json::to_string(text).unwrap_or_else(|_| "\"\"".into()),
+                    timestamp,
+                    serde_json::to_string(&label).unwrap_or_else(|_| "\"\"".into()),
+                    serde_json::to_string(source_name).unwrap_or_else(|_| "\"\"".into()),
+                    serde_json::to_string(source_bundle_id).unwrap_or_else(|_| "\"\"".into()),
+                ));
+            }
+            ClipboardEntry::Image { id, db_id, width, height, thumb_width, thumb_height, timestamp, source_name, source_bundle_id, .. } => {
+                let label = format!("📷 图片 ({}×{})", width, height);
+                out.push_str(&format!(
+                    r#"{{"ty":1,"id":{},"di":{},"w":{},"h":{},"tw":{},"th":{},"ts":{},"lb":{},"sn":{},"sb":{}}}"#,
+                    id,
+                    db_id,
+                    width, height,
+                    thumb_width, thumb_height,
+                    timestamp,
+                    serde_json::to_string(&label).unwrap_or_else(|_| "\"\"".into()),
+                    serde_json::to_string(source_name).unwrap_or_else(|_| "\"\"".into()),
+                    serde_json::to_string(source_bundle_id).unwrap_or_else(|_| "\"\"".into()),
+                ));
+            }
+        }
+    }
+    out.push(']');
+    out
+}
 
 #[no_mangle]
 pub extern "C" fn clipboard_init() -> c_int {
@@ -1188,6 +1255,152 @@ pub extern "C" fn clipboard_clear_history() {
     }
 }
 
+/// Batch-read all history items as a JSON string under a SINGLE lock.
+/// Eliminates the race condition between the Swift polling loop and the
+/// background monitor thread. Caller must free with clipboard_free_string().
+#[no_mangle]
+pub extern "C" fn clipboard_get_all_items_json() -> *mut c_char {
+    let hist = backend().history.lock().unwrap();
+    let json = items_to_json(&hist);
+    CString::new(json).unwrap_or_default().into_raw()
+}
+
+/// Load an image thumbnail directly by database row id.
+/// Does NOT touch the history lock — only accesses SQLite.
+/// Caller must free with clipboard_free_bytes().
+#[no_mangle]
+pub extern "C" fn clipboard_get_image_thumb_by_db_id(db_id: i64, out_len: *mut c_int) -> *mut u8 {
+    if db_id == 0 || out_len.is_null() {
+        return std::ptr::null_mut();
+    }
+
+    let thumb_data = match backend().db.lock() {
+        Ok(conn) => {
+            match conn.query_row(
+                "SELECT thumb_data FROM clipboard_history WHERE id = ?",
+                rusqlite::params![db_id],
+                |row| row.get::<_, Vec<u8>>(0),
+            ) {
+                Ok(data) => data,
+                Err(e) => {
+                    eprintln!("CopyAttach: failed to load thumbnail for db_id={}: {}", db_id, e);
+                    return std::ptr::null_mut();
+                }
+            }
+        }
+        Err(_) => return std::ptr::null_mut(),
+    };
+
+    let len = thumb_data.len() as c_int;
+    unsafe { *out_len = len; }
+    vec_to_raw(thumb_data)
+}
+
+/// Select and paste an entry by its stable entry ID (not array index).
+/// Finds the entry in history by ID, writes it back to the clipboard,
+/// simulates Cmd+V, and moves it to the top of history.
+/// Returns 1 on success, 0 if the entry ID is not found.
+#[no_mangle]
+pub extern "C" fn clipboard_select_and_paste_by_id(entry_id: u64) -> c_int {
+    let item = {
+        let hist = backend().history.lock().unwrap();
+        hist.iter().find(|e| match e {
+            ClipboardEntry::Text { id, .. } => *id == entry_id,
+            ClipboardEntry::Image { id, .. } => *id == entry_id,
+        }).cloned()
+    };
+    let item = match item { Some(i) => i, None => return 0 };
+
+    // Build a copy with full png_data and thumb_data loaded from DB in one query.
+    let db_item = match &item {
+        ClipboardEntry::Image { db_id, .. } if *db_id != 0 => {
+            let mut loaded = item.clone();
+            if let ClipboardEntry::Image { ref mut png_data, ref mut thumb_data, ref mut thumb_width, ref mut thumb_height, .. } = loaded {
+                if let Ok(conn) = backend().db.lock() {
+                    if let Ok((png, thumb, tw, th)) = conn.query_row(
+                        "SELECT png_data, thumb_data, thumb_width, thumb_height FROM clipboard_history WHERE id = ?",
+                        rusqlite::params![*db_id],
+                        |row| Ok((
+                            row.get::<_, Vec<u8>>(0)?,
+                            row.get::<_, Vec<u8>>(1)?,
+                            row.get::<_, i64>(2)?,
+                            row.get::<_, i64>(3)?,
+                        )),
+                    ) {
+                        *png_data = png;
+                        *thumb_data = thumb;
+                        *thumb_width = tw as u32;
+                        *thumb_height = th as u32;
+                    }
+                }
+            }
+            loaded
+        }
+        _ => item.clone(),
+    };
+
+    // Paste from db_item's loaded data.
+    let mut cb = match Clipboard::new() { Ok(c) => c, Err(_) => return 0 };
+
+    match &db_item {
+        ClipboardEntry::Text { text, .. } => {
+            if cb.set_text(text).is_err() { return 0; }
+            let b = backend();
+            *b.last_seen_text.lock().unwrap() = Some(text.clone());
+            *b.last_seen_image_hash.lock().unwrap() = None;
+        }
+        ClipboardEntry::Image { png_data, width, height, hash, .. } => {
+            if png_data.is_empty() { return 0; }
+            if let Some((rgba, _, _)) = decode_png(png_data) {
+                let img = arboard::ImageData {
+                    width: *width as usize,
+                    height: *height as usize,
+                    bytes: rgba.into(),
+                };
+                if cb.set_image(img).is_err() { return 0; }
+                let b = backend();
+                *b.last_seen_text.lock().unwrap() = None;
+                *b.last_seen_image_hash.lock().unwrap() = Some(*hash);
+            } else { return 0; }
+        }
+    }
+
+    // Move the selected item to top of history.
+    {
+        let mut hist = backend().history.lock().unwrap();
+        *hist = add_to_history(std::mem::take(&mut *hist), item);
+        while hist.len() > CLEANUP_THRESHOLD {
+            hist.pop();
+        }
+    }
+
+    // Write-through to DB.
+    if let Some(b) = BACKEND.get() {
+        if let Ok(conn) = b.db.lock() {
+            let png_for_insert = match &db_item {
+                ClipboardEntry::Image { png_data, .. } if !png_data.is_empty() => {
+                    Some(png_data.as_slice())
+                }
+                _ => None,
+            };
+            let thumb_for_insert = match &db_item {
+                ClipboardEntry::Image { thumb_data, thumb_width, thumb_height, .. } if !thumb_data.is_empty() => {
+                    Some((thumb_data.as_slice(), *thumb_width, *thumb_height))
+                }
+                _ => None,
+            };
+            delete_matching_entry(&conn, &db_item);
+            insert_entry_to_db(&conn, &db_item, png_for_insert, thumb_for_insert);
+            trim_db_history(&conn);
+        }
+    }
+
+    thread::sleep(Duration::from_millis(50));
+    #[cfg(target_os = "macos")]
+    { if mac::check_permission() && !mac::simulate_cmd_v() { return 0; } }
+    1
+}
+
 // ═══════════════════════════════════════════
 // Tests
 // ═══════════════════════════════════════════
@@ -1198,6 +1411,7 @@ mod tests {
 
     fn make_text(text: &str, ts: u64) -> ClipboardEntry {
         ClipboardEntry::Text {
+            id: new_entry_id(),
             text: text.to_string(),
             timestamp: ts,
             source_name: String::new(),
@@ -1210,6 +1424,7 @@ mod tests {
         let png = encode_png(w, h, data).unwrap();
         let thumb = create_thumbnail(w, h, data, 100).unwrap();
         ClipboardEntry::Image {
+            id: new_entry_id(),
             png_data: png,
             width: w,
             height: h,

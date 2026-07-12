@@ -67,32 +67,56 @@ class ClipboardBackend: ObservableObject {
     }
 
     private func reloadItems() {
-        let c = Int(clipboard_get_count())
-        var newItems: [ClipboardItem] = []
-        for i in 0..<c {
-            let type = Int(clipboard_get_item_type(Int32(i)))
-            let timestamp = clipboard_get_item_timestamp(Int32(i))
-            let sourceName = getSourceName(at: i)
-            let sourceBundleId = getSourceBundleId(at: i)
+        // Batch-read all items under a SINGLE Rust-side lock — eliminates the
+        // race condition where the monitor thread could shift array indices
+        // between successive per-index FFI calls.
+        guard let jsonStr = clipboard_get_all_items_json() else {
+            return
+        }
+        let jsonString = String(cString: jsonStr)
+        clipboard_free_string(jsonStr)
 
-            switch type {
+        guard let data = jsonString.data(using: .utf8),
+              let rawItems = try? JSONDecoder().decode([ClipItemJSON].self, from: data) else {
+            print("[ClipboardBackend] failed to parse items JSON")
+            return
+        }
+
+        var newItems: [ClipboardItem] = []
+        for raw in rawItems {
+            switch raw.ty {
             case 0: // Text
-                if let text = getText(at: i) {
-                    newItems.append(.text(
-                        id: i, text: text, timestamp: UInt64(timestamp),
-                        label: getLabel(at: i),
-                        sourceName: sourceName, sourceBundleId: sourceBundleId
-                    ))
-                }
+                let text = raw.tx ?? ""
+                newItems.append(.text(
+                    entryId: raw.id,
+                    text: text,
+                    timestamp: raw.ts,
+                    label: raw.lb,
+                    sourceName: raw.sn,
+                    sourceBundleId: raw.sb
+                ))
             case 1: // Image
-                let (w, h) = getImageSize(at: i)
-                if let thumbData = getImageThumb(at: i) {
-                    newItems.append(.image(
-                        id: i, thumbData: thumbData, width: w, height: h,
-                        timestamp: UInt64(timestamp), label: getLabel(at: i),
-                        sourceName: sourceName, sourceBundleId: sourceBundleId
-                    ))
+                // Load thumbnail by db_id — no history lock needed
+                let dbId = raw.di ?? 0
+                var thumbData = Data()
+                if dbId != 0 {
+                    var len: Int32 = 0
+                    if let ptr = clipboard_get_image_thumb_by_db_id(Int64(dbId), &len) {
+                        thumbData = Data(bytes: ptr, count: Int(len))
+                        clipboard_free_bytes(ptr, len)
+                    }
                 }
+                newItems.append(.image(
+                    entryId: raw.id,
+                    dbId: dbId,
+                    thumbData: thumbData,
+                    width: raw.w ?? 0,
+                    height: raw.h ?? 0,
+                    timestamp: raw.ts,
+                    label: raw.lb,
+                    sourceName: raw.sn,
+                    sourceBundleId: raw.sb
+                ))
             default:
                 break
             }
@@ -155,7 +179,9 @@ class ClipboardBackend: ObservableObject {
     }
 
     func selectAndPaste(at index: Int) -> Bool {
-        let result = clipboard_select_and_paste(Int32(index)) != 0
+        guard index < items.count else { return false }
+        let entryId = UInt64(items[index].id)
+        let result = clipboard_select_and_paste_by_id(entryId) != 0
         if result {
             // History order changed (selected item moved to top) — force UI refresh
             reloadItems()
@@ -183,42 +209,58 @@ class ClipboardBackend: ObservableObject {
 
 // MARK: - Item Types
 
+/// JSON-decoded item from the Rust batch-read API.
+private struct ClipItemJSON: Codable {
+    let ty: Int       // 0 = text, 1 = image
+    let id: Int        // stable entry id
+    let tx: String?    // text content (ty=0)
+    let di: Int?       // db_id for image (ty=1)
+    let w: Int?        // width (ty=1)
+    let h: Int?        // height (ty=1)
+    let tw: Int?       // thumb_width (ty=1)
+    let th: Int?       // thumb_height (ty=1)
+    let ts: UInt64     // timestamp
+    let lb: String     // label
+    let sn: String     // source_name
+    let sb: String     // source_bundle_id
+}
+
 enum ClipboardItem: Identifiable {
-    case text(id: Int, text: String, timestamp: UInt64, label: String, sourceName: String, sourceBundleId: String)
-    case image(id: Int, thumbData: Data, width: Int, height: Int, timestamp: UInt64, label: String, sourceName: String, sourceBundleId: String)
+    case text(entryId: Int, text: String, timestamp: UInt64, label: String, sourceName: String, sourceBundleId: String)
+    case image(entryId: Int, dbId: Int, thumbData: Data, width: Int, height: Int, timestamp: UInt64, label: String, sourceName: String, sourceBundleId: String)
 
     var id: Int {
         switch self {
-        case .text(let id, _, _, _, _, _): return id
-        case .image(let id, _, _, _, _, _, _, _): return id
+        case .text(let entryId, _, _, _, _, _): return entryId
+        case .image(let entryId, _, _, _, _, _, _, _, _): return entryId
         }
     }
 
     var label: String {
         switch self {
         case .text(_, _, _, let label, _, _): return label
-        case .image(_, _, _, _, _, let label, _, _): return label
+        case .image(_, _, _, _, _, _, let label, _, _): return label
         }
     }
 
     var timestamp: UInt64 {
         switch self {
         case .text(_, _, let ts, _, _, _): return ts
-        case .image(_, _, _, _, let ts, _, _, _): return ts
+        case .image(_, _, _, _, _, let ts, _, _, _): return ts
         }
     }
 
     var sourceName: String {
         switch self {
         case .text(_, _, _, _, let sn, _): return sn
-        case .image(_, _, _, _, _, _, let sn, _): return sn
+        case .image(_, _, _, _, _, _, _, let sn, _): return sn
         }
     }
 
     var sourceBundleId: String {
         switch self {
         case .text(_, _, _, _, _, let sbid): return sbid
-        case .image(_, _, _, _, _, _, _, let sbid): return sbid
+        case .image(_, _, _, _, _, _, _, _, let sbid): return sbid
         }
     }
 

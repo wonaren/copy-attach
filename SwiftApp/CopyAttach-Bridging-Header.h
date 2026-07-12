@@ -26,6 +26,13 @@ void clipboard_free_bytes(uint8_t* data, int32_t len);
 
 // ─── Action ───
 int32_t clipboard_select_and_paste(int32_t index);
+int32_t clipboard_select_and_paste_by_id(uint64_t entry_id);
+
+// ─── Batch Read (single-lock, race-free) ───
+char* clipboard_get_all_items_json(void);
+
+// ─── Image by DB row id (no history lock) ───
+uint8_t* clipboard_get_image_thumb_by_db_id(int64_t db_id, int32_t* out_len);
 
 // ─── Source App ───
 void clipboard_set_source_app(const char* name, const char* bundle_id);
