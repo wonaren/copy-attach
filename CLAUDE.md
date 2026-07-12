@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-本文件为 Claude Code（claude.ai/code）在此仓库中工作时提供行为指引。
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## 行为约定
 
@@ -13,35 +13,74 @@
 ## 构建与测试
 
 ```bash
-# 构建全部（Rust 库 + Swift 应用包）
+# 构建全部（Rust + Swift 应用）
 ./build.sh
 
-# 仅 Rust：release 构建
+# 仅 Rust release 构建
 cargo build --release
 
-# 仅 Rust：运行测试
+# 仅 Rust 运行测试
 cargo test
+
+# 调试日志
+tail -f /tmp/copyattach_debug.log
 
 # 打开应用
 open "CopyAttach.app"
 ```
 
-所有命令的项目根目录为 `clipboard-manager/`。构建脚本将 Rust 编译为 `target/release/libcopy_attach.dylib`，拷贝到 `CopyAttach.app/Contents/Frameworks/`，用 `swiftc` 编译 Swift 源码，ad-hoc 签名后产出 `CopyAttach.app`。
+所有命令在项目根目录执行。构建脚本（[build.sh](build.sh)）流程：
+1. `cargo build --release` → 产出 `target/release/libcopy_attach.dylib`
+2. 拷贝 dylib 到 `CopyAttach.app/Contents/Frameworks/`，设置 `install_name`
+3. `swiftc` 编译 SwiftApp 下所有 `.swift` 文件，带 `-import-objc-header` 和 `-lcopy_attach` 链接
+4. 拷贝 `Info.plist`，codesign ad-hoc
 
-## 架构
+## 架构概览
 
-**Rust 后端**（[src/lib.rs](src/lib.rs)）——一个 `cdylib`，通过扁平的 C FFI 暴露接口。通过 `arboard` 每 300ms 轮询 macOS 剪贴板，捕获文本和 PNG 编码图片，基于文本相等或图片哈希去重，维护最多 1000 条历史记录。通过 `CGEventPost`（Cmd+V）模拟粘贴，通过 `AXIsProcessTrusted` 检查辅助功能权限。所有状态存放于 `OnceLock<Backend>` 单例中，`Arc<Mutex<Vec<ClipboardEntry>>>` 历史数据与后台监控线程共享。
+**Rust 后端**（[src/lib.rs](src/lib.rs)）—— `cdylib` 类型的库，编译为 `libcopy_attach.dylib`。核心逻辑：
 
-**Swift 前端**（[SwiftApp/](SwiftApp/)）——仅菜单栏的应用（`LSUIElement: true`），使用 SwiftUI + AppKit：
+- **剪贴板监控**：后台线程每 300ms 轮询 `arboard` 获取系统剪贴板内容，先检查 NSPasteboard `changeCount`（轻量检测，避免每次读图片），再读取文本或图片。图片通过 `image` crate 编码为 PNG，缩略图缩放至最长边 300px。去重依据文本相等或图片哈希（`DefaultHasher`）。
+- **SQLite 持久化**（`rusqlite bundled`）：`~/Library/Application Support/CopyAttach/history.db`，mmap 读取 BLOB，512KB page cache。所有变更通过 write-through 策略实时写入 DB（监控线程 + `select_and_paste` 均写穿），启动时从 DB 加载最多 3000 条记录。
+- **历史管理**：`Arc<Mutex<Vec<ClipboardEntry>>>` 最多 1000 条。添加时去重（相同文本/哈希的旧条目被移除），新条目插入头部。
+- **paste 模拟**：通过 `CGEventPost` 发送 Cmd+V，需要辅助功能权限（`AXIsProcessTrusted` 检查）。
+- **全局状态**：`OnceLock<Backend>` 单例，所有 FFI 函数通过 `backend()` 访问。
 
-- [CopyAttachApp.swift](SwiftApp/CopyAttachApp.swift)——`@main` 入口，含 `MenuBarExtra` 和 `AppDelegate`，启动时初始化 Rust 后端，管理设置窗口和弹窗切换。
-- [ClipboardBackend.swift](SwiftApp/ClipboardBackend.swift)——Rust C FFI 的 `ObservableObject` 封装。每 0.5s 通过 Timer 轮询 `clipboard_get_count()`，有变更时重载条目，周期性调用 `clipboard_set_source_app()` 告诉 Rust 当前前台应用。
-- [HistoryPopupView.swift](SwiftApp/HistoryPopupView.swift)——`NSPanel`（浮动、无边框、非激活面板）承载 SwiftUI `HistoryPopupContent`，支持键盘导航（↑↓ Enter Esc）、悬停/选中高亮、滚动到选中项、以及每项的应用图标+来源名显示。
-- [HotkeyManager.swift](SwiftApp/HotkeyManager.swift)——双重机制的全局热键：Carbon `RegisterEventHotKey`（主）+ `NSEvent.addGlobalMonitorForEvents`（备）。支持运行时录制新快捷键，配置以 JSON 持久化到 `UserDefaults`。默认为 ⌥⌘V。
-- [CopyAttach-Bridging-Header.h](SwiftApp/CopyAttach-Bridging-Header.h)——与 Rust `#[no_mangle] extern "C"` 函数匹配的 C FFI 声明，`swiftc` 通过 `-import-objc-header` 导入。
+**Swift 前端**（[SwiftApp/](SwiftApp/)）—— 纯菜单栏应用（`LSUIElement: true`），SwiftUI + AppKit。
 
-**数据流**：Rust 在后台线程监控剪贴板 → Swift 通过 FFI 轮询条目数 → 有变更时 Swift 将标签/缩略图重载为 `ClipboardItem` 枚举（`.text` / `.image`）→ SwiftUI 在弹窗中渲染。用户选择条目时 Swift 调用 `clipboard_select_and_paste()`，通过 `arboard` 写回剪贴板，sleep 50ms，然后通过 `CGEvent` 发送 Cmd+V。
+## 关键数据流
 
-**FFI 所有权规则**：Rust 返回的字符串（`clipboard_get_item_text` 等）调用方必须用 `clipboard_free_string` 释放；字节缓冲区（`clipboard_get_image_thumb`）必须用 `clipboard_free_bytes` 释放。Swift `ClipboardBackend` 封装已处理这些。
+```
+Rust 监控线程捕获新剪贴板内容
+  ↓ 写穿 SQLite + 更新内存历史
+Swift Timer (0.5s) 轮询 clipboard_get_count()
+  ↓ 计数变化
+Swift 通过 Snapshot API 批量读取所有条目（单次加锁，免竞争）
+  ↓ 构建 [ClipboardItem] 数组
+SwiftUI 渲染 HistoryPopupContent
+  ↓ 用户选择条目
+clipboard_select_and_paste_by_id() → 写回系统剪贴板 → sleep 50ms → Cmd+V
+```
 
-**调试日志**：[HotkeyManager.swift](SwiftApp/HotkeyManager.swift) 中的 `debugLog()` 函数写入 stderr 和 `/tmp/copyattach_debug.log`。开发时可用 `tail -f /tmp/copyattach_debug.log` 监控。
+## FFI 关键模式
+
+- **Snapshot API**（`clipboard_snapshot_acquire/release`）：Swift 批量读取时，在 Rust 侧一次性加锁 clone 全部历史，后续读取不持有锁。所有 `snapshot_` 前缀函数操作此快照。
+- **旧式 API**（`clipboard_get_count`, `clipboard_get_item_text` 等）：每次调用单独加锁，遗留接口，新代码优先用 Snapshot API。
+- **所有权规则**：`*_free_string` 释放 Rust 分配的 `*mut c_char`；`*_free_bytes` 释放 Rust 分配的 `*mut u8` 缓冲区（含长度）。
+- **图片加载**：缩略图通过 `clipboard_get_image_thumb_by_db_id`（仅 SQLite 读，不碰 history 锁）；大图通过 `clipboard_get_image_full`（优先内存缓存，后备 DB 加载）。
+- **稳定 ID**：`entry_id`（`u64`）单调递增，用于 select_and_paste_by_id，避免数组索引竞争。
+
+## Cargo 特性
+
+- `migration`（默认开启）：启用 `serde`/`serde_json`/`base64` 依赖，提供从旧版 `history.json` 到 SQLite 的迁移。
+- `default = ["migration"]`：迁移完成后考虑移除。
+
+## 调试日志
+
+`debugLog()` 函数在 [HotkeyManager.swift](SwiftApp/HotkeyManager.swift) 中，写入 stderr 和 `/tmp/copyattach_debug.log`。Swift 端其他 `print("[ClipboardBackend] ...")` 也输出到 stderr。Rust 端通过 `eprintln!` 输出。监控：
+```bash
+tail -f /tmp/copyattach_debug.log
+```
+
+## 应用图标
+
+`assets/icon.svg` 通过 `sips` 渲染 + `iconutil` 生成 `AppIcon.icns`，构建时自动处理。
