@@ -192,7 +192,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                         Spacer()
                     }
                     HStack(spacing: 8) {
-                        Text("呼出剪贴板").font(.system(size: 12)).foregroundColor(.secondary)
+                        Text("呼出剪贴板：").font(.system(size: 12)).foregroundColor(.secondary)
                         if hotkeyManager.isRecording {
                             Button(action: { hotkeyManager.stopRecording() }) {
                                 HStack(spacing: 5) {
