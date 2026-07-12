@@ -67,37 +67,61 @@ class ClipboardBackend: ObservableObject {
     }
 
     private func reloadItems() {
-        // Batch-read all items under a SINGLE Rust-side lock — eliminates the
-        // race condition where the monitor thread could shift array indices
-        // between successive per-index FFI calls.
-        guard let jsonStr = clipboard_get_all_items_json() else {
-            return
-        }
-        let jsonString = String(cString: jsonStr)
-        clipboard_free_string(jsonStr)
+        // Acquire a consistent snapshot under a single Rust-side lock,
+        // then read all items from the snapshot (no further locking).
+        guard let snap = clipboard_snapshot_acquire() else { return }
+        defer { clipboard_snapshot_release(snap) }
 
-        guard let data = jsonString.data(using: .utf8),
-              let rawItems = try? JSONDecoder().decode([ClipItemJSON].self, from: data) else {
-            print("[ClipboardBackend] failed to parse items JSON")
-            return
-        }
-
+        let c = Int(clipboard_snapshot_count(snap))
         var newItems: [ClipboardItem] = []
-        for raw in rawItems {
-            switch raw.ty {
+
+        for i in 0..<c {
+            let type = Int(clipboard_snapshot_item_type(snap, Int32(i)))
+            let id = Int(clipboard_snapshot_item_id(snap, Int32(i)))
+            let timestamp = UInt64(clipboard_snapshot_item_timestamp(snap, Int32(i)))
+
+            let label: String = {
+                guard let cStr = clipboard_snapshot_item_label(snap, Int32(i)) else { return "" }
+                let s = String(cString: cStr)
+                clipboard_free_string(cStr)
+                return s
+            }()
+
+            let sourceName: String = {
+                guard let cStr = clipboard_snapshot_item_source_name(snap, Int32(i)) else { return "" }
+                let s = String(cString: cStr)
+                clipboard_free_string(cStr)
+                return s
+            }()
+
+            let sourceBundleId: String = {
+                guard let cStr = clipboard_snapshot_item_source_bundle_id(snap, Int32(i)) else { return "" }
+                let s = String(cString: cStr)
+                clipboard_free_string(cStr)
+                return s
+            }()
+
+            switch type {
             case 0: // Text
-                let text = raw.tx ?? ""
+                let text: String = {
+                    guard let cStr = clipboard_snapshot_item_text(snap, Int32(i)) else { return "" }
+                    let s = String(cString: cStr)
+                    clipboard_free_string(cStr)
+                    return s
+                }()
                 newItems.append(.text(
-                    entryId: raw.id,
+                    entryId: id,
                     text: text,
-                    timestamp: raw.ts,
-                    label: raw.lb,
-                    sourceName: raw.sn,
-                    sourceBundleId: raw.sb
+                    timestamp: timestamp,
+                    label: label,
+                    sourceName: sourceName,
+                    sourceBundleId: sourceBundleId
                 ))
             case 1: // Image
+                let dbId = Int(clipboard_snapshot_get_image_db_id(snap, Int32(i)))
+                let w = Int(clipboard_snapshot_get_image_width(snap, Int32(i)))
+                let h = Int(clipboard_snapshot_get_image_height(snap, Int32(i)))
                 // Load thumbnail by db_id — no history lock needed
-                let dbId = raw.di ?? 0
                 var thumbData = Data()
                 if dbId != 0 {
                     var len: Int32 = 0
@@ -107,15 +131,15 @@ class ClipboardBackend: ObservableObject {
                     }
                 }
                 newItems.append(.image(
-                    entryId: raw.id,
+                    entryId: id,
                     dbId: dbId,
                     thumbData: thumbData,
-                    width: raw.w ?? 0,
-                    height: raw.h ?? 0,
-                    timestamp: raw.ts,
-                    label: raw.lb,
-                    sourceName: raw.sn,
-                    sourceBundleId: raw.sb
+                    width: w,
+                    height: h,
+                    timestamp: timestamp,
+                    label: label,
+                    sourceName: sourceName,
+                    sourceBundleId: sourceBundleId
                 ))
             default:
                 break
@@ -208,22 +232,6 @@ class ClipboardBackend: ObservableObject {
 }
 
 // MARK: - Item Types
-
-/// JSON-decoded item from the Rust batch-read API.
-private struct ClipItemJSON: Codable {
-    let ty: Int       // 0 = text, 1 = image
-    let id: Int        // stable entry id
-    let tx: String?    // text content (ty=0)
-    let di: Int?       // db_id for image (ty=1)
-    let w: Int?        // width (ty=1)
-    let h: Int?        // height (ty=1)
-    let tw: Int?       // thumb_width (ty=1)
-    let th: Int?       // thumb_height (ty=1)
-    let ts: UInt64     // timestamp
-    let lb: String     // label
-    let sn: String     // source_name
-    let sb: String     // source_bundle_id
-}
 
 enum ClipboardItem: Identifiable {
     case text(entryId: Int, text: String, timestamp: UInt64, label: String, sourceName: String, sourceBundleId: String)

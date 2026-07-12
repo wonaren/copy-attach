@@ -800,54 +800,138 @@ fn clipboard_monitor(
 // C FFI - Exported Functions
 // ═══════════════════════════════════════════
 
-/// Serialize all history entries to a compact JSON string under a SINGLE lock.
-/// This eliminates the race condition where the monitor thread can modify
-/// history between successive per-index FFI calls.
-fn items_to_json(hist: &[ClipboardEntry]) -> String {
-    let mut out = String::from("[");
-    for (i, item) in hist.iter().enumerate() {
-        if i > 0 { out.push(','); }
-        match item {
-            ClipboardEntry::Text { id, text, timestamp, source_name, source_bundle_id } => {
-                // Use serde_json to safely escape the text
-                let label = {
-                    let first = text.lines().find(|l| !l.trim().is_empty()).unwrap_or(text);
-                    let char_count: usize = first.chars().count();
-                    if char_count > 60 {
-                        let truncated: String = first.chars().take(59).collect();
-                        format!("{}…", truncated)
-                    } else {
-                        first.to_string()
-                    }
-                };
-                out.push_str(&format!(
-                    r#"{{"ty":0,"id":{},"tx":{},"ts":{},"lb":{},"sn":{},"sb":{}}}"#,
-                    id,
-                    serde_json::to_string(text).unwrap_or_else(|_| "\"\"".into()),
-                    timestamp,
-                    serde_json::to_string(&label).unwrap_or_else(|_| "\"\"".into()),
-                    serde_json::to_string(source_name).unwrap_or_else(|_| "\"\"".into()),
-                    serde_json::to_string(source_bundle_id).unwrap_or_else(|_| "\"\"".into()),
-                ));
-            }
-            ClipboardEntry::Image { id, db_id, width, height, thumb_width, thumb_height, timestamp, source_name, source_bundle_id, .. } => {
-                let label = format!("📷 图片 ({}×{})", width, height);
-                out.push_str(&format!(
-                    r#"{{"ty":1,"id":{},"di":{},"w":{},"h":{},"tw":{},"th":{},"ts":{},"lb":{},"sn":{},"sb":{}}}"#,
-                    id,
-                    db_id,
-                    width, height,
-                    thumb_width, thumb_height,
-                    timestamp,
-                    serde_json::to_string(&label).unwrap_or_else(|_| "\"\"".into()),
-                    serde_json::to_string(source_name).unwrap_or_else(|_| "\"\"".into()),
-                    serde_json::to_string(source_bundle_id).unwrap_or_else(|_| "\"\"".into()),
-                ));
-            }
-        }
+/// Opaque handle to a cloned snapshot of clipboard history,
+/// taken under a single history lock. All reads from this snapshot
+/// are race-free — the background monitor thread cannot modify it.
+pub struct Snapshot(Vec<ClipboardEntry>);
+
+/// Acquire a consistent snapshot of all history entries under one lock.
+/// Returns opaque handle (or null if backend is uninitialized).
+/// Caller must release with clipboard_snapshot_release().
+#[no_mangle]
+pub extern "C" fn clipboard_snapshot_acquire() -> *mut Snapshot {
+    let hist = match BACKEND.get() {
+        Some(b) => b.history.lock().unwrap(),
+        None => return std::ptr::null_mut(),
+    };
+    Box::into_raw(Box::new(Snapshot(hist.clone())))
+}
+
+#[no_mangle]
+pub extern "C" fn clipboard_snapshot_count(snap: *const Snapshot) -> c_int {
+    if snap.is_null() { return 0; }
+    let snap = unsafe { &*snap };
+    snap.0.len() as c_int
+}
+
+#[no_mangle]
+pub extern "C" fn clipboard_snapshot_item_type(snap: *const Snapshot, index: c_int) -> c_int {
+    if snap.is_null() { return -1; }
+    let snap = unsafe { &*snap };
+    snap.0.get(index as usize).map_or(-1, |item| item.content_type())
+}
+
+#[no_mangle]
+pub extern "C" fn clipboard_snapshot_item_id(snap: *const Snapshot, index: c_int) -> i64 {
+    if snap.is_null() { return 0; }
+    let snap = unsafe { &*snap };
+    match snap.0.get(index as usize) {
+        Some(ClipboardEntry::Text { id, .. }) => *id as i64,
+        Some(ClipboardEntry::Image { id, .. }) => *id as i64,
+        None => 0,
     }
-    out.push(']');
-    out
+}
+
+#[no_mangle]
+pub extern "C" fn clipboard_snapshot_item_timestamp(snap: *const Snapshot, index: c_int) -> c_longlong {
+    if snap.is_null() { return 0; }
+    let snap = unsafe { &*snap };
+    snap.0.get(index as usize).map_or(0, |item| item.timestamp() as c_longlong)
+}
+
+/// Get label text. Caller must free with clipboard_free_string().
+#[no_mangle]
+pub extern "C" fn clipboard_snapshot_item_label(snap: *const Snapshot, index: c_int) -> *mut c_char {
+    if snap.is_null() { return std::ptr::null_mut(); }
+    let snap = unsafe { &*snap };
+    match snap.0.get(index as usize) {
+        Some(item) => CString::new(item.label()).unwrap_or_default().into_raw(),
+        None => std::ptr::null_mut(),
+    }
+}
+
+/// Get text content (text items only). Caller must free with clipboard_free_string().
+#[no_mangle]
+pub extern "C" fn clipboard_snapshot_item_text(snap: *const Snapshot, index: c_int) -> *mut c_char {
+    if snap.is_null() { return std::ptr::null_mut(); }
+    let snap = unsafe { &*snap };
+    match snap.0.get(index as usize) {
+        Some(ClipboardEntry::Text { text, .. }) => CString::new(text.as_str()).unwrap_or_default().into_raw(),
+        _ => std::ptr::null_mut(),
+    }
+}
+
+/// Get source app name. Caller must free with clipboard_free_string().
+#[no_mangle]
+pub extern "C" fn clipboard_snapshot_item_source_name(snap: *const Snapshot, index: c_int) -> *mut c_char {
+    if snap.is_null() { return std::ptr::null_mut(); }
+    let snap = unsafe { &*snap };
+    match snap.0.get(index as usize) {
+        Some(item) => CString::new(item.source_name()).unwrap_or_default().into_raw(),
+        None => std::ptr::null_mut(),
+    }
+}
+
+/// Get source app bundle ID. Caller must free with clipboard_free_string().
+#[no_mangle]
+pub extern "C" fn clipboard_snapshot_item_source_bundle_id(snap: *const Snapshot, index: c_int) -> *mut c_char {
+    if snap.is_null() { return std::ptr::null_mut(); }
+    let snap = unsafe { &*snap };
+    match snap.0.get(index as usize) {
+        Some(item) => CString::new(item.source_bundle_id()).unwrap_or_default().into_raw(),
+        None => std::ptr::null_mut(),
+    }
+}
+
+/// Get image db_id (0 if not an image or unset).
+#[no_mangle]
+pub extern "C" fn clipboard_snapshot_get_image_db_id(snap: *const Snapshot, index: c_int) -> i64 {
+    if snap.is_null() { return 0; }
+    let snap = unsafe { &*snap };
+    match snap.0.get(index as usize) {
+        Some(ClipboardEntry::Image { db_id, .. }) => *db_id,
+        _ => 0,
+    }
+}
+
+/// Get image width (0 if not an image).
+#[no_mangle]
+pub extern "C" fn clipboard_snapshot_get_image_width(snap: *const Snapshot, index: c_int) -> c_int {
+    if snap.is_null() { return 0; }
+    let snap = unsafe { &*snap };
+    match snap.0.get(index as usize) {
+        Some(ClipboardEntry::Image { width, .. }) => *width as c_int,
+        _ => 0,
+    }
+}
+
+/// Get image height (0 if not an image).
+#[no_mangle]
+pub extern "C" fn clipboard_snapshot_get_image_height(snap: *const Snapshot, index: c_int) -> c_int {
+    if snap.is_null() { return 0; }
+    let snap = unsafe { &*snap };
+    match snap.0.get(index as usize) {
+        Some(ClipboardEntry::Image { height, .. }) => *height as c_int,
+        _ => 0,
+    }
+}
+
+/// Release a snapshot acquired with clipboard_snapshot_acquire().
+/// Safe to call with null pointer (no-op).
+#[no_mangle]
+pub extern "C" fn clipboard_snapshot_release(snap: *mut Snapshot) {
+    if snap.is_null() { return; }
+    unsafe { drop(Box::from_raw(snap)); }
 }
 
 #[no_mangle]
@@ -899,6 +983,33 @@ pub extern "C" fn clipboard_init() -> c_int {
         Err(_) => return 0, // Already initialized
         Ok(()) => {}
     }
+
+    // Establish clipboard baseline: read the current system clipboard content and
+    // initialize last_seen_* accordingly. This ensures the monitor thread only
+    // reacts to genuinely new clipboard changes — not the content already on the
+    // clipboard at startup. The saved history entries remain the only popup items
+    // until the user performs a new copy.
+    //
+    // We create a temporary Clipboard here (dropped before the monitor thread
+    // creates its own) so the baseline accurately reflects what's on the pasteboard
+    // right now, regardless of what was saved to the DB.
+    if let Ok(mut tmp_cb) = Clipboard::new() {
+        if let Ok(img) = tmp_cb.get_image() {
+            let hash = image_hash(&img.bytes, img.width as u32, img.height as u32);
+            *last_seen_image_hash.lock().unwrap() = Some(hash);
+            *last_seen_text.lock().unwrap() = None;
+        } else if let Ok(text) = tmp_cb.get_text() {
+            if !text.is_empty() {
+                *last_seen_text.lock().unwrap() = Some(text);
+                *last_seen_image_hash.lock().unwrap() = None;
+            }
+        } else {
+            eprintln!("CopyAttach: clipboard baseline read failed (empty pasteboard or unsupported content)");
+        }
+    } else {
+        eprintln!("CopyAttach: failed to open clipboard for baseline read");
+    }
+    // tmp_cb dropped here; monitor thread creates its own Clipboard instance.
 
     // Spawn the monitor thread after BACKEND is live.
     let handle = thread::spawn(|| clipboard_monitor(
@@ -1264,16 +1375,6 @@ pub extern "C" fn clipboard_clear_history() {
             }
         }
     }
-}
-
-/// Batch-read all history items as a JSON string under a SINGLE lock.
-/// Eliminates the race condition between the Swift polling loop and the
-/// background monitor thread. Caller must free with clipboard_free_string().
-#[no_mangle]
-pub extern "C" fn clipboard_get_all_items_json() -> *mut c_char {
-    let hist = backend().history.lock().unwrap();
-    let json = items_to_json(&hist);
-    CString::new(json).unwrap_or_default().into_raw()
 }
 
 /// Load an image thumbnail directly by database row id.

@@ -28,8 +28,20 @@ void clipboard_free_bytes(uint8_t* data, int32_t len);
 int32_t clipboard_select_and_paste(int32_t index);
 int32_t clipboard_select_and_paste_by_id(uint64_t entry_id);
 
-// ─── Batch Read (single-lock, race-free) ───
-char* clipboard_get_all_items_json(void);
+// ─── Snapshot API (single-lock, race-free read) ───
+void* clipboard_snapshot_acquire(void);
+int32_t clipboard_snapshot_count(void* snap);
+int32_t clipboard_snapshot_item_type(void* snap, int32_t index);
+int64_t clipboard_snapshot_item_id(void* snap, int32_t index);
+int64_t clipboard_snapshot_item_timestamp(void* snap, int32_t index);
+char* clipboard_snapshot_item_label(void* snap, int32_t index);
+char* clipboard_snapshot_item_text(void* snap, int32_t index);
+char* clipboard_snapshot_item_source_name(void* snap, int32_t index);
+char* clipboard_snapshot_item_source_bundle_id(void* snap, int32_t index);
+int64_t clipboard_snapshot_get_image_db_id(void* snap, int32_t index);
+int32_t clipboard_snapshot_get_image_width(void* snap, int32_t index);
+int32_t clipboard_snapshot_get_image_height(void* snap, int32_t index);
+void clipboard_snapshot_release(void* snap);
 
 // ─── Image by DB row id (no history lock) ───
 uint8_t* clipboard_get_image_thumb_by_db_id(int64_t db_id, int32_t* out_len);
