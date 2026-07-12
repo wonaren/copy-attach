@@ -1126,14 +1126,17 @@ fn vec_to_raw(v: Vec<u8>) -> *mut u8 {
 
 #[no_mangle]
 pub extern "C" fn clipboard_select_and_paste(index: c_int) -> c_int {
-    let item = {
+    // 1. Find the entry by index and clone it.
+    let mut item = {
         let hist = backend().history.lock().unwrap();
-        hist.get(index as usize).cloned()
+        match hist.get(index as usize).cloned() {
+            Some(i) => i,
+            None => return 0,
+        }
     };
-    let item = match item { Some(i) => i, None => return 0 };
 
-    // Build a copy with full png_data and thumb_data loaded from DB in one query.
-    // The in-memory entry keeps only metadata (png_data and thumb_data stay empty).
+    // 2. Load full png_data + thumb_data from DB (used only for clipboard write
+    //    and DB write-through). The in-memory entry keeps only metadata.
     let db_item = match &item {
         ClipboardEntry::Image { db_id, .. } if *db_id != 0 => {
             let mut loaded = item.clone();
@@ -1161,7 +1164,7 @@ pub extern "C" fn clipboard_select_and_paste(index: c_int) -> c_int {
         _ => item.clone(),
     };
 
-    // Paste from db_item's loaded data (or item's text for text entries).
+    // 3. Write to system clipboard and suppress re-capture.
     let mut cb = match Clipboard::new() { Ok(c) => c, Err(_) => return 0 };
 
     match &db_item {
@@ -1187,34 +1190,42 @@ pub extern "C" fn clipboard_select_and_paste(index: c_int) -> c_int {
         }
     }
 
-    // Move the selected item to top of history immediately so the UI
-    // reflects the new order right away, without waiting for the monitor thread.
-    {
-        let mut hist = backend().history.lock().unwrap();
-        *hist = add_to_history(std::mem::take(&mut *hist), item);
-        while hist.len() > CLEANUP_THRESHOLD {
-            hist.pop();
-        }
-    }
-
-    // Write-through to DB: delete old row and insert new (gets higher id, = top)
+    // 4. DB write-through FIRST — so we can capture the new row id and update
+    //    item.db_id BEFORE it enters the in-memory history.
+    //    Order: insert → delete (keeps newest) → get row_id → trim.
     if let Some(b) = BACKEND.get() {
         if let Ok(conn) = b.db.lock() {
-            let png_for_insert = match &db_item {
+            let png_for_db = match &db_item {
                 ClipboardEntry::Image { png_data, .. } if !png_data.is_empty() => {
                     Some(png_data.as_slice())
                 }
                 _ => None,
             };
-            let thumb_for_insert = match &db_item {
+            let thumb_for_db = match &db_item {
                 ClipboardEntry::Image { thumb_data, thumb_width, thumb_height, .. } if !thumb_data.is_empty() => {
                     Some((thumb_data.as_slice(), *thumb_width, *thumb_height))
                 }
                 _ => None,
             };
+
+            insert_entry_to_db(&conn, &db_item, png_for_db, thumb_for_db);
             delete_matching_entry(&conn, &db_item);
-            insert_entry_to_db(&conn, &db_item, png_for_insert, thumb_for_insert);
+            let new_row_id = conn.last_insert_rowid();
             trim_db_history(&conn);
+
+            // CRITICAL: update the in-memory entry's db_id.
+            if let ClipboardEntry::Image { ref mut db_id, .. } = &mut item {
+                *db_id = new_row_id;
+            }
+        }
+    }
+
+    // 5. Now move the entry to top of history — with the correct db_id already set.
+    {
+        let mut hist = backend().history.lock().unwrap();
+        *hist = add_to_history(std::mem::take(&mut *hist), item);
+        while hist.len() > CLEANUP_THRESHOLD {
+            hist.pop();
         }
     }
 
@@ -1302,16 +1313,20 @@ pub extern "C" fn clipboard_get_image_thumb_by_db_id(db_id: i64, out_len: *mut c
 /// Returns 1 on success, 0 if the entry ID is not found.
 #[no_mangle]
 pub extern "C" fn clipboard_select_and_paste_by_id(entry_id: u64) -> c_int {
-    let item = {
+    // 1. Find the entry by stable ID and clone it.
+    let mut item = {
         let hist = backend().history.lock().unwrap();
-        hist.iter().find(|e| match e {
+        match hist.iter().find(|e| match e {
             ClipboardEntry::Text { id, .. } => *id == entry_id,
             ClipboardEntry::Image { id, .. } => *id == entry_id,
-        }).cloned()
+        }).cloned() {
+            Some(i) => i,
+            None => return 0,
+        }
     };
-    let item = match item { Some(i) => i, None => return 0 };
 
-    // Build a copy with full png_data and thumb_data loaded from DB in one query.
+    // 2. Load full png_data + thumb_data from DB (used only for clipboard write
+    //    and DB write-through). The in-memory entry keeps only metadata.
     let db_item = match &item {
         ClipboardEntry::Image { db_id, .. } if *db_id != 0 => {
             let mut loaded = item.clone();
@@ -1339,7 +1354,7 @@ pub extern "C" fn clipboard_select_and_paste_by_id(entry_id: u64) -> c_int {
         _ => item.clone(),
     };
 
-    // Paste from db_item's loaded data.
+    // 3. Write to system clipboard and suppress re-capture.
     let mut cb = match Clipboard::new() { Ok(c) => c, Err(_) => return 0 };
 
     match &db_item {
@@ -1365,33 +1380,44 @@ pub extern "C" fn clipboard_select_and_paste_by_id(entry_id: u64) -> c_int {
         }
     }
 
-    // Move the selected item to top of history.
-    {
-        let mut hist = backend().history.lock().unwrap();
-        *hist = add_to_history(std::mem::take(&mut *hist), item);
-        while hist.len() > CLEANUP_THRESHOLD {
-            hist.pop();
-        }
-    }
-
-    // Write-through to DB.
+    // 4. DB write-through FIRST — so we can capture the new row id and update
+    //    item.db_id BEFORE it enters the in-memory history.
+    //    Order: insert → delete (keeps newest) → get row_id → trim.
+    //    This matches the monitor thread's write pattern.
     if let Some(b) = BACKEND.get() {
         if let Ok(conn) = b.db.lock() {
-            let png_for_insert = match &db_item {
+            let png_for_db = match &db_item {
                 ClipboardEntry::Image { png_data, .. } if !png_data.is_empty() => {
                     Some(png_data.as_slice())
                 }
                 _ => None,
             };
-            let thumb_for_insert = match &db_item {
+            let thumb_for_db = match &db_item {
                 ClipboardEntry::Image { thumb_data, thumb_width, thumb_height, .. } if !thumb_data.is_empty() => {
                     Some((thumb_data.as_slice(), *thumb_width, *thumb_height))
                 }
                 _ => None,
             };
+
+            insert_entry_to_db(&conn, &db_item, png_for_db, thumb_for_db);
             delete_matching_entry(&conn, &db_item);
-            insert_entry_to_db(&conn, &db_item, png_for_insert, thumb_for_insert);
+            let new_row_id = conn.last_insert_rowid();
             trim_db_history(&conn);
+
+            // CRITICAL: update the in-memory entry's db_id so future thumbnail
+            // loads from the JSON API can locate the correct DB row.
+            if let ClipboardEntry::Image { ref mut db_id, .. } = &mut item {
+                *db_id = new_row_id;
+            }
+        }
+    }
+
+    // 5. Now move the entry to top of history — with the correct db_id already set.
+    {
+        let mut hist = backend().history.lock().unwrap();
+        *hist = add_to_history(std::mem::take(&mut *hist), item);
+        while hist.len() > CLEANUP_THRESHOLD {
+            hist.pop();
         }
     }
 
