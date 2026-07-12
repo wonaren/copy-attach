@@ -185,48 +185,37 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         private var hotkeyCard: some View {
             settingsCard {
-                HStack(spacing: 14) {
-                    Image(systemName: "keyboard").font(.system(size: 20)).foregroundColor(.blue)
-                    VStack(alignment: .leading, spacing: 6) {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(spacing: 10) {
+                        Image(systemName: "keyboard").font(.system(size: 18)).foregroundColor(.blue)
                         Text("全局快捷键").font(.system(size: 13, weight: .semibold)).foregroundColor(.white)
-                        Text("自定义显示剪贴板历史的快捷键")
-                            .font(.system(size: 11)).foregroundColor(.secondary)
-                    }
-                    Spacer()
-                }
-                VStack(spacing: 12) {
-                    HStack {
-                        Text("当前快捷键：").font(.system(size: 12)).foregroundColor(.secondary)
-                        Text(hotkeyManager.config.displayString)
-                            .font(.system(size: 14, weight: .bold, design: .monospaced))
-                            .foregroundColor(.white)
-                            .padding(.horizontal, 12).padding(.vertical, 6)
-                            .background(Color(nsColor: .darkGray).opacity(0.5)).cornerRadius(6)
                         Spacer()
                     }
-                    HStack(spacing: 10) {
+                    HStack(spacing: 8) {
+                        Text("呼出剪贴板").font(.system(size: 12)).foregroundColor(.secondary)
                         if hotkeyManager.isRecording {
-                            HStack {
-                                Image(systemName: "record.circle").foregroundColor(.red)
-                                Text("按下新的快捷键...").font(.system(size: 12, weight: .medium)).foregroundColor(.red)
-                            }
-                            .padding(.horizontal, 14).padding(.vertical, 8)
-                            .background(Color.red.opacity(0.1)).cornerRadius(6)
-                            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.red.opacity(0.5), lineWidth: 1))
-                            Button("取消") { hotkeyManager.stopRecording() }
-                                .buttonStyle(.plain).font(.system(size: 11)).foregroundColor(.secondary)
+                            Button(action: { hotkeyManager.stopRecording() }) {
+                                HStack(spacing: 5) {
+                                    Image(systemName: "record.circle").foregroundColor(.red).font(.system(size: 10))
+                                    Text("按下快捷键...").font(.system(size: 13)).foregroundColor(.red)
+                                }
+                                .padding(.horizontal, 10).padding(.vertical, 5)
+                                .background(Color.red.opacity(0.1)).cornerRadius(5)
+                                .overlay(RoundedRectangle(cornerRadius: 5).stroke(Color.red.opacity(0.5), lineWidth: 1))
+                            }.buttonStyle(.plain)
                         } else {
                             Button(action: { hotkeyManager.startRecording() }) {
-                                HStack(spacing: 4) {
-                                    Image(systemName: "arrow.triangle.branch")
-                                    Text("修改快捷键")
-                                }.font(.system(size: 12)).padding(.horizontal, 14).padding(.vertical, 8)
-                            }.buttonStyle(.borderedProminent).tint(Color(nsColor: .darkGray))
-                            Button("重置") { hotkeyManager.resetToDefault() }
-                                .buttonStyle(.plain).font(.system(size: 11)).foregroundColor(.secondary)
+                                Text(hotkeyManager.config.displayString)
+                                    .font(.system(size: 13, weight: .bold, design: .monospaced))
+                                    .foregroundColor(.white)
+                                    .padding(.horizontal, 10).padding(.vertical, 5)
+                                    .background(Color(nsColor: .darkGray)).cornerRadius(5)
+                                    .overlay(RoundedRectangle(cornerRadius: 5).stroke(Color.gray.opacity(0.5), lineWidth: 1))
+                            }.buttonStyle(.plain)
                         }
+                        Spacer()
                     }
-                }.padding(.top, 8)
+                }
             }
         }
         
