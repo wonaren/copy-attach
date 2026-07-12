@@ -220,7 +220,7 @@ struct ItemRowView: View {
     private let mutedText = Color.white.opacity(0.6)
 
     var body: some View {
-        HStack(alignment: .center, spacing: 10) {
+        HStack(alignment: .center, spacing: 4) { // Reduced spacing from 10 to 4
             // App icon
             appIcon
 
@@ -234,21 +234,21 @@ struct ItemRowView: View {
                 }
             }
 
-            Spacer(minLength: 2)
+            Spacer(minLength: 4)
 
             // Source app name
             if !item.sourceName.isEmpty {
                 Text(item.sourceName)
-                    .font(.system(size: 10, weight: .medium))
+                    .font(.system(size: 10, weight: .medium)) // Slightly reduced size
                     .foregroundColor(whiteText)
                     .lineLimit(1)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
+                    .padding(.horizontal, 4) // Reduced padding from 6 to 4
+                    .padding(.vertical, 1.5) // Reduced padding from 2 to 1.5
                     .background(Capsule().fill(Color.black.opacity(0.2))) // background for label
             }
         }
-        .padding(.horizontal, 8) // larger horizontal padding
-        .padding(.vertical, 6) // larger vertical padding
+        .padding(.horizontal, 6) // Reduced horizontal padding from 8 to 6
+        .padding(.vertical, 5) // Reduced vertical padding from 6 to 5
         .background(rowBackground)
         .overlay(
             Group {
@@ -305,8 +305,18 @@ struct ItemRowView: View {
             .filter { !$0.isEmpty }
             .joined(separator: " ")
 
-        return Text(stripped)
-            .font(.system(size: 13, weight: isSelected ? .medium : .regular)) // updated size
+        let display: String
+        let visualLen = visualWidth(stripped)
+        if visualLen > 64 {
+            let prefix = String(stripped.prefix(whileVisualWidth: 32))
+            let suffix = String(stripped.suffix(whileVisualWidth: 32))
+            display = "\(prefix)…\(suffix)"
+        } else {
+            display = stripped
+        }
+
+        return Text(display)
+            .font(.system(size: 13, weight: isSelected ? .medium : .regular))
             .foregroundColor(whiteText) // user's image shows white text
             .lineLimit(1)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -334,5 +344,34 @@ struct ItemRowView: View {
                     .frame(height: 42)
             }
         }
+    }
+}
+
+// MARK: - Visual Width Helpers
+
+/// 1 for ASCII, 2 for CJK / fullwidth characters
+private func visualWidth(_ s: String) -> Int {
+    s.reduce(0) { $0 + ($1.isASCII ? 1 : 2) }
+}
+
+extension String {
+    fileprivate func prefix(whileVisualWidth limit: Int) -> Substring {
+        var w = 0
+        return prefix(while: { char in
+            let cw = char.isASCII ? 1 : 2
+            defer { w += cw }
+            return w + cw <= limit
+        })
+    }
+
+    fileprivate func suffix(whileVisualWidth limit: Int) -> Substring {
+        var w = 0
+        let reversed = String(self.reversed())
+        let taken = reversed.prefix(while: { char in
+            let cw = char.isASCII ? 1 : 2
+            defer { w += cw }
+            return w + cw <= limit
+        })
+        return Substring(self.suffix(taken.count))
     }
 }
