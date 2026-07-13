@@ -244,6 +244,11 @@ class ClipboardBackend: ObservableObject {
             self.items = []
         }
     }
+
+    /// Returns total storage size in bytes of all clipboard entries in the database.
+    func getStorageSize() -> Int64 {
+        clipboard_get_storage_size()
+    }
 }
 
 // MARK: - Item Types

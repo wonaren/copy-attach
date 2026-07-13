@@ -259,6 +259,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     statRow("总项目数", "\(backend.items.count)")
                     statRow("文本项目数", "\(textCount)")
                     statRow("图片项目数", "\(imageCount)")
+                    statRow("已使用存储空间", formatStorageSize(backend.getStorageSize()))
                     statRow("自动清理阈值", "3,000")
                 }.padding(.top, 8)
                 Divider().background(Color.gray.opacity(0.3)).padding(.vertical, 8)
@@ -305,6 +306,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 .cornerRadius(10)
         }
         
+        private func formatStorageSize(_ bytes: Int64) -> String {
+            let byteCount = Double(bytes)
+            switch byteCount {
+            case 0: return "0 B"
+            case ..<1024: return "\(Int(byteCount)) B"
+            case ..<(1024 * 1024): return String(format: "%.1f KB", byteCount / 1024)
+            case ..<(1024 * 1024 * 1024): return String(format: "%.1f MB", byteCount / (1024 * 1024))
+            default: return String(format: "%.1f GB", byteCount / (1024 * 1024 * 1024))
+            }
+        }
+
         private func statRow(_ label: String, _ value: String) -> some View {
             HStack {
                 Text(label).font(.system(size: 11)).foregroundColor(.secondary)

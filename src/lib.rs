@@ -1377,6 +1377,31 @@ pub extern "C" fn clipboard_clear_history() {
     }
 }
 
+/// Returns the total storage size in bytes of all clipboard entries in the database.
+/// Sums text length, image PNG data, and thumbnail data.
+#[no_mangle]
+pub extern "C" fn clipboard_get_storage_size() -> i64 {
+    let b = match BACKEND.get() {
+        Some(b) => b,
+        None => return 0,
+    };
+    let conn = match b.db.lock() {
+        Ok(c) => c,
+        Err(_) => return 0,
+    };
+    match conn.query_row(
+        "SELECT COALESCE(SUM(LENGTH(text)), 0) + COALESCE(SUM(LENGTH(png_data)), 0) + COALESCE(SUM(LENGTH(thumb_data)), 0) FROM clipboard_history",
+        [],
+        |row| row.get::<_, i64>(0),
+    ) {
+        Ok(size) => size,
+        Err(e) => {
+            eprintln!("CopyAttach: failed to query storage size: {}", e);
+            0
+        }
+    }
+}
+
 /// Load a full image directly by database row id.
 /// Checks in-memory cache first (history entry with matching db_id),
 /// falls back to SQLite load. Does NOT touch the history lock except
