@@ -11,6 +11,7 @@ class ClipboardBackend: ObservableObject {
 
     private var timer: Timer?
     private var sourceAppTimer: Timer?
+    private let thumbnailCache = NSCache<NSNumber, NSImage>()
 
     private init() {
         permissionGranted = checkPermission()
@@ -121,19 +122,9 @@ class ClipboardBackend: ObservableObject {
                 let dbId = Int(clipboard_snapshot_get_image_db_id(snap, Int32(i)))
                 let w = Int(clipboard_snapshot_get_image_width(snap, Int32(i)))
                 let h = Int(clipboard_snapshot_get_image_height(snap, Int32(i)))
-                // Load thumbnail by db_id — no history lock needed
-                var thumbData = Data()
-                if dbId != 0 {
-                    var len: Int32 = 0
-                    if let ptr = clipboard_get_image_thumb_by_db_id(Int64(dbId), &len) {
-                        thumbData = Data(bytes: ptr, count: Int(len))
-                        clipboard_free_bytes(ptr, len)
-                    }
-                }
                 newItems.append(.image(
                     entryId: id,
                     dbId: dbId,
-                    thumbData: thumbData,
                     width: w,
                     height: h,
                     timestamp: timestamp,
@@ -186,6 +177,22 @@ class ClipboardBackend: ObservableObject {
         let data = Data(bytes: ptr, count: Int(len))
         clipboard_free_bytes(ptr, len)
         return data
+    }
+
+    func getCachedThumbnail(dbId: Int) -> NSImage? {
+        guard dbId != 0 else { return nil }
+        let key = NSNumber(value: dbId)
+        if let cached = thumbnailCache.object(forKey: key) { return cached }
+        var len: Int32 = 0
+        guard let ptr = clipboard_get_image_thumb_by_db_id(Int64(dbId), &len) else { return nil }
+        let data = Data(bytes: ptr, count: Int(len))
+        clipboard_free_bytes(ptr, len)
+        guard let image = NSImage(data: data) else {
+            print("[ClipboardBackend] failed to decode thumbnail for dbId=\(dbId): PNG data is \(data.count) bytes but NSImage(data:) returned nil")
+            return nil
+        }
+        thumbnailCache.setObject(image, forKey: key)
+        return image
     }
 
     func getImageThumb(at index: Int) -> Data? {
@@ -243,40 +250,40 @@ class ClipboardBackend: ObservableObject {
 
 enum ClipboardItem: Identifiable {
     case text(entryId: Int, text: String, timestamp: UInt64, label: String, sourceName: String, sourceBundleId: String)
-    case image(entryId: Int, dbId: Int, thumbData: Data, width: Int, height: Int, timestamp: UInt64, label: String, sourceName: String, sourceBundleId: String)
+    case image(entryId: Int, dbId: Int, width: Int, height: Int, timestamp: UInt64, label: String, sourceName: String, sourceBundleId: String)
 
     var id: Int {
         switch self {
         case .text(let entryId, _, _, _, _, _): return entryId
-        case .image(let entryId, _, _, _, _, _, _, _, _): return entryId
+        case .image(let entryId, _, _, _, _, _, _, _): return entryId
         }
     }
 
     var label: String {
         switch self {
         case .text(_, _, _, let label, _, _): return label
-        case .image(_, _, _, _, _, _, let label, _, _): return label
+        case .image(_, _, _, _, _, let label, _, _): return label
         }
     }
 
     var timestamp: UInt64 {
         switch self {
         case .text(_, _, let ts, _, _, _): return ts
-        case .image(_, _, _, _, _, let ts, _, _, _): return ts
+        case .image(_, _, _, _, let ts, _, _, _): return ts
         }
     }
 
     var sourceName: String {
         switch self {
         case .text(_, _, _, _, let sn, _): return sn
-        case .image(_, _, _, _, _, _, _, let sn, _): return sn
+        case .image(_, _, _, _, _, _, let sn, _): return sn
         }
     }
 
     var sourceBundleId: String {
         switch self {
         case .text(_, _, _, _, _, let sbid): return sbid
-        case .image(_, _, _, _, _, _, _, _, let sbid): return sbid
+        case .image(_, _, _, _, _, _, _, let sbid): return sbid
         }
     }
 

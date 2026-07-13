@@ -302,8 +302,8 @@ struct ItemRowView: View {
                 switch item {
                 case .text(_, let text, _, _, _, _):
                     textContent(text)
-                case .image(_, _, let thumbData, let width, let height, _, _, _, _):
-                    imageContent(thumbData: thumbData, width: width, height: height)
+                case .image(_, let dbId, let width, let height, _, _, _, _):
+                    imageContent(dbId: dbId, width: width, height: height)
                 }
             }
             Spacer(minLength: 2)
@@ -369,17 +369,41 @@ struct ItemRowView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private func imageContent(thumbData: Data, width: Int, height: Int) -> some View {
+    private func imageContent(dbId: Int, width: Int, height: Int) -> some View {
         HStack(spacing: 8) {
-            if let nsImage = NSImage(data: thumbData) {
+            if let nsImage = ClipboardBackend.shared.getCachedThumbnail(dbId: dbId) {
                 Image(nsImage: nsImage).resizable().aspectRatio(contentMode: .fit)
                     .frame(height: 80)
                     .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
                     .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous)
                         .stroke(Color.white.opacity(0.1), lineWidth: 0.5))
             } else {
-                Image(systemName: "photo").font(.system(size: 16))
-                    .foregroundColor(mutedText).frame(height: 42)
+                ZStack {
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .stroke(mutedText.opacity(0.25), style: StrokeStyle(lineWidth: 1, dash: [4, 4]))
+                        .frame(height: 60)
+                    VStack(spacing: 5) {
+                        Canvas { ctx, size in
+                            let r = CGRect(origin: .zero, size: size).insetBy(dx: 4, dy: 4)
+                            // Photo frame outline
+                            ctx.stroke(Path(roundedRect: r.insetBy(dx: 4, dy: 4), cornerRadius: 3),
+                                       with: .color(mutedText.opacity(0.3)), lineWidth: 1)
+                            // Crack lines
+                            var crack = Path()
+                            crack.move(to: CGPoint(x: r.minX + r.width * 0.15, y: r.minY + r.height * 0.05))
+                            crack.addLine(to: CGPoint(x: r.minX + r.width * 0.35, y: r.minY + r.height * 0.45))
+                            crack.addLine(to: CGPoint(x: r.minX + r.width * 0.55, y: r.minY + r.height * 0.35))
+                            crack.addLine(to: CGPoint(x: r.minX + r.width * 0.7, y: r.minY + r.height * 0.55))
+                            crack.addLine(to: CGPoint(x: r.minX + r.width * 0.85, y: r.minY + r.height * 0.93))
+                            ctx.stroke(crack, with: .color(.red.opacity(0.5)), lineWidth: 1.5)
+                        }
+                        .frame(width: 80, height: 40)
+                        Text("缩略图加载失败")
+                            .font(.system(size: 10))
+                            .foregroundColor(mutedText.opacity(0.5))
+                    }
+                }
+                .frame(maxWidth: .infinity)
             }
         }
     }

@@ -104,7 +104,7 @@ class PreviewWindow: NSPanel {
             let totalH = min(textH + pad, maxH)
             return NSSize(width: textWidth, height: max(totalH, 100))
 
-        case .image(_, _, _, let w, let h, _, _, _, _):
+        case .image(_, _, let w, let h, _, _, _, _):
             // Cap display height at 500; don't upscale images shorter than that.
             let capH: CGFloat = 500
             let displayH = CGFloat(h) < capH ? CGFloat(h) : capH
@@ -147,7 +147,7 @@ struct PreviewContent: View {
     @State private var isLoadingImage = false
 
     private var currentDbId: Int {
-        guard case .image(_, let dbId, _, _, _, _, _, _, _) = model.item else { return 0 }
+        guard case .image(_, let dbId, _, _, _, _, _, _) = model.item else { return 0 }
         return dbId
     }
 
@@ -159,7 +159,7 @@ struct PreviewContent: View {
             switch model.item {
             case .text(_, let text, _, _, _, _):
                 LargeTextView(text: text)
-            case .image(_, let dbId, _, _, _, _, _, _, _):
+            case .image(_, let dbId, _, _, _, _, _, _):
                 imageContent(dbId: dbId)
             }
         }

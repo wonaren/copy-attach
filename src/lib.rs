@@ -698,7 +698,7 @@ fn clipboard_monitor(
                     img_data.width as u32, img_data.height as u32, &img_data.bytes,
                 ) {
                     let thumb = create_thumbnail(
-                        img_data.width as u32, img_data.height as u32, &img_data.bytes, 300,
+                        img_data.width as u32, img_data.height as u32, &img_data.bytes, 500,
                     );
                     let (thumb_data, thumb_w, thumb_h) = match thumb {
                         Some(t) => t,
