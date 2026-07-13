@@ -74,6 +74,7 @@ echo "==> Compiling Swift sources…"
     "${SWIFT_SRC}/CopyAttachApp.swift" \
     "${SWIFT_SRC}/ClipboardBackend.swift" \
     "${SWIFT_SRC}/HistoryPopupView.swift" \
+    "${SWIFT_SRC}/PreviewWindow.swift" \
     "${SWIFT_SRC}/HotkeyManager.swift"
 
 # Copy Info.plist

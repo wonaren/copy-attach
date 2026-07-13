@@ -45,6 +45,7 @@ void clipboard_snapshot_release(void* snap);
 
 // ─── Image by DB row id (no history lock) ───
 uint8_t* clipboard_get_image_thumb_by_db_id(int64_t db_id, int32_t* out_len);
+uint8_t* clipboard_get_image_full_by_db_id(int64_t db_id, int32_t* out_len);
 
 // ─── Source App ───
 void clipboard_set_source_app(const char* name, const char* bundle_id);

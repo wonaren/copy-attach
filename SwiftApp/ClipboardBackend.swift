@@ -180,6 +180,14 @@ class ClipboardBackend: ObservableObject {
         return str
     }
 
+    func getImageFullByDbId(_ dbId: Int) -> Data? {
+        var len: Int32 = 0
+        guard let ptr = clipboard_get_image_full_by_db_id(Int64(dbId), &len) else { return nil }
+        let data = Data(bytes: ptr, count: Int(len))
+        clipboard_free_bytes(ptr, len)
+        return data
+    }
+
     func getImageThumb(at index: Int) -> Data? {
         var len: Int32 = 0
         guard let ptr = clipboard_get_image_thumb(Int32(index), &len) else { return nil }

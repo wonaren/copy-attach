@@ -6,6 +6,9 @@ import SwiftUI
 class HistoryPopupWindow: NSPanel {
     static let shared = HistoryPopupWindow()
 
+    /// Non-key preview panel managed by the popup content.
+    weak var previewPanel: PreviewWindow?
+
     private init() {
         let screenSize = NSScreen.main?.frame.size ?? NSSize(width: 800, height: 600)
         let popupWidth: CGFloat = 520
@@ -43,7 +46,6 @@ class HistoryPopupWindow: NSPanel {
         let contentRect = self.contentRect(forFrameRect: self.frame)
         hosting.frame = contentRect
 
-        // Enable layer-backed rendering with 14px rounded corners (native HUD look)
         hosting.wantsLayer = true
         hosting.layer?.masksToBounds = true
         hosting.layer?.cornerRadius = 14
@@ -70,7 +72,7 @@ class HistoryPopupWindow: NSPanel {
             _ = hosting.becomeFirstResponder()
         }
 
-        // Auto-close when window loses key status
+        // Auto-close when window loses key status (click outside)
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(didResignKey),
@@ -80,14 +82,42 @@ class HistoryPopupWindow: NSPanel {
     }
 
     @objc private func didResignKey(_ notification: Notification) {
-        debugLog("Popup resigned key, closing")
-        self.close()
+        debugLog("Popup resigned key, animated close")
+        closeWithAnimation()
+    }
+
+    /// Animated close: popup fades → preview fades → both close.
+    func closeWithAnimation() {
+        let preview = previewPanel
+        previewPanel = nil
+
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = 0.15
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            self.animator().alphaValue = 0
+        }, completionHandler: { [weak self] in
+            guard let self = self else { return }
+            if let pv = preview {
+                NSAnimationContext.runAnimationGroup({ ctx in
+                    ctx.duration = 0.1
+                    pv.animator().alphaValue = 0
+                }, completionHandler: {
+                    pv.close()
+                    self.close()
+                })
+            } else {
+                self.close()
+            }
+        })
     }
 
     override func close() {
         NotificationCenter.default.removeObserver(self, name: NSWindow.didResignKeyNotification, object: self)
+        previewPanel?.close()
+        previewPanel = nil
         super.close()
         self.contentView = nil
+        self.alphaValue = 1.0 // reset for next open
     }
 }
 
@@ -110,11 +140,16 @@ struct HistoryPopupContent: View {
 
     @StateObject private var backend = ClipboardBackend.shared
     @State private var selectedIndex: Int = 0
+    @State private var showPreview: Bool = false
     @FocusState private var isFocused: Bool
 
     // Design Tokens
     private let popupWidth: CGFloat = 500
     private let popupHeight: CGFloat = 600
+
+    private var popupWindow: HistoryPopupWindow? {
+        NSApp.windows.first(where: { $0 is HistoryPopupWindow }) as? HistoryPopupWindow
+    }
 
     var body: some View {
         ZStack {
@@ -124,10 +159,9 @@ struct HistoryPopupContent: View {
 
             // === Layer 1: Content ===
             VStack(spacing: 4) {
-                // List of clipboard items
                 itemsList
             }
-            .padding(.all, 3) // unified padding
+            .padding(.all, 3)
         }
         .frame(width: popupWidth, height: popupHeight)
         .focusable()
@@ -152,7 +186,16 @@ struct HistoryPopupContent: View {
             return .handled
         }
         .onKeyPress(.escape) {
-            onClose()
+            if showPreview {
+                closePreview()
+            } else {
+                onClose()
+            }
+            return .handled
+        }
+        .onKeyPress(.space) {
+            guard selectedIndex < backend.items.count else { return .handled }
+            togglePreview()
             return .handled
         }
         .onAppear {
@@ -161,6 +204,41 @@ struct HistoryPopupContent: View {
                 isFocused = true
             }
         }
+        .onDisappear {
+            closePreview()
+        }
+    }
+
+    // MARK: - Preview Management
+
+    private func togglePreview() {
+        if showPreview {
+            closePreview()
+        } else {
+            openPreview()
+        }
+    }
+
+    private func openPreview() {
+        guard selectedIndex < backend.items.count, let popup = popupWindow else { return }
+        let item = backend.items[selectedIndex]
+        let preview = PreviewWindow(item: item)
+        popup.previewPanel = preview
+        preview.orderFront(nil) // don't become key
+        showPreview = true
+    }
+
+    private func closePreview() {
+        guard showPreview else { return }
+        showPreview = false
+        popupWindow?.previewPanel?.close()
+        popupWindow?.previewPanel = nil
+    }
+
+    private func updatePreviewContent() {
+        guard showPreview, selectedIndex < backend.items.count,
+              let preview = popupWindow?.previewPanel else { return }
+        preview.updateContent(item: backend.items[selectedIndex])
     }
 
     // MARK: - Items List
@@ -168,7 +246,7 @@ struct HistoryPopupContent: View {
     private var itemsList: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(spacing: 3) { // wider spacing for native feel
+                LazyVStack(spacing: 3) {
                     ForEach(Array(backend.items.enumerated()), id: \.element.id) { index, item in
                         ItemRowView(
                             item: item,
@@ -182,9 +260,8 @@ struct HistoryPopupContent: View {
                         .id(index)
                     }
                 }
-                .padding(.all, 2) // inner list padding
+                .padding(.all, 2)
             }
-            // Style the ScrollView itself as the main container
             .background(Color(nsColor: .windowBackgroundColor).opacity(0.06))
             .overlay(
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
@@ -194,6 +271,7 @@ struct HistoryPopupContent: View {
             .scrollIndicators(.hidden)
             .onChange(of: selectedIndex) { _, newValue in
                 proxy.scrollTo(newValue, anchor: .center)
+                updatePreviewContent()
             }
         }
     }
@@ -202,6 +280,7 @@ struct HistoryPopupContent: View {
 
     private func selectItem(at index: Int) {
         if backend.selectAndPaste(at: index) {
+            closePreview()
             onClose()
         }
     }
@@ -213,16 +292,12 @@ struct ItemRowView: View {
     let item: ClipboardItem
     let isSelected: Bool
 
-    // Design Tokens
     private let whiteText = Color.white.opacity(0.9)
     private let mutedText = Color.white.opacity(0.6)
 
     var body: some View {
-        HStack(alignment: .center, spacing: 2) { // Reduced spacing from 10 to 4
-            // App icon
+        HStack(alignment: .center, spacing: 2) {
             appIcon
-
-            // Content
             VStack(alignment: .leading, spacing: 0) {
                 switch item {
                 case .text(_, let text, _, _, _, _):
@@ -231,123 +306,129 @@ struct ItemRowView: View {
                     imageContent(thumbData: thumbData, width: width, height: height)
                 }
             }
-
             Spacer(minLength: 2)
-
-            // Source app name
             if !item.sourceName.isEmpty {
                 Text(item.sourceName)
-                    .font(.system(size: 9.5, weight: .medium)) // Slightly reduced size
+                    .font(.system(size: 9.5, weight: .medium))
                     .foregroundColor(whiteText)
                     .lineLimit(1)
-                    .padding(.horizontal, 2) // Reduced padding from 6 to 4
-                    .padding(.vertical, 1.5) // Reduced padding from 2 to 1.5
-                    .background(Capsule().fill(Color.black.opacity(0.2))) // background for label
+                    .padding(.horizontal, 2)
+                    .padding(.vertical, 1.5)
+                    .background(Capsule().fill(Color.black.opacity(0.2)))
             }
         }
-        .padding(.horizontal, 2) // Reduced horizontal padding from 8 to 6
-        .padding(.vertical, 3) // Reduced vertical padding from 6 to 5
+        .padding(.horizontal, 2)
+        .padding(.vertical, 3)
         .background(rowBackground)
         .overlay(
             Group {
                 if isSelected {
-                    // Cleaner, solid focus border for selected item
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
                         .strokeBorder(Color(nsColor: .keyboardFocusIndicatorColor).opacity(0.8), lineWidth: 1)
                 }
             }
         )
-        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous)) // corner radius from item image
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
-
-    // MARK: - Row Background
 
     private var rowBackground: some View {
         Group {
-            if isSelected {
-                // Selected: System accent color
-                Color(nsColor: .controlAccentColor)
-            } else {
-                // Default: Nearly transparent
-                Color(nsColor: .windowBackgroundColor).opacity(0.04)
-            }
+            if isSelected { Color(nsColor: .controlAccentColor) }
+            else { Color(nsColor: .windowBackgroundColor).opacity(0.04) }
         }
     }
-
-    // MARK: - App Icon
 
     private var appIcon: some View {
         Group {
             if !item.sourceBundleId.isEmpty, let nsImage = getAppIcon(for: item.sourceBundleId) {
-                Image(nsImage: nsImage)
-                    .resizable()
-                    .frame(width: 18, height: 18)
+                Image(nsImage: nsImage).resizable().frame(width: 18, height: 18)
                     .clipShape(RoundedRectangle(cornerRadius: 4.5, style: .continuous))
             } else {
-                Image(systemName: "app.fill")
-                    .resizable()
-                    .frame(width: 14, height: 14)
+                Image(systemName: "app.fill").resizable().frame(width: 14, height: 14)
                     .foregroundColor(mutedText.opacity(0.5))
             }
         }
-        .frame(width: 20, height: 20)
-        .foregroundColor(.white) // fallback foreground for app icon
+        .frame(width: 20, height: 20).foregroundColor(.white)
     }
 
-    // MARK: - Text Content
-
     private func textContent(_ text: String) -> some View {
-        let stripped = text
-            .components(separatedBy: .newlines)
+        let stripped = text.components(separatedBy: .newlines)
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
             .joined(separator: " ")
-
         let display: String
         let visualLen = visualWidth(stripped)
         if visualLen > 60 {
             let prefix = String(stripped.prefix(whileVisualWidth: 30))
             let suffix = String(stripped.suffix(whileVisualWidth: 30))
             display = "\(prefix)……\(suffix)"
-        } else {
-            display = stripped
-        }
-
+        } else { display = stripped }
         return Text(display)
             .font(.system(size: 13, weight: isSelected ? .medium : .regular))
-            .foregroundColor(whiteText) // user's image shows white text
-            .lineLimit(1)
+            .foregroundColor(whiteText).lineLimit(1)
             .frame(maxWidth: .infinity, alignment: .leading)
     }
-
-    // MARK: - Image Content
 
     private func imageContent(thumbData: Data, width: Int, height: Int) -> some View {
         HStack(spacing: 8) {
             if let nsImage = NSImage(data: thumbData) {
-                let imageHeight: CGFloat = 80
-                Image(nsImage: nsImage)
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
-                    .frame(height: imageHeight)
+                Image(nsImage: nsImage).resizable().aspectRatio(contentMode: .fit)
+                    .frame(height: 80)
                     .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 7, style: .continuous)
-                            .stroke(Color.white.opacity(0.1), lineWidth: 0.5)
-                    )
+                    .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .stroke(Color.white.opacity(0.1), lineWidth: 0.5))
             } else {
-                Image(systemName: "photo")
-                    .font(.system(size: 16))
-                    .foregroundColor(mutedText)
-                    .frame(height: 42)
+                Image(systemName: "photo").font(.system(size: 16))
+                    .foregroundColor(mutedText).frame(height: 42)
             }
+        }
+    }
+}
+
+// MARK: - Large Text Preview (NSTextView-backed, non-contiguous layout)
+
+struct LargeTextView: NSViewRepresentable {
+    let text: String
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSScrollView()
+        scrollView.hasVerticalScroller = false
+        scrollView.hasHorizontalScroller = false
+        scrollView.autohidesScrollers = true
+        scrollView.borderType = .noBorder
+        scrollView.backgroundColor = .clear
+        scrollView.drawsBackground = false
+
+        let textView = NSTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 100))
+        textView.autoresizingMask = [.width]
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.drawsBackground = false
+        textView.backgroundColor = .clear
+        textView.textContainerInset = NSSize(width: 16, height: 12)
+        textView.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+        textView.textColor = NSColor.white.withAlphaComponent(0.95)
+        textView.layoutManager?.allowsNonContiguousLayout = true
+        textView.isHorizontallyResizable = false
+        textView.textContainer?.widthTracksTextView = true
+
+        scrollView.documentView = textView
+        return scrollView
+    }
+
+    func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        guard let textView = scrollView.documentView as? NSTextView else { return }
+        if textView.frame.width > 0 {
+            textView.textContainer?.containerSize.width = textView.frame.width
+        }
+        if textView.string != text {
+            textView.string = text
         }
     }
 }
 
 // MARK: - Visual Width Helpers
 
-/// 1 for ASCII, 2 for CJK / fullwidth characters
 private func visualWidth(_ s: String) -> Int {
     s.reduce(0) { $0 + ($1.isASCII ? 1 : 2) }
 }

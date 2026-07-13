@@ -1377,6 +1377,57 @@ pub extern "C" fn clipboard_clear_history() {
     }
 }
 
+/// Load a full image directly by database row id.
+/// Checks in-memory cache first (history entry with matching db_id),
+/// falls back to SQLite load. Does NOT touch the history lock except
+/// for the brief cache check.
+/// Caller must free with clipboard_free_bytes().
+#[no_mangle]
+pub extern "C" fn clipboard_get_image_full_by_db_id(db_id: i64, out_len: *mut c_int) -> *mut u8 {
+    if db_id == 0 || out_len.is_null() {
+        return std::ptr::null_mut();
+    }
+
+    // Check in-memory cache first (same pattern as clipboard_get_image_full)
+    let cached = {
+        let hist = backend().history.lock().unwrap();
+        hist.iter().find_map(|entry| {
+            match entry {
+                ClipboardEntry::Image { db_id: id, png_data, .. } if *id == db_id && !png_data.is_empty() => {
+                    Some(png_data.clone())
+                }
+                _ => None,
+            }
+        })
+    };
+
+    let data = match cached {
+        Some(d) => d,
+        None => {
+            match backend().db.lock() {
+                Ok(conn) => {
+                    match conn.query_row(
+                        "SELECT png_data FROM clipboard_history WHERE id = ?",
+                        rusqlite::params![db_id],
+                        |row| row.get(0),
+                    ) {
+                        Ok(data) => data,
+                        Err(e) => {
+                            eprintln!("CopyAttach: failed to load full image for db_id={}: {}", db_id, e);
+                            return std::ptr::null_mut();
+                        }
+                    }
+                }
+                Err(_) => return std::ptr::null_mut(),
+            }
+        }
+    };
+
+    let len = data.len() as c_int;
+    unsafe { *out_len = len; }
+    vec_to_raw(data)
+}
+
 /// Load an image thumbnail directly by database row id.
 /// Does NOT touch the history lock — only accesses SQLite.
 /// Caller must free with clipboard_free_bytes().
