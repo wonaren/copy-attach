@@ -43,10 +43,10 @@ class HistoryPopupWindow: NSPanel {
         let contentRect = self.contentRect(forFrameRect: self.frame)
         hosting.frame = contentRect
 
-        // Enable layer-backed rendering with 22px rounded corners (native HUD look)
+        // Enable layer-backed rendering with 14px rounded corners (native HUD look)
         hosting.wantsLayer = true
         hosting.layer?.masksToBounds = true
-        hosting.layer?.cornerRadius = 22
+        hosting.layer?.cornerRadius = 14
         hosting.layer?.cornerCurve = .continuous
 
         self.contentView = hosting
@@ -120,14 +120,14 @@ struct HistoryPopupContent: View {
         ZStack {
             // === Layer 0: Dark Translucent Background (HUD look) ===
             Color.black.opacity(0.8)
-                .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
 
             // === Layer 1: Content ===
             VStack(spacing: 4) {
                 // List of clipboard items
                 itemsList
             }
-            .padding(.all, 4) // unified padding
+            .padding(.all, 3) // unified padding
         }
         .frame(width: popupWidth, height: popupHeight)
         .focusable()
@@ -168,7 +168,7 @@ struct HistoryPopupContent: View {
     private var itemsList: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(spacing: 4) { // wider spacing for native feel
+                LazyVStack(spacing: 3) { // wider spacing for native feel
                     ForEach(Array(backend.items.enumerated()), id: \.element.id) { index, item in
                         ItemRowView(
                             item: item,
@@ -182,20 +182,18 @@ struct HistoryPopupContent: View {
                         .id(index)
                     }
                 }
-                .padding(.all, 4) // inner list padding
+                .padding(.all, 2) // inner list padding
             }
             // Style the ScrollView itself as the main container
             .background(Color(nsColor: .windowBackgroundColor).opacity(0.06))
             .overlay(
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .stroke(Color(nsColor: .separatorColor).opacity(0.1), lineWidth: 1)
             )
-            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
             .scrollIndicators(.hidden)
             .onChange(of: selectedIndex) { _, newValue in
-                withAnimation(.easeOut(duration: 0.15)) {
-                    proxy.scrollTo(newValue, anchor: .center)
-                }
+                proxy.scrollTo(newValue, anchor: .center)
             }
         }
     }
@@ -220,7 +218,7 @@ struct ItemRowView: View {
     private let mutedText = Color.white.opacity(0.6)
 
     var body: some View {
-        HStack(alignment: .center, spacing: 4) { // Reduced spacing from 10 to 4
+        HStack(alignment: .center, spacing: 2) { // Reduced spacing from 10 to 4
             // App icon
             appIcon
 
@@ -234,32 +232,32 @@ struct ItemRowView: View {
                 }
             }
 
-            Spacer(minLength: 4)
+            Spacer(minLength: 2)
 
             // Source app name
             if !item.sourceName.isEmpty {
                 Text(item.sourceName)
-                    .font(.system(size: 10, weight: .medium)) // Slightly reduced size
+                    .font(.system(size: 9.5, weight: .medium)) // Slightly reduced size
                     .foregroundColor(whiteText)
                     .lineLimit(1)
-                    .padding(.horizontal, 4) // Reduced padding from 6 to 4
+                    .padding(.horizontal, 2) // Reduced padding from 6 to 4
                     .padding(.vertical, 1.5) // Reduced padding from 2 to 1.5
                     .background(Capsule().fill(Color.black.opacity(0.2))) // background for label
             }
         }
-        .padding(.horizontal, 6) // Reduced horizontal padding from 8 to 6
-        .padding(.vertical, 5) // Reduced vertical padding from 6 to 5
+        .padding(.horizontal, 2) // Reduced horizontal padding from 8 to 6
+        .padding(.vertical, 3) // Reduced vertical padding from 6 to 5
         .background(rowBackground)
         .overlay(
             Group {
                 if isSelected {
                     // Cleaner, solid focus border for selected item
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
                         .strokeBorder(Color(nsColor: .keyboardFocusIndicatorColor).opacity(0.8), lineWidth: 1)
                 }
             }
         )
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous)) // corner radius from item image
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous)) // corner radius from item image
     }
 
     // MARK: - Row Background
@@ -307,10 +305,10 @@ struct ItemRowView: View {
 
         let display: String
         let visualLen = visualWidth(stripped)
-        if visualLen > 64 {
-            let prefix = String(stripped.prefix(whileVisualWidth: 32))
-            let suffix = String(stripped.suffix(whileVisualWidth: 32))
-            display = "\(prefix)…\(suffix)"
+        if visualLen > 60 {
+            let prefix = String(stripped.prefix(whileVisualWidth: 30))
+            let suffix = String(stripped.suffix(whileVisualWidth: 30))
+            display = "\(prefix)……\(suffix)"
         } else {
             display = stripped
         }
