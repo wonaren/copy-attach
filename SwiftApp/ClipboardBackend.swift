@@ -26,6 +26,12 @@ class ClipboardBackend: ObservableObject {
         print("[ClipboardBackend] init result: \(result)")
         permissionGranted = checkPermission()
 
+        // Restore saved cleanup threshold from UserDefaults
+        let saved = UserDefaults.standard.integer(forKey: "CleanupThreshold")
+        if saved >= 100 {
+            clipboard_set_cleanup_threshold(Int32(saved))
+        }
+
         timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             self?.refresh()
         }
@@ -254,6 +260,30 @@ class ClipboardBackend: ObservableObject {
             self.count = 0
             self.items = []
         }
+    }
+
+    /// Trim the oldest N percent of entries from history and DB.
+    /// Returns the number of entries removed.
+    func trimOldestPercent(_ percent: Int) -> Int {
+        let removed = Int(clipboard_trim_oldest_percent(Int32(percent)))
+        if removed > 0 {
+            DispatchQueue.main.async {
+                self.refresh()
+            }
+        }
+        return removed
+    }
+
+    /// Get the current cleanup threshold from Rust.
+    func getCleanupThreshold() -> Int {
+        Int(clipboard_get_cleanup_threshold())
+    }
+
+    /// Set the cleanup threshold. Persists to UserDefaults and syncs to Rust.
+    func setCleanupThreshold(_ threshold: Int) {
+        let clamped = max(100, min(10000, threshold))
+        clipboard_set_cleanup_threshold(Int32(clamped))
+        UserDefaults.standard.set(clamped, forKey: "CleanupThreshold")
     }
 
     /// Returns total storage size in bytes of all clipboard entries in the database.

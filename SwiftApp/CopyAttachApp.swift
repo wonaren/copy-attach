@@ -122,6 +122,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         @StateObject private var hotkeyManager = HotkeyManager.shared
         @State private var launchAtLogin = UserDefaults.standard.bool(forKey: "LaunchAtLogin")
         @State private var runInBackground = UserDefaults.standard.bool(forKey: "RunInBackground") != false
+        @State private var cleanupThreshold: Double = {
+            let saved = UserDefaults.standard.integer(forKey: "CleanupThreshold")
+            return Double(saved >= 100 ? saved : 3000)
+        }()
         
         var body: some View {
             ScrollView {
@@ -255,32 +259,99 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     Text("统计数据").font(.system(size: 13, weight: .semibold)).foregroundColor(.white)
                     Spacer()
                 }
+                .padding(.bottom, 6)
                 VStack(spacing: 6) {
                     statRow("总项目数", "\(backend.items.count)")
                     statRow("文本项目数", "\(textCount)")
                     statRow("图片项目数", "\(imageCount)")
                     statRow("已使用存储空间", formatStorageSize(backend.getStorageSize()))
-                    statRow("自动清理阈值", "3,000")
-                }.padding(.top, 8)
-                Divider().background(Color.gray.opacity(0.3)).padding(.vertical, 8)
-                Button(role: .destructive) {
-                    let alert = NSAlert()
-                    alert.messageText = "清除所有剪贴板历史?"
-                    alert.informativeText = "此操作会删除所有已保存的剪贴板记录，且无法撤销。"
-                    alert.alertStyle = .warning
-                    alert.addButton(withTitle: "确认清除")
-                    alert.addButton(withTitle: "取消")
-                    if alert.runModal() == .alertFirstButtonReturn {
-                        backend.clearHistory()
+                    VStack(spacing: 4) {
+                        HStack {
+                            Text("自动清理阈值").font(.system(size: 11)).foregroundColor(.secondary)
+                            Text("（超出阈值自动清理最旧1条记录）").font(.system(size: 9)).foregroundColor(.gray)
+                            Spacer()
+                            Text("\(Int(cleanupThreshold))")
+                                .font(.system(size: 12, weight: .bold, design: .monospaced))
+                                .foregroundColor(.white)
+                        }
+                        Slider(value: $cleanupThreshold, in: 100...5000, step: 100) {
+                            Text("")
+                        } onEditingChanged: { editing in
+                            if !editing {
+                                let val = Int(cleanupThreshold)
+                                backend.setCleanupThreshold(val)
+                            }
+                        }
+                        .accentColor(.orange)
+                        GeometryReader { geo in
+                            let w = geo.size.width
+                            let minVal: Double = 100
+                            let maxVal: Double = 5000
+                            let range = maxVal - minVal
+                            let ticks: [(String, Double)] = [
+                                ("100", 100), ("500", 500), ("1,000", 1000),
+                                ("1,500", 1500), ("3,000", 3000), ("5,000", 5000),
+                            ]
+                            ZStack(alignment: .topLeading) {
+                                ForEach(ticks, id: \.0) { label, value in
+                                    Text(label).font(.system(size: 9)).foregroundColor(.gray)
+                                        .onTapGesture {
+                                            cleanupThreshold = value
+                                            backend.setCleanupThreshold(Int(value))
+                                        }
+                                        .position(x: w * (value - minVal) / range, y: 6)
+                                }
+                            }
+                        }
+                        .frame(height: 16)
                     }
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: "trash")
-                        Text("清除所有历史").font(.system(size: 12))
-                    }.frame(maxWidth: .infinity).padding(.vertical, 8)
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(Color.red.opacity(0.7))
+                Divider().background(Color.gray.opacity(0.3)).padding(.vertical, 8)
+                HStack(spacing: 12) {
+                    Button {
+                        let total = backend.items.count
+                        let estimated = Int((Double(total) * 0.4).rounded(.up))
+                        if total == 0 { return }
+                        let alert = NSAlert()
+                        alert.messageText = "清理前 40% 的剪贴板历史?"
+                        alert.informativeText = "将从 \(total) 条记录中移除最旧的 \(estimated) 条（约前 40%），且无法撤销。"
+                        alert.alertStyle = .warning
+                        alert.addButton(withTitle: "确认清理")
+                        alert.addButton(withTitle: "取消")
+                        if alert.runModal() == .alertFirstButtonReturn {
+                            let removed = backend.trimOldestPercent(40)
+                            if removed > 0 {
+                                debugLog("Trimmed \(removed) oldest entries (40%)")
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "arrow.up.trash")
+                            Text("清理前 40%").font(.system(size: 12))
+                        }.frame(maxWidth: .infinity).padding(.vertical, 8)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(Color.orange.opacity(0.7))
+
+                    Button(role: .destructive) {
+                        let alert = NSAlert()
+                        alert.messageText = "清除所有剪贴板历史?"
+                        alert.informativeText = "此操作会删除所有已保存的剪贴板记录，且无法撤销。"
+                        alert.alertStyle = .warning
+                        alert.addButton(withTitle: "确认清除")
+                        alert.addButton(withTitle: "取消")
+                        if alert.runModal() == .alertFirstButtonReturn {
+                            backend.clearHistory()
+                        }
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "trash")
+                            Text("清除所有历史").font(.system(size: 12))
+                        }.frame(maxWidth: .infinity).padding(.vertical, 8)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(Color.red.opacity(0.7))
+                }
             }
         }
         
