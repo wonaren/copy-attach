@@ -173,6 +173,7 @@ struct HistoryPopupContent: View {
             } else {
                 VStack(spacing: 4) {
                     itemsList
+                    itemCountBar
                 }
                 .padding(.all, 3)
             }
@@ -256,6 +257,30 @@ struct HistoryPopupContent: View {
         guard showPreview, selectedIndex < backend.items.count,
               let preview = popupWindow?.previewPanel else { return }
         preview.updateContent(item: backend.items[selectedIndex])
+    }
+
+    // MARK: - Item Count Bar
+
+    private var itemCountBar: some View {
+        HStack(spacing: 4) {
+            Text("\(backend.items.count) 项")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundColor(.white.opacity(0.7))
+            Text("·")
+                .font(.system(size: 10))
+                .foregroundColor(.white.opacity(0.3))
+            let textCount = backend.items.filter { $0.isText }.count
+            let imageCount = backend.items.filter { $0.isImage }.count
+            Text("\(textCount) 文本")
+                .font(.system(size: 10))
+                .foregroundColor(.white.opacity(0.5))
+            Text("\(imageCount) 图片")
+                .font(.system(size: 10))
+                .foregroundColor(.white.opacity(0.5))
+            Spacer()
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 4)
     }
 
     // MARK: - Items List
