@@ -59,3 +59,4 @@ void clipboard_open_preferences(void);
 // ─── History Management ───
 void clipboard_clear_history(void);
 int64_t clipboard_get_storage_size(void);
+int32_t clipboard_delete_by_id(uint64_t entry_id);

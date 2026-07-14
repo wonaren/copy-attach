@@ -1484,6 +1484,59 @@ pub extern "C" fn clipboard_get_image_thumb_by_db_id(db_id: i64, out_len: *mut c
     vec_to_raw(thumb_data)
 }
 
+/// Delete an entry by its stable entry ID.
+/// Removes it from in-memory history and from the SQLite database.
+/// Returns 1 on success, 0 if the entry ID is not found or the backend is uninitialized.
+#[no_mangle]
+pub extern "C" fn clipboard_delete_by_id(entry_id: u64) -> c_int {
+    let b = match BACKEND.get() {
+        Some(b) => b,
+        None => return 0,
+    };
+
+    // 1. Find and remove from in-memory history. We extract the entry to know
+    //    its type and content so we can target the correct DB row.
+    let removed = {
+        let mut hist = b.history.lock().unwrap();
+        match hist.iter().position(|e| match e {
+            ClipboardEntry::Text { id, .. } => *id == entry_id,
+            ClipboardEntry::Image { id, .. } => *id == entry_id,
+        }) {
+            Some(pos) => Some(hist.remove(pos)),
+            None => None,
+        }
+    };
+
+    let removed = match removed {
+        Some(r) => r,
+        None => return 0,
+    };
+
+    // 2. Delete the corresponding DB row.
+    if let Ok(conn) = b.db.lock() {
+        let result = match &removed {
+            ClipboardEntry::Text { text, .. } => {
+                conn.execute(
+                    "DELETE FROM clipboard_history WHERE entry_type = 0 AND text = ?1",
+                    rusqlite::params![text],
+                )
+            }
+            ClipboardEntry::Image { db_id, .. } if *db_id != 0 => {
+                conn.execute(
+                    "DELETE FROM clipboard_history WHERE id = ?1",
+                    rusqlite::params![*db_id],
+                )
+            }
+            _ => Ok(0),
+        };
+        if let Err(e) = result {
+            eprintln!("CopyAttach: failed to delete entry {} from DB: {}", entry_id, e);
+        }
+    }
+
+    1
+}
+
 /// Select and paste an entry by its stable entry ID (not array index).
 /// Finds the entry in history by ID, writes it back to the clipboard,
 /// simulates Cmd+V, and moves it to the top of history.

@@ -131,7 +131,17 @@ class PopupHostingView: NSHostingView<HistoryPopupContent> {
             window?.makeFirstResponder(self)
         }
     }
+
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 51 || event.keyCode == 117 {
+            NotificationCenter.default.post(name: deleteKeyNotification, object: nil)
+            return
+        }
+        super.keyDown(with: event)
+    }
 }
+
+private let deleteKeyNotification = Notification.Name("PopupDeleteKeyPressed")
 
 // MARK: - SwiftUI Content for Popup — Native HUD Aesthetic
 
@@ -207,6 +217,9 @@ struct HistoryPopupContent: View {
         .onDisappear {
             closePreview()
         }
+        .onReceive(NotificationCenter.default.publisher(for: deleteKeyNotification)) { _ in
+            deleteItem(at: selectedIndex)
+        }
     }
 
     // MARK: - Preview Management
@@ -252,15 +265,17 @@ struct HistoryPopupContent: View {
                             item: item,
                             isSelected: index == selectedIndex
                         )
+                        .transition(.opacity)
                         .contentShape(Rectangle())
                         .onTapGesture {
                             selectedIndex = index
                             selectItem(at: index)
                         }
-                        .id(index)
+                        .id(item.id)
                     }
                 }
                 .padding(.all, 2)
+                .animation(.easeInOut(duration: 0.2), value: backend.items.count)
             }
             .background(Color(nsColor: .windowBackgroundColor).opacity(0.06))
             .overlay(
@@ -270,13 +285,25 @@ struct HistoryPopupContent: View {
             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
             .scrollIndicators(.hidden)
             .onChange(of: selectedIndex) { _, newValue in
-                proxy.scrollTo(newValue, anchor: .center)
+                if newValue < backend.items.count {
+                    proxy.scrollTo(backend.items[newValue].id, anchor: .center)
+                }
                 updatePreviewContent()
             }
         }
     }
 
     // MARK: - Actions
+
+    private func deleteItem(at index: Int) {
+        closePreview()
+        guard backend.deleteEntry(at: index) else { return }
+        if backend.items.isEmpty {
+            selectedIndex = 0
+        } else if selectedIndex >= backend.items.count {
+            selectedIndex = backend.items.count - 1
+        }
+    }
 
     private func selectItem(at index: Int) {
         if backend.selectAndPaste(at: index) {

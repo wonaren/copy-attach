@@ -217,6 +217,17 @@ class ClipboardBackend: ObservableObject {
         return (Int(w), Int(h))
     }
 
+    func deleteEntry(at index: Int) -> Bool {
+        guard index < items.count else { return false }
+        let entryId = UInt64(items[index].id)
+        let result = clipboard_delete_by_id(entryId) != 0
+        if result {
+            items.remove(at: index)
+            count = items.count
+        }
+        return result
+    }
+
     func selectAndPaste(at index: Int) -> Bool {
         guard index < items.count else { return false }
         let entryId = UInt64(items[index].id)
