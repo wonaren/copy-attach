@@ -535,7 +535,8 @@ struct LargeTextView: NSViewRepresentable {
         textView.textColor = NSColor.white.withAlphaComponent(0.95)
         textView.layoutManager?.allowsNonContiguousLayout = true
         textView.isHorizontallyResizable = false
-        textView.textContainer?.widthTracksTextView = true
+        textView.textContainer!.widthTracksTextView = true
+        textView.textContainer!.lineFragmentPadding = 0
 
         scrollView.documentView = textView
         return scrollView
@@ -543,9 +544,15 @@ struct LargeTextView: NSViewRepresentable {
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         guard let textView = scrollView.documentView as? NSTextView else { return }
-        if textView.frame.width > 0 {
-            textView.textContainer?.containerSize.width = textView.frame.width
-        }
+
+        // Force text view width to match scroll view's clip view width.
+        // autoresizingMask + isHorizontallyResizable doesn't guarantee this
+        // due to timing of makeNSView vs SwiftUI layout vs updateNSView.
+        let clipWidth = scrollView.bounds.width
+        textView.frame.size.width = clipWidth
+        let inset = textView.textContainerInset
+        textView.textContainer!.containerSize.width = clipWidth - inset.width * 2
+
         if textView.string != text {
             textView.string = text
         }

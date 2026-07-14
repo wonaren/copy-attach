@@ -97,8 +97,12 @@ class PreviewWindow: NSPanel {
 
         switch item {
         case .text(let entryId, let text, _, _, _, _):
-            let textWidth: CGFloat = min(900, maxW)
-            let pad: CGFloat = 24
+            let pad: CGFloat = 32
+            let font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+            // Find the longest line in the text to determine adaptive window width
+            let longestLine = text.components(separatedBy: .newlines).max(by: { $0.count < $1.count }) ?? ""
+            let lineWidth = (longestLine as NSString).size(withAttributes: [.font: font]).width
+            let textWidth = min(max(lineWidth + pad, 300), maxW)
             let containerW = textWidth - pad
             let textH = calculateTextHeight(text, width: containerW, entryId: entryId)
             let totalH = min(textH + pad, maxH)
