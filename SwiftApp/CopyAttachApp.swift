@@ -146,12 +146,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         private var textCount: Int { backend.items.filter { $0.isText }.count }
         private var imageCount: Int { backend.items.filter { $0.isImage }.count }
         
+        private var appVersion: String {
+            (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "0.0"
+        }
+
         private var header: some View {
             HStack {
                 Image(nsImage: .appIcon)
                     .resizable()
                     .frame(width: 48, height: 48)
-                Text("CopyAttach").font(.system(size: 18, weight: .bold)).foregroundColor(.white)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("CopyAttach").font(.system(size: 18, weight: .bold)).foregroundColor(.white)
+                    Text("v\(appVersion)").font(.system(size: 11)).foregroundColor(.gray)
+                }
                 Spacer()
             }
         }
