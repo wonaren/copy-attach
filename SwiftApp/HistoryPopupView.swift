@@ -449,7 +449,7 @@ struct ItemRowView: View {
         HStack(spacing: 8) {
             if let nsImage = ClipboardBackend.shared.getCachedThumbnail(dbId: dbId) {
                 Image(nsImage: nsImage).resizable().aspectRatio(contentMode: .fit)
-                    .frame(height: 80)
+                    .frame(height: 100)
                     .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
                     .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous)
                         .stroke(Color.white.opacity(0.1), lineWidth: 0.5))
@@ -457,8 +457,8 @@ struct ItemRowView: View {
                 ZStack {
                     RoundedRectangle(cornerRadius: 7, style: .continuous)
                         .stroke(mutedText.opacity(0.25), style: StrokeStyle(lineWidth: 1, dash: [4, 4]))
-                        .frame(height: 60)
-                    VStack(spacing: 5) {
+                        .frame(height: 100)
+                    VStack(spacing: 8) {
                         Canvas { ctx, size in
                             let r = CGRect(origin: .zero, size: size).insetBy(dx: 4, dy: 4)
                             // Photo frame outline
@@ -473,9 +473,9 @@ struct ItemRowView: View {
                             crack.addLine(to: CGPoint(x: r.minX + r.width * 0.85, y: r.minY + r.height * 0.93))
                             ctx.stroke(crack, with: .color(.red.opacity(0.5)), lineWidth: 1.5)
                         }
-                        .frame(width: 80, height: 40)
+                        .frame(width: 128, height: 64)
                         Text("缩略图加载失败")
-                            .font(.system(size: 10))
+                            .font(.system(size: 12))
                             .foregroundColor(mutedText.opacity(0.5))
                     }
                 }
