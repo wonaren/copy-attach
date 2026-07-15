@@ -1,17 +1,9 @@
 import AppKit
 import SwiftUI
 
-// MARK: - Shared state model (drives PreviewContent without replacing rootView)
-
-class PreviewContentModel: ObservableObject {
-    @Published var item: ClipboardItem
-    init(item: ClipboardItem) { self.item = item }
-}
-
-// MARK: - Preview Window (non-key, auto-sized, content driven by ObservableObject)
+// MARK: - Preview Window (non-key, auto-sized, content driven by direct value)
 
 class PreviewWindow: NSPanel {
-    private let model: PreviewContentModel
     private let centerAnchor: NSPoint
     private var hostingView: NSHostingView<PreviewContent>!
 
@@ -27,7 +19,6 @@ class PreviewWindow: NSPanel {
         let y = screenCenter.y - size.height / 2
 
         self.centerAnchor = screenCenter
-        self.model = PreviewContentModel(item: item)
 
         super.init(
             contentRect: NSRect(x: x, y: y, width: size.width, height: size.height),
@@ -44,7 +35,7 @@ class PreviewWindow: NSPanel {
         self.hasShadow = true
         self.isMovableByWindowBackground = true
 
-        let content = PreviewContent(model: model)
+        let content = PreviewContent(item: item)
         let hosting = NSHostingView(rootView: content)
         let contentRect = self.contentRect(forFrameRect: self.frame)
         hosting.frame = contentRect
@@ -61,13 +52,9 @@ class PreviewWindow: NSPanel {
 
     /// Update displayed content and resize window — called by popup on selection change.
     func updateContent(item: ClipboardItem) {
-        guard model.item.id != item.id else { return } // same item, skip
-        model.item = item
-        // Force NSHostingView to re-render immediately by replacing rootView.
-        // @ObservedObject can be unreliable in NSHostingView on macOS SwiftUI,
-        // so we bypass it with a direct rootView swap.
-        hostingView.rootView = PreviewContent(model: model)
-        resizeToFitContent()
+        guard hostingView.rootView.item.id != item.id else { return }
+        hostingView.rootView = PreviewContent(item: item)
+        resizeToFitContent(for: item)
     }
 
     override func close() {
@@ -78,9 +65,9 @@ class PreviewWindow: NSPanel {
 
     // MARK: - Window resizing
 
-    private func resizeToFitContent() {
+    private func resizeToFitContent(for item: ClipboardItem) {
         guard let screenFrame = NSScreen.main?.visibleFrame, screenFrame.width > 0 else { return }
-        let newSize = Self.contentSize(for: model.item, screenFrame: screenFrame)
+        let newSize = Self.contentSize(for: item, screenFrame: screenFrame)
         let oldSize = self.frame.size
         guard abs(newSize.width - oldSize.width) > 2 || abs(newSize.height - oldSize.height) > 2 else { return }
         let newOrigin = NSPoint(
@@ -146,13 +133,13 @@ class PreviewWindow: NSPanel {
 // MARK: - Preview Content
 
 struct PreviewContent: View {
-    @ObservedObject var model: PreviewContentModel
+    let item: ClipboardItem
 
     @State private var image: NSImage?
     @State private var isLoadingImage = false
 
     private var currentDbId: Int {
-        guard case .image(_, let dbId, _, _, _, _, _, _) = model.item else { return 0 }
+        guard case .image(_, let dbId, _, _, _, _, _, _) = item else { return 0 }
         return dbId
     }
 
@@ -161,7 +148,7 @@ struct PreviewContent: View {
             Color.black.opacity(0.88)
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
 
-            switch model.item {
+            switch item {
             case .text(_, let text, _, _, _, _):
                 LargeTextView(text: text)
             case .image(_, let dbId, _, _, _, _, _, _):
