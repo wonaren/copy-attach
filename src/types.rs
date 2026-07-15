@@ -86,7 +86,7 @@ impl ClipboardEntry {
                 }
             }
             ClipboardEntry::Image { width, height, .. } => {
-                format!("📷 图片 ({}×{})", width, height)
+                format!("Image ({}×{})", width, height)
             }
         }
     }

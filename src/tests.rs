@@ -203,7 +203,7 @@ fn test_label_text() {
 fn test_label_image() {
     let img_data = make_test_image_rgba(1920, 1080, 128);
     let i = make_image(&img_data, 1920, 1080, 100);
-    assert_eq!(i.label(), "📷 图片 (1920×1080)");
+    assert_eq!(i.label(), "Image (1920×1080)");
 }
 
 #[test]

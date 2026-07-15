@@ -11,8 +11,6 @@ name = "copy_attach"
 arboard = "3.6"
 objc2 = "0.6"
 objc2-core-graphics = "0.3"
-objc2-foundation = "0.3"
-block2 = "0.6"
 image = { version = "0.25", default-features = false, features = ["png"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 serde = { version = "1", features = ["derive"], optional = true }

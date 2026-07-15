@@ -136,16 +136,19 @@ pub(crate) fn clipboard_monitor(
                             return;
                         }
                     };
-                    if let Ok(conn) = db.lock() {
-                        let db_item = {
-                            let hist = history.lock().unwrap();
-                            hist.iter().find(|e| match e {
-                                ClipboardEntry::Image { hash: h, .. } => *h == item_hash,
-                                _ => false,
-                            }).cloned()
-                        };
 
-                        if let Some(db_item) = db_item {
+                    // Lock history FIRST to find and clone the item (consistent lock order)
+                    let db_item = {
+                        let hist = history.lock().unwrap();
+                        hist.iter().find(|e| match e {
+                            ClipboardEntry::Image { hash: h, .. } => *h == item_hash,
+                            _ => false,
+                        }).cloned()
+                    };
+
+                    if let Some(db_item) = db_item {
+                        // Lock DB WITHOUT holding history lock
+                        if let Ok(conn) = db.lock() {
                             insert_entry_to_db(
                                 &conn, &db_item,
                                 Some(&full_png),
@@ -155,7 +158,7 @@ pub(crate) fn clipboard_monitor(
                             let row_id = conn.last_insert_rowid();
                             trim_db_history(&conn, threshold);
 
-                            // Update db_id on the matching history entry
+                            // Re-acquire history lock to update db_id in memory
                             let mut hist = history.lock().unwrap();
                             for entry in hist.iter_mut() {
                                 if let ClipboardEntry::Image { hash: h, db_id, .. } = entry {
@@ -196,17 +199,25 @@ pub(crate) fn clipboard_monitor(
                             db_id: 0,
                         };
 
-                        let mut hist = history.lock().unwrap();
-                        *hist = add_to_history(std::mem::take(&mut *hist), item);
-                        while hist.len() > cleanup_threshold.load(Ordering::Relaxed) {
-                            hist.pop();
-                        }
+                        // Scope 1: in-memory history update (history lock only)
+                        let item_for_db = {
+                            let mut hist = history.lock().unwrap();
+                            *hist = add_to_history(std::mem::take(&mut *hist), item);
+                            while hist.len() > cleanup_threshold.load(Ordering::Relaxed) {
+                                hist.pop();
+                            }
+                            hist[0].clone()
+                        }; // history lock released
 
+                        // Scope 2: DB write-through (db lock only — no history lock held)
                         if let Ok(conn) = db.lock() {
-                            insert_entry_to_db(&conn, &hist[0], None, None);
-                            delete_matching_entry(&conn, &hist[0]);
+                            insert_entry_to_db(&conn, &item_for_db, None, None);
+                            delete_matching_entry(&conn, &item_for_db);
                             let row_id = conn.last_insert_rowid();
                             trim_db_history(&conn, cleanup_threshold.load(Ordering::Relaxed));
+
+                            // Re-acquire history lock to set db_id on the head entry
+                            let mut hist = history.lock().unwrap();
                             if let Some(ClipboardEntry::Text { db_id, .. }) = hist.get_mut(0) {
                                 *db_id = row_id;
                             }

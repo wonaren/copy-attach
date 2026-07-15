@@ -548,16 +548,10 @@ pub extern "C" fn clipboard_free_bytes(data: *mut u8, len: c_int) {
 // Select & Paste
 // ═══════════════════════════════════════════
 
-#[no_mangle]
-pub extern "C" fn clipboard_select_and_paste(index: c_int) -> c_int {
-    let mut item = {
-        let hist = backend().history.lock().unwrap();
-        match hist.get(index as usize).cloned() {
-            Some(i) => i,
-            None => return 0,
-        }
-    };
-
+/// Shared implementation for select-and-paste.
+/// Loads full image data from DB if needed, writes to system clipboard,
+/// write-through DB, moves item to top of history, then simulates paste.
+fn select_and_paste_impl(mut item: ClipboardEntry) -> c_int {
     let db_item = match &item {
         ClipboardEntry::Image { db_id, .. } if *db_id != 0 => {
             let mut loaded = item.clone();
@@ -654,10 +648,23 @@ pub extern "C" fn clipboard_select_and_paste(index: c_int) -> c_int {
     1
 }
 
+/// Legacy: select and paste by array index. Prefer `clipboard_select_and_paste_by_id`.
+#[no_mangle]
+pub extern "C" fn clipboard_select_and_paste(index: c_int) -> c_int {
+    let item = {
+        let hist = backend().history.lock().unwrap();
+        match hist.get(index as usize).cloned() {
+            Some(i) => i,
+            None => return 0,
+        }
+    };
+    select_and_paste_impl(item)
+}
+
 /// Select and paste by stable entry ID (not array index).
 #[no_mangle]
 pub extern "C" fn clipboard_select_and_paste_by_id(entry_id: u64) -> c_int {
-    let mut item = {
+    let item = {
         let hist = backend().history.lock().unwrap();
         match hist.iter().find(|e| match e {
             ClipboardEntry::Text { id, .. } => *id == entry_id,
@@ -667,101 +674,7 @@ pub extern "C" fn clipboard_select_and_paste_by_id(entry_id: u64) -> c_int {
             None => return 0,
         }
     };
-
-    let db_item = match &item {
-        ClipboardEntry::Image { db_id, .. } if *db_id != 0 => {
-            let mut loaded = item.clone();
-            if let ClipboardEntry::Image { ref mut png_data, ref mut thumb_data, ref mut thumb_width, ref mut thumb_height, .. } = loaded {
-                if let Ok(conn) = backend().db.lock() {
-                    if let Ok((png, thumb, tw, th)) = conn.query_row(
-                        "SELECT png_data, thumb_data, thumb_width, thumb_height FROM clipboard_history WHERE id = ?",
-                        rusqlite::params![*db_id],
-                        |row| Ok((
-                            row.get::<_, Vec<u8>>(0)?,
-                            row.get::<_, Vec<u8>>(1)?,
-                            row.get::<_, i64>(2)?,
-                            row.get::<_, i64>(3)?,
-                        )),
-                    ) {
-                        *png_data = png;
-                        *thumb_data = thumb;
-                        *thumb_width = tw as u32;
-                        *thumb_height = th as u32;
-                    }
-                }
-            }
-            loaded
-        }
-        _ => item.clone(),
-    };
-
-    let mut cb = match Clipboard::new() { Ok(c) => c, Err(_) => return 0 };
-
-    match &db_item {
-        ClipboardEntry::Text { text, .. } => {
-            if cb.set_text(text).is_err() { return 0; }
-            let b = backend();
-            *b.last_seen_text.lock().unwrap() = Some(text.clone());
-            *b.last_seen_image_hash.lock().unwrap() = None;
-        }
-        ClipboardEntry::Image { png_data, width, height, hash, .. } => {
-            if png_data.is_empty() { return 0; }
-            if let Some((rgba, _, _)) = decode_png(png_data) {
-                let img = arboard::ImageData {
-                    width: *width as usize,
-                    height: *height as usize,
-                    bytes: rgba.into(),
-                };
-                if cb.set_image(img).is_err() { return 0; }
-                let b = backend();
-                *b.last_seen_text.lock().unwrap() = None;
-                *b.last_seen_image_hash.lock().unwrap() = Some(*hash);
-            } else { return 0; }
-        }
-    }
-
-    if let Some(b) = crate::backend::try_backend() {
-        if let Ok(conn) = b.db.lock() {
-            let png_for_db = match &db_item {
-                ClipboardEntry::Image { png_data, .. } if !png_data.is_empty() => {
-                    Some(png_data.as_slice())
-                }
-                _ => None,
-            };
-            let thumb_for_db = match &db_item {
-                ClipboardEntry::Image { thumb_data, thumb_width, thumb_height, .. } if !thumb_data.is_empty() => {
-                    Some((thumb_data.as_slice(), *thumb_width, *thumb_height))
-                }
-                _ => None,
-            };
-
-            insert_entry_to_db(&conn, &db_item, png_for_db, thumb_for_db);
-            delete_matching_entry(&conn, &db_item);
-            let new_row_id = conn.last_insert_rowid();
-            trim_db_history(&conn, b.cleanup_threshold.load(Ordering::Relaxed));
-
-            match &mut item {
-                ClipboardEntry::Image { ref mut db_id, .. } |
-                ClipboardEntry::Text { ref mut db_id, .. } => {
-                    *db_id = new_row_id;
-                }
-            }
-        }
-    }
-
-    {
-        let b = backend();
-        let mut hist = b.history.lock().unwrap();
-        *hist = add_to_history(std::mem::take(&mut *hist), item);
-        while hist.len() > b.cleanup_threshold.load(Ordering::Relaxed) {
-            hist.pop();
-        }
-    }
-
-    thread::sleep(Duration::from_millis(50));
-    #[cfg(target_os = "macos")]
-    { if macos::check_permission() && !macos::simulate_cmd_v() { return 0; } }
-    1
+    select_and_paste_impl(item)
 }
 
 // ═══════════════════════════════════════════
@@ -808,10 +721,10 @@ pub extern "C" fn clipboard_delete_by_id(entry_id: u64) -> c_int {
 
     if let Ok(conn) = b.db.lock() {
         let result = match &removed {
-            ClipboardEntry::Text { text, .. } => {
+            ClipboardEntry::Text { db_id, .. } if *db_id != 0 => {
                 conn.execute(
-                    "DELETE FROM clipboard_history WHERE entry_type = 0 AND text = ?1",
-                    rusqlite::params![text],
+                    "DELETE FROM clipboard_history WHERE id = ?1",
+                    rusqlite::params![*db_id],
                 )
             }
             ClipboardEntry::Image { db_id, .. } if *db_id != 0 => {

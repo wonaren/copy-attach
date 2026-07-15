@@ -110,11 +110,9 @@ version = "0.1.0-beta"
 dependencies = [
  "arboard",
  "base64",
- "block2",
  "image",
  "objc2",
  "objc2-core-graphics",
- "objc2-foundation",
  "rusqlite",
  "serde",
  "serde_json",
@@ -397,8 +395,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3e0adef53c21f888deb4fa59fc59f7eb17404926ee8a6f59f5df0fd7f9f3272"
 dependencies = [
  "bitflags",
- "block2",
- "libc",
  "objc2",
  "objc2-core-foundation",
 ]
