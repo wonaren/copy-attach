@@ -397,6 +397,7 @@ struct HistoryPopupContent: View {
 struct ItemRowView: View {
     let item: ClipboardItem
     let isSelected: Bool
+    @State private var isHovering = false
 
     private let whiteText = Color.white.opacity(0.9)
     private let mutedText = Color.white.opacity(0.6)
@@ -435,11 +436,15 @@ struct ItemRowView: View {
             }
         )
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .onHover { hovering in
+            isHovering = hovering
+        }
     }
 
     private var rowBackground: some View {
         Group {
             if isSelected { Color(nsColor: .controlAccentColor) }
+            else if isHovering { Color.white.opacity(0.1) }
             else { Color(nsColor: .windowBackgroundColor).opacity(0.04) }
         }
     }
