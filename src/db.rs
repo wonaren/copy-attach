@@ -59,7 +59,7 @@ pub(crate) fn load_history_from_db(conn: &Connection) -> Vec<ClipboardEntry> {
     let mut stmt = match conn.prepare(
         "SELECT id, entry_type, text,
                 width, height,
-                thumb_data, thumb_width, thumb_height, hash,
+                thumb_width, thumb_height, hash,
                 timestamp, source_name, source_bundle_id
          FROM clipboard_history
          ORDER BY id DESC
@@ -79,13 +79,12 @@ pub(crate) fn load_history_from_db(conn: &Connection) -> Vec<ClipboardEntry> {
             row.get::<_, Option<String>>(2)?,
             row.get::<_, Option<i64>>(3)?,
             row.get::<_, Option<i64>>(4)?,
-            row.get::<_, Option<Vec<u8>>>(5)?,
+            row.get::<_, Option<i64>>(5)?,
             row.get::<_, Option<i64>>(6)?,
             row.get::<_, Option<i64>>(7)?,
-            row.get::<_, Option<i64>>(8)?,
-            row.get::<_, i64>(9)?,
-            row.get::<_, String>(10)?,
-            row.get::<_, String>(11)?))
+            row.get::<_, i64>(8)?,
+            row.get::<_, String>(9)?,
+            row.get::<_, String>(10)?))
     }) {
         Ok(r) => r,
         Err(e) => {
@@ -97,7 +96,7 @@ pub(crate) fn load_history_from_db(conn: &Connection) -> Vec<ClipboardEntry> {
     let mut result = Vec::new();
     let mut skipped = 0u32;
     for row in rows {
-        let (entry_type, db_id, text, width, height, _thumb_data,
+        let (entry_type, db_id, text, width, height,
              thumb_width, thumb_height, hash, timestamp, source_name, source_bundle_id) = match row {
             Ok(r) => r,
             Err(e) => {
