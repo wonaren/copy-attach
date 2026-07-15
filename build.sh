@@ -8,6 +8,10 @@ APP_NAME="CopyAttach"
 SWIFT_SRC="SwiftApp"
 
 echo "==> Building Rust backend library…"
+
+# Read version from Cargo.toml and sync to Info.plist
+CARGO_VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+/usr/libexec/PlistBuddy -c "Set CFBundleShortVersionString ${CARGO_VERSION}" "${SWIFT_SRC}/Info.plist" 2>/dev/null || true
 cargo build --release
 
 echo "==> Building Swift frontend app…"
