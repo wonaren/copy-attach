@@ -12,6 +12,7 @@ class PreviewContentModel: ObservableObject {
 
 class PreviewWindow: NSPanel {
     private let model: PreviewContentModel
+    private let centerAnchor: NSPoint
     private var hostingView: NSHostingView<PreviewContent>!
 
     /// Cache text heights per entryId so arrow-key navigation doesn't re-layout.
@@ -25,6 +26,7 @@ class PreviewWindow: NSPanel {
         let x = screenCenter.x - size.width / 2
         let y = screenCenter.y - size.height / 2
 
+        self.centerAnchor = screenCenter
         self.model = PreviewContentModel(item: item)
 
         super.init(
@@ -82,8 +84,8 @@ class PreviewWindow: NSPanel {
         let oldSize = self.frame.size
         guard abs(newSize.width - oldSize.width) > 2 || abs(newSize.height - oldSize.height) > 2 else { return }
         let newOrigin = NSPoint(
-            x: screenFrame.midX - newSize.width / 2,
-            y: screenFrame.midY - newSize.height / 2
+            x: centerAnchor.x - newSize.width / 2,
+            y: centerAnchor.y - newSize.height / 2
         )
         self.setFrame(NSRect(origin: newOrigin, size: newSize), display: true, animate: false)
     }
