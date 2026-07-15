@@ -10,11 +10,15 @@ class HistoryPopupWindow: NSPanel {
     weak var previewPanel: PreviewWindow?
 
     private init() {
-        let screenSize = NSScreen.main?.frame.size ?? NSSize(width: 800, height: 600)
+        // Match show() — use visibleFrame so first-open position matches
+        // subsequent repositioning. Using frame.size (full screen) would
+        // place the popup at a different y (menu bar not accounted for),
+        // misaligning it with the preview window which uses visibleFrame.
+        let screenFrame = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 800, height: 600)
         let popupWidth: CGFloat = 520
         let popupHeight: CGFloat = 620
-        let x = (screenSize.width - popupWidth) / 2
-        let y = (screenSize.height - popupHeight) / 2
+        let x = screenFrame.origin.x + (screenFrame.size.width - popupWidth) / 2
+        let y = screenFrame.origin.y + (screenFrame.size.height - popupHeight) / 2
 
         super.init(
             contentRect: NSRect(x: x, y: y, width: popupWidth, height: popupHeight),
@@ -240,7 +244,8 @@ struct HistoryPopupContent: View {
     private func openPreview() {
         guard selectedIndex < backend.items.count, let popup = popupWindow else { return }
         let item = backend.items[selectedIndex]
-        let preview = PreviewWindow(item: item)
+        let popupCenter = NSPoint(x: popup.frame.midX, y: popup.frame.midY)
+        let preview = PreviewWindow(item: item, centerAt: popupCenter)
         popup.previewPanel = preview
         preview.orderFront(nil) // don't become key
         showPreview = true

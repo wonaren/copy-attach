@@ -1,133 +1,152 @@
 # CopyAttach
 
-A full-featured macOS clipboard manager with a **Rust backend** and **native SwiftUI/AppKit frontend**. Monitors clipboard changes, stores text and image history (up to 1000 items), persists to SQLite, and provides a floating overlay UI via a customizable global hotkey.
+**你复制过的每段文字、每张图片，随时找回。**
 
-## Features
+CopyAttach 是一个 macOS 剪贴板管理器。它默默记录你复制的一切——文本、代码、链接、图片——然后通过一个快捷键让你在任何应用中快速搜索、预览、粘贴。
 
-- Automatic clipboard monitoring — captures both text and images in real-time
-- Text and Image support — stores content with thumbnail previews (up to 1000 items)
-- SQLite persistence — history survives app restarts (write-through strategy, mmap-backed)
-- Customizable global hotkey — defaults to ⌥⌘V, changeable via Settings
-- One-click select and paste — choose an item to copy it to clipboard and auto-paste via Cmd+V simulation
-- Permission request UI — detects missing Accessibility permissions, one-click button to open System Settings
-- Native SwiftUI settings window — permissions, hotkey customization, statistics, usage tips
-- Spacebar preview — press Space to preview full text or image before pasting
-- App source tracking — shows which app each clipboard entry came from
-- Menu bar icon — quick access to popup and settings
-- Background agent — runs as a menu bar app (no Dock icon)
-
-## Requirements
-
-- macOS 14.0+ (Sonoma or newer)
-- Xcode 16+ (for building Swift frontend)
-- Rust 1.75+ (for building Rust backend)
-
-## Build & Run
+## 一分钟上手
 
 ```bash
+# 构建
 ./build.sh
+
+# 启动
 open "CopyAttach.app"
+
+# 按 ⌥⌘V 唤出历史记录
+# ↑↓ 选择 → ⏎ 粘贴
 ```
 
-Debug logging showing Rust + Swift output:
+就是这么简单。不需要配置，不需要注册，不需要联网。
+
+## 为什么你需要它
+
+macOS 自带的剪贴板只存一个条目。复制新内容，旧的就被覆盖了。
+
+CopyAttach 替你保留了完整的剪贴板历史：
+
+- **复制了重要内容却不小心又复制了别的？** 翻回去就能找到
+- **想粘贴半小时前看到的那段代码？** 它还在
+- **想同时引用几张截图？** 翻历史就行，不用反复切窗口
+
+## 使用方式
+
+| 操作 | 效果 |
+|---|---|
+| **⌥⌘V** | 唤出 / 隐藏历史弹窗 |
+| **↑  /  ↓** | 选择上 / 下一条 |
+| **⏎** | 粘贴选中条目 |
+| **␣** 空格 | 预览完整内容 |
+| **⎋**  Esc | 关闭弹窗 / 预览 |
+| **点击条目** | 直接粘贴 |
+
+你可以自己在设置里改成顺手的快捷键。
+
+## 核心设计原则
+
+1. **不搞兜底**——主流程失败就暴露错误，不静默降级。你不会粘贴到错误的内容。
+2. **不重复捕获**——粘贴时不会把自己刚写回的内容又读进来，形成死循环。
+3. **不丢数据**——每条历史实时写入 SQLite，重启还在。
+4. **不阻塞 UI**——读历史走无锁快照，Swift 随时拿到完整数据。
+
+## 适用人群
+
+- **开发者**——频繁复制代码片段、终端输出、API 文档
+- **写作者**——收集素材、引用资料、整理笔记
+- **设计师**——复制截图、设计稿，随时比对
+- **任何嫌「Cmd+C / Cmd+V 切来切去」麻烦的人**
+
+## 架构概览
+
+```
+┌────────────────────────────────────────────┐
+│            Swift 前端（macOS 原生）          │
+│  ┌─────────┐ ┌─────────┐ ┌──────────────┐ │
+│  │ 设置窗口  │ │ 历史弹窗 │ │  预览窗口     │ │
+│  │ SwiftUI  │ │ NSPanel │ │  NSPanel     │ │
+│  └────┬────┘ └────┬────┘ └──────┬───────┘ │
+│       │           │             │          │
+│  ┌────┴───────────┴─────────────┴────────┐ │
+│  │     ClipboardBackend（Swift FFI）      │ │
+│  │  轮询 → 快照 → 缓存 → 渲染             │ │
+│  └────────────────┬───────────────────────┘ │
+└───────────────────┼─────────────────────────┘
+                    │ C FFI（约 40 个导出函数）
+┌───────────────────┼─────────────────────────┐
+│        Rust 后端（cdylib）                   │
+│                                            │
+│  ┌──────────────┐  ┌─────────────────────┐ │
+│  │  剪贴板监控    │  │  历史管理           │ │
+│  │  300ms 轮询   │  │  去重 · 上限 3000   │ │
+│  │  changeCount  │  │  Arc<Mutex<Vec>>   │ │
+│  └──────────────┘  └─────────────────────┘ │
+│  ┌──────────────┐  ┌─────────────────────┐ │
+│  │  图片处理     │  │  SQLite 持久化      │ │
+│  │  PNG 编解码   │  │  write-through     │ │
+│  │  Lanczos3     │  │  mmap 读取         │ │
+│  │  缩略图/哈希   │  │  512KB page cache │ │
+│  └──────────────┘  └─────────────────────┘ │
+│  ┌──────────────────────────────────────┐  │
+│  │  Cmd+V 模拟（CGEventPost）            │  │
+│  └──────────────────────────────────────┘  │
+└────────────────────────────────────────────┘
+```
+
+### 数据流（一句话版）
+
+```
+你复制 → Rust 监控线程捕获 → 写入 SQLite + 内存历史
+                                        ↓
+                            Swift 发现变化 → 读取快照 → 渲染列表
+                                        ↓
+                            你选了一条 → Rust 写回剪贴板 → 模拟 Cmd+V
+                                        ↓
+                            监控线程跳过自己写入的内容（不重复捕获）
+```
+
+### 快捷键系统
+
+两种机制确保在任何场景下都能唤出弹窗：
+- **Carbon RegisterEventHotKey** — 系统级注册，应用在后台也生效
+- **NSEvent global monitor** — 后备方案，覆盖 Carbon 的边缘情况
+
+两者都需要 macOS「辅助功能权限」。首次运行时应用会自动引导授权。
+
+## 项目结构
+
+```
+├── src/
+│   └── lib.rs              # Rust 后端（约 1786 行）：FFI、监控、图片处理、
+│                               SQLite、粘贴模拟 —— 全部核心逻辑
+├── SwiftApp/
+│   ├── CopyAttachApp.swift      # 应用入口 + 设置窗口
+│   ├── ClipboardBackend.swift   # Rust FFI 封装 + 定时轮询 + 缓存
+│   ├── HistoryPopupView.swift   # 历史弹窗 UI + 键盘导航
+│   ├── PreviewWindow.swift      # 预览窗口（文本/图片）
+│   ├── HotkeyManager.swift      # 全局快捷键注册 + 录制
+│   ├── CopyAttach-Bridging-Header.h  # C FFI 声明
+│   └── Info.plist
+├── assets/
+│   ├── icon.svg             # 应用图标源文件
+│   └── AppIcon.icns         # 构建时生成的图标
+├── build.sh                 # 构建脚本（cargo + swiftc + codesign）
+├── Cargo.toml               # Rust crate 配置
+├── CLAUDE.md                # 开发者指南
+└── README.md
+```
+
+## 构建依赖
+
+- macOS 14.0+（Sonoma）
+- Xcode 16+
+- Rust 1.75+
+
+## 调试
+
 ```bash
 tail -f /tmp/copyattach_debug.log
 ```
 
-## Usage
-
-- **⌥⌘V** (customizable) — show/hide clipboard history overlay
-- **↑/↓** — navigate through history items
-- **␣** — open preview of the selected item
-- **⏎** — select and paste (copies back to clipboard + Cmd+V)
-- **⎋** — close overlay or preview
-- Click an item to select and paste
-
-## Architecture
-
-```
-┌─────────────────────────────────────────────┐
-│           Swift Frontend (macOS)            │
-│  ┌──────────┐  ┌──────────┐  ┌───────────┐ │
-│  │ Settings  │  │  Popup   │  │  Preview  │ │
-│  │  Window   │  │ NSPanel  │  │ NSPanel   │ │
-│  └─────┬────┘  └────┬─────┘  └─────┬─────┘ │
-│        │             │              │       │
-│  ┌─────┴─────────────┴──────────────┴─────┐ │
-│  │     ClipboardBackend (Swift FFI)       │ │
-│  │   (0.5s poll, Snapshot API reads,      │ │
-│  │    thumbnail NSCache, source app        │ │
-│  │    tracker via NSWorkspace)             │ │
-│  └──────────────────┬──────────────────────┘ │
-└─────────────────────┼────────────────────────┘
-                      │ C FFI (objc-free, ~40 exported functions)
-┌─────────────────────┴────────────────────────┐
-│         Rust Backend (cdylib)                │
-│                                             │
-│  ┌──────────────┐  ┌──────────────────────┐ │
-│  │  Clipboard   │  │  History Management  │ │
-│  │  Monitor     │  │  (Arc<Mutex<Vec>>,   │ │
-│  │  (300ms poll,│  │   dedup by text/hash, │ │
-│  │   changeCount│  │   3000 cap, monotonic │ │
-│  │   check)     │  │   entry_id)           │ │
-│  └──────────────┘  └──────────────────────┘ │
-│  ┌──────────────┐  ┌──────────────────────┐ │
-│  │  Image Proc  │  │  SQLite Persistence  │ │
-│  │  (PNG encode,│  │  (write-through,     │ │
-│  │   Lanczos3   │  │   mmap BLOB reads,   │ │
-│  │   thumbnail, │  │   512KB page cache)  │ │
-│  │   hash dedup)│  │                      │ │
-│  └──────────────┘  └──────────────────────┘ │
-│                                             │
-│  ┌──────────────────────────────────────┐   │
-│  │  Cmd+V Simulation (CGEventPost)      │   │
-│  └──────────────────────────────────────┘   │
-└─────────────────────────────────────────────┘
-```
-
-**Data flow**: Rust monitors clipboard in a background thread (NSPasteboard `changeCount` lightweight check, then `arboard` read). New entries are written through to SQLite immediately. Swift polls `clipboard_get_count()` every 500ms; on change, it acquires a lock-free snapshot via `clipboard_snapshot_acquire()`, reads all items, then releases. On user selection, `clipboard_select_and_paste_by_id()` writes the entry back to the system clipboard and simulates Cmd+V via CGEventPost. The Rust side sets `last_seen_text` / `last_seen_image_hash` before writing to suppress re-capture.
-
-**FFI ownership**: Rust-allocated strings must be freed with `clipboard_free_string`, byte buffers with `clipboard_free_bytes`. The Swift `ClipboardBackend` wrapper handles all deallocation.
-
-## Hotkey System
-
-Two redundant mechanisms for global hotkey detection:
-1. **Carbon RegisterEventHotKey** — system-level, works when app is backgrounded
-2. **NSEvent global monitor** — fallback for Carbon edge cases
-
-Both require Accessibility permissions (`AXIsProcessTrusted`). Hotkey configuration is persisted to `UserDefaults` as JSON via `Codable`.
-
-## Project Structure
-
-```
-├── src/
-│   └── lib.rs              # Rust backend (~1786 lines): C FFI, clipboard monitor,
-│                               SQLite, image processing (PNG / thumbnail / hash),
-│                               paste simulation
-├── SwiftApp/
-│   ├── CopyAttachApp.swift      # App entry (MenuBarExtra), AppDelegate,
-│                                   settings window (InlineSettingsView)
-│   ├── ClipboardBackend.swift   # Rust FFI wrapper, 0.5s polling timer,
-│                                   Snapshot API reads, item types enum,
-│                                   thumbnail NSCache, app icon lookup
-│   ├── HistoryPopupView.swift   # Floating NSPanel overlay, SwiftUI list,
-│                                   keyboard nav (↑↓⏎⎋␣), item rows with
-│                                   visual-width CJK truncation
-│   ├── PreviewWindow.swift      # Non-key NSPanel, full-size text/image
-│                                   preview, auto-resizing, content height cache
-│   ├── HotkeyManager.swift      # Carbon + NSEvent dual hotkey registration,
-│                                   interactive recording, debugLog()
-│   ├── CopyAttach-Bridging-Header.h  # C FFI declarations (~60 functions)
-│   └── Info.plist
-├── assets/
-│   ├── icon.svg             # App icon source
-│   └── AppIcon.icns         # Generated icon (by build.sh via sips + iconutil)
-├── build.sh                 # Build script (cargo release + swiftc + codesign)
-├── Cargo.toml               # Rust crate (cdylib + rlib, rusqlite bundled, image/png)
-├── CLAUDE.md                # Developer guide (Claude Code instructions)
-└── README.md
-```
-
-## License
+## 许可证
 
 MIT

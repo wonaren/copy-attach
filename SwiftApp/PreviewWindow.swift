@@ -19,11 +19,11 @@ class PreviewWindow: NSPanel {
 
     override var canBecomeKey: Bool { false }
 
-    init(item: ClipboardItem) {
+    init(item: ClipboardItem, centerAt screenCenter: NSPoint) {
         let screenFrame = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 800, height: 600)
         let size = Self.contentSize(for: item, screenFrame: screenFrame)
-        let x = screenFrame.origin.x + (screenFrame.size.width - size.width) / 2
-        let y = screenFrame.origin.y + (screenFrame.size.height - size.height) / 2
+        let x = screenCenter.x - size.width / 2
+        let y = screenCenter.y - size.height / 2
 
         self.model = PreviewContentModel(item: item)
 
@@ -77,16 +77,15 @@ class PreviewWindow: NSPanel {
     // MARK: - Window resizing
 
     private func resizeToFitContent() {
-        let screenFrame = NSScreen.main?.visibleFrame ?? .zero
-        guard screenFrame.width > 0 else { return }
+        guard let screenFrame = NSScreen.main?.visibleFrame, screenFrame.width > 0 else { return }
         let newSize = Self.contentSize(for: model.item, screenFrame: screenFrame)
-        var frame = self.frame
-        let oldSize = frame.size
+        let oldSize = self.frame.size
         guard abs(newSize.width - oldSize.width) > 2 || abs(newSize.height - oldSize.height) > 2 else { return }
-        frame.size = newSize
-        frame.origin.x += (oldSize.width - newSize.width) / 2
-        frame.origin.y += (oldSize.height - newSize.height) / 2
-        self.setFrame(frame, display: true, animate: false)
+        let newOrigin = NSPoint(
+            x: screenFrame.midX - newSize.width / 2,
+            y: screenFrame.midY - newSize.height / 2
+        )
+        self.setFrame(NSRect(origin: newOrigin, size: newSize), display: true, animate: false)
     }
 
     // MARK: - Auto-sizing
