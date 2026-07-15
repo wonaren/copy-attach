@@ -26,7 +26,7 @@ pub(crate) fn open_db() -> Option<Connection> {
     }).ok()?;
     // Use mmap for BLOB reads + minimal SQLite page cache (512KB)
     let _ = conn.execute_batch(
-        "PRAGMA mmap_size = 268435456;
+        "PRAGMA mmap_size = 33554432;    -- 32 MB (ample for clipboard history, was 256 MB)
          PRAGMA cache_size = -512;"
     );
     Some(conn)

@@ -27,6 +27,9 @@ use crate::history::add_to_history;
 use crate::db::{insert_entry_to_db, delete_matching_entry, trim_db_history};
 use crate::macos;
 
+/// Maximum length of the longest edge for thumbnail generation.
+const THUMBNAIL_MAX_DIM: u32 = 300;
+
 pub(crate) fn clipboard_monitor(
     history: Arc<Mutex<Vec<ClipboardEntry>>>,
     running: Arc<AtomicBool>,
@@ -83,7 +86,7 @@ pub(crate) fn clipboard_monitor(
                 let h = img_data.height as u32;
 
                 // ── Phase 1 (sync): fast thumbnail → in-memory history ──
-                let (thumb_data, thumb_w, thumb_h) = match create_thumbnail_fast(w, h, &img_data.bytes, 500) {
+                let (thumb_data, thumb_w, thumb_h) = match create_thumbnail_fast(w, h, &img_data.bytes, THUMBNAIL_MAX_DIM) {
                     Some(t) => t,
                     None => {
                         eprintln!("CopyAttach: thumbnail creation failed for image {}x{}, skipping entry", w, h);
