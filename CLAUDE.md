@@ -55,10 +55,13 @@ open "CopyAttach.app"
 ### 核心机制
 
 - **剪贴板监控**：后台线程每 300ms 轮询 `arboard`。先用 `macos::pasteboard_change_count()` 轻量检查（避免每次读图片），有变化再读取文本或图片。图片编码为 PNG（`image` crate），缩略图 Lanczos3 缩放至最长边 500px。去重依据文本相等或 `DefaultHasher`（dimensions + raw pixels）。
-- **SQLite 持久化**：`~/Library/Application Support/CopyAttach/history.db`，mmap 256MB + 512KB page cache。所有变更 write-through 实时写入（监控线程 + select_and_paste 均写穿），启动时从 DB 加载最近条目。
+- **SQLite 持久化**：`~/Library/Application Support/CopyAttach/history.db`，mmap 32MB + 512KB page cache。所有变更 write-through 实时写入（监控线程 + select_and_paste 均写穿），启动时从 DB 加载最近条目。
 - **历史管理**：`Arc<Mutex<Vec<ClipboardEntry>>>`，上限 3000（可调，范围 100–10000）。添加时去重，新条目插入头部，超限从尾部 pop。阈值变更即时 trim。
 - **paste 模拟**：`CGEventPost` 发 Cmd+V（key code 9），需辅助功能权限（`AXIsProcessTrusted`）。
 - **全局状态**：`OnceLock<Backend>` 单例，`backend()` panic 式访问 / `try_backend()` Option 式访问。
+- **搜索**：HistoryPopupContent 中 searchText 驱动 filteredItems 过滤，匹配 label 和 sourceName（不区分大小写）。selectedIndex 0 固定为搜索栏，选中搜索栏时自动 focus。搜索结果变更时 selectedIndex 回 0。
+- **条目删除**：按住 Control 时选中条目显示删除图标，Control+Delete 键删除。Swift 端通过 `clipboard_delete_by_id(entry_id)` 删除内存和 DB 中的条目。
+- **两阶段图片捕获**：Phase 1（同步）— hash + CatmullRom 缩略图（最长边 300px）→ 更新内存历史。Phase 2（异步）— 完整 PNG 编码 → DB write-through → 更新 db_id。避免大幅图片（如 4K 截图）阻塞监控线程。
 
 **Swift 前端**（`SwiftApp/`）—— 纯菜单栏应用（`LSUIElement: true`，无 Dock 图标），SwiftUI + AppKit。
 
@@ -105,6 +108,8 @@ select_and_paste 先设置 `last_seen_text` / `last_seen_image_hash` 再写剪�
 - `HistoryPopupWindow.shared` — NSPanel 单例（`.floating` level，`.nonactivatingPanel` style）
 - `PreviewWindow` — 每次打开创建新实例，`PreviewContentModel` (`ObservableObject`) 驱动内容更新
 - 弹窗关闭时动画顺序：popup 0.15s fade → preview 0.1s fade → close
+- **FocusState 双管理**：`isSearchFocused` 和 `isContainerFocused` 两个 FocusState。selectedIndex=0 时 focus 搜索框，selectedIndex>0 时 focus 容器（使 `.onKeyPress` 继续生效）。解决 SwiftUI 中 TextField focus 接管后 onKeyPress 失效的问题。
+- **搜索**：`searchText` → `filteredItems` 计算属性（匹配 `label.lowercased()` + `sourceName.lowercased()`）。搜索栏是 index 0，项目从 index 1 开始。搜索变更时 `selectedIndex` 归零。搜索结果滚动通过 `proxy.scrollTo` 定位到第一项。
 
 ### 热点键系统（双机制）
 - **Carbon RegisterEventHotKey**：需辅助功能权限，应用不在前台时也触发
@@ -138,6 +143,32 @@ select_and_paste 先设置 `last_seen_text` / `last_seen_image_hash` 再写剪�
 ```bash
 tail -f /tmp/copyattach_debug.log
 ```
+
+## .claude 配置
+
+`.claude/settings.local.json` 包含命令白名单权限，避免频繁弹 permission 提示。新命令需要时在此文件中添加：
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "cargo build --release",
+      "cargo test",
+      ...
+    ]
+  }
+}
+```
+
+## 构建依赖
+
+- macOS 14.0+（Sonoma）
+- Xcode 16+（含 macOS SDK 15.0）
+- Rust 1.75+
+
+## lib.rs 特性
+
+- `#![allow(dead_code)]` 全局开启，因为部分模块函数仅由 FFI 或 cfg-gated 路径使用。不建议移除。
 
 ## 应用图标
 

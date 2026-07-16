@@ -168,6 +168,7 @@ struct HistoryPopupContent: View {
     @State private var isControlPressed: Bool = false
     @State private var searchText: String = ""
     @FocusState private var isSearchFocused: Bool
+    @FocusState private var isContainerFocused: Bool
 
     /// Items filtered by search text. When searchText is empty, returns all items.
     private var filteredItems: [ClipboardItem] {
@@ -218,6 +219,7 @@ struct HistoryPopupContent: View {
         .frame(width: popupWidth, height: popupHeight)
         .focusable()
         .focusEffectDisabled()
+        .focused($isContainerFocused)
         .onKeyPress(.upArrow) {
             if selectedIndex > 0 {
                 selectedIndex -= 1
@@ -276,6 +278,15 @@ struct HistoryPopupContent: View {
         }
         .onChange(of: searchText) { _, _ in
             selectedIndex = 0
+        }
+        .onChange(of: selectedIndex) { _, newValue in
+            if newValue == 0 {
+                isSearchFocused = true
+                isContainerFocused = false
+            } else {
+                isSearchFocused = false
+                isContainerFocused = true
+            }
         }
     }
 
@@ -642,7 +653,7 @@ struct ItemRowView: View {
         HStack(spacing: 8) {
             if let nsImage = ClipboardBackend.shared.getCachedThumbnail(dbId: dbId) {
                 Image(nsImage: nsImage).resizable().aspectRatio(contentMode: .fit)
-                    .frame(height: 100)
+                    .frame(maxHeight: 100)
                     .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
                     .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous)
                         .stroke(Color.white.opacity(0.1), lineWidth: 0.5))
@@ -650,7 +661,7 @@ struct ItemRowView: View {
                 ZStack {
                     RoundedRectangle(cornerRadius: 7, style: .continuous)
                         .stroke(mutedText.opacity(0.25), style: StrokeStyle(lineWidth: 1, dash: [4, 4]))
-                        .frame(height: 100)
+                        .frame(maxHeight: 100)
                     VStack(spacing: 8) {
                         HStack(spacing: 12) {
                             // Source: Image
