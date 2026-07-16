@@ -139,7 +139,6 @@ class PopupHostingView: NSHostingView<HistoryPopupContent> {
 
     override func keyDown(with event: NSEvent) {
         if event.keyCode == 51 || event.keyCode == 117 {
-            // Require Control (⌃) modifier for delete key (plain Backspace can cause confusion)
             if event.modifierFlags.contains(.control) {
                 NotificationCenter.default.post(name: deleteKeyNotification, object: nil)
                 return
@@ -164,10 +163,24 @@ struct HistoryPopupContent: View {
     let onClose: () -> Void
 
     @StateObject private var backend = ClipboardBackend.shared
-    @State private var selectedIndex: Int = 0
+    @State private var selectedIndex: Int = 0  // 0 = search bar, 1+ = items
     @State private var showPreview: Bool = false
     @State private var isControlPressed: Bool = false
-    @FocusState private var isFocused: Bool
+    @State private var searchText: String = ""
+    @FocusState private var isSearchFocused: Bool
+
+    /// Items filtered by search text. When searchText is empty, returns all items.
+    private var filteredItems: [ClipboardItem] {
+        guard !searchText.isEmpty else { return backend.items }
+        let query = searchText.lowercased()
+        return backend.items.filter {
+            $0.label.lowercased().contains(query) ||
+            $0.sourceName.lowercased().contains(query)
+        }
+    }
+
+    /// The highest valid selectedIndex (search bar + item count).
+    private var maxIndex: Int { filteredItems.count }
 
     // Design Tokens
     private let popupWidth: CGFloat = 500
@@ -183,13 +196,21 @@ struct HistoryPopupContent: View {
             Color.black.opacity(0.8)
                 .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
 
-            // === Layer 1: Content (conditional on empty) ===
+            // === Layer 1: Content ===
             if backend.items.isEmpty {
                 emptyStateView
             } else {
                 VStack(spacing: 4) {
-                    itemsList
-                    itemCountBar
+                    searchField
+                        .padding(.horizontal, 5)
+                        .padding(.top, 6)
+
+                    if filteredItems.isEmpty && !searchText.isEmpty {
+                        noResultsView
+                    } else {
+                        itemsList
+                        itemCountBar
+                    }
                 }
                 .padding(.all, 3)
             }
@@ -197,7 +218,6 @@ struct HistoryPopupContent: View {
         .frame(width: popupWidth, height: popupHeight)
         .focusable()
         .focusEffectDisabled()
-        .focused($isFocused)
         .onKeyPress(.upArrow) {
             if selectedIndex > 0 {
                 selectedIndex -= 1
@@ -205,14 +225,14 @@ struct HistoryPopupContent: View {
             return .handled
         }
         .onKeyPress(.downArrow) {
-            if selectedIndex < backend.items.count - 1 {
+            if selectedIndex < maxIndex {
                 selectedIndex += 1
             }
             return .handled
         }
         .onKeyPress(.return) {
-            if selectedIndex < backend.items.count {
-                selectItem(at: selectedIndex)
+            if selectedIndex > 0 {
+                selectItem(at: selectedIndex - 1)
             }
             return .handled
         }
@@ -220,20 +240,22 @@ struct HistoryPopupContent: View {
             if showPreview {
                 closePreview()
             } else {
+                searchText = ""
                 onClose()
             }
             return .handled
         }
         .onKeyPress(.space) {
-            guard selectedIndex < backend.items.count else { return .handled }
+            if selectedIndex == 0 { return .handled }
             togglePreview()
             return .handled
         }
         .onAppear {
             selectedIndex = 0
+            searchText = ""
             isControlPressed = NSEvent.modifierFlags.contains(.control)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                isFocused = true
+                isSearchFocused = true
             }
         }
         .onDisappear {
@@ -248,28 +270,87 @@ struct HistoryPopupContent: View {
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: deleteKeyNotification)) { _ in
-            deleteItem(at: selectedIndex)
+            if selectedIndex > 0 {
+                deleteItem(at: selectedIndex - 1)
+            }
+        }
+        .onChange(of: searchText) { _, _ in
+            selectedIndex = 0
+        }
+    }
+
+    // MARK: - Search Field (item 0)
+
+    private var searchField: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(.white.opacity(0.45))
+
+            TextField("搜索", text: $searchText)
+                .textFieldStyle(.plain)
+                .focused($isSearchFocused)
+                .font(.system(size: 12.5))
+                .foregroundColor(.white.opacity(0.9))
+
+            if !searchText.isEmpty {
+                Button(action: { searchText = "" }) {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 12))
+                        .foregroundColor(.white.opacity(0.45))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 7)
+        .padding(.vertical, 5)
+        .background(
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(Color.white.opacity(0.07))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .strokeBorder(
+                    selectedIndex == 0
+                        ? Color(nsColor: .controlAccentColor)
+                        : Color.white.opacity(0.08),
+                    lineWidth: selectedIndex == 0 ? 2.5 : 1
+                )
+        )
+        .onTapGesture {
+            selectedIndex = 0
+            isSearchFocused = true
+        }
+    }
+
+    private var noResultsView: some View {
+        VStack(spacing: 12) {
+            Spacer()
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 28))
+                .foregroundColor(.white.opacity(0.2))
+            Text("无匹配结果")
+                .font(.system(size: 14))
+                .foregroundColor(.white.opacity(0.35))
+            Spacer()
         }
     }
 
     // MARK: - Preview Management
 
     private func togglePreview() {
-        if showPreview {
-            closePreview()
-        } else {
-            openPreview()
-        }
+        if showPreview { closePreview() } else { openPreview() }
     }
 
     private func openPreview() {
-        guard selectedIndex < backend.items.count, let popup = popupWindow else { return }
-        let item = backend.items[selectedIndex]
+        let itemIndex = selectedIndex - 1
+        guard itemIndex < filteredItems.count, let popup = popupWindow else { return }
+        let item = filteredItems[itemIndex]
         let popupCenter = NSPoint(x: popup.frame.midX, y: popup.frame.midY)
         guard let previewItem = fullTextItem(item) else { return }
         let preview = PreviewWindow(item: previewItem, centerAt: popupCenter)
         popup.previewPanel = preview
-        preview.orderFront(nil) // don't become key
+        preview.orderFront(nil)
         showPreview = true
     }
 
@@ -281,18 +362,16 @@ struct HistoryPopupContent: View {
     }
 
     private func updatePreviewContent() {
-        guard showPreview, selectedIndex < backend.items.count,
+        let itemIndex = selectedIndex - 1
+        guard showPreview, itemIndex >= 0, itemIndex < filteredItems.count,
               let preview = popupWindow?.previewPanel else { return }
-        guard let previewItem = fullTextItem(backend.items[selectedIndex]) else {
+        guard let previewItem = fullTextItem(filteredItems[itemIndex]) else {
             closePreview()
             return
         }
         preview.updateContent(item: previewItem)
     }
 
-    /// Load full text for text items (snapshot only contains truncated label).
-    /// Returns nil if the full text cannot be loaded — caller should not open
-    /// or should close the preview.
     private func fullTextItem(_ item: ClipboardItem) -> ClipboardItem? {
         switch item {
         case .text(let entryId, _, let timestamp, let label, let sourceName, let sourceBundleId):
@@ -311,14 +390,20 @@ struct HistoryPopupContent: View {
 
     private var itemCountBar: some View {
         HStack(spacing: 4) {
-            Text("\(backend.items.count) 项")
-                .font(.system(size: 10, weight: .medium))
-                .foregroundColor(.white.opacity(0.7))
+            if searchText.isEmpty {
+                Text("\(backend.items.count) 项")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(.white.opacity(0.7))
+            } else {
+                Text("\(filteredItems.count)/\(backend.items.count) 项")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(.white.opacity(0.7))
+            }
             Text("·")
                 .font(.system(size: 10))
                 .foregroundColor(.white.opacity(0.3))
-            let textCount = backend.items.filter { $0.isText }.count
-            let imageCount = backend.items.filter { $0.isImage }.count
+            let textCount = filteredItems.filter { $0.isText }.count
+            let imageCount = filteredItems.filter { $0.isImage }.count
             Text("\(textCount) 文本")
                 .font(.system(size: 10))
                 .foregroundColor(.white.opacity(0.5))
@@ -338,23 +423,21 @@ struct HistoryPopupContent: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(spacing: 3) {
-                    ForEach(Array(backend.items.enumerated()), id: \.element.id) { index, item in
+                    ForEach(Array(filteredItems.enumerated()), id: \.element.id) { index, item in
                         ItemRowView(
                             item: item,
-                            isSelected: index == selectedIndex,
+                            isSelected: selectedIndex == index + 1,
                             isDeleteModifierPressed: isControlPressed
                         )
-                        .transition(.opacity)
                         .contentShape(Rectangle())
                         .onTapGesture {
-                            selectedIndex = index
+                            selectedIndex = index + 1
                             selectItem(at: index)
                         }
                         .id(item.id)
                     }
                 }
                 .padding(.all, 2)
-                .animation(.easeInOut(duration: 0.2), value: backend.items.count)
             }
             .background(Color(nsColor: .windowBackgroundColor).opacity(0.06))
             .overlay(
@@ -364,8 +447,22 @@ struct HistoryPopupContent: View {
             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
             .scrollIndicators(.hidden)
             .onChange(of: selectedIndex) { _, newValue in
-                if newValue < backend.items.count {
-                    proxy.scrollTo(backend.items[newValue].id, anchor: .center)
+                if newValue == 0 {
+                    if showPreview { closePreview() }
+                    // Scroll to top so first search results are visible.
+                    // Dispatch async to let LazyVStack render the first item first,
+                    // otherwise proxy.scrollTo may not find the id.
+                    if !filteredItems.isEmpty {
+                        let firstId = filteredItems[0].id
+                        DispatchQueue.main.async {
+                            proxy.scrollTo(firstId, anchor: .top)
+                        }
+                    }
+                    return
+                }
+                let itemIndex = newValue - 1
+                if itemIndex < filteredItems.count {
+                    proxy.scrollTo(filteredItems[itemIndex].id, anchor: .center)
                 }
                 updatePreviewContent()
             }
@@ -419,17 +516,24 @@ struct HistoryPopupContent: View {
     // MARK: - Actions
 
     private func deleteItem(at index: Int) {
+        guard index < filteredItems.count else { return }
+        let item = filteredItems[index]
+        guard let backendIdx = backend.items.firstIndex(where: { $0.id == item.id }) else { return }
         closePreview()
-        guard backend.deleteEntry(at: index) else { return }
+        guard backend.deleteEntry(at: backendIdx) else { return }
         if backend.items.isEmpty {
             selectedIndex = 0
-        } else if selectedIndex >= backend.items.count {
-            selectedIndex = backend.items.count - 1
+            searchText = ""
+        } else if selectedIndex > maxIndex {
+            selectedIndex = max(0, maxIndex)
         }
     }
 
     private func selectItem(at index: Int) {
-        if backend.selectAndPaste(at: index) {
+        guard index < filteredItems.count else { return }
+        let item = filteredItems[index]
+        guard let backendIdx = backend.items.firstIndex(where: { $0.id == item.id }) else { return }
+        if backend.selectAndPaste(at: backendIdx) {
             closePreview()
             onClose()
         }
