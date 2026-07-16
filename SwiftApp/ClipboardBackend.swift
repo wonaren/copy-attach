@@ -11,7 +11,11 @@ class ClipboardBackend: ObservableObject {
 
     private var timer: Timer?
     private var sourceAppTimer: Timer?
-    private let thumbnailCache = NSCache<NSNumber, NSImage>()
+    private let thumbnailCache: NSCache<NSNumber, NSImage> = {
+        let c = NSCache<NSNumber, NSImage>()
+        c.totalCostLimit = 30 * 1024 * 1024  // 30 MB
+        return c
+    }()
 
     private init() {
         permissionGranted = checkPermission()
@@ -197,8 +201,14 @@ class ClipboardBackend: ObservableObject {
             print("[ClipboardBackend] failed to decode thumbnail for dbId=\(dbId): PNG data is \(data.count) bytes but NSImage(data:) returned nil")
             return nil
         }
-        thumbnailCache.setObject(image, forKey: key)
+        // cost = decoded RGBA upper bound for a 300px-max-dimension thumbnail
+        thumbnailCache.setObject(image, forKey: key, cost: 300 * 300 * 4)
         return image
+    }
+
+    /// Immediately release all cached thumbnails.
+    func clearThumbnailCache() {
+        thumbnailCache.removeAllObjects()
     }
 
     func getImageThumb(at index: Int) -> Data? {

@@ -119,6 +119,7 @@ class HistoryPopupWindow: NSPanel {
         NotificationCenter.default.removeObserver(self, name: NSWindow.didResignKeyNotification, object: self)
         previewPanel?.close()
         previewPanel = nil
+        ClipboardBackend.shared.clearThumbnailCache()
         super.close()
         self.contentView = nil
         self.alphaValue = 1.0 // reset for next open
