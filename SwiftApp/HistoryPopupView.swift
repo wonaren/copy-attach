@@ -139,14 +139,24 @@ class PopupHostingView: NSHostingView<HistoryPopupContent> {
 
     override func keyDown(with event: NSEvent) {
         if event.keyCode == 51 || event.keyCode == 117 {
-            NotificationCenter.default.post(name: deleteKeyNotification, object: nil)
-            return
+            // Require Control (⌃) modifier for delete key (plain Backspace can cause confusion)
+            if event.modifierFlags.contains(.control) {
+                NotificationCenter.default.post(name: deleteKeyNotification, object: nil)
+                return
+            }
         }
         super.keyDown(with: event)
+    }
+
+    override func flagsChanged(with event: NSEvent) {
+        let controlPressed = event.modifierFlags.contains(.control)
+        NotificationCenter.default.post(name: controlKeyNotification, object: controlPressed)
+        super.flagsChanged(with: event)
     }
 }
 
 private let deleteKeyNotification = Notification.Name("PopupDeleteKeyPressed")
+private let controlKeyNotification = Notification.Name("PopupControlKeyChanged")
 
 // MARK: - SwiftUI Content for Popup — Native HUD Aesthetic
 
@@ -156,6 +166,7 @@ struct HistoryPopupContent: View {
     @StateObject private var backend = ClipboardBackend.shared
     @State private var selectedIndex: Int = 0
     @State private var showPreview: Bool = false
+    @State private var isControlPressed: Bool = false
     @FocusState private var isFocused: Bool
 
     // Design Tokens
@@ -220,12 +231,21 @@ struct HistoryPopupContent: View {
         }
         .onAppear {
             selectedIndex = 0
+            isControlPressed = NSEvent.modifierFlags.contains(.control)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                 isFocused = true
             }
         }
         .onDisappear {
             closePreview()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: controlKeyNotification)) { note in
+            let pressed = (note.object as? Bool) ?? NSEvent.modifierFlags.contains(.control)
+            if pressed != isControlPressed {
+                withAnimation(.easeInOut(duration: 0.15)) {
+                    isControlPressed = pressed
+                }
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: deleteKeyNotification)) { _ in
             deleteItem(at: selectedIndex)
@@ -321,7 +341,8 @@ struct HistoryPopupContent: View {
                     ForEach(Array(backend.items.enumerated()), id: \.element.id) { index, item in
                         ItemRowView(
                             item: item,
-                            isSelected: index == selectedIndex
+                            isSelected: index == selectedIndex,
+                            isDeleteModifierPressed: isControlPressed
                         )
                         .transition(.opacity)
                         .contentShape(Rectangle())
@@ -420,6 +441,7 @@ struct HistoryPopupContent: View {
 struct ItemRowView: View {
     let item: ClipboardItem
     let isSelected: Bool
+    let isDeleteModifierPressed: Bool
     @State private var isHovering = false
 
     private let whiteText = Color.white.opacity(0.9)
@@ -437,7 +459,14 @@ struct ItemRowView: View {
                 }
             }
             Spacer(minLength: 2)
-            if !item.sourceName.isEmpty {
+            if isSelected && isDeleteModifierPressed {
+                Image(systemName: "delete.left.fill")
+                    .font(.system(size: 13))
+                    .foregroundColor(whiteText)
+                    .frame(minWidth: 20, alignment: .center)
+                    .padding(.trailing, 6)
+                    .transition(.scale.combined(with: .opacity))
+            } else if !item.sourceName.isEmpty {
                 Text(item.sourceName)
                     .font(.system(size: 9.5, weight: .medium))
                     .foregroundColor(whiteText)
@@ -445,6 +474,7 @@ struct ItemRowView: View {
                     .padding(.horizontal, 2)
                     .padding(.vertical, 1.5)
                     .background(Capsule().fill(Color.black.opacity(0.2)))
+                    .transition(.scale.combined(with: .opacity))
             }
         }
         .padding(.horizontal, 2)
@@ -454,7 +484,7 @@ struct ItemRowView: View {
             Group {
                 if isSelected {
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .strokeBorder(Color(nsColor: .keyboardFocusIndicatorColor).opacity(0.8), lineWidth: 1)
+                        .strokeBorder(isDeleteModifierPressed ? Color(nsColor: .systemRed) : Color(nsColor: .keyboardFocusIndicatorColor).opacity(0.8), lineWidth: 1)
                 }
             }
         )
@@ -466,7 +496,8 @@ struct ItemRowView: View {
 
     private var rowBackground: some View {
         Group {
-            if isSelected { Color(nsColor: .controlAccentColor) }
+            if isSelected && isDeleteModifierPressed { Color(nsColor: .systemRed) }
+            else if isSelected { Color(nsColor: .controlAccentColor) }
             else if isHovering { Color.white.opacity(0.1) }
             else { Color(nsColor: .windowBackgroundColor).opacity(0.04) }
         }
