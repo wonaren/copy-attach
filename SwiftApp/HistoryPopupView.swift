@@ -517,24 +517,48 @@ struct ItemRowView: View {
                         .stroke(mutedText.opacity(0.25), style: StrokeStyle(lineWidth: 1, dash: [4, 4]))
                         .frame(height: 100)
                     VStack(spacing: 8) {
-                        Canvas { ctx, size in
-                            let r = CGRect(origin: .zero, size: size).insetBy(dx: 4, dy: 4)
-                            // Photo frame outline
-                            ctx.stroke(Path(roundedRect: r.insetBy(dx: 4, dy: 4), cornerRadius: 3),
-                                       with: .color(mutedText.opacity(0.3)), lineWidth: 1)
-                            // Crack lines
-                            var crack = Path()
-                            crack.move(to: CGPoint(x: r.minX + r.width * 0.15, y: r.minY + r.height * 0.05))
-                            crack.addLine(to: CGPoint(x: r.minX + r.width * 0.35, y: r.minY + r.height * 0.45))
-                            crack.addLine(to: CGPoint(x: r.minX + r.width * 0.55, y: r.minY + r.height * 0.35))
-                            crack.addLine(to: CGPoint(x: r.minX + r.width * 0.7, y: r.minY + r.height * 0.55))
-                            crack.addLine(to: CGPoint(x: r.minX + r.width * 0.85, y: r.minY + r.height * 0.93))
-                            ctx.stroke(crack, with: .color(.red.opacity(0.5)), lineWidth: 1.5)
+                        HStack(spacing: 12) {
+                            // Source: Image
+                            VStack(spacing: 4) {
+                                Image(systemName: "photo")
+                                    .font(.system(size: 18))
+                                    .foregroundColor(mutedText.opacity(0.8))
+                            }
+                            .frame(width: 36, height: 36)
+                            .background(Color.white.opacity(0.03))
+                            .cornerRadius(6)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .stroke(mutedText.opacity(0.15), lineWidth: 1)
+                            )
+
+                            // Flow/Processing Indicator
+                            VStack(spacing: 4) {
+                                Image(systemName: "arrow.right")
+                                    .font(.system(size: 14, weight: .bold))
+                                    .foregroundColor(mutedText.opacity(0.5))
+                                ProgressView()
+                                    .scaleEffect(0.6)
+                                    .frame(height: 10)
+                            }
+
+                            // Destination: Local
+                            VStack(spacing: 4) {
+                                Image(systemName: "desktopcomputer")
+                                    .font(.system(size: 18))
+                                    .foregroundColor(mutedText.opacity(0.8))
+                            }
+                            .frame(width: 36, height: 36)
+                            .background(Color.white.opacity(0.03))
+                            .cornerRadius(6)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .stroke(mutedText.opacity(0.15), lineWidth: 1)
+                            )
                         }
-                        .frame(width: 128, height: 64)
-                        Text("缩略图加载失败")
-                            .font(.system(size: 12))
-                            .foregroundColor(mutedText.opacity(0.5))
+                        Text("图片编码中")
+                            .font(.system(size: 11))
+                            .foregroundColor(mutedText.opacity(0.6))
                     }
                 }
                 .frame(maxWidth: .infinity)
