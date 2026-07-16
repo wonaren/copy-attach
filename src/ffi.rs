@@ -677,6 +677,27 @@ pub extern "C" fn clipboard_select_and_paste_by_id(entry_id: u64) -> c_int {
     select_and_paste_impl(item)
 }
 
+/// Load full text by entry ID (for on-demand preview loading).
+/// Returns null if entry_id is not found or is not a text entry.
+/// Caller must free with `clipboard_free_string()`.
+#[no_mangle]
+pub extern "C" fn clipboard_get_text_by_id(entry_id: u64) -> *mut c_char {
+    let b = match crate::backend::try_backend() {
+        Some(b) => b,
+        None => return std::ptr::null_mut(),
+    };
+    let hist = b.history.lock().unwrap();
+    for entry in hist.iter() {
+        match entry {
+            ClipboardEntry::Text { id, text, .. } if *id == entry_id => {
+                return CString::new(text.as_str()).unwrap_or_default().into_raw();
+            }
+            _ => {}
+        }
+    }
+    std::ptr::null_mut()
+}
+
 // ═══════════════════════════════════════════
 // History Management
 // ═══════════════════════════════════════════

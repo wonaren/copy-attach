@@ -53,6 +53,14 @@ class PreviewWindow: NSPanel {
     /// Update displayed content and resize window — called by popup on selection change.
     func updateContent(item: ClipboardItem) {
         guard hostingView.rootView.item.id != item.id else { return }
+
+        // Cross-fade content during transition
+        let fade = CATransition()
+        fade.duration = 0.15
+        fade.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        fade.type = .fade
+        hostingView.layer?.add(fade, forKey: kCATransition)
+
         hostingView.rootView = PreviewContent(item: item)
         resizeToFitContent(for: item)
     }
@@ -74,7 +82,12 @@ class PreviewWindow: NSPanel {
             x: centerAnchor.x - newSize.width / 2,
             y: centerAnchor.y - newSize.height / 2
         )
-        self.setFrame(NSRect(origin: newOrigin, size: newSize), display: true, animate: false)
+        let newFrame = NSRect(origin: newOrigin, size: newSize)
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.2
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            self.animator().setFrame(newFrame, display: true)
+        }
     }
 
     // MARK: - Auto-sizing

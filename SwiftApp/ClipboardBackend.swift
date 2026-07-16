@@ -11,6 +11,7 @@ class ClipboardBackend: ObservableObject {
 
     private var timer: Timer?
     private var sourceAppTimer: Timer?
+    private let reloadQueue = DispatchQueue(label: "com.copyattach.reload", qos: .userInitiated)
     private let thumbnailCache: NSCache<NSNumber, NSImage> = {
         let c = NSCache<NSNumber, NSImage>()
         c.totalCostLimit = 30 * 1024 * 1024  // 30 MB
@@ -78,76 +79,70 @@ class ClipboardBackend: ObservableObject {
     }
 
     private func reloadItems() {
-        // Acquire a consistent snapshot under a single Rust-side lock,
-        // then read all items from the snapshot (no further locking).
-        guard let snap = clipboard_snapshot_acquire() else { return }
-        defer { clipboard_snapshot_release(snap) }
+        reloadQueue.async {
+            guard let snap = clipboard_snapshot_acquire() else { return }
+            defer { clipboard_snapshot_release(snap) }
 
-        let c = Int(clipboard_snapshot_count(snap))
-        var newItems: [ClipboardItem] = []
+            let c = Int(clipboard_snapshot_count(snap))
+            var newItems: [ClipboardItem] = []
 
-        for i in 0..<c {
-            let type = Int(clipboard_snapshot_item_type(snap, Int32(i)))
-            let id = Int(clipboard_snapshot_item_id(snap, Int32(i)))
-            let timestamp = UInt64(clipboard_snapshot_item_timestamp(snap, Int32(i)))
+            for i in 0..<c {
+                let type = Int(clipboard_snapshot_item_type(snap, Int32(i)))
+                let id = Int(clipboard_snapshot_item_id(snap, Int32(i)))
+                let timestamp = UInt64(clipboard_snapshot_item_timestamp(snap, Int32(i)))
 
-            let label: String = {
-                guard let cStr = clipboard_snapshot_item_label(snap, Int32(i)) else { return "" }
-                let s = String(cString: cStr)
-                clipboard_free_string(cStr)
-                return s
-            }()
-
-            let sourceName: String = {
-                guard let cStr = clipboard_snapshot_item_source_name(snap, Int32(i)) else { return "" }
-                let s = String(cString: cStr)
-                clipboard_free_string(cStr)
-                return s
-            }()
-
-            let sourceBundleId: String = {
-                guard let cStr = clipboard_snapshot_item_source_bundle_id(snap, Int32(i)) else { return "" }
-                let s = String(cString: cStr)
-                clipboard_free_string(cStr)
-                return s
-            }()
-
-            switch type {
-            case 0: // Text
-                let text: String = {
-                    guard let cStr = clipboard_snapshot_item_text(snap, Int32(i)) else { return "" }
+                let label: String = {
+                    guard let cStr = clipboard_snapshot_item_label(snap, Int32(i)) else { return "" }
                     let s = String(cString: cStr)
                     clipboard_free_string(cStr)
                     return s
                 }()
-                newItems.append(.text(
-                    entryId: id,
-                    text: text,
-                    timestamp: timestamp,
-                    label: label,
-                    sourceName: sourceName,
-                    sourceBundleId: sourceBundleId
-                ))
-            case 1: // Image
-                let dbId = Int(clipboard_snapshot_get_image_db_id(snap, Int32(i)))
-                let w = Int(clipboard_snapshot_get_image_width(snap, Int32(i)))
-                let h = Int(clipboard_snapshot_get_image_height(snap, Int32(i)))
-                newItems.append(.image(
-                    entryId: id,
-                    dbId: dbId,
-                    width: w,
-                    height: h,
-                    timestamp: timestamp,
-                    label: label,
-                    sourceName: sourceName,
-                    sourceBundleId: sourceBundleId
-                ))
-            default:
-                break
+
+                let sourceName: String = {
+                    guard let cStr = clipboard_snapshot_item_source_name(snap, Int32(i)) else { return "" }
+                    let s = String(cString: cStr)
+                    clipboard_free_string(cStr)
+                    return s
+                }()
+
+                let sourceBundleId: String = {
+                    guard let cStr = clipboard_snapshot_item_source_bundle_id(snap, Int32(i)) else { return "" }
+                    let s = String(cString: cStr)
+                    clipboard_free_string(cStr)
+                    return s
+                }()
+
+                switch type {
+                case 0: // Text — use label as display text, defer full text to preview
+                    newItems.append(.text(
+                        entryId: id,
+                        text: label,
+                        timestamp: timestamp,
+                        label: label,
+                        sourceName: sourceName,
+                        sourceBundleId: sourceBundleId
+                    ))
+                case 1: // Image
+                    let dbId = Int(clipboard_snapshot_get_image_db_id(snap, Int32(i)))
+                    let w = Int(clipboard_snapshot_get_image_width(snap, Int32(i)))
+                    let h = Int(clipboard_snapshot_get_image_height(snap, Int32(i)))
+                    newItems.append(.image(
+                        entryId: id,
+                        dbId: dbId,
+                        width: w,
+                        height: h,
+                        timestamp: timestamp,
+                        label: label,
+                        sourceName: sourceName,
+                        sourceBundleId: sourceBundleId
+                    ))
+                default:
+                    break
+                }
             }
-        }
-        DispatchQueue.main.async {
-            self.items = newItems
+            DispatchQueue.main.async {
+                self.items = newItems
+            }
         }
     }
 
@@ -162,6 +157,13 @@ class ClipboardBackend: ObservableObject {
 
     func getText(at index: Int) -> String? {
         guard let cStr = clipboard_get_item_text(Int32(index)) else { return nil }
+        let str = String(cString: cStr)
+        clipboard_free_string(cStr)
+        return str
+    }
+
+    func getTextByEntryId(_ entryId: Int) -> String? {
+        guard let cStr = clipboard_get_text_by_id(UInt64(entryId)) else { return nil }
         let str = String(cString: cStr)
         clipboard_free_string(cStr)
         return str

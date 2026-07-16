@@ -246,7 +246,8 @@ struct HistoryPopupContent: View {
         guard selectedIndex < backend.items.count, let popup = popupWindow else { return }
         let item = backend.items[selectedIndex]
         let popupCenter = NSPoint(x: popup.frame.midX, y: popup.frame.midY)
-        let preview = PreviewWindow(item: item, centerAt: popupCenter)
+        guard let previewItem = fullTextItem(item) else { return }
+        let preview = PreviewWindow(item: previewItem, centerAt: popupCenter)
         popup.previewPanel = preview
         preview.orderFront(nil) // don't become key
         showPreview = true
@@ -262,7 +263,28 @@ struct HistoryPopupContent: View {
     private func updatePreviewContent() {
         guard showPreview, selectedIndex < backend.items.count,
               let preview = popupWindow?.previewPanel else { return }
-        preview.updateContent(item: backend.items[selectedIndex])
+        guard let previewItem = fullTextItem(backend.items[selectedIndex]) else {
+            closePreview()
+            return
+        }
+        preview.updateContent(item: previewItem)
+    }
+
+    /// Load full text for text items (snapshot only contains truncated label).
+    /// Returns nil if the full text cannot be loaded — caller should not open
+    /// or should close the preview.
+    private func fullTextItem(_ item: ClipboardItem) -> ClipboardItem? {
+        switch item {
+        case .text(let entryId, _, let timestamp, let label, let sourceName, let sourceBundleId):
+            guard let full = ClipboardBackend.shared.getTextByEntryId(entryId) else {
+                debugLog("fullTextItem: failed to load full text for entry \(entryId)")
+                return nil
+            }
+            return .text(entryId: entryId, text: full, timestamp: timestamp,
+                         label: label, sourceName: sourceName, sourceBundleId: sourceBundleId)
+        default:
+            return item
+        }
     }
 
     // MARK: - Item Count Bar

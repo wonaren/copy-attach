@@ -28,6 +28,9 @@ void clipboard_free_bytes(uint8_t* data, int32_t len);
 int32_t clipboard_select_and_paste(int32_t index);
 int32_t clipboard_select_and_paste_by_id(uint64_t entry_id);
 
+// ─── Lazy Text Loading (on-demand full text by entry ID) ───
+char* clipboard_get_text_by_id(uint64_t entry_id);
+
 // ─── Snapshot API (single-lock, race-free read) ───
 void* clipboard_snapshot_acquire(void);
 int32_t clipboard_snapshot_count(void* snap);
