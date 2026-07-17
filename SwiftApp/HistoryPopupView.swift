@@ -166,6 +166,7 @@ struct HistoryPopupContent: View {
     @State private var selectedIndex: Int = 0  // 0 = search bar, 1+ = items
     @State private var showPreview: Bool = false
     @State private var isControlPressed: Bool = false
+    @State private var suppressListScroll: Bool = false
     @State private var searchText: String = ""
     @FocusState private var isSearchFocused: Bool
     @FocusState private var isContainerFocused: Bool
@@ -442,8 +443,13 @@ struct HistoryPopupContent: View {
                         )
                         .contentShape(Rectangle())
                         .onTapGesture {
-                            selectedIndex = index + 1
-                            selectItem(at: index)
+                            let itemIdx = index + 1
+                            if selectedIndex == itemIdx {
+                                selectItem(at: index)
+                            } else {
+                                suppressListScroll = true
+                                selectedIndex = itemIdx
+                            }
                         }
                         .id(item.id)
                     }
@@ -458,6 +464,13 @@ struct HistoryPopupContent: View {
             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
             .scrollIndicators(.hidden)
             .onChange(of: selectedIndex) { _, newValue in
+                if suppressListScroll {
+                    suppressListScroll = false
+                    if newValue > 0 {
+                        updatePreviewContent()
+                    }
+                    return
+                }
                 if newValue == 0 {
                     if showPreview { closePreview() }
                     // Scroll to top so first search results are visible.
