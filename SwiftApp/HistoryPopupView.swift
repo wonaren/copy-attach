@@ -67,6 +67,11 @@ class HistoryPopupWindow: NSPanel {
         }
 
         self.level = .floating
+
+        // Start invisible: window alpha handles the entire fade (including shadow),
+        // while SwiftUI handles the scale pop. Together they match Spotlight's
+        // unified window + content appearance.
+        self.alphaValue = 0
         self.orderFrontRegardless()
         self.makeKey()
 
@@ -96,8 +101,8 @@ class HistoryPopupWindow: NSPanel {
         previewPanel = nil
 
         NSAnimationContext.runAnimationGroup({ ctx in
-            ctx.duration = 0.15
-            ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            ctx.duration = 0.12
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
             self.animator().alphaValue = 0
         }, completionHandler: { [weak self] in
             guard let self = self else { return }
@@ -168,6 +173,10 @@ struct HistoryPopupContent: View {
     @State private var isControlPressed: Bool = false
     @State private var suppressListScroll: Bool = false
     @State private var searchText: String = ""
+
+    // Spotlight opening animation: start slightly larger, spring in
+    @State private var openingScale: CGFloat = 1.10
+
     @FocusState private var isSearchFocused: Bool
     @FocusState private var isContainerFocused: Bool
 
@@ -217,6 +226,7 @@ struct HistoryPopupContent: View {
                 .padding(.all, 3)
             }
         }
+        .scaleEffect(openingScale, anchor: .center)
         .frame(width: popupWidth, height: popupHeight)
         .focusable()
         .focusEffectDisabled()
@@ -257,7 +267,27 @@ struct HistoryPopupContent: View {
             selectedIndex = 0
             searchText = ""
             isControlPressed = NSEvent.modifierFlags.contains(.control)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+
+            // Spotlight opening: spring scale with slight overshoot
+            let animDuration = 0.3
+            withAnimation(.spring(response: animDuration * 0.7,
+                                  dampingFraction: 0.62,
+                                  blendDuration: 0)) {
+                openingScale = 1.0
+            }
+
+            // Sync window alpha fade with the SwiftUI scale animation,
+            // so the entire window (including shadow) appears as one unit.
+            if let w = popupWindow {
+                NSAnimationContext.runAnimationGroup { ctx in
+                    ctx.duration = animDuration
+                    ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                    w.animator().alphaValue = 1
+                }
+            }
+
+            // Focus search field after animation completes
+            DispatchQueue.main.asyncAfter(deadline: .now() + animDuration + 0.05) {
                 isSearchFocused = true
             }
         }
@@ -572,8 +602,13 @@ struct ItemRowView: View {
     let isDeleteModifierPressed: Bool
     @State private var isHovering = false
 
-    private let whiteText = Color.white.opacity(0.9)
+    private func textColor(_ isSelected: Bool) -> Color {
+        isSelected ? Color.white : Color.white.opacity(0.9)
+    }
     private let mutedText = Color.white.opacity(0.6)
+    private func sourceNameColor(_ isSelected: Bool) -> Color {
+        isSelected ? Color.white.opacity(0.9) : Color.white.opacity(0.7)
+    }
 
     var body: some View {
         HStack(alignment: .center, spacing: 2) {
@@ -590,14 +625,14 @@ struct ItemRowView: View {
             if isSelected && isDeleteModifierPressed {
                 Image(systemName: "delete.left.fill")
                     .font(.system(size: 13))
-                    .foregroundColor(whiteText)
+                    .foregroundColor(Color.white)
                     .frame(minWidth: 20, alignment: .center)
                     .padding(.trailing, 6)
                     .transition(.scale.combined(with: .opacity))
             } else if !item.sourceName.isEmpty {
                 Text(item.sourceName)
                     .font(.system(size: 9.5, weight: .medium))
-                    .foregroundColor(whiteText)
+                    .foregroundColor(sourceNameColor(isSelected))
                     .lineLimit(1)
                     .padding(.horizontal, 2)
                     .padding(.vertical, 1.5)
@@ -657,8 +692,8 @@ struct ItemRowView: View {
             display = "\(prefix)……\(suffix)"
         } else { display = stripped }
         return Text(display)
-            .font(.system(size: 13, weight: isSelected ? .medium : .regular))
-            .foregroundColor(whiteText).lineLimit(1)
+            .font(.system(size: 13, weight: .regular))
+            .foregroundColor(textColor(isSelected)).lineLimit(1)
             .frame(maxWidth: .infinity, alignment: .leading)
     }
 
