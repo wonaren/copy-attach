@@ -173,6 +173,8 @@ struct HistoryPopupContent: View {
     @State private var isControlPressed: Bool = false
     @State private var suppressListScroll: Bool = false
     @State private var searchText: String = ""
+    @State private var effectiveSearchText: String = ""
+    @State private var searchTask: Task<Void, Never>?
 
     // Spotlight opening animation: start slightly larger, spring in
     @State private var openingScale: CGFloat = 1.10
@@ -180,13 +182,13 @@ struct HistoryPopupContent: View {
     @FocusState private var isSearchFocused: Bool
     @FocusState private var isContainerFocused: Bool
 
-    /// Items filtered by search text. When searchText is empty, returns all items.
+    /// Items filtered by search text. When effectiveSearchText is empty, returns all items.
     private var filteredItems: [ClipboardItem] {
-        guard !searchText.isEmpty else { return backend.items }
-        let query = searchText.lowercased()
+        guard !effectiveSearchText.isEmpty else { return backend.items }
         return backend.items.filter {
-            $0.label.lowercased().contains(query) ||
-            $0.sourceName.lowercased().contains(query)
+            $0.label.localizedCaseInsensitiveContains(effectiveSearchText) ||
+            $0.sourceName.localizedCaseInsensitiveContains(effectiveSearchText) ||
+            $0.fullText.localizedCaseInsensitiveContains(effectiveSearchText)
         }
     }
 
@@ -216,7 +218,7 @@ struct HistoryPopupContent: View {
                         .padding(.horizontal, 5)
                         .padding(.top, 6)
 
-                    if filteredItems.isEmpty && !searchText.isEmpty {
+                    if filteredItems.isEmpty && !effectiveSearchText.isEmpty {
                         noResultsView
                     } else {
                         itemsList
@@ -307,8 +309,24 @@ struct HistoryPopupContent: View {
                 deleteItem(at: selectedIndex - 1)
             }
         }
-        .onChange(of: searchText) { _, _ in
+        .onChange(of: searchText) { _, newValue in
             selectedIndex = 0
+            searchTask?.cancel()
+            if newValue.isEmpty {
+                withAnimation(.easeInOut(duration: 0.12)) {
+                    effectiveSearchText = ""
+                }
+                return
+            }
+            searchTask = Task {
+                try? await Task.sleep(nanoseconds: 80_000_000)
+                guard !Task.isCancelled else { return }
+                await MainActor.run {
+                    withAnimation(.easeInOut(duration: 0.12)) {
+                        effectiveSearchText = newValue
+                    }
+                }
+            }
         }
         .onChange(of: selectedIndex) { _, newValue in
             if newValue == 0 {
@@ -376,6 +394,7 @@ struct HistoryPopupContent: View {
                 .foregroundColor(.white.opacity(0.35))
             Spacer()
         }
+        .transition(.opacity)
     }
 
     // MARK: - Preview Management
@@ -416,13 +435,13 @@ struct HistoryPopupContent: View {
 
     private func fullTextItem(_ item: ClipboardItem) -> ClipboardItem? {
         switch item {
-        case .text(let entryId, _, let timestamp, let label, let sourceName, let sourceBundleId):
+        case .text(let entryId, _, let timestamp, let label, let sourceName, let sourceBundleId, _):
             guard let full = ClipboardBackend.shared.getTextByEntryId(entryId) else {
                 debugLog("fullTextItem: failed to load full text for entry \(entryId)")
                 return nil
             }
             return .text(entryId: entryId, text: full, timestamp: timestamp,
-                         label: label, sourceName: sourceName, sourceBundleId: sourceBundleId)
+                         label: label, sourceName: sourceName, sourceBundleId: sourceBundleId, fullText: full)
         default:
             return item
         }
@@ -432,7 +451,7 @@ struct HistoryPopupContent: View {
 
     private var itemCountBar: some View {
         HStack(spacing: 4) {
-            if searchText.isEmpty {
+            if effectiveSearchText.isEmpty {
                 Text("\(backend.items.count) 项")
                     .font(.system(size: 10, weight: .medium))
                     .foregroundColor(.white.opacity(0.7))
@@ -482,6 +501,7 @@ struct HistoryPopupContent: View {
                             }
                         }
                         .id(item.id)
+                        .transition(.opacity)
                     }
                 }
                 .padding(.all, 2)
@@ -615,7 +635,7 @@ struct ItemRowView: View {
             appIcon
             VStack(alignment: .leading, spacing: 0) {
                 switch item {
-                case .text(_, let text, _, _, _, _):
+                case .text(_, let text, _, _, _, _, _):
                     textContent(text)
                 case .image(_, let dbId, let width, let height, _, _, _, _):
                     imageContent(dbId: dbId, width: width, height: height)

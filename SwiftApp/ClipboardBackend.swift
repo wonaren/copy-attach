@@ -113,14 +113,21 @@ class ClipboardBackend: ObservableObject {
                 }()
 
                 switch type {
-                case 0: // Text — use label as display text, defer full text to preview
+                case 0: // Text
+                    let fullText: String = {
+                        guard let cStr = clipboard_snapshot_item_text(snap, Int32(i)) else { return label }
+                        let s = String(cString: cStr)
+                        clipboard_free_string(cStr)
+                        return s
+                    }()
                     newItems.append(.text(
                         entryId: id,
                         text: label,
                         timestamp: timestamp,
                         label: label,
                         sourceName: sourceName,
-                        sourceBundleId: sourceBundleId
+                        sourceBundleId: sourceBundleId,
+                        fullText: fullText
                     ))
                 case 1: // Image
                     let dbId = Int(clipboard_snapshot_get_image_db_id(snap, Int32(i)))
@@ -307,41 +314,48 @@ class ClipboardBackend: ObservableObject {
 // MARK: - Item Types
 
 enum ClipboardItem: Identifiable {
-    case text(entryId: Int, text: String, timestamp: UInt64, label: String, sourceName: String, sourceBundleId: String)
+    case text(entryId: Int, text: String, timestamp: UInt64, label: String, sourceName: String, sourceBundleId: String, fullText: String)
     case image(entryId: Int, dbId: Int, width: Int, height: Int, timestamp: UInt64, label: String, sourceName: String, sourceBundleId: String)
 
     var id: Int {
         switch self {
-        case .text(let entryId, _, _, _, _, _): return entryId
+        case .text(let entryId, _, _, _, _, _, _): return entryId
         case .image(let entryId, _, _, _, _, _, _, _): return entryId
         }
     }
 
     var label: String {
         switch self {
-        case .text(_, _, _, let label, _, _): return label
+        case .text(_, _, _, let label, _, _, _): return label
         case .image(_, _, _, _, _, let label, _, _): return label
         }
     }
 
     var timestamp: UInt64 {
         switch self {
-        case .text(_, _, let ts, _, _, _): return ts
+        case .text(_, _, let ts, _, _, _, _): return ts
         case .image(_, _, _, _, let ts, _, _, _): return ts
         }
     }
 
     var sourceName: String {
         switch self {
-        case .text(_, _, _, _, let sn, _): return sn
+        case .text(_, _, _, _, let sn, _, _): return sn
         case .image(_, _, _, _, _, _, let sn, _): return sn
         }
     }
 
     var sourceBundleId: String {
         switch self {
-        case .text(_, _, _, _, _, let sbid): return sbid
+        case .text(_, _, _, _, _, let sbid, _): return sbid
         case .image(_, _, _, _, _, _, _, let sbid): return sbid
+        }
+    }
+
+    var fullText: String {
+        switch self {
+        case .text(_, _, _, _, _, _, let ft): return ft
+        case .image: return ""
         }
     }
 

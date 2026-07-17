@@ -97,7 +97,7 @@ class PreviewWindow: NSPanel {
         let maxH = screenFrame.height * 0.85
 
         switch item {
-        case .text(let entryId, let text, _, _, _, _):
+        case .text(let entryId, let text, _, _, _, _, _):
             let pad: CGFloat = 32
             let font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
             // Find the longest line in the text to determine adaptive window width
@@ -162,7 +162,7 @@ struct PreviewContent: View {
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
 
             switch item {
-            case .text(_, let text, _, _, _, _):
+            case .text(_, let text, _, _, _, _, _):
                 LargeTextView(text: text)
             case .image(_, let dbId, _, _, _, _, _, _):
                 imageContent(dbId: dbId)
