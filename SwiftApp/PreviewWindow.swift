@@ -110,8 +110,8 @@ class PreviewWindow: NSPanel {
             return NSSize(width: textWidth, height: max(totalH, 100))
 
         case .image(_, _, let w, let h, _, _, _, _):
-            // Cap display height at 500; don't upscale images shorter than that.
-            let capH: CGFloat = 500
+            // Cap display height at 720; don't upscale images shorter than that.
+            let capH: CGFloat = 720
             let displayH = CGFloat(h) < capH ? CGFloat(h) : capH
             let aspect = CGFloat(w) / CGFloat(h)
             let displayW = displayH * aspect
