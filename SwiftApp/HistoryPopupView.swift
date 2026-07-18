@@ -635,8 +635,8 @@ struct ItemRowView: View {
             appIcon
             VStack(alignment: .leading, spacing: 0) {
                 switch item {
-                case .text(_, let text, _, _, _, _, _):
-                    textContent(text)
+                case .text(_, _, _, _, _, _, let fullText):
+                    textContent(fullText)
                 case .image(_, let dbId, let width, let height, _, _, _, _):
                     imageContent(dbId: dbId, width: width, height: height)
                 }
@@ -700,17 +700,18 @@ struct ItemRowView: View {
     }
 
     private func textContent(_ text: String) -> some View {
-        let stripped = text.components(separatedBy: .newlines)
+        let displayText = text
+            .components(separatedBy: .newlines)
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
-            .joined(separator: " ")
+            .joined(separator: "⏎")
         let display: String
-        let visualLen = visualWidth(stripped)
+        let visualLen = visualWidth(displayText)
         if visualLen > 60 {
-            let prefix = String(stripped.prefix(whileVisualWidth: 30))
-            let suffix = String(stripped.suffix(whileVisualWidth: 30))
+            let prefix = String(displayText.prefix(whileVisualWidth: 30))
+            let suffix = String(displayText.suffix(whileVisualWidth: 30))
             display = "\(prefix)……\(suffix)"
-        } else { display = stripped }
+        } else { display = displayText }
         return Text(display)
             .font(.system(size: 13, weight: .regular))
             .foregroundColor(textColor(isSelected)).lineLimit(1)

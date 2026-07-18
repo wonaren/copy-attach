@@ -883,26 +883,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         private var aboutTab: some View {
             ScrollView {
                 VStack(spacing: 16) {
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 18)
-                            .fill(LinearGradient(
-                                gradient: Gradient(colors: [
-                                    Color(red: 0.66, green: 0.33, blue: 0.97),
-                                    Color(red: 0.39, green: 0.40, blue: 0.95)
-                                ]),
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            ))
-                            .frame(width: 80, height: 80)
-                            .shadow(color: Color(red: 0.39, green: 0.40, blue: 0.95).opacity(0.3), radius: 12, y: 4)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 18)
-                                    .stroke(Color.white.opacity(0.1), lineWidth: 1)
-                            )
-                        Image(systemName: "clipboard")
-                            .font(.system(size: 36, weight: .medium))
-                            .foregroundColor(.white)
-                    }
+                    Image(nsImage: .appIcon)
+                        .resizable()
+                        .frame(width: 80, height: 80)
+                        .clipShape(RoundedRectangle(cornerRadius: 18))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 18)
+                                .stroke(Color.white.opacity(0.1), lineWidth: 1)
+                        )
+                        .shadow(color: .black.opacity(0.2), radius: 8, y: 4)
 
                     VStack(spacing: 4) {
                         Text("CopyAttach")
