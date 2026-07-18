@@ -106,7 +106,7 @@ dependencies = [
 
 [[package]]
 name = "copy-attach"
-version = "0.51.0-beta"
+version = "0.52.0-beta"
 dependencies = [
  "arboard",
  "base64",

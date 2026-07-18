@@ -16,7 +16,7 @@ class HistoryPopupWindow: NSPanel {
         // misaligning it with the preview window which uses visibleFrame.
         let screenFrame = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 800, height: 600)
         let popupWidth: CGFloat = 520
-        let popupHeight: CGFloat = 620
+        let popupHeight: CGFloat = 744
         let x = screenFrame.origin.x + (screenFrame.size.width - popupWidth) / 2
         let y = screenFrame.origin.y + (screenFrame.size.height - popupHeight) / 2
 
@@ -197,7 +197,7 @@ struct HistoryPopupContent: View {
 
     // Design Tokens
     private let popupWidth: CGFloat = 500
-    private let popupHeight: CGFloat = 600
+    private let popupHeight: CGFloat = 720
 
     private var popupWindow: HistoryPopupWindow? {
         NSApp.windows.first(where: { $0 is HistoryPopupWindow }) as? HistoryPopupWindow
@@ -712,10 +712,80 @@ struct ItemRowView: View {
             let suffix = String(displayText.suffix(whileVisualWidth: 30))
             display = "\(prefix)……\(suffix)"
         } else { display = displayText }
-        return Text(display)
+        return coloredLabel(display)
             .font(.system(size: 13, weight: .regular))
-            .foregroundColor(textColor(isSelected)).lineLimit(1)
+            .foregroundColor(textColor(isSelected))
+            .lineLimit(1)
             .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// Build a Text view with inline color swatches for hex color codes.
+    private func coloredLabel(_ text: String) -> Text {
+        let pattern = try! NSRegularExpression(pattern: "#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})\\b")
+        let nsRange = NSRange(text.startIndex..., in: text)
+        let matches = pattern.matches(in: text, range: nsRange)
+
+        if matches.isEmpty { return Text(text) }
+
+        var result = Text("")
+        var lastEnd = text.startIndex
+
+        for match in matches {
+            guard let range = Range(match.range, in: text) else { continue }
+            // Text before this color code
+            if lastEnd < range.lowerBound {
+                result = result + Text(String(text[lastEnd..<range.lowerBound]))
+            }
+            // Color code with swatch
+            let code = String(text[range])
+            if let color = parseHexColor(code),
+               let swatch = createColorSwatchImage(color) {
+                result = result + Text(Image(nsImage: swatch)) + Text(code)
+            } else {
+                result = result + Text(code)
+            }
+            lastEnd = range.upperBound
+        }
+
+        if lastEnd < text.endIndex {
+            result = result + Text(String(text[lastEnd...]))
+        }
+
+        return result
+    }
+
+    /// Parse a hex color string (#RGB or #RRGGBB) into NSColor.
+    private func parseHexColor(_ hex: String) -> NSColor? {
+        var h = hex
+        if h.hasPrefix("#") { h = String(h.dropFirst()) }
+        guard let value = UInt64(h, radix: 16) else { return nil }
+        switch h.count {
+        case 3:
+            let r = CGFloat((value >> 8) & 0xF) / 15.0
+            let g = CGFloat((value >> 4) & 0xF) / 15.0
+            let b = CGFloat(value & 0xF) / 15.0
+            return NSColor(red: r, green: g, blue: b, alpha: 1.0)
+        case 6:
+            let r = CGFloat((value >> 16) & 0xFF) / 255.0
+            let g = CGFloat((value >> 8) & 0xFF) / 255.0
+            let b = CGFloat(value & 0xFF) / 255.0
+            return NSColor(red: r, green: g, blue: b, alpha: 1.0)
+        default:
+            return nil
+        }
+    }
+
+    /// Create a small rounded square image filled with the given color.
+    private func createColorSwatchImage(_ color: NSColor) -> NSImage? {
+        let size = NSSize(width: 10, height: 10)
+        let image = NSImage(size: size)
+        image.lockFocus()
+        color.setFill()
+        let path = NSBezierPath(roundedRect: NSRect(origin: .zero, size: size),
+                                xRadius: 2, yRadius: 2)
+        path.fill()
+        image.unlockFocus()
+        return image
     }
 
     private func imageContent(dbId: Int, width: Int, height: Int) -> some View {

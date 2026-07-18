@@ -651,13 +651,13 @@ fn select_and_paste_impl(mut item: ClipboardEntry) -> c_int {
     thread::sleep(Duration::from_millis(50));
     #[cfg(target_os = "macos")]
     {
-        if !macos::check_permission() {
-            eprintln!("CopyAttach: paste skipped — accessibility permission not granted. Open System Settings → Privacy & Security → Accessibility and add/enable CopyAttach.");
-            return 0;
-        }
-        if !macos::simulate_cmd_v(front_pid) {
-            eprintln!("CopyAttach: simulate_cmd_v failed");
-            return 0;
+        if macos::check_permission() {
+            if !macos::simulate_cmd_v(front_pid) {
+                eprintln!("CopyAttach: simulate_cmd_v failed");
+                return 0;
+            }
+        } else {
+            eprintln!("CopyAttach: accessibility permission not granted — clipboard copied but paste skipped");
         }
     }
     1
