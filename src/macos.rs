@@ -8,7 +8,7 @@ use std::ffi::c_int;
 use std::process::Command;
 use objc2::msg_send;
 use objc2_core_graphics::{
-    CGEvent, CGEventFlags, CGEventSource, CGEventSourceStateID, CGEventTapLocation,
+    CGEvent, CGEventFlags, CGEventSource, CGEventSourceStateID,
 };
 
 #[link(name = "ApplicationServices", kind = "framework")]
@@ -43,9 +43,14 @@ pub(crate) fn pasteboard_change_count() -> Option<i64> {
     }
 }
 
-/// Simulate Cmd+V key press via CGEventPost.
-/// Returns `true` if the events were posted successfully.
-pub(crate) fn simulate_cmd_v() -> bool {
+/// Simulate Cmd+V key press via CGEventPostToPid.
+/// `pid` must be the frontmost application's process identifier (> 0).
+/// Returns `false` if pid is 0 or event creation fails.
+pub(crate) fn simulate_cmd_v(pid: i32) -> bool {
+    if pid <= 0 {
+        eprintln!("CopyAttach: simulate_cmd_v: no target PID (frontmost app unknown)");
+        return false;
+    }
     let source = CGEventSource::new(CGEventSourceStateID::Private);
     let source = source.as_ref().map(|s| &**s);
     let key_down = CGEvent::new_keyboard_event(source, 9, true);
@@ -53,9 +58,10 @@ pub(crate) fn simulate_cmd_v() -> bool {
     match (key_down, key_up) {
         (Some(kd), Some(ku)) => {
             CGEvent::set_flags(Some(&*kd), CGEventFlags::MaskCommand);
-            CGEvent::post(CGEventTapLocation::SessionEventTap, Some(&*kd));
             CGEvent::set_flags(Some(&*ku), CGEventFlags::MaskCommand);
-            CGEvent::post(CGEventTapLocation::SessionEventTap, Some(&*ku));
+
+            CGEvent::post_to_pid(pid, Some(&*kd));
+            CGEvent::post_to_pid(pid, Some(&*ku));
             true
         }
         _ => {

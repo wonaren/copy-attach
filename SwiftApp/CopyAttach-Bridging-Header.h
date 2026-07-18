@@ -51,7 +51,7 @@ uint8_t* clipboard_get_image_thumb_by_db_id(int64_t db_id, int32_t* out_len);
 uint8_t* clipboard_get_image_full_by_db_id(int64_t db_id, int32_t* out_len);
 
 // ─── Source App ───
-void clipboard_set_source_app(const char* name, const char* bundle_id);
+void clipboard_set_source_app(const char* name, const char* bundle_id, int32_t pid);
 char* clipboard_get_item_source_name(int32_t index);
 char* clipboard_get_item_source_bundle_id(int32_t index);
 

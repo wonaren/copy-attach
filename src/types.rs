@@ -5,6 +5,7 @@
 pub(crate) struct SourceApp {
     pub(crate) name: String,
     pub(crate) bundle_id: String,
+    pub(crate) pid: i32,
 }
 
 /// A clipboard history entry.

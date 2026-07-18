@@ -257,7 +257,7 @@ pub extern "C" fn clipboard_cleanup() {
 // ═══════════════════════════════════════════
 
 #[no_mangle]
-pub extern "C" fn clipboard_set_source_app(name: *const c_char, bundle_id: *const c_char) {
+pub extern "C" fn clipboard_set_source_app(name: *const c_char, bundle_id: *const c_char, pid: i32) {
     let name = if name.is_null() { String::new() } else {
         unsafe { CStr::from_ptr(name) }.to_string_lossy().into_owned()
     };
@@ -268,6 +268,7 @@ pub extern "C" fn clipboard_set_source_app(name: *const c_char, bundle_id: *cons
         let mut src = b.source_app.lock().unwrap();
         src.name = name;
         src.bundle_id = bundle_id;
+        src.pid = pid;
     }
 }
 
@@ -642,9 +643,23 @@ fn select_and_paste_impl(mut item: ClipboardEntry) -> c_int {
         }
     }
 
+    let front_pid = crate::backend::try_backend()
+        .and_then(|b| b.source_app.lock().ok())
+        .map(|src| src.pid)
+        .unwrap_or(0);
+
     thread::sleep(Duration::from_millis(50));
     #[cfg(target_os = "macos")]
-    { if macos::check_permission() && !macos::simulate_cmd_v() { return 0; } }
+    {
+        if !macos::check_permission() {
+            eprintln!("CopyAttach: paste skipped — accessibility permission not granted. Open System Settings → Privacy & Security → Accessibility and add/enable CopyAttach.");
+            return 0;
+        }
+        if !macos::simulate_cmd_v(front_pid) {
+            eprintln!("CopyAttach: simulate_cmd_v failed");
+            return 0;
+        }
+    }
     1
 }
 

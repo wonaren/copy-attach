@@ -65,7 +65,8 @@ class ClipboardBackend: ObservableObject {
         if let app = NSWorkspace.shared.frontmostApplication {
             let name = app.localizedName ?? "Unknown"
             let bundleId = app.bundleIdentifier ?? "unknown"
-            clipboard_set_source_app(name, bundleId)
+            let pid = Int32(app.processIdentifier)
+            clipboard_set_source_app(name, bundleId, pid)
         }
     }
 
