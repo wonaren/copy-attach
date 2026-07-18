@@ -1,14 +1,16 @@
 import AppKit
 import SwiftUI
+import ServiceManagement
 
 /// Main entry point for the CopyAttach macOS app.
 @main
 struct ClipboardManagerApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
+    @AppStorage("ShowMenuBarIcon") private var showMenuBarIcon = true
 
     var body: some Scene {
         // Menu bar
-        MenuBarExtra("剪贴板", systemImage: "clipboard") {
+        MenuBarExtra("剪贴板", systemImage: "clipboard", isInserted: $showMenuBarIcon) {
             AppMenuBarContent()
         }
         .menuBarExtraStyle(.menu)
@@ -120,205 +122,541 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private struct InlineSettingsView: View {
         @StateObject private var backend = ClipboardBackend.shared
         @StateObject private var hotkeyManager = HotkeyManager.shared
+        @State private var selectedTab = 0
         @State private var launchAtLogin = UserDefaults.standard.bool(forKey: "LaunchAtLogin")
         @State private var runInBackground = UserDefaults.standard.bool(forKey: "RunInBackground") != false
+        @State private var showMenuBarIcon = UserDefaults.standard.bool(forKey: "ShowMenuBarIcon") != false
         @State private var cleanupThreshold: Double = {
             let saved = UserDefaults.standard.integer(forKey: "CleanupThreshold")
             return Double(saved >= 100 ? saved : 3000)
         }()
+        @State private var ignoredApps: [String] = UserDefaults.standard.stringArray(forKey: "IgnoredApps") ?? ["1Password", "Keychain Access", "System Settings"]
+        @State private var ignoreShortText = UserDefaults.standard.bool(forKey: "IgnoreShortText")
+        @State private var shortTextThreshold = UserDefaults.standard.integer(forKey: "ShortTextThreshold") != 0 ? UserDefaults.standard.integer(forKey: "ShortTextThreshold") : 3
+        @State private var ignoreProtectedWindows = UserDefaults.standard.bool(forKey: "IgnoreProtectedWindows") != false
+        @State private var pendingThreshold: Int? = nil
+        @State private var thresholdBeforeEdit: Double = 3000
         
         var body: some View {
-            ScrollView {
-                VStack(spacing: 16) {
-                    header
-                    permissionCard
-                    hotkeyCard
-                    generalCard
-                    statsCard
-                    tipsCard
-                }
-                .padding(16)
+            VStack(spacing: 0) {
+                tabBar
+                Divider()
+                    .frame(height: 1)
+                    .background(Color(nsColor: NSColor(calibratedRed: 0.25, green: 0.25, blue: 0.27, alpha: 1.0)))
+                tabContent
             }
-            .frame(width: 420, height: 620)
-            .background(Color(NSColor(calibratedRed: 0.12, green: 0.12, blue: 0.13, alpha: 1.0)))
+            .frame(width: 520, height: 600)
+            .background(Color(nsColor: NSColor(calibratedRed: 0.12, green: 0.12, blue: 0.13, alpha: 1.0)))
         }
-        
+
         private var textCount: Int { backend.items.filter { $0.isText }.count }
         private var imageCount: Int { backend.items.filter { $0.isImage }.count }
-        
+
         private var appVersion: String {
             (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "0.0"
         }
 
-        private var header: some View {
-            HStack {
-                Image(nsImage: .appIcon)
-                    .resizable()
-                    .frame(width: 48, height: 48)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("CopyAttach").font(.system(size: 18, weight: .bold)).foregroundColor(.white)
-                    Text("v\(appVersion)").font(.system(size: 11)).foregroundColor(.gray)
+        private var textPct: CGFloat {
+            let threshold = CGFloat(max(Int(cleanupThreshold), 1))
+            return CGFloat(textCount) / threshold
+        }
+        private var imagePct: CGFloat {
+            let threshold = CGFloat(max(Int(cleanupThreshold), 1))
+            return CGFloat(imageCount) / threshold
+        }
+
+        private let tabTitles = ["通用", "快捷键", "存储", "忽略", "关于"]
+        private let tabIcons = ["gearshape", "keyboard", "externaldrive", "eye.slash", "info.circle"]
+
+        // MARK: - Tab Bar
+        @State private var hoveredTab: Int? = nil
+
+        private var tabBar: some View {
+            HStack(spacing: 4) {
+                Spacer()
+                ForEach(0..<5, id: \.self) { i in
+                    Button {
+                        selectedTab = i
+                    } label: {
+                        VStack(spacing: 4) {
+                            Image(systemName: tabIcons[i])
+                                .font(.system(size: 15, weight: .medium))
+                            Text(tabTitles[i])
+                                .font(.system(size: 10.5, weight: .medium))
+                        }
+                        .frame(width: 72)
+                        .padding(.vertical, 10)
+                        .background(
+                            selectedTab == i
+                            ? Color.accentColor.opacity(0.12)
+                            : hoveredTab == i ? Color.white.opacity(0.06) : Color.clear
+                        )
+                        .cornerRadius(8)
+                        .overlay(
+                            selectedTab == i
+                            ? RoundedRectangle(cornerRadius: 8).stroke(Color.accentColor, lineWidth: 1)
+                            : nil
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundColor(
+                        selectedTab == i
+                        ? Color.accentColor
+                        : hoveredTab == i
+                        ? Color(nsColor: NSColor(calibratedRed: 0.75, green: 0.75, blue: 0.78, alpha: 1.0))
+                        : Color(nsColor: NSColor(calibratedRed: 0.6, green: 0.6, blue: 0.62, alpha: 1.0))
+                    )
+                    .onHover { hovering in
+                        hoveredTab = hovering ? i : nil
+                    }
                 }
                 Spacer()
             }
+            .padding(.vertical, 10)
+            .background(Color(nsColor: NSColor(calibratedRed: 0.14, green: 0.14, blue: 0.15, alpha: 1.0)))
         }
-        
-        private var permissionCard: some View {
-            settingsCard {
-                HStack(spacing: 14) {
-                    Image(systemName: backend.permissionGranted ? "checkmark.shield.fill" : "exclamationmark.shield.fill")
-                        .font(.system(size: 20))
-                        .foregroundColor(backend.permissionGranted ? .green : .orange)
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(backend.permissionGranted ? "辅助功能：已授权" : "辅助功能：未授权")
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundColor(backend.permissionGranted ? .green : .orange)
-                        Text(backend.permissionGranted
-                             ? "按 \(hotkeyManager.config.displayString) 打开剪贴板历史"
-                             : "应用需要辅助功能权限才能使用全局快捷键和自动粘贴")
-                            .font(.system(size: 11)).foregroundColor(.secondary)
-                    }
-                    Spacer()
+
+        // MARK: - Tab Content Router
+        private var tabContent: some View {
+            Group {
+                if selectedTab == 0 { generalTab }
+                else if selectedTab == 1 { shortcutsTab }
+                else if selectedTab == 2 { storageTab }
+                else if selectedTab == 3 { ignoreTab }
+                else { aboutTab }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+
+        // MARK: - Helpers
+        private func settingsCard<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+            VStack(alignment: .leading, spacing: 0) { content() }
+                .padding(16)
+                .frame(maxWidth: .infinity)
+                .background(Color(nsColor: NSColor(calibratedRed: 0.175, green: 0.175, blue: 0.19, alpha: 1.0)))
+                .cornerRadius(12)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12)
+                        .stroke(Color(nsColor: NSColor(calibratedRed: 0.24, green: 0.24, blue: 0.26, alpha: 1.0)), lineWidth: 1)
+                )
+        }
+
+        private func kbdBadge(_ text: String) -> some View {
+            Text(text)
+                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                .foregroundColor(Color(white: 0.85))
+                .padding(.horizontal, 5).padding(.vertical, 2)
+                .background(Color(nsColor: NSColor(calibratedRed: 0.22, green: 0.22, blue: 0.24, alpha: 1.0)))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 5)
+                        .stroke(Color(nsColor: NSColor(calibratedRed: 0.35, green: 0.35, blue: 0.37, alpha: 1.0)), lineWidth: 1)
+                )
+                .cornerRadius(5)
+        }
+
+        private func formatStorageSize(_ bytes: Int64) -> String {
+            let bc = Double(bytes)
+            switch bc {
+            case 0: return "0 B"
+            case ..<1024: return "\(Int(bc)) B"
+            case ..<(1024 * 1024): return String(format: "%.1f KB", bc / 1024)
+            case ..<(1024 * 1024 * 1024): return String(format: "%.1f MB", bc / (1024 * 1024))
+            default: return String(format: "%.1f GB", bc / (1024 * 1024 * 1024))
+            }
+        }
+
+        // MARK: - 🔵 GENERAL TAB
+        private var generalTab: some View {
+            ScrollView {
+                VStack(spacing: 16) {
+                    permissionBanner
+                    generalSettingsCard
+                    menuBarConfigCard
                 }
+                .padding(20)
+            }
+        }
+
+        private var permissionBanner: some View {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 10) {
+                    Image(systemName: backend.permissionGranted ? "checkmark.shield.fill" : "exclamationmark.shield.fill")
+                        .font(.system(size: 18))
+                        .foregroundColor(backend.permissionGranted ? .green : .orange)
+                    Text(backend.permissionGranted ? "辅助功能：已授权" : "辅助功能：未授权")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(backend.permissionGranted ? .green : .orange)
+                }
+                Text(backend.permissionGranted
+                     ? "按 \(hotkeyManager.config.displayString) 打开剪贴板历史"
+                     : "应用需要辅助功能权限才能使用全局快捷键和自动粘贴")
+                    .font(.system(size: 11.5))
+                    .foregroundColor(Color(nsColor: NSColor(calibratedRed: 0.75, green: 0.75, blue: 0.78, alpha: 1.0)))
+                    .lineSpacing(2)
                 if !backend.permissionGranted {
                     Button(action: { backend.openPreferences() }) {
                         HStack(spacing: 6) {
                             Image(systemName: "shield")
-                            Text("打开系统设置 → 授予权限").font(.system(size: 12))
-                        }.frame(maxWidth: .infinity).padding(.vertical, 8)
+                            Text("打开系统设置 → 授予权限")
+                                .font(.system(size: 12))
+                        }
+                        .frame(maxWidth: .infinity).padding(.vertical, 8)
                     }
                     .buttonStyle(.borderedProminent)
-                    .tint(Color(nsColor: NSColor(calibratedRed: 0.25, green: 0.45, blue: 0.75, alpha: 1.0)))
-                    .padding(.top, 8)
+                    .tint(Color.accentColor)
                 }
             }
+            .padding(16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(backend.permissionGranted ? Color.green.opacity(0.08) : Color.orange.opacity(0.08))
+            .cornerRadius(12)
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(backend.permissionGranted ? Color.green.opacity(0.2) : Color.orange.opacity(0.2), lineWidth: 1)
+            )
         }
-        
-        private var hotkeyCard: some View {
+
+        private var generalSettingsCard: some View {
             settingsCard {
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack(spacing: 10) {
-                        Image(systemName: "keyboard").font(.system(size: 18)).foregroundColor(.blue)
-                        Text("全局快捷键").font(.system(size: 13, weight: .semibold)).foregroundColor(.white)
-                        Spacer()
-                    }
-                    HStack(spacing: 8) {
-                        Text("呼出剪贴板：").font(.system(size: 12)).foregroundColor(.secondary)
-                        if hotkeyManager.isRecording {
-                            Button(action: { hotkeyManager.stopRecording() }) {
-                                HStack(spacing: 5) {
-                                    Image(systemName: "record.circle").foregroundColor(.red).font(.system(size: 10))
-                                    Text("按下快捷键...").font(.system(size: 13)).foregroundColor(.red)
-                                }
-                                .padding(.horizontal, 10).padding(.vertical, 5)
-                                .background(Color.red.opacity(0.1)).cornerRadius(5)
-                                .overlay(RoundedRectangle(cornerRadius: 5).stroke(Color.red.opacity(0.5), lineWidth: 1))
-                            }.buttonStyle(.plain)
+                cardTitle(icon: "gearshape.2", text: "其它设置")
+                settingToggleRow(
+                    icon: launchAtLogin ? "power.circle.fill" : "power.circle",
+                    iconColor: launchAtLogin ? .green : .secondary,
+                    title: "开机启动",
+                    desc: "在 macOS 系统启动时自动开启 CopyAttach。",
+                    isOn: $launchAtLogin
+                )
+                .onChange(of: launchAtLogin) { _, newValue in
+                    UserDefaults.standard.set(newValue, forKey: "LaunchAtLogin")
+                    do {
+                        if newValue {
+                            try SMAppService.mainApp.register()
                         } else {
-                            Button(action: { hotkeyManager.startRecording() }) {
-                                Text(hotkeyManager.config.displayString)
-                                    .font(.system(size: 13, weight: .bold, design: .monospaced))
-                                    .foregroundColor(.white)
-                                    .padding(.horizontal, 10).padding(.vertical, 5)
-                                    .background(Color(nsColor: .darkGray)).cornerRadius(5)
-                                    .overlay(RoundedRectangle(cornerRadius: 5).stroke(Color.gray.opacity(0.5), lineWidth: 1))
-                            }.buttonStyle(.plain)
+                            try SMAppService.mainApp.unregister()
                         }
-                        Spacer()
+                    } catch {
+                        debugLog("Failed to update login item: \(error)")
+                        launchAtLogin = !newValue
+                        UserDefaults.standard.set(!newValue, forKey: "LaunchAtLogin")
                     }
+                }
+                sectionDivider().padding(.vertical, 4)
+                settingToggleRow(
+                    icon: runInBackground ? "circle.fill" : "circle",
+                    iconColor: runInBackground ? .green : .secondary,
+                    title: "后台运行",
+                    desc: "关闭主窗口后，保持应用在后台状态栏运行。",
+                    isOn: $runInBackground
+                )
+                .onChange(of: runInBackground) { _, newValue in
+                    UserDefaults.standard.set(newValue, forKey: "RunInBackground")
+                    if !newValue { NSApp.terminate(nil) }
                 }
             }
         }
-        
-        private var generalCard: some View {
+
+        private var menuBarConfigCard: some View {
             settingsCard {
-                HStack(spacing: 14) {
-                    Image(systemName: "gearshape.fill").font(.system(size: 20)).foregroundColor(.gray)
-                    Text("通用").font(.system(size: 13, weight: .semibold)).foregroundColor(.white)
-                    Spacer()
+                cardTitle(icon: "menubar.rectangle", text: "菜单栏图标状态设置")
+                settingToggleRow(
+                    icon: "dot.square",
+                    iconColor: showMenuBarIcon ? Color.accentColor : .secondary,
+                    title: "显示菜单栏图标",
+                    desc: "控制 CopyAttach 图标在 macOS 右上角状态栏的显隐。",
+                    isOn: $showMenuBarIcon
+                )
+                .onChange(of: showMenuBarIcon) { _, newValue in
+                    UserDefaults.standard.set(newValue, forKey: "ShowMenuBarIcon")
                 }
-                VStack(spacing: 12) {
-                    HStack {
-                        Image(systemName: launchAtLogin ? "power.circle.fill" : "power.circle")
-                            .foregroundColor(launchAtLogin ? .green : .secondary).font(.system(size: 14))
-                        Text("开机启动").font(.system(size: 12)).foregroundColor(.white)
-                        Spacer()
-                        Toggle("", isOn: $launchAtLogin).toggleStyle(.switch).controlSize(.small)
-                            .onChange(of: launchAtLogin) { _, newValue in setLaunchAtLogin(newValue) }
-                    }
-                    Divider().background(Color.gray.opacity(0.3))
-                    HStack {
-                        Image(systemName: runInBackground ? "circle.fill" : "circle")
-                            .foregroundColor(runInBackground ? .green : .secondary).font(.system(size: 14))
-                        Text("后台运行").font(.system(size: 12)).foregroundColor(.white)
-                        Spacer()
-                        Toggle("", isOn: $runInBackground).toggleStyle(.switch).controlSize(.small)
-                            .onChange(of: runInBackground) { _, newValue in setRunInBackground(newValue) }
-                    }
-                }.padding(.top, 8)
             }
         }
-        
-        private var statsCard: some View {
-            settingsCard {
-                HStack(spacing: 14) {
-                    Image(systemName: "chart.bar.fill").font(.system(size: 20)).foregroundColor(.green)
-                    Text("统计数据").font(.system(size: 13, weight: .semibold)).foregroundColor(.white)
-                    Spacer()
+
+        // MARK: - 🟢 SHORTCUTS TAB
+        private var shortcutsTab: some View {
+            ScrollView {
+                VStack(spacing: 16) {
+                    shortcutConfigCard
+                    shortcutsGuideCard
                 }
-                .padding(.bottom, 6)
-                VStack(spacing: 6) {
-                    statRow("总项目数", "\(backend.items.count)")
-                    statRow("文本项目数", "\(textCount)")
-                    statRow("图片项目数", "\(imageCount)")
-                    statRow("已使用存储空间", formatStorageSize(backend.getStorageSize()))
-                    VStack(spacing: 4) {
-                        HStack {
-                            Text("自动清理阈值").font(.system(size: 11)).foregroundColor(.secondary)
-                            Text("（超出阈值自动清理最旧1条记录）").font(.system(size: 9)).foregroundColor(.gray)
-                            Spacer()
-                            Text("\(Int(cleanupThreshold))")
-                                .font(.system(size: 12, weight: .bold, design: .monospaced))
-                                .foregroundColor(.white)
+                .padding(20)
+            }
+        }
+
+        private var shortcutConfigCard: some View {
+            settingsCard {
+                cardTitle(icon: "keyboard", text: "全局快捷键")
+                HStack(spacing: 10) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("呼出剪贴板")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundColor(Color(white: 0.85))
+                        Text("在全局任意地方呼出或隐藏剪贴板窗口。")
+                            .font(.system(size: 11))
+                            .foregroundColor(Color(nsColor: NSColor(calibratedRed: 0.6, green: 0.6, blue: 0.62, alpha: 1.0)))
+                    }
+                    Spacer()
+                    Button(action: {
+                        if hotkeyManager.isRecording {
+                            hotkeyManager.stopRecording()
+                        } else {
+                            hotkeyManager.startRecording()
                         }
-                        Slider(value: $cleanupThreshold, in: 100...5000, step: 100) {
-                            Text("")
-                        } onEditingChanged: { editing in
-                            if !editing {
-                                let val = Int(cleanupThreshold)
-                                backend.setCleanupThreshold(val)
+                    }) {
+                        HStack(spacing: 6) {
+                            if hotkeyManager.isRecording {
+                                HStack(spacing: 6) {
+                                    Image(systemName: "record.circle")
+                                        .foregroundColor(.red).font(.system(size: 14))
+                                    Text("按下快捷键...")
+                                        .font(.system(size: 14)).foregroundColor(.red)
+                                        .padding(.vertical, 6)
+                                }
+                                .padding(.horizontal, 12)
+                            } else {
+                                let parts = hotkeyManager.config.displayString.components(separatedBy: " ")
+                                ForEach(parts, id: \.self) { p in
+                                    Text(p)
+                                        .font(.system(size: 14, weight: .bold, design: .monospaced))
+                                        .foregroundColor(Color(white: 0.95))
+                                        .padding(.horizontal, 12).padding(.vertical, 6)
+                                        .background(Color(nsColor: NSColor(calibratedRed: 0.22, green: 0.22, blue: 0.24, alpha: 1.0)))
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: 8)
+                                                .stroke(Color(nsColor: NSColor(calibratedRed: 0.45, green: 0.45, blue: 0.48, alpha: 1.0)), lineWidth: 1.5)
+                                        )
+                                        .cornerRadius(8)
+                                }
                             }
                         }
-                        .accentColor(.orange)
+                        .background(hotkeyManager.isRecording ? Color.red.opacity(0.1) : Color.clear)
+                        .cornerRadius(8)
+                        .overlay(
+                            Group {
+                                if hotkeyManager.isRecording {
+                                    RoundedRectangle(cornerRadius: 8).stroke(Color.red.opacity(0.4), lineWidth: 1.5)
+                                }
+                            }
+                        )
+                        .padding(.horizontal, 12).padding(.vertical, 4)
+                    }
+                    .buttonStyle(.plain)
+                    .help(hotkeyManager.isRecording ? "" : "点击可更改快捷键组合")
+                }
+            }
+        }
+
+        private func shortcutKeycapView(config: HotkeyConfig) -> some View {
+            let parts = config.displayString.components(separatedBy: " ")
+            return HStack(spacing: 5) {
+                ForEach(parts, id: \.self) { p in
+                    Text(p)
+                        .font(.system(size: 14, weight: .bold, design: .monospaced))
+                        .foregroundColor(Color(white: 0.95))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(Color(nsColor: NSColor(calibratedRed: 0.22, green: 0.22, blue: 0.24, alpha: 1.0)))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(Color(nsColor: NSColor(calibratedRed: 0.45, green: 0.45, blue: 0.48, alpha: 1.0)), lineWidth: 1.5)
+                        )
+                        .cornerRadius(8)
+                }
+            }
+            .padding(.horizontal, 6).padding(.vertical, 4)
+        }
+
+        private var shortcutsGuideCard: some View {
+            settingsCard {
+                cardTitle(icon: "list.bullet.rectangle", text: "快捷键说明")
+                VStack(spacing: 0) {
+                    shortcutGuideRow(label: "呼出 / 隐藏剪贴板历史", keycaps: hotkeyManager.config.displayString.components(separatedBy: " "))
+                    sectionDivider()
+                    shortcutGuideRow(label: "列表中导航上移", keycaps: ["↑"])
+                    sectionDivider()
+                    shortcutGuideRow(label: "列表中导航下移", keycaps: ["↓"])
+                    sectionDivider()
+                    shortcutGuideRow(label: "确认并粘贴所选项", keycaps: ["⏎"])
+                    sectionDivider()
+                    shortcutGuideRow(label: "预览选中的多媒体/大文本项目", keycaps: ["Space"])
+                    sectionDivider()
+                    shortcutGuideRow(label: "关闭弹窗", keycaps: ["Esc"])
+                    sectionDivider()
+                    shortcutGuideRow(label: "快速删除选中历史项目", keycaps: ["⌃", "⌫"])
+                }
+            }
+        }
+
+        private func shortcutGuideRow(label: String, keycaps: [String]) -> some View {
+            HStack {
+                Text(label)
+                    .font(.system(size: 12))
+                    .foregroundColor(Color(white: 0.8))
+                Spacer()
+                HStack(spacing: 3) {
+                    ForEach(keycaps, id: \.self) { k in
+                        kbdBadge(k)
+                    }
+                }
+            }
+            .padding(.vertical, 6)
+        }
+
+        // MARK: - 🟡 STORAGE TAB
+        private var storageTab: some View {
+            ScrollView {
+                VStack(spacing: 16) {
+                    storageStatsCard
+                    cleanupCard
+                }
+                .padding(20)
+            }
+        }
+
+        private var storageStatsCard: some View {
+            settingsCard {
+                HStack(spacing: 10) {
+                    Image(systemName: "chart.pie")
+                        .font(.system(size: 16))
+                        .foregroundColor(Color.accentColor)
+                    Text("存储统计")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(Color(white: 0.9))
+                    Text("(\(backend.items.count) / \(Int(cleanupThreshold)))")
+                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                        .foregroundColor(Color(nsColor: NSColor(calibratedRed: 0.55, green: 0.55, blue: 0.58, alpha: 1.0)))
+                    Spacer()
+                }
+                .padding(.bottom, 12)
+                HStack(spacing: 20) {
+                    VStack(alignment: .leading, spacing: 6) {
                         GeometryReader { geo in
                             let w = geo.size.width
-                            let minVal: Double = 100
-                            let maxVal: Double = 5000
-                            let range = maxVal - minVal
-                            let ticks: [(String, Double)] = [
-                                ("100", 100), ("500", 500), ("1,000", 1000),
-                                ("1,500", 1500), ("3,000", 3000), ("5,000", 5000),
-                            ]
-                            ZStack(alignment: .topLeading) {
-                                ForEach(ticks, id: \.0) { label, value in
-                                    Text(label).font(.system(size: 9)).foregroundColor(.gray)
-                                        .onTapGesture {
-                                            cleanupThreshold = value
-                                            backend.setCleanupThreshold(Int(value))
-                                        }
-                                        .position(x: w * (value - minVal) / range, y: 6)
+                            ZStack(alignment: .leading) {
+                                RoundedRectangle(cornerRadius: 6)
+                                    .fill(Color(nsColor: NSColor(calibratedRed: 0.24, green: 0.24, blue: 0.26, alpha: 1.0)))
+                                    .frame(height: 12)
+                                HStack(spacing: 0) {
+                                    Color.accentColor
+                                        .frame(width: w * textPct)
+                                    Color.green
+                                        .frame(width: w * imagePct)
+                                    Spacer(minLength: 0)
                                 }
+                                .frame(height: 12)
+                                .clipShape(RoundedRectangle(cornerRadius: 6))
                             }
                         }
-                        .frame(height: 16)
+                        .frame(height: 12)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6)
+                                .stroke(Color(nsColor: NSColor(calibratedRed: 0.3, green: 0.3, blue: 0.32, alpha: 1.0)), lineWidth: 1)
+                        )
+                        HStack(spacing: 16) {
+                            HStack(spacing: 5) {
+                                Circle().fill(Color.accentColor).frame(width: 8, height: 8)
+                                Text("文本项目 (\(textCount))")
+                                    .font(.system(size: 10)).foregroundColor(Color(nsColor: NSColor(calibratedRed: 0.6, green: 0.6, blue: 0.62, alpha: 1.0)))
+                            }
+                            HStack(spacing: 5) {
+                                Circle().fill(Color.green).frame(width: 8, height: 8)
+                                Text("图片项目 (\(imageCount))")
+                                    .font(.system(size: 10)).foregroundColor(Color(nsColor: NSColor(calibratedRed: 0.6, green: 0.6, blue: 0.62, alpha: 1.0)))
+                            }
+                        }
                     }
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("已使用存储空间")
+                            .font(.system(size: 11))
+                            .foregroundColor(Color(nsColor: NSColor(calibratedRed: 0.6, green: 0.6, blue: 0.62, alpha: 1.0)))
+                        Text(formatStorageSize(backend.getStorageSize()))
+                            .font(.system(size: 28, weight: .bold))
+                            .foregroundColor(Color(white: 0.9))
+                        Text("共 \(backend.items.count) 个剪贴板历史项目")
+                            .font(.system(size: 11))
+                            .foregroundColor(Color(nsColor: NSColor(calibratedRed: 0.55, green: 0.55, blue: 0.58, alpha: 1.0)))
+                    }
+                    .frame(width: 140)
+                    .padding(.leading, 16)
+                    .overlay(
+                        Rectangle()
+                            .fill(Color(nsColor: NSColor(calibratedRed: 0.25, green: 0.25, blue: 0.27, alpha: 1.0)))
+                            .frame(width: 1),
+                        alignment: .leading
+                    )
                 }
-                Divider().background(Color.gray.opacity(0.3)).padding(.vertical, 8)
+            }
+        }
+
+        private var cleanupCard: some View {
+            settingsCard {
+                cardTitle(icon: "trash", text: "清理与维护")
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text("自动清理阈值")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundColor(Color(white: 0.85))
+                        Spacer()
+                        Text("\(Int(cleanupThreshold)) 条")
+                            .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                            .foregroundColor(.accentColor)
+                    }
+                    Slider(value: $cleanupThreshold, in: 100...10000, step: 100) {
+                        Text("")
+                    } onEditingChanged: { editing in
+                        if editing {
+                            thresholdBeforeEdit = cleanupThreshold
+                        } else if Int(cleanupThreshold) < backend.items.count {
+                            pendingThreshold = Int(cleanupThreshold)
+                            cleanupThreshold = thresholdBeforeEdit
+                        } else {
+                            backend.setCleanupThreshold(Int(cleanupThreshold))
+                        }
+                    }
+                    GeometryReader { geo in
+                        let w = geo.size.width
+                        let minV: Double = 100
+                        let maxV: Double = 10000
+                        let range = maxV - minV
+                        let ticks: [(String, Double)] = [
+                            ("100", 100), ("500", 500), ("1k", 1000), ("1.5k", 1500),
+                            ("2k", 2000), ("3k", 3000), ("5k", 5000), ("10k", 10000)
+                        ]
+                        ZStack(alignment: .topLeading) {
+                            ForEach(ticks, id: \.0) { label, value in
+                                Text(label)
+                                    .font(.system(size: 9))
+                                    .foregroundColor(
+                                        abs(cleanupThreshold - value) < 50
+                                        ? Color.accentColor : Color(nsColor: NSColor(calibratedRed: 0.5, green: 0.5, blue: 0.53, alpha: 1.0))
+                                    )
+                                    .onTapGesture {
+                                        let newVal = Int(value)
+                                        if newVal < backend.items.count {
+                                            thresholdBeforeEdit = cleanupThreshold
+                                            pendingThreshold = newVal
+                                        } else {
+                                            cleanupThreshold = value
+                                            backend.setCleanupThreshold(newVal)
+                                        }
+                                    }
+                                    .position(x: w * (value - minV) / range, y: 4)
+                            }
+                        }
+                    }
+                    .frame(height: 14)
+                }
+                Text("当历史项目超过该阈值时，自动清理最早记录，以保护磁盘存储。")
+                    .font(.system(size: 11))
+                    .foregroundColor(Color(nsColor: NSColor(calibratedRed: 0.6, green: 0.6, blue: 0.62, alpha: 1.0)))
+                    .padding(.top, 4)
+
+                sectionDivider().padding(.vertical, 4)
+
                 HStack(spacing: 12) {
                     Button {
                         let total = backend.items.count
                         let estimated = Int((Double(total) * 0.4).rounded(.up))
-                        if total == 0 { return }
+                        guard total > 0 else { return }
                         let alert = NSAlert()
                         alert.messageText = "清理前 40% 的剪贴板历史?"
                         alert.informativeText = "将从 \(total) 条记录中移除最旧的 \(estimated) 条（约前 40%），且无法撤销。"
@@ -327,18 +665,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                         alert.addButton(withTitle: "取消")
                         if alert.runModal() == .alertFirstButtonReturn {
                             let removed = backend.trimOldestPercent(40)
-                            if removed > 0 {
-                                debugLog("Trimmed \(removed) oldest entries (40%)")
-                            }
+                            if removed > 0 { debugLog("Trimmed \(removed) oldest entries (40%)") }
                         }
                     } label: {
-                        HStack(spacing: 6) {
-                            Image(systemName: "arrow.up.trash")
-                            Text("清理前 40%").font(.system(size: 12))
-                        }.frame(maxWidth: .infinity).padding(.vertical, 8)
+                        Label("清理前 40% 历史", systemImage: "arrow.up.trash")
+                            .font(.system(size: 12))
+                            .frame(maxWidth: .infinity).padding(.vertical, 8)
                     }
                     .buttonStyle(.borderedProminent)
-                    .tint(Color.orange.opacity(0.7))
+                    .tint(Color.orange)
 
                     Button(role: .destructive) {
                         let alert = NSAlert()
@@ -351,72 +686,319 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                             backend.clearHistory()
                         }
                     } label: {
-                        HStack(spacing: 6) {
-                            Image(systemName: "trash")
-                            Text("清除所有历史").font(.system(size: 12))
-                        }.frame(maxWidth: .infinity).padding(.vertical, 8)
+                        Label("清除所有历史", systemImage: "trash")
+                            .font(.system(size: 12))
+                            .frame(maxWidth: .infinity).padding(.vertical, 8)
                     }
                     .buttonStyle(.borderedProminent)
-                    .tint(Color.red.opacity(0.7))
+                    .tint(.red)
                 }
             }
-        }
-        
-        private var tipsCard: some View {
-            settingsCard {
-                HStack(spacing: 14) {
-                    Image(systemName: "lightbulb.fill").font(.system(size: 20)).foregroundColor(.yellow)
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("使用技巧").font(.system(size: 13, weight: .semibold)).foregroundColor(.white)
-                        Text("• 按 \(hotkeyManager.config.displayString) 显示/隐藏剪贴板历史\n• ↑↓ 导航，回车选择并粘贴\n• Esc 关闭弹出窗口\n• 点击项目即可复制并粘贴")
-                            .font(.system(size: 11)).foregroundColor(.secondary).lineSpacing(3)
+            .alert("确认调整清理阈值?", isPresented: Binding<Bool>(
+                get: { pendingThreshold != nil },
+                set: { if !$0 { pendingThreshold = nil } }
+            )) {
+                Button("确认调整") {
+                    if let val = pendingThreshold {
+                        cleanupThreshold = Double(val)
+                        backend.setCleanupThreshold(val)
                     }
-                    Spacer()
+                    pendingThreshold = nil
                 }
-            }
-        }
-        
-        // Helpers
-        private func settingsCard<Content: View>(@ViewBuilder content: () -> Content) -> some View {
-            VStack(alignment: .leading, spacing: 0) { content() }
-                .padding(14).frame(maxWidth: .infinity)
-                .background(Color(nsColor: NSColor(calibratedRed: 0.16, green: 0.16, blue: 0.18, alpha: 1.0)))
-                .cornerRadius(10)
-        }
-        
-        private func formatStorageSize(_ bytes: Int64) -> String {
-            let byteCount = Double(bytes)
-            switch byteCount {
-            case 0: return "0 B"
-            case ..<1024: return "\(Int(byteCount)) B"
-            case ..<(1024 * 1024): return String(format: "%.1f KB", byteCount / 1024)
-            case ..<(1024 * 1024 * 1024): return String(format: "%.1f MB", byteCount / (1024 * 1024))
-            default: return String(format: "%.1f GB", byteCount / (1024 * 1024 * 1024))
+                Button("取消", role: .cancel) {
+                    pendingThreshold = nil
+                }
+            } message: {
+                if let val = pendingThreshold {
+                    Text("当前已有 \(backend.items.count) 条记录。阈值降至 \(val) 条后，超出部分将被自动清理。是否继续？")
+                }
             }
         }
 
-        private func statRow(_ label: String, _ value: String) -> some View {
-            HStack {
-                Text(label).font(.system(size: 11)).foregroundColor(.secondary)
-                Spacer()
-                Text(value).font(.system(size: 11, weight: .bold)).foregroundColor(.white)
+        // MARK: - 🟣 IGNORE TAB
+        private var ignoreTab: some View {
+            ScrollView {
+                VStack(spacing: 16) {
+                    ignoreAppsCard
+                    filterRulesCard
+                }
+                .padding(20)
             }
         }
-        
-        private func setLaunchAtLogin(_ enabled: Bool) {
-            UserDefaults.standard.set(enabled, forKey: "LaunchAtLogin")
+
+        private var ignoreAppsCard: some View {
+            settingsCard {
+                HStack(spacing: 10) {
+                    Image(systemName: "eye.slash")
+                        .font(.system(size: 16))
+                        .foregroundColor(Color.accentColor)
+                    Text("忽略的应用程序")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(Color(white: 0.9))
+                    todoBadge
+                    Spacer()
+                }
+                .padding(.bottom, 12)
+                Text("来自已选应用所复制的内容，CopyAttach 将不做任何记录和收集。")
+                    .font(.system(size: 11.5))
+                    .foregroundColor(Color(nsColor: NSColor(calibratedRed: 0.6, green: 0.6, blue: 0.62, alpha: 1.0)))
+
+                VStack(spacing: 0) {
+                    ForEach(ignoredApps, id: \.self) { app in
+                        HStack {
+                            Image(systemName: "lock.square")
+                                .font(.system(size: 12))
+                                .foregroundColor(.secondary)
+                            Text(app)
+                                .font(.system(size: 12))
+                                .foregroundColor(Color(white: 0.8))
+                            Spacer()
+                            Button {
+                                ignoredApps.removeAll { $0 == app }
+                                UserDefaults.standard.set(ignoredApps, forKey: "IgnoredApps")
+                            } label: {
+                                Image(systemName: "xmark")
+                                    .font(.system(size: 9, weight: .bold))
+                                    .foregroundColor(Color(nsColor: NSColor(calibratedRed: 0.5, green: 0.5, blue: 0.53, alpha: 1.0)))
+                            }
+                            .buttonStyle(.plain)
+                            .opacity(0.7)
+                        }
+                        .padding(.horizontal, 12).padding(.vertical, 8)
+                        if app != ignoredApps.last {
+                            sectionDivider()
+                        }
+                    }
+                }
+                .background(Color(nsColor: NSColor(calibratedRed: 0.12, green: 0.12, blue: 0.13, alpha: 1.0)))
+                .cornerRadius(8)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(Color(nsColor: NSColor(calibratedRed: 0.24, green: 0.24, blue: 0.26, alpha: 1.0)), lineWidth: 1)
+                )
+
+                if ignoredApps.isEmpty {
+                    Text("暂无忽略的应用")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8)
+                }
+
+                HStack(spacing: 8) {
+                    Picker("", selection: .constant("")) {
+                        Text("选择想要忽略的应用...").tag("")
+                        Text("Safari").tag("Safari")
+                        Text("Google Chrome").tag("Google Chrome")
+                        Text("Terminal").tag("Terminal")
+                        Text("Slack").tag("Slack")
+                        Text("微信 (WeChat)").tag("WeChat")
+                    }
+                    .pickerStyle(.menu)
+                    .frame(maxWidth: .infinity)
+                    .font(.system(size: 12))
+
+                    Button("添加") {
+                    }
+                    .font(.system(size: 12, weight: .medium))
+                    .padding(.horizontal, 12).padding(.vertical, 6)
+                    .background(Color.accentColor)
+                    .foregroundColor(.white)
+                    .cornerRadius(6)
+                    .buttonStyle(.plain)
+                }
+            }
         }
-        
-        private func setRunInBackground(_ enabled: Bool) {
-            UserDefaults.standard.set(enabled, forKey: "RunInBackground")
-            if !enabled { NSApp.terminate(nil) }
+
+        private var filterRulesCard: some View {
+            settingsCard {
+                HStack(spacing: 10) {
+                    Image(systemName: "line.3.horizontal.decrease")
+                        .font(.system(size: 16))
+                        .foregroundColor(Color.accentColor)
+                    Text("过滤规则")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(Color(white: 0.9))
+                    todoBadge
+                    Spacer()
+                }
+                .padding(.bottom, 12)
+
+                HStack {
+                    Toggle(isOn: $ignoreShortText) {
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("忽略小于三个字符的文本")
+                                .font(.system(size: 12))
+                                .foregroundColor(Color(white: 0.8))
+                        }
+                    }
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                    .onChange(of: ignoreShortText) { _, newValue in
+                        UserDefaults.standard.set(newValue, forKey: "IgnoreShortText")
+                    }
+                    Spacer()
+                    HStack(spacing: 4) {
+                        Text("阈值:")
+                            .font(.system(size: 11))
+                            .foregroundColor(Color(nsColor: NSColor(calibratedRed: 0.6, green: 0.6, blue: 0.62, alpha: 1.0)))
+                        Picker("", selection: $shortTextThreshold) {
+                            Text("2 个字符").tag(2)
+                            Text("3 个字符").tag(3)
+                            Text("5 个字符").tag(5)
+                            Text("10 个字符").tag(10)
+                        }
+                        .pickerStyle(.menu)
+                        .frame(width: 90)
+                        .font(.system(size: 11))
+                    }
+                    .opacity(ignoreShortText ? 1 : 0.5)
+                }
+
+                sectionDivider().padding(.vertical, 4)
+
+                HStack {
+                    Toggle(isOn: $ignoreProtectedWindows) {
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("忽略复制自受保护窗口的内容")
+                                .font(.system(size: 12))
+                                .foregroundColor(Color(white: 0.8))
+                        }
+                    }
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                    .onChange(of: ignoreProtectedWindows) { _, newValue in
+                        UserDefaults.standard.set(newValue, forKey: "IgnoreProtectedWindows")
+                    }
+                    Spacer()
+                    Text("对密码输入框及无痕浏览窗口自动排除")
+                        .font(.system(size: 10))
+                        .foregroundColor(Color(nsColor: NSColor(calibratedRed: 0.55, green: 0.55, blue: 0.58, alpha: 1.0)))
+                        .frame(maxWidth: 140, alignment: .trailing)
+                }
+            }
+        }
+
+        // MARK: - ⚪ ABOUT TAB
+        private var aboutTab: some View {
+            ScrollView {
+                VStack(spacing: 16) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 18)
+                            .fill(LinearGradient(
+                                gradient: Gradient(colors: [
+                                    Color(red: 0.66, green: 0.33, blue: 0.97),
+                                    Color(red: 0.39, green: 0.40, blue: 0.95)
+                                ]),
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            ))
+                            .frame(width: 80, height: 80)
+                            .shadow(color: Color(red: 0.39, green: 0.40, blue: 0.95).opacity(0.3), radius: 12, y: 4)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 18)
+                                    .stroke(Color.white.opacity(0.1), lineWidth: 1)
+                            )
+                        Image(systemName: "clipboard")
+                            .font(.system(size: 36, weight: .medium))
+                            .foregroundColor(.white)
+                    }
+
+                    VStack(spacing: 4) {
+                        Text("CopyAttach")
+                            .font(.system(size: 24, weight: .bold))
+                            .foregroundColor(Color(white: 0.9))
+                        Text("版本 v\(appVersion)")
+                            .font(.system(size: 12))
+                            .foregroundColor(Color(nsColor: NSColor(calibratedRed: 0.55, green: 0.55, blue: 0.58, alpha: 1.0)))
+                    }
+
+                    Text("CopyAttach 是一款轻量、快捷的 macOS 全局剪贴板与附件管理工具，专注于提升开发者及科研人员的工作流吞吐效率。")
+                        .font(.system(size: 12.5))
+                        .foregroundColor(Color(nsColor: NSColor(calibratedRed: 0.7, green: 0.7, blue: 0.73, alpha: 1.0)))
+                        .multilineTextAlignment(.center)
+                        .lineSpacing(3)
+                        .frame(maxWidth: 300)
+
+                    HStack(spacing: 12) {
+                        Button("检查更新") {}
+                            .font(.system(size: 12, weight: .medium))
+                            .padding(.horizontal, 16).padding(.vertical, 8)
+                            .background(Color.accentColor)
+                            .foregroundColor(.white)
+                            .cornerRadius(6)
+                            .buttonStyle(.plain)
+                        Button("官方网站") {}
+                            .font(.system(size: 12, weight: .medium))
+                            .padding(.horizontal, 16).padding(.vertical, 8)
+                            .background(Color(nsColor: NSColor(calibratedRed: 0.22, green: 0.22, blue: 0.24, alpha: 1.0)))
+                            .foregroundColor(Color(white: 0.8))
+                            .cornerRadius(6)
+                            .buttonStyle(.plain)
+                    }
+                    .padding(.top, 4)
+                }
+                .padding(40)
+                .frame(maxWidth: .infinity)
+            }
+        }
+
+        // MARK: - Reusable Components
+
+        private func cardTitle(icon: String, text: String) -> some View {
+            HStack(spacing: 10) {
+                Image(systemName: icon)
+                    .font(.system(size: 16))
+                    .foregroundColor(Color.accentColor)
+                Text(text)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(Color(white: 0.9))
+                Spacer()
+            }
+            .padding(.bottom, 12)
+        }
+
+        private func settingToggleRow(icon: String, iconColor: Color, title: String, desc: String, isOn: Binding<Bool>) -> some View {
+            HStack(spacing: 10) {
+                Image(systemName: icon)
+                    .font(.system(size: 14))
+                    .foregroundColor(iconColor)
+                    .frame(width: 18)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(title)
+                        .font(.system(size: 12.5, weight: .medium))
+                        .foregroundColor(Color(white: 0.85))
+                    Text(desc)
+                        .font(.system(size: 10.5))
+                        .foregroundColor(Color(nsColor: NSColor(calibratedRed: 0.55, green: 0.55, blue: 0.58, alpha: 1.0)))
+                }
+                Spacer()
+                Toggle("", isOn: isOn)
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+            }
+        }
+
+        private func sectionDivider() -> some View {
+            Color(nsColor: NSColor(calibratedRed: 0.24, green: 0.24, blue: 0.26, alpha: 1.0))
+                .frame(height: 1)
+        }
+
+        private var todoBadge: some View {
+            Text("TODO")
+                .font(.system(size: 9, weight: .bold))
+                .foregroundColor(Color(red: 0.92, green: 0.58, blue: 0.20))
+                .padding(.horizontal, 5)
+                .padding(.vertical, 2)
+                .background(Color(red: 0.92, green: 0.58, blue: 0.20).opacity(0.15))
+                .cornerRadius(4)
         }
     }
 
     private func createSettingsWindow() {
         debugLog("Creating settings window...")
         let window = NSWindow(
-            contentRect: NSRect(x: 100, y: 100, width: 420, height: 620),
+            contentRect: NSRect(x: 100, y: 100, width: 520, height: 600),
             styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered,
             defer: false
@@ -424,16 +1006,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         window.title = "CopyAttach"
         window.isReleasedWhenClosed = false
         window.hidesOnDeactivate = false
-        
+
         let content = NSHostingController(rootView: InlineSettingsView())
-        content.view.frame = NSRect(x: 0, y: 0, width: 420, height: 620)
+        content.view.frame = NSRect(x: 0, y: 0, width: 520, height: 600)
         content.view.autoresizingMask = [NSView.AutoresizingMask.width, NSView.AutoresizingMask.height]
         window.contentViewController = content
-        
+
         window.center()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         self.settingsWindow = window
-        debugLog("Created settings window with InlineSettingsView")
+        debugLog("Created settings window with redesigned InlineSettingsView")
     }
 }

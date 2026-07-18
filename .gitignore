@@ -6,6 +6,7 @@ CopyAttach.app/
 .build/
 .vscode/
 .idea/
+.agents/
 
 # Build artifacts
 build/
@@ -15,7 +16,7 @@ AppIcon.iconset/
 assets/AppIcon.icns
 
 # User-local Claude Code config (permissions, environment-specific)
-.claude/settings.local.json
+.claude/
 
 # Rust debug symbol bundles
 target/
