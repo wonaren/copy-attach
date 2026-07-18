@@ -171,10 +171,10 @@ struct HistoryPopupContent: View {
     @State private var selectedIndex: Int = 0  // 0 = search bar, 1+ = items
     @State private var showPreview: Bool = false
     @State private var isControlPressed: Bool = false
-    @State private var suppressListScroll: Bool = false
     @State private var searchText: String = ""
     @State private var effectiveSearchText: String = ""
     @State private var searchTask: Task<Void, Never>?
+    @State private var scrollTarget: Int?
 
     // Spotlight opening animation: start slightly larger, spring in
     @State private var openingScale: CGFloat = 1.10
@@ -316,6 +316,7 @@ struct HistoryPopupContent: View {
                 withAnimation(.easeInOut(duration: 0.12)) {
                     effectiveSearchText = ""
                 }
+                scrollTarget = filteredItems.first?.id
                 return
             }
             searchTask = Task {
@@ -324,6 +325,9 @@ struct HistoryPopupContent: View {
                 await MainActor.run {
                     withAnimation(.easeInOut(duration: 0.12)) {
                         effectiveSearchText = newValue
+                    }
+                    if selectedIndex == 0 {
+                        scrollTarget = filteredItems.first?.id
                     }
                 }
             }
@@ -481,66 +485,54 @@ struct HistoryPopupContent: View {
 
     @ViewBuilder
     private var itemsList: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(spacing: 3) {
-                    ForEach(Array(filteredItems.enumerated()), id: \.element.id) { index, item in
-                        ItemRowView(
-                            item: item,
-                            isSelected: selectedIndex == index + 1,
-                            isDeleteModifierPressed: isControlPressed
-                        )
-                        .contentShape(Rectangle())
-                        .onTapGesture {
-                            let itemIdx = index + 1
-                            if selectedIndex == itemIdx {
-                                selectItem(at: index)
-                            } else {
-                                suppressListScroll = true
-                                selectedIndex = itemIdx
-                            }
-                        }
-                        .id(item.id)
-                        .transition(.opacity)
-                    }
-                }
-                .padding(.all, 2)
-            }
-            .background(Color(nsColor: .windowBackgroundColor).opacity(0.06))
-            .overlay(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .stroke(Color(nsColor: .separatorColor).opacity(0.1), lineWidth: 1)
-            )
-            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-            .scrollIndicators(.hidden)
+        itemsListScrollView
+            .scrollPosition(id: $scrollTarget)
             .onChange(of: selectedIndex) { _, newValue in
-                if suppressListScroll {
-                    suppressListScroll = false
-                    if newValue > 0 {
-                        updatePreviewContent()
-                    }
-                    return
-                }
                 if newValue == 0 {
                     if showPreview { closePreview() }
-                    // Scroll to top so first search results are visible.
-                    // Dispatch async to let LazyVStack render the first item first,
-                    // otherwise proxy.scrollTo may not find the id.
                     if !filteredItems.isEmpty {
-                        let firstId = filteredItems[0].id
-                        DispatchQueue.main.async {
-                            proxy.scrollTo(firstId, anchor: .top)
-                        }
+                        scrollTarget = filteredItems[0].id
                     }
                     return
                 }
                 let itemIndex = newValue - 1
                 if itemIndex < filteredItems.count {
-                    proxy.scrollTo(filteredItems[itemIndex].id, anchor: .center)
+                    scrollTarget = filteredItems[itemIndex].id
                 }
                 updatePreviewContent()
             }
+    }
+
+    private var itemsListScrollView: some View {
+        ScrollView {
+            LazyVStack(spacing: 3) {
+                ForEach(Array(filteredItems.enumerated()), id: \.element.id) { index, item in
+                    ItemRowView(
+                        item: item,
+                        isSelected: selectedIndex == index + 1,
+                        isDeleteModifierPressed: isControlPressed
+                    )
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        let itemIdx = index + 1
+                        if selectedIndex == itemIdx {
+                            selectItem(at: index)
+                        } else {
+                            selectedIndex = itemIdx
+                        }
+                    }
+                    .id(item.id)
+                    .transition(.opacity)
+                }
+            }
+            .padding(.all, 2)
         }
+        .background(Color(nsColor: .windowBackgroundColor).opacity(0.06))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(Color(nsColor: .separatorColor).opacity(0.1), lineWidth: 1)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 
     // MARK: - Empty State
