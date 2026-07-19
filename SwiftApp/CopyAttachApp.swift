@@ -22,9 +22,10 @@ struct AppMenuBarContent: View {
     @ObservedObject private var hotkeyManager = HotkeyManager.shared
 
     var body: some View {
-        Button("打开主界面") {
+        Button("偏好设置") {
             AppDelegate.shared?.openSettings()
         }
+        .keyboardShortcut(",", modifiers: .command)
         Divider()
         Button("显示历史记录 (\(hotkeyManager.config.displayString))") {
             AppDelegate.shared?.togglePopup()
@@ -45,9 +46,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         Self.shared = self
-        
+
         debugLog("Starting initialization...")
-        
+
         // Get HotkeyManager setup first (doesn't require Rust backend)
         let hotkeyManager = HotkeyManager.shared
         hotkeyManager.onHotkeyPressed = { [weak self] in
@@ -55,7 +56,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             self?.togglePopup()
         }
         debugLog("Hotkey callback set up")
-        
+
         // Initialize Rust backend
         debugLog("Starting Rust backend...")
         let started = ClipboardBackend.shared.start()
@@ -63,6 +64,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             debugLog("Rust backend failed to initialize — app may not function correctly")
         }
         debugLog("Rust backend started")
+
+        // Register local ⌘+, monitor for when app windows are active (popup, settings, etc.)
+        NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            if event.keyCode == 43 && event.modifierFlags.contains(.command) { // kVK_ANSI_Comma = 43
+                self?.openSettings()
+                return nil
+            }
+            return event
+        }
 
         // Show settings window on launch
         openSettingsWindow()
