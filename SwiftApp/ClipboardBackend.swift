@@ -12,6 +12,7 @@ class ClipboardBackend: ObservableObject {
     private var timer: Timer?
     private var sourceAppTimer: Timer?
     private let reloadQueue = DispatchQueue(label: "com.copyattach.reload", qos: .userInitiated)
+    private var reloadGeneration = 0
     private let thumbnailCache: NSCache<NSNumber, NSImage> = {
         let c = NSCache<NSNumber, NSImage>()
         c.totalCostLimit = 30 * 1024 * 1024  // 30 MB
@@ -80,7 +81,9 @@ class ClipboardBackend: ObservableObject {
     }
 
     private func reloadItems() {
-        reloadQueue.async {
+        let gen = reloadGeneration &+ 1
+        reloadGeneration = gen
+        reloadQueue.async { [gen] in
             guard let snap = clipboard_snapshot_acquire() else { return }
             defer { clipboard_snapshot_release(snap) }
 
@@ -148,7 +151,8 @@ class ClipboardBackend: ObservableObject {
                     break
                 }
             }
-            DispatchQueue.main.async {
+            DispatchQueue.main.async { [gen] in
+                guard gen == self.reloadGeneration else { return }
                 self.items = newItems
             }
         }
@@ -250,6 +254,9 @@ class ClipboardBackend: ObservableObject {
         if result {
             items.remove(at: index)
             count = items.count
+            // Bump generation to discard any stale in-flight snapshot
+            // that might still include the deleted item.
+            reloadGeneration &+= 1
         }
         return result
     }

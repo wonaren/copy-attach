@@ -124,7 +124,6 @@ class HistoryPopupWindow: NSPanel {
         NotificationCenter.default.removeObserver(self, name: NSWindow.didResignKeyNotification, object: self)
         previewPanel?.close()
         previewPanel = nil
-        ClipboardBackend.shared.clearThumbnailCache()
         super.close()
         self.contentView = nil
         self.alphaValue = 1.0 // reset for next open
@@ -173,8 +172,12 @@ class PopupHostingView: NSHostingView<HistoryPopupContent> {
             NotificationCenter.default.post(name: focusSearchNotification, object: nil)
             // After focus switches to search bar, re-send the original event
             // so the search field's NSTextView handles it with full IME support.
+            // Use a weak reference to self.window rather than NSApp.keyWindow
+            // to prevent keystroke injection into other apps if the popup
+            // loses key status during the async gap.
+            weak let popupWindow = self.window
             DispatchQueue.main.async { [event] in
-                NSApp.keyWindow?.firstResponder?.keyDown(with: event)
+                popupWindow?.firstResponder?.keyDown(with: event)
             }
             return
         }
@@ -220,18 +223,17 @@ struct HistoryPopupContent: View {
     @FocusState private var isSearchFocused: Bool
     @FocusState private var isContainerFocused: Bool
 
-    /// Items filtered by search text. When effectiveSearchText is empty, returns all items.
-    private var filteredItems: [ClipboardItem] {
-        guard !effectiveSearchText.isEmpty else { return backend.items }
-        return backend.items.filter {
-            $0.label.localizedCaseInsensitiveContains(effectiveSearchText) ||
-            $0.sourceName.localizedCaseInsensitiveContains(effectiveSearchText) ||
-            $0.fullText.localizedCaseInsensitiveContains(effectiveSearchText)
-        }
+    /// Cached search results, computed off the main thread in the debounce task.
+    /// When effectiveSearchText is empty, the view uses backend.items directly.
+    @State private var searchResults: [ClipboardItem] = []
+
+    /// Items to display: full history when idle, cached results when searching.
+    private var displayItems: [ClipboardItem] {
+        effectiveSearchText.isEmpty ? backend.items : searchResults
     }
 
     /// The highest valid selectedIndex (search bar + item count).
-    private var maxIndex: Int { filteredItems.count }
+    private var maxIndex: Int { displayItems.count }
 
     // Design Tokens
     private let popupWidth: CGFloat = 500
@@ -256,7 +258,7 @@ struct HistoryPopupContent: View {
                         .padding(.horizontal, 5)
                         .padding(.top, 6)
 
-                    if filteredItems.isEmpty && !effectiveSearchText.isEmpty {
+                    if displayItems.isEmpty && !effectiveSearchText.isEmpty {
                         noResultsView
                     } else {
                         itemsList
@@ -299,7 +301,7 @@ struct HistoryPopupContent: View {
             return .handled
         }
         .onKeyPress(.space) {
-            if selectedIndex == 0 { return .handled }
+            if selectedIndex == 0 { return .ignored }
             togglePreview()
             return .handled
         }
@@ -362,7 +364,7 @@ struct HistoryPopupContent: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: commandNumberNotification)) { note in
             guard let number = note.object as? Int,
-                  number >= 1 && number <= filteredItems.count else { return }
+                  number >= 1 && number <= displayItems.count else { return }
             selectItem(at: number - 1)
         }
         .onReceive(NotificationCenter.default.publisher(for: focusSearchNotification)) { _ in
@@ -372,21 +374,41 @@ struct HistoryPopupContent: View {
             selectedIndex = 0
             searchTask?.cancel()
             if newValue.isEmpty {
-                withAnimation(.easeInOut(duration: 0.12)) {
+                withAnimation(.easeInOut(duration: 0.25)) {
                     effectiveSearchText = ""
                 }
-                scrollTarget = filteredItems.first?.id
+                searchResults = []
+                scrollTarget = displayItems.first?.id
                 return
             }
-            searchTask = Task {
-                try? await Task.sleep(nanoseconds: 80_000_000)
+
+            // Longer debounce for CJK: IME produces intermediate characters
+            // rapidly (pinyin syllables, tone marks, candidates), so fewer
+            // filter passes reduce main-thread jank from Unicode normalization.
+            let hasCJK = newValue.unicodeScalars.contains { $0.value > 0x2E80 }
+            let debounceNs: UInt64 = hasCJK ? 150_000_000 : 80_000_000
+
+            searchTask = Task { [items = backend.items] in
+                try? await Task.sleep(nanoseconds: debounceNs)
                 guard !Task.isCancelled else { return }
+
+                // localizeCaseInsensitiveContains for CJK is 10-50× slower
+                // than ASCII — compute off the main thread.
+                let filtered = await Task.detached(priority: .userInitiated) { [items] in
+                    items.filter {
+                        $0.label.localizedCaseInsensitiveContains(newValue) ||
+                        $0.sourceName.localizedCaseInsensitiveContains(newValue) ||
+                        $0.fullText.localizedCaseInsensitiveContains(newValue)
+                    }
+                }.value
+
                 await MainActor.run {
-                    withAnimation(.easeInOut(duration: 0.12)) {
+                    withAnimation(.easeInOut(duration: 0.25)) {
                         effectiveSearchText = newValue
+                        searchResults = filtered
                     }
                     if selectedIndex == 0 {
-                        scrollTarget = filteredItems.first?.id
+                        scrollTarget = displayItems.first?.id
                     }
                 }
             }
@@ -395,12 +417,12 @@ struct HistoryPopupContent: View {
             if newValue == 0 {
                 isSearchFocused = true
                 isContainerFocused = false
-                // Clear default selection (NSTextField selects all on focus)
-                DispatchQueue.main.async {
-                    if let editor = NSApp.keyWindow?.firstResponder as? NSTextView {
-                        let end = editor.string.count
-                        editor.selectedRange = NSRange(location: end, length: 0)
-                    }
+                // Move cursor to end — NSTextField selects all on focus by default.
+                // This runs synchronously before the keyDown re-dispatch, so the
+                // character lands at the correct position.
+                if let editor = NSApp.keyWindow?.firstResponder as? NSTextView {
+                    let end = editor.string.count
+                    editor.selectedRange = NSRange(location: end, length: 0)
                 }
             } else {
                 isSearchFocused = false
@@ -475,8 +497,8 @@ struct HistoryPopupContent: View {
 
     private func openPreview() {
         let itemIndex = selectedIndex - 1
-        guard itemIndex < filteredItems.count, let popup = popupWindow else { return }
-        let item = filteredItems[itemIndex]
+        guard itemIndex < displayItems.count, let popup = popupWindow else { return }
+        let item = displayItems[itemIndex]
         let popupCenter = NSPoint(x: popup.frame.midX, y: popup.frame.midY)
         guard let previewItem = fullTextItem(item) else { return }
         let preview = PreviewWindow(item: previewItem, centerAt: popupCenter)
@@ -494,9 +516,9 @@ struct HistoryPopupContent: View {
 
     private func updatePreviewContent() {
         let itemIndex = selectedIndex - 1
-        guard showPreview, itemIndex >= 0, itemIndex < filteredItems.count,
+        guard showPreview, itemIndex >= 0, itemIndex < displayItems.count,
               let preview = popupWindow?.previewPanel else { return }
-        guard let previewItem = fullTextItem(filteredItems[itemIndex]) else {
+        guard let previewItem = fullTextItem(displayItems[itemIndex]) else {
             closePreview()
             return
         }
@@ -526,15 +548,15 @@ struct HistoryPopupContent: View {
                     .font(.system(size: 10, weight: .medium))
                     .foregroundColor(.white.opacity(0.7))
             } else {
-                Text("\(filteredItems.count)/\(backend.items.count) 项")
+                Text("\(displayItems.count)/\(backend.items.count) 项")
                     .font(.system(size: 10, weight: .medium))
                     .foregroundColor(.white.opacity(0.7))
             }
             Text("·")
                 .font(.system(size: 10))
                 .foregroundColor(.white.opacity(0.3))
-            let textCount = filteredItems.filter { $0.isText }.count
-            let imageCount = filteredItems.filter { $0.isImage }.count
+            let textCount = displayItems.filter { $0.isText }.count
+            let imageCount = displayItems.filter { $0.isImage }.count
             Text("\(textCount) 文本")
                 .font(.system(size: 10))
                 .foregroundColor(.white.opacity(0.5))
@@ -556,14 +578,15 @@ struct HistoryPopupContent: View {
             .onChange(of: selectedIndex) { _, newValue in
                 if newValue == 0 {
                     if showPreview { closePreview() }
-                    if !filteredItems.isEmpty {
-                        scrollTarget = filteredItems[0].id
-                    }
+                    // Don't set scrollTarget here — the searchText onChange
+                    // handler sets it after the debounced search is applied.
+                    // Setting it now would scroll to pre-search item 0 first,
+                    // then correct 80ms later, causing visible flicker.
                     return
                 }
                 let itemIndex = newValue - 1
-                if itemIndex < filteredItems.count {
-                    scrollTarget = filteredItems[itemIndex].id
+                if itemIndex < displayItems.count {
+                    scrollTarget = displayItems[itemIndex].id
                 }
                 updatePreviewContent()
             }
@@ -572,7 +595,7 @@ struct HistoryPopupContent: View {
     private var itemsListScrollView: some View {
         ScrollView {
             LazyVStack(spacing: 3) {
-                ForEach(Array(filteredItems.enumerated()), id: \.element.id) { index, item in
+                ForEach(Array(displayItems.enumerated()), id: \.element.id) { index, item in
                     let shortcut: String? = isCommandPressed && index < 9 ? "⌘\(index + 1)" : nil
                     ItemRowView(
                         item: item,
@@ -650,8 +673,8 @@ struct HistoryPopupContent: View {
     // MARK: - Actions
 
     private func deleteItem(at index: Int) {
-        guard index < filteredItems.count else { return }
-        let item = filteredItems[index]
+        guard index < displayItems.count else { return }
+        let item = displayItems[index]
         guard let backendIdx = backend.items.firstIndex(where: { $0.id == item.id }) else { return }
         closePreview()
         guard backend.deleteEntry(at: backendIdx) else { return }
@@ -664,8 +687,8 @@ struct HistoryPopupContent: View {
     }
 
     private func selectItem(at index: Int) {
-        guard index < filteredItems.count else { return }
-        let item = filteredItems[index]
+        guard index < displayItems.count else { return }
+        let item = displayItems[index]
         guard let backendIdx = backend.items.firstIndex(where: { $0.id == item.id }) else { return }
         if backend.selectAndPaste(at: backendIdx) {
             closePreview()
@@ -682,6 +705,8 @@ struct ItemRowView: View {
     let isDeleteModifierPressed: Bool
     let shortcutHint: String?
     @State private var isHovering = false
+
+    private static let hexColorRegex = try! NSRegularExpression(pattern: "#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})\\b")
 
     private func textColor(_ isSelected: Bool) -> Color {
         isSelected ? Color.white : Color.white.opacity(0.9)
@@ -768,7 +793,10 @@ struct ItemRowView: View {
     }
 
     private func textContent(_ text: String) -> some View {
-        let displayText = text
+        // Early truncation: process at most 200 chars from the full text.
+        // The display text after filtering is at most ~60 visual chars (30 CJK).
+        // 200 is a safe upper bound that avoids O(n) processing of multi-KB text.
+        let displayText = String(text.prefix(200))
             .components(separatedBy: .newlines)
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
@@ -789,9 +817,8 @@ struct ItemRowView: View {
 
     /// Build a Text view with inline color swatches for hex color codes.
     private func coloredLabel(_ text: String) -> Text {
-        let pattern = try! NSRegularExpression(pattern: "#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})\\b")
         let nsRange = NSRange(text.startIndex..., in: text)
-        let matches = pattern.matches(in: text, range: nsRange)
+        let matches = Self.hexColorRegex.matches(in: text, range: nsRange)
 
         if matches.isEmpty { return Text(text) }
 
@@ -802,21 +829,21 @@ struct ItemRowView: View {
             guard let range = Range(match.range, in: text) else { continue }
             // Text before this color code
             if lastEnd < range.lowerBound {
-                result = result + Text(String(text[lastEnd..<range.lowerBound]))
+                result = Text("\(result)\(String(text[lastEnd..<range.lowerBound]))")
             }
             // Color code with swatch
             let code = String(text[range])
             if let color = parseHexColor(code),
                let swatch = createColorSwatchImage(color) {
-                result = result + Text(Image(nsImage: swatch)) + Text(code)
+                result = Text("\(result)\(Image(nsImage: swatch))\(code)")
             } else {
-                result = result + Text(code)
+                result = Text("\(result)\(code)")
             }
             lastEnd = range.upperBound
         }
 
         if lastEnd < text.endIndex {
-            result = result + Text(String(text[lastEnd...]))
+            result = Text("\(result)\(String(text[lastEnd...]))")
         }
 
         return result
