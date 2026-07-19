@@ -141,6 +141,19 @@ class PopupHostingView: NSHostingView<HistoryPopupContent> {
         }
     }
 
+    /// Intercept ⌘Z before the search field's NSTextView swallows it for text undo.
+    /// This catches the key-equivalent event regardless of which responder is first.
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if event.keyCode == 6 && event.modifierFlags.contains(.command) &&
+            !event.modifierFlags.contains(.option) &&
+            !event.modifierFlags.contains(.control) &&
+            !event.modifierFlags.contains(.shift) {
+            NotificationCenter.default.post(name: undoKeyNotification, object: nil)
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+
     override func keyDown(with event: NSEvent) {
         // Command + number (1-9): quick select item
         if event.modifierFlags.contains(.command) {
@@ -158,6 +171,12 @@ class PopupHostingView: NSHostingView<HistoryPopupContent> {
                 NotificationCenter.default.post(name: deleteKeyNotification, object: nil)
                 return
             }
+        }
+
+        // Command + Z: undo deletion
+        if event.keyCode == 6 && event.modifierFlags.contains(.command) {
+            NotificationCenter.default.post(name: undoKeyNotification, object: nil)
+            return
         }
 
         // Printable character while on an item: switch focus to search bar
@@ -201,6 +220,7 @@ private let controlKeyNotification = Notification.Name("PopupControlKeyChanged")
 private let commandKeyNotification = Notification.Name("PopupCommandKeyChanged")
 private let commandNumberNotification = Notification.Name("PopupCommandNumberPressed")
 private let focusSearchNotification = Notification.Name("PopupFocusSearch")
+private let undoKeyNotification = Notification.Name("PopupUndoKeyPressed")
 
 // MARK: - SwiftUI Content for Popup — Native HUD Aesthetic
 
@@ -369,6 +389,9 @@ struct HistoryPopupContent: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: focusSearchNotification)) { _ in
             selectedIndex = 0
+        }
+        .onReceive(NotificationCenter.default.publisher(for: undoKeyNotification)) { _ in
+            performUndo()
         }
         .onChange(of: searchText) { _, newValue in
             selectedIndex = 0
@@ -677,7 +700,11 @@ struct HistoryPopupContent: View {
         let item = displayItems[index]
         guard let backendIdx = backend.items.firstIndex(where: { $0.id == item.id }) else { return }
         closePreview()
-        guard backend.deleteEntry(at: backendIdx) else { return }
+        var deleted = false
+        withAnimation(.easeInOut(duration: 0.2)) {
+            deleted = backend.deleteEntry(at: backendIdx)
+        }
+        guard deleted else { return }
         if backend.items.isEmpty {
             selectedIndex = 0
             searchText = ""
@@ -693,6 +720,40 @@ struct HistoryPopupContent: View {
         if backend.selectAndPaste(at: backendIdx) {
             closePreview()
             onClose()
+        }
+    }
+
+    // MARK: - Undo
+
+    /// Undo the most recent deletion. SwiftUI naturally animates the insertion
+    /// via identity-based diffing on `\.element.id`.
+    private func performUndo() {
+        guard backend.canUndo() else { return }
+
+        let savedSearchText = searchText
+
+        let success = withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) {
+            backend.undoDelete()
+        }
+        guard success else {
+            // Undo failed (DB error, entry gone, etc.). CanUndo returned true but
+            // by the time we popped the stack something went wrong.
+            // Restore search text — don't leave the user in a changed state.
+            searchText = savedSearchText
+            return
+        }
+
+        // Clear search only on success so the user sees the restored item
+        if !searchText.isEmpty {
+            searchText = ""
+        }
+
+        // Set selection to first item. Must happen AFTER searchText is cleared
+        // so selectedIndex is not immediately overwritten by onChange(of: searchText)
+        // which sets selectedIndex = 0.
+        DispatchQueue.main.async {
+            self.selectedIndex = 1
+            self.scrollTarget = self.backend.items.first?.id
         }
     }
 }
@@ -803,9 +864,9 @@ struct ItemRowView: View {
             .joined(separator: "⏎")
         let display: String
         let visualLen = visualWidth(displayText)
-        if visualLen > 60 {
-            let prefix = String(displayText.prefix(whileVisualWidth: 30))
-            let suffix = String(displayText.suffix(whileVisualWidth: 30))
+        if visualLen > 50 {
+            let prefix = String(displayText.prefix(whileVisualWidth: 25))
+            let suffix = String(displayText.suffix(whileVisualWidth: 25))
             display = "\(prefix)……\(suffix)"
         } else { display = displayText }
         return coloredLabel(display)

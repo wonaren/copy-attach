@@ -38,6 +38,8 @@ pub(crate) struct Backend {
     pub(crate) last_seen_image_hash: Arc<Mutex<Option<u64>>>,
     pub(crate) db: Arc<Mutex<Connection>>,
     pub(crate) cleanup_threshold: Arc<AtomicUsize>,
+    /// Stack of deleted entries for undo (Cmd+Z). Max 10 items.
+    pub(crate) deleted_stack: Arc<Mutex<Vec<ClipboardEntry>>>,
 }
 
 static BACKEND: OnceLock<Backend> = OnceLock::new();

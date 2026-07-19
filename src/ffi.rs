@@ -190,6 +190,7 @@ pub extern "C" fn clipboard_init() -> c_int {
     let last_seen_image_hash: Arc<Mutex<Option<u64>>> = Arc::new(Mutex::new(None));
     let db = Arc::new(Mutex::new(conn));
     let cleanup_threshold = Arc::new(AtomicUsize::new(DEFAULT_CLEANUP_THRESHOLD));
+    let deleted_stack: Arc<Mutex<Vec<ClipboardEntry>>> = Arc::new(Mutex::new(Vec::new()));
 
     let backend = Backend {
         history: Arc::clone(&history),
@@ -200,6 +201,7 @@ pub extern "C" fn clipboard_init() -> c_int {
         last_seen_image_hash: Arc::clone(&last_seen_image_hash),
         db: Arc::clone(&db),
         cleanup_threshold: Arc::clone(&cleanup_threshold),
+        deleted_stack: Arc::clone(&deleted_stack),
     };
 
     if set_backend(backend).is_err() {
@@ -620,7 +622,7 @@ fn select_and_paste_impl(mut item: ClipboardEntry) -> c_int {
                 _ => None,
             };
 
-            insert_entry_to_db(&conn, &db_item, png_for_db, thumb_for_db);
+            insert_entry_to_db(&conn, &db_item, png_for_db, thumb_for_db).ok();
             delete_matching_entry(&conn, &db_item);
             let new_row_id = conn.last_insert_rowid();
             trim_db_history(&conn, b.cleanup_threshold.load(Ordering::Relaxed));
@@ -739,44 +741,189 @@ pub extern "C" fn clipboard_delete_by_id(entry_id: u64) -> c_int {
         None => return 0,
     };
 
-    let removed = {
-        let mut hist = b.history.lock().unwrap();
-        match hist.iter().position(|e| match e {
+    // Step 1: Find the entry in history and clone it WITHOUT removing yet.
+    // If undo data capture fails later, entry stays intact in history.
+    let entry = {
+        let hist = b.history.lock().unwrap();
+        hist.iter().find(|e| match e {
             ClipboardEntry::Text { id, .. } => *id == entry_id,
             ClipboardEntry::Image { id, .. } => *id == entry_id,
-        }) {
-            Some(pos) => Some(hist.remove(pos)),
-            None => None,
-        }
+        }).cloned()
     };
-
-    let removed = match removed {
-        Some(r) => r,
+    let mut entry = match entry {
+        Some(e) => e,
         None => return 0,
     };
 
-    if let Ok(conn) = b.db.lock() {
-        let result = match &removed {
-            ClipboardEntry::Text { db_id, .. } if *db_id != 0 => {
-                conn.execute(
-                    "DELETE FROM clipboard_history WHERE id = ?1",
-                    rusqlite::params![*db_id],
-                )
+    // Step 2: For image entries, load full data from DB before removal.
+    // If loading fails (Phase 2 not done, DB error), reject deletion entirely.
+    if let ClipboardEntry::Image { db_id, png_data, thumb_data, thumb_width, thumb_height, .. } = &mut entry {
+        if png_data.is_empty() && *db_id != 0 {
+            let conn = b.db.lock().unwrap_or_else(|e| {
+                panic!("CopyAttach: DB lock poisoned loading image for undo: {}", e);
+            });
+            let loaded = conn.query_row(
+                "SELECT png_data, thumb_data, thumb_width, thumb_height FROM clipboard_history WHERE id = ?",
+                rusqlite::params![*db_id],
+                |row| Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                )),
+            );
+            match loaded {
+                Ok((png, thumb, tw, th)) => {
+                    *png_data = png;
+                    *thumb_data = thumb;
+                    *thumb_width = tw as u32;
+                    *thumb_height = th as u32;
+                }
+                Err(e) => {
+                    eprintln!("CopyAttach: failed to load image data from DB for undo: {}", e);
+                    return 0;
+                }
             }
-            ClipboardEntry::Image { db_id, .. } if *db_id != 0 => {
-                conn.execute(
-                    "DELETE FROM clipboard_history WHERE id = ?1",
-                    rusqlite::params![*db_id],
-                )
-            }
-            _ => Ok(0),
-        };
-        if let Err(e) = result {
-            eprintln!("CopyAttach: failed to delete entry {} from DB: {}", entry_id, e);
+        } else if png_data.is_empty() && *db_id == 0 {
+            // Phase 2 async persist has not completed — no image data exists in DB.
+            // Reject deletion: the entry stays in history, user can retry later.
+            eprintln!("CopyAttach: cannot delete image entry {}: Phase 2 not yet complete (db_id=0)", entry_id);
+            return 0;
+        }
+    }
+
+    // Step 3: All undo data captured. Now remove from history.
+    {
+        let mut hist = b.history.lock().unwrap();
+        hist.retain(|e| match e {
+            ClipboardEntry::Text { id, .. } => *id != entry_id,
+            ClipboardEntry::Image { id, .. } => *id != entry_id,
+        });
+    }
+
+    // Step 4: Delete from DB while entry is still in memory history.
+    // If this fails, history entry stays intact; caller can retry.
+    let conn = match b.db.lock() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("CopyAttach: DB lock poisoned deleting entry {}: {}", entry_id, e);
+            return 0;
+        }
+    };
+    if let Err(e) = match &entry {
+        ClipboardEntry::Text { db_id, .. } if *db_id != 0 => {
+            conn.execute(
+                "DELETE FROM clipboard_history WHERE id = ?1",
+                rusqlite::params![*db_id],
+            )
+        }
+        ClipboardEntry::Image { db_id, .. } if *db_id != 0 => {
+            conn.execute(
+                "DELETE FROM clipboard_history WHERE id = ?1",
+                rusqlite::params![*db_id],
+            )
+        }
+        _ => Ok(0),
+    } {
+        eprintln!("CopyAttach: failed to delete entry {} from DB: {}", entry_id, e);
+        return 0;
+    }
+
+    // Step 5: All data captured and DB cleaned up. Now remove from history.
+    {
+        let mut hist = b.history.lock().unwrap();
+        hist.retain(|e| match e {
+            ClipboardEntry::Text { id, .. } => *id != entry_id,
+            ClipboardEntry::Image { id, .. } => *id != entry_id,
+        });
+    }
+
+    // Step 6: Push to undo stack with fully captured data.
+    {
+        let mut stack = b.deleted_stack.lock().unwrap();
+        stack.push(entry.clone());
+        if stack.len() > 10 {
+            stack.remove(0);
         }
     }
 
     1
+}
+
+/// Undo the most recent deletion: restore the entry back into history
+/// at the front of the list and re-insert into DB.
+/// Returns 1 on success, 0 if there's nothing to undo.
+#[no_mangle]
+pub extern "C" fn clipboard_undo_delete() -> c_int {
+    let b = match crate::backend::try_backend() {
+        Some(b) => b,
+        None => return 0,
+    };
+
+    let entry = {
+        let mut stack = b.deleted_stack.lock().unwrap();
+        match stack.pop() {
+            Some(e) => e,
+            None => return 0,
+        }
+    };
+
+    // DB lock failure is fatal — entry has already been popped from the stack.
+    // Panic so the crash report reveals the poisoning rather than silently losing data.
+    let conn = b.db.lock().unwrap_or_else(|e| {
+        panic!("CopyAttach: DB lock poisoned during undo: {}", e);
+    });
+    let png_for_db = match &entry {
+        ClipboardEntry::Image { png_data, .. } if !png_data.is_empty() => {
+            Some(png_data.as_slice())
+        }
+        _ => None,
+    };
+    let thumb_for_db = match &entry {
+        ClipboardEntry::Image { thumb_data, thumb_width, thumb_height, .. }
+            if !thumb_data.is_empty() =>
+        {
+            Some((thumb_data.as_slice(), *thumb_width, *thumb_height))
+        }
+        _ => None,
+    };
+
+    // Must succeed: without DB write, image entries can't store their data
+    // and text entries would lack db_id. Re-push to stack so user can retry.
+    if insert_entry_to_db(&conn, &entry, png_for_db, thumb_for_db).is_err() {
+        let mut stack = b.deleted_stack.lock().unwrap();
+        stack.push(entry);
+        return 0;
+    }
+    let new_row_id = conn.last_insert_rowid();
+
+    let mut entry = entry;
+    match &mut entry {
+        ClipboardEntry::Text { ref mut db_id, .. }
+        | ClipboardEntry::Image { ref mut db_id, .. } => {
+            *db_id = new_row_id;
+        }
+    }
+
+    let mut hist = b.history.lock().unwrap();
+    // Use add_to_history for dedup: if the same content was re-captured
+    // by the monitor between deletion and undo, remove the existing copy
+    // before inserting the restored one at head.
+    *hist = add_to_history(std::mem::take(&mut *hist), entry);
+    while hist.len() > b.cleanup_threshold.load(Ordering::Relaxed) {
+        hist.pop();
+    }
+
+    1
+}
+
+/// Returns 1 if there's at least one entry in the undo stack, 0 otherwise.
+#[no_mangle]
+pub extern "C" fn clipboard_can_undo() -> c_int {
+    match crate::backend::try_backend() {
+        Some(b) => !b.deleted_stack.lock().unwrap().is_empty() as c_int,
+        None => 0,
+    }
 }
 
 /// Trim the oldest N percent of entries from both in-memory history and DB.

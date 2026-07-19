@@ -147,7 +147,7 @@ pub(crate) fn insert_entry_to_db(
     entry: &ClipboardEntry,
     image_png: Option<&[u8]>,
     image_thumb: Option<(&[u8], u32, u32)>,
-) {
+) -> Result<(), ()> {
     let result = match entry {
         ClipboardEntry::Text { text, timestamp, source_name, source_bundle_id, .. } => {
             conn.execute(
@@ -157,18 +157,24 @@ pub(crate) fn insert_entry_to_db(
                      timestamp, source_name, source_bundle_id)
                  VALUES (0, ?1, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?2, ?3, ?4)",
                 rusqlite::params![text, *timestamp as i64, source_name, source_bundle_id],
-            ).map(|_| ())
+            ).map(|_| ()).map_err(|e| { eprintln!("CopyAttach: failed to insert text entry: {}", e); })
         }
         ClipboardEntry::Image { width, height,
                                 thumb_width: _, thumb_height: _, hash,
                                 timestamp, source_name, source_bundle_id, .. } => {
             let png = match image_png {
                 Some(data) => data,
-                None => return,
+                None => {
+                    eprintln!("CopyAttach: cannot insert image entry: missing png_data");
+                    return Err(());
+                }
             };
             let (thumb_data, tw, th) = match image_thumb {
                 Some(t) => t,
-                None => return,
+                None => {
+                    eprintln!("CopyAttach: cannot insert image entry: missing thumb_data");
+                    return Err(());
+                }
             };
             conn.execute(
                 "INSERT INTO clipboard_history
@@ -182,12 +188,10 @@ pub(crate) fn insert_entry_to_db(
                     *hash as i64, *timestamp as i64,
                     source_name, source_bundle_id,
                 ],
-            ).map(|_| ())
+            ).map(|_| ()).map_err(|e| { eprintln!("CopyAttach: failed to insert image entry: {}", e); })
         }
     };
-    if let Err(e) = result {
-        eprintln!("CopyAttach: failed to insert entry: {}", e);
-    }
+    result
 }
 
 /// Delete duplicate entries from the DB, keeping only the newest row for the

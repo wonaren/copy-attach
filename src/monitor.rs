@@ -152,7 +152,7 @@ pub(crate) fn clipboard_monitor(
                     if let Some(db_item) = db_item {
                         // Lock DB WITHOUT holding history lock
                         if let Ok(conn) = db.lock() {
-                            insert_entry_to_db(
+                            let _ = insert_entry_to_db(
                                 &conn, &db_item,
                                 Some(&full_png),
                                 Some((&thumb_data, thumb_w, thumb_h)),
@@ -214,7 +214,7 @@ pub(crate) fn clipboard_monitor(
 
                         // Scope 2: DB write-through (db lock only — no history lock held)
                         if let Ok(conn) = db.lock() {
-                            insert_entry_to_db(&conn, &item_for_db, None, None);
+                            let _ = insert_entry_to_db(&conn, &item_for_db, None, None);
                             delete_matching_entry(&conn, &item_for_db);
                             let row_id = conn.last_insert_rowid();
                             trim_db_history(&conn, cleanup_threshold.load(Ordering::Relaxed));

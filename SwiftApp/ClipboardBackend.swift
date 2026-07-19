@@ -272,6 +272,101 @@ class ClipboardBackend: ObservableObject {
         return result
     }
 
+    // MARK: - Undo Delete
+
+    /// Undo the most recent deletion. Performs a synchronous reload from snapshot
+    /// so the caller can wrap this in `withAnimation` for a smooth transition.
+    func undoDelete() -> Bool {
+        guard clipboard_undo_delete() != 0 else { return false }
+
+        // Clear thumbnail cache: restored images get new db_ids, old keys are orphans.
+        clearThumbnailCache()
+
+        // Lightweight synchronous prepend: read only the first (restored) entry from
+        // snapshot and insert it at the front of items. O(1) instead of O(n) full clone.
+        guard let snap = clipboard_snapshot_acquire() else {
+            // Snapshot acquisition only fails when backend is uninitialized (teardown
+            // between clipboard_undo_delete and here). Return false — the caller must
+            // not proceed with animation/UI changes, and Rust side has already popped
+            // the stack. The 0.5s timer refresh picks up the new state.
+            return false
+        }
+        defer { clipboard_snapshot_release(snap) }
+
+        // Sync count to suppress redundant timer refresh.
+        count = Int(clipboard_snapshot_count(snap))
+
+        guard let restoredItem = readFirstSnapshotItem(snap) else {
+            // Shouldn't happen: restore just inserted one entry. Return false to
+            // let the caller handle it — items will refresh on the 0.5s timer tick.
+            return false
+        }
+
+        items.insert(restoredItem, at: 0)
+        // Bump generation so any stale in-flight snapshot from the timer is discarded.
+        reloadGeneration &+= 1
+        return true
+    }
+
+    /// Read the first entry from a snapshot and build a ClipboardItem (O(1)).
+    private func readFirstSnapshotItem(_ snap: UnsafeMutableRawPointer) -> ClipboardItem? {
+        guard clipboard_snapshot_count(snap) > 0 else { return nil }
+        let i: Int32 = 0
+        let type = Int(clipboard_snapshot_item_type(snap, i))
+        let id = Int(clipboard_snapshot_item_id(snap, i))
+        let timestamp = UInt64(clipboard_snapshot_item_timestamp(snap, i))
+
+        let label: String = {
+            guard let cStr = clipboard_snapshot_item_label(snap, i) else { return "" }
+            let s = String(cString: cStr)
+            clipboard_free_string(cStr)
+            return s
+        }()
+        let sourceName: String = {
+            guard let cStr = clipboard_snapshot_item_source_name(snap, i) else { return "" }
+            let s = String(cString: cStr)
+            clipboard_free_string(cStr)
+            return s
+        }()
+        let sourceBundleId: String = {
+            guard let cStr = clipboard_snapshot_item_source_bundle_id(snap, i) else { return "" }
+            let s = String(cString: cStr)
+            clipboard_free_string(cStr)
+            return s
+        }()
+
+        switch type {
+        case 0:
+            let fullText: String = {
+                guard let cStr = clipboard_snapshot_item_text(snap, i) else { return label }
+                let s = String(cString: cStr)
+                clipboard_free_string(cStr)
+                return s
+            }()
+            return .text(
+                entryId: id, text: label, timestamp: timestamp,
+                label: label, sourceName: sourceName,
+                sourceBundleId: sourceBundleId, fullText: fullText
+            )
+        case 1:
+            let dbId = Int(clipboard_snapshot_get_image_db_id(snap, i))
+            let w = Int(clipboard_snapshot_get_image_width(snap, i))
+            let h = Int(clipboard_snapshot_get_image_height(snap, i))
+            return .image(
+                entryId: id, dbId: dbId, width: w, height: h,
+                timestamp: timestamp, label: label,
+                sourceName: sourceName, sourceBundleId: sourceBundleId
+            )
+        default:
+            return nil
+        }
+    }
+
+    /// Returns true if there is at least one deleted entry that can be undone.
+    func canUndo() -> Bool {
+        clipboard_can_undo() != 0
+    }
+
     func checkPermission() -> Bool {
         return clipboard_check_permission() != 0
     }
