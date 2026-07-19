@@ -99,7 +99,7 @@ class PreviewWindow: NSPanel {
         switch item {
         case .text(let entryId, let text, _, _, _, _, _):
             let pad: CGFloat = 32
-            let font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+            let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
             // Find the longest line in the text to determine adaptive window width
             let longestLine = text.components(separatedBy: .newlines).max(by: { $0.count < $1.count }) ?? ""
             let lineWidth = (longestLine as NSString).size(withAttributes: [.font: font]).width
@@ -132,7 +132,7 @@ class PreviewWindow: NSPanel {
         layoutManager.addTextContainer(textContainer)
         textStorage.addLayoutManager(layoutManager)
 
-        let font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+        let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
         textStorage.setAttributedString(NSAttributedString(string: text, attributes: [.font: font]))
 
         _ = layoutManager.glyphRange(for: textContainer)

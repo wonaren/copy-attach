@@ -143,6 +143,17 @@ class PopupHostingView: NSHostingView<HistoryPopupContent> {
     }
 
     override func keyDown(with event: NSEvent) {
+        // Command + number (1-9): quick select item
+        if event.modifierFlags.contains(.command) {
+            let keyCode = event.keyCode
+            // kVK_ANSI_1=18 ... kVK_ANSI_9=26
+            if keyCode >= 18 && keyCode <= 26 {
+                let number = Int(keyCode - 18 + 1)
+                NotificationCenter.default.post(name: commandNumberNotification, object: number)
+                return
+            }
+        }
+        // Control + Delete: delete item
         if event.keyCode == 51 || event.keyCode == 117 {
             if event.modifierFlags.contains(.control) {
                 NotificationCenter.default.post(name: deleteKeyNotification, object: nil)
@@ -155,12 +166,18 @@ class PopupHostingView: NSHostingView<HistoryPopupContent> {
     override func flagsChanged(with event: NSEvent) {
         let controlPressed = event.modifierFlags.contains(.control)
         NotificationCenter.default.post(name: controlKeyNotification, object: controlPressed)
+
+        let commandPressed = event.modifierFlags.contains(.command)
+        NotificationCenter.default.post(name: commandKeyNotification, object: commandPressed)
+
         super.flagsChanged(with: event)
     }
 }
 
 private let deleteKeyNotification = Notification.Name("PopupDeleteKeyPressed")
 private let controlKeyNotification = Notification.Name("PopupControlKeyChanged")
+private let commandKeyNotification = Notification.Name("PopupCommandKeyChanged")
+private let commandNumberNotification = Notification.Name("PopupCommandNumberPressed")
 
 // MARK: - SwiftUI Content for Popup — Native HUD Aesthetic
 
@@ -171,6 +188,7 @@ struct HistoryPopupContent: View {
     @State private var selectedIndex: Int = 0  // 0 = search bar, 1+ = items
     @State private var showPreview: Bool = false
     @State private var isControlPressed: Bool = false
+    @State private var isCommandPressed: Bool = false
     @State private var searchText: String = ""
     @State private var effectiveSearchText: String = ""
     @State private var searchTask: Task<Void, Never>?
@@ -269,6 +287,7 @@ struct HistoryPopupContent: View {
             selectedIndex = 0
             searchText = ""
             isControlPressed = NSEvent.modifierFlags.contains(.control)
+            isCommandPressed = NSEvent.modifierFlags.contains(.command)
 
             // Spotlight opening: spring scale with slight overshoot
             let animDuration = 0.3
@@ -308,6 +327,19 @@ struct HistoryPopupContent: View {
             if selectedIndex > 0 {
                 deleteItem(at: selectedIndex - 1)
             }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: commandKeyNotification)) { note in
+            let pressed = (note.object as? Bool) ?? NSEvent.modifierFlags.contains(.command)
+            if pressed != isCommandPressed {
+                withAnimation(.easeInOut(duration: 0.15)) {
+                    isCommandPressed = pressed
+                }
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: commandNumberNotification)) { note in
+            guard let number = note.object as? Int,
+                  number >= 1 && number <= filteredItems.count else { return }
+            selectItem(at: number - 1)
         }
         .onChange(of: searchText) { _, newValue in
             selectedIndex = 0
@@ -507,10 +539,12 @@ struct HistoryPopupContent: View {
         ScrollView {
             LazyVStack(spacing: 3) {
                 ForEach(Array(filteredItems.enumerated()), id: \.element.id) { index, item in
+                    let shortcut: String? = isCommandPressed && index < 9 ? "⌘\(index + 1)" : nil
                     ItemRowView(
                         item: item,
                         isSelected: selectedIndex == index + 1,
-                        isDeleteModifierPressed: isControlPressed
+                        isDeleteModifierPressed: isControlPressed,
+                        shortcutHint: shortcut
                     )
                     .contentShape(Rectangle())
                     .onTapGesture {
@@ -612,6 +646,7 @@ struct ItemRowView: View {
     let item: ClipboardItem
     let isSelected: Bool
     let isDeleteModifierPressed: Bool
+    let shortcutHint: String?
     @State private var isHovering = false
 
     private func textColor(_ isSelected: Bool) -> Color {
@@ -640,6 +675,13 @@ struct ItemRowView: View {
                     .foregroundColor(Color.white)
                     .frame(minWidth: 20, alignment: .center)
                     .padding(.trailing, 6)
+                    .transition(.scale.combined(with: .opacity))
+            } else if let hint = shortcutHint {
+                Text(hint)
+                    .font(.system(size: 13, weight: .regular))
+                    .foregroundColor(isSelected ? sourceNameColor(true) : Color(nsColor: .controlAccentColor))
+                    .lineLimit(1)
+                    .monospacedDigit()
                     .transition(.scale.combined(with: .opacity))
             } else if !item.sourceName.isEmpty {
                 Text(item.sourceName)
@@ -865,7 +907,7 @@ struct LargeTextView: NSViewRepresentable {
         textView.drawsBackground = false
         textView.backgroundColor = .clear
         textView.textContainerInset = NSSize(width: 16, height: 12)
-        textView.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+        textView.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
         textView.textColor = NSColor.white.withAlphaComponent(0.95)
         textView.layoutManager?.allowsNonContiguousLayout = true
         textView.isHorizontallyResizable = false

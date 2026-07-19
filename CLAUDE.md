@@ -19,8 +19,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 # 仅 Rust release 构建
 cargo build --release
 
-# 仅 Rust 运行测试（可直接运行，不依赖 Swift 端）
+# 快速编译检查（不用完整构建）
+cargo check
+
+# Lint
+cargo clippy
+
+# 运行所有 Rust 测试（可直接运行，不依赖 Swift 端）
 cargo test
+
+# 运行单个测试（按名称匹配）
+cargo test test_add_text_item
+cargo test test_auto_cleanup  # 匹配前缀
 
 # 调试日志
 tail -f /tmp/copyattach_debug.log
@@ -67,6 +77,8 @@ open "CopyAttach.app"
 
 ## 关键数据流
 
+参阅 [README.md](README.md) 中的架构 ASCII 图和「一分钟上手」章节，快速理解系统全貌。
+
 ```
 Rust 监控线程捕获新剪贴板内容（300ms 轮询，先 changeCount 轻量检测）
   ↓ write-through SQLite + 更新内存历史
@@ -101,6 +113,10 @@ select_and_paste 先设置 `last_seen_text` / `last_seen_image_hash` 再写剪�
 | `PreviewWindow.swift` | `NSPanel` 非 key 预览窗口（可跟随弹窗焦点切换），大文本 NSTextView 渲染，图片全尺寸加载 |
 | `HotkeyManager.swift` | 全局快捷键管理（Carbon RegisterEventHotKey + NSEvent global monitor 双注册），快捷键录制，`debugLog()` 工具函数 |
 
+**FFI 接口**：`CopyAttach-Bridging-Header.h` 声明约 40 个 `extern "C"` 函数，涵盖生命周期、查询、快照、图片加载、粘贴、权限管理、历史管理等。新功能如需 Rust 向 Swift 暴露调用点，需在此文件添加声明。
+
+**App 类型**：纯菜单栏应用（`Info.plist` 中 `LSUIElement: true`），无 Dock 图标。`-target arm64-apple-macosx15.0` 硬编码在 build.sh 中。
+
 ### SwiftUI 模型关系
 
 - `ClipboardBackend.shared` — `@StateObject`，驱动弹窗列表刷新
@@ -124,18 +140,21 @@ select_and_paste 先设置 `last_seen_text` / `last_seen_image_hash` 再写剪�
 - `migration`（默认开启）：启用 `serde`/`serde_json`/`base64` 依赖，提供从旧版 `history.json` 到 SQLite 的迁移。
 - `default = ["migration"]`：迁移完成后考虑移除。
 
-## 单测清单（Rust）
+## 单测
 
-`cargo test` 运行以下测试（均在 `src/tests.rs` 中）：
-- **基本操作**：`test_add_text_item` / `test_add_multiple_items_order` — 基本添加与顺序
-- **去重**：`test_text_deduplication` / `test_image_deduplication` / `test_text_and_image_mixed` — 保留新条目
-- **图片处理**：`test_encode_decode_png` / `test_create_thumbnail` / `test_image_hash_consistency` / `test_image_hash_different`
-- **元数据**：`test_source_app_fields` / `test_item_types` / `test_item_timestamps`
-- **label 生成**：`test_label_text` / `test_label_image` / `test_label_multibyte`（多字节安全）
-- **内存安全**：`test_free_string_null_safe` — null 释放安全
-- **自动清理**（不同阈值 100/500/1000/2000/3000/5000）：`test_auto_cleanup_at_threshold_*` / `test_auto_cleanup_keeps_newest` / `test_auto_cleanup_removes_oldest` / `test_auto_cleanup_no_trim_below_threshold` / `test_auto_cleanup_empty_history` / `test_auto_cleanup_exactly_at_threshold`
-- **按百分比 trim**：`test_trim_percent_*`（0%/40%/50%/100%、边界值、ceil 行为、空列表一致性）
-- **阈值变更**：`test_threshold_reduction_trims_history` / `test_threshold_increase_preserves_all` / `test_threshold_reduction_to_minimum`
+所有 Rust 测试集中在 `src/tests.rs`（cfg-gated）。运行方式：
+
+```bash
+# 运行所有测试
+cargo test
+
+# 按名称筛选测试
+cargo test test_add_text_item          # 精确匹配
+cargo test test_auto_cleanup           # 匹配前缀
+cargo test test_trim_percent           # 匹配子串
+```
+
+测试覆盖：基本添加与顺序、去重（文本/图片/混合）、图片编解码与缩略图、内容哈希一致性、SourceApp 元数据、label 生成（含多字节安全）、FFI 空指针安全、阈值清理（多个阈值 + 边界 + 百分比 trim + ceil 行为）、阈值变更。
 
 ## 调试日志
 
@@ -173,6 +192,16 @@ tail -f /tmp/copyattach_debug.log
 ## 应用图标
 
 `assets/icon.svg` 通过 `sips` 渲染 + `iconutil` 生成 `AppIcon.icns`，构建时自动处理。
+
+## 设计参考
+
+`UI-DESIGN.md` 包含完整的 Apple 风格设计系统（色板、字体层级、间距、圆角、组件）。在涉及 UI 样式调整时参考此文件，而不是从零硬编码颜色值。
+
+## 安装的 Skills
+
+`.claude/skills/` 目录包含多个动画/设计相关的 skill（软链接），可用于 UI 动效分析和改进：
+- `apple-design`, `emil-design-eng`: Apple 风格 UI 设计原则
+- `animation-vocabulary`, `improve-animations`, `find-animation-opportunities`: 动画分析与改进
 
 ## 权限管理
 
