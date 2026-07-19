@@ -183,6 +183,17 @@ pub extern "C" fn clipboard_init() -> c_int {
     let saved = load_history_from_db(&conn);
     let saved: Vec<ClipboardEntry> = saved.into_iter().take(DEFAULT_CLEANUP_THRESHOLD).collect();
 
+    // Prime the entry-id counter above the highest loaded ID so new entries
+    // never collide with restored ones. This is safe even when loaded IDs are
+    // a sparse set from the backfill (SQLite rowids can have gaps from
+    // deletion): the AtomicU64 is monotonic and always moves forward.
+    {
+        let max_id = saved.iter().map(|e| match e {
+            ClipboardEntry::Text { id, .. } | ClipboardEntry::Image { id, .. } => *id,
+        }).max().unwrap_or(0);
+        crate::backend::prime_entry_id(max_id + 1);
+    }
+
     let history: Arc<Mutex<Vec<ClipboardEntry>>> = Arc::new(Mutex::new(saved));
     let running = Arc::new(AtomicBool::new(true));
     let source_app = Arc::new(Mutex::new(crate::types::SourceApp::default()));

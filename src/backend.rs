@@ -25,6 +25,14 @@ pub(crate) fn new_entry_id() -> u64 {
     NEXT_ENTRY_ID.fetch_add(1, Ordering::SeqCst)
 }
 
+/// Set the entry-id counter to at least `min_next`, ensuring new IDs don't
+/// collide with already-loaded IDs after a restart. Only moves the counter
+/// upward; never backward (but that can't happen since we start from 1 and
+/// the store is called once during init with a value >= loaded max + 1).
+pub(crate) fn prime_entry_id(min_next: u64) {
+    NEXT_ENTRY_ID.store(min_next, Ordering::SeqCst);
+}
+
 // ═══════════════════════════════════════════
 // Backend Struct & Singleton
 // ═══════════════════════════════════════════

@@ -1,6 +1,20 @@
 import AppKit
 import SwiftUI
 
+// MARK: - Filter Mode
+
+enum FilterMode: String, CaseIterable {
+    case favorites
+    case all
+
+    var icon: String {
+        switch self {
+        case .favorites: return "star.fill"
+        case .all: return "line.3.horizontal"
+        }
+    }
+}
+
 // MARK: - History Popup Window (NSPanel)
 
 class HistoryPopupWindow: NSPanel {
@@ -134,11 +148,45 @@ class HistoryPopupWindow: NSPanel {
 class PopupHostingView: NSHostingView<HistoryPopupContent> {
     override var acceptsFirstResponder: Bool { true }
 
+    /// Local event monitor to intercept ←/→ from the empty search field
+    /// before NSTextView swallows them for cursor movement.
+    private var arrowMonitor: Any?
+
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         if window != nil {
             window?.makeFirstResponder(self)
+            installArrowMonitor()
+        } else {
+            removeArrowMonitor()
         }
+    }
+
+    private func installArrowMonitor() {
+        removeArrowMonitor()
+        arrowMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard event.keyCode == 123 || event.keyCode == 124 else { return event }
+            // Only intercept when the search field (editable NSTextView) is
+            // first responder and its string is empty — no cursor to move.
+            guard let self = self,
+                  let textView = self.window?.firstResponder as? NSTextView,
+                  textView.isEditable,
+                  textView.string.isEmpty else { return event }
+            let direction: String = event.keyCode == 123 ? "left" : "right"
+            NotificationCenter.default.post(name: arrowKeyFromSearchNotification, object: direction)
+            return nil
+        }
+    }
+
+    private func removeArrowMonitor() {
+        if let monitor = arrowMonitor {
+            NSEvent.removeMonitor(monitor)
+            arrowMonitor = nil
+        }
+    }
+
+    deinit {
+        removeArrowMonitor()
     }
 
     /// Intercept ⌘Z before the search field's NSTextView swallows it for text undo.
@@ -155,6 +203,22 @@ class PopupHostingView: NSHostingView<HistoryPopupContent> {
     }
 
     override func keyDown(with event: NSEvent) {
+        // Option + P: toggle favorite (must intercept before text input
+        // system converts it to π character)
+        if event.keyCode == 35 && event.modifierFlags.contains(.option) &&
+            !event.modifierFlags.contains(.command) &&
+            !event.modifierFlags.contains(.control) &&
+            !event.modifierFlags.contains(.shift) {
+            // Let the event pass through when the search bar is focused
+            // so the user can type characters like π via Opt+P.
+            if let textView = window?.firstResponder as? NSTextView, textView.isEditable {
+                super.keyDown(with: event)
+                return
+            }
+            NotificationCenter.default.post(name: favoriteToggleNotification, object: nil)
+            return
+        }
+
         // Command + number (1-9): quick select item
         if event.modifierFlags.contains(.command) {
             let keyCode = event.keyCode
@@ -221,6 +285,8 @@ private let commandKeyNotification = Notification.Name("PopupCommandKeyChanged")
 private let commandNumberNotification = Notification.Name("PopupCommandNumberPressed")
 private let focusSearchNotification = Notification.Name("PopupFocusSearch")
 private let undoKeyNotification = Notification.Name("PopupUndoKeyPressed")
+private let favoriteToggleNotification = Notification.Name("PopupFavoriteToggle")
+private let arrowKeyFromSearchNotification = Notification.Name("PopupArrowKeyFromSearch")
 
 // MARK: - SwiftUI Content for Popup — Native HUD Aesthetic
 
@@ -237,6 +303,8 @@ struct HistoryPopupContent: View {
     @State private var searchTask: Task<Void, Never>?
     @State private var scrollTarget: Int?
 
+    @State private var filterMode: FilterMode = .all
+
     // Spotlight opening animation: start slightly larger, spring in
     @State private var openingScale: CGFloat = 1.10
 
@@ -249,7 +317,13 @@ struct HistoryPopupContent: View {
 
     /// Items to display: full history when idle, cached results when searching.
     private var displayItems: [ClipboardItem] {
-        effectiveSearchText.isEmpty ? backend.items : searchResults
+        let base = effectiveSearchText.isEmpty ? backend.items : searchResults
+        switch filterMode {
+        case .all:
+            return base
+        case .favorites:
+            return base.filter { backend.favoriteIds.contains($0.id) }
+        }
     }
 
     /// The highest valid selectedIndex (search bar + item count).
@@ -278,8 +352,13 @@ struct HistoryPopupContent: View {
                         .padding(.horizontal, 5)
                         .padding(.top, 6)
 
+                    filterModeTabs
+                        .padding(.horizontal, 5)
+
                     if displayItems.isEmpty && !effectiveSearchText.isEmpty {
                         noResultsView
+                    } else if displayItems.isEmpty && filterMode == .favorites {
+                        emptyFavoritesView
                     } else {
                         itemsList
                         itemCountBar
@@ -323,6 +402,24 @@ struct HistoryPopupContent: View {
         .onKeyPress(.space) {
             if selectedIndex == 0 { return .ignored }
             togglePreview()
+            return .handled
+        }
+        .onKeyPress(.leftArrow) {
+            guard selectedIndex > 0 else { return .ignored }
+            let modes = FilterMode.allCases
+            if let idx = modes.firstIndex(of: filterMode), idx > 0 {
+                filterMode = modes[idx - 1]
+                selectedIndex = min(selectedIndex, maxIndex)
+            }
+            return .handled
+        }
+        .onKeyPress(.rightArrow) {
+            guard selectedIndex > 0 else { return .ignored }
+            let modes = FilterMode.allCases
+            if let idx = modes.firstIndex(of: filterMode), idx < modes.count - 1 {
+                filterMode = modes[idx + 1]
+                selectedIndex = min(selectedIndex, maxIndex)
+            }
             return .handled
         }
         .onAppear {
@@ -392,6 +489,37 @@ struct HistoryPopupContent: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: undoKeyNotification)) { _ in
             performUndo()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: favoriteToggleNotification)) { _ in
+            if selectedIndex > 0 {
+                let itemIdx = selectedIndex - 1
+                if itemIdx < displayItems.count {
+                    let item = displayItems[itemIdx]
+                    backend.toggleFavorite(item.id)
+                }
+            }
+            // Reclamp after favorites change: displayItems may have shrunk
+            if selectedIndex > maxIndex {
+                selectedIndex = max(0, maxIndex)
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: arrowKeyFromSearchNotification)) { note in
+            guard let direction = note.object as? String else { return }
+            let modes = FilterMode.allCases
+            if let idx = modes.firstIndex(of: filterMode) {
+                if direction == "left" && idx > 0 {
+                    filterMode = modes[idx - 1]
+                } else if direction == "right" && idx < modes.count - 1 {
+                    filterMode = modes[idx + 1]
+                }
+            }
+        }
+        .onChange(of: filterMode) { _, _ in
+            closePreview()
+            if selectedIndex > maxIndex {
+                selectedIndex = max(0, maxIndex)
+            }
+            scrollTarget = displayItems.first?.id
         }
         .onChange(of: searchText) { _, newValue in
             selectedIndex = 0
@@ -512,6 +640,61 @@ struct HistoryPopupContent: View {
         .transition(.opacity)
     }
 
+    // MARK: - Filter Mode Tabs
+
+    private var filterModeTabs: some View {
+        HStack(spacing: 8) {
+            ForEach(FilterMode.allCases, id: \.self) { mode in
+                Button(action: {
+                    withAnimation(.easeInOut(duration: 0.15)) {
+                        filterMode = mode
+                    }
+                }) {
+                    Image(systemName: mode.icon)
+                        .font(.system(size: 13, weight: .medium))
+                        .frame(height: 16)
+                        .foregroundColor(mode == filterMode
+                            ? Color(nsColor: .controlAccentColor)
+                            : .white.opacity(0.45))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .fill(mode == filterMode
+                                    ? Color(nsColor: .controlAccentColor).opacity(0.15)
+                                    : Color.white.opacity(0.05))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .strokeBorder(
+                                    mode == filterMode
+                                        ? Color(nsColor: .controlAccentColor).opacity(0.3)
+                                        : Color.white.opacity(0.06),
+                                    lineWidth: 1
+                                )
+                        )
+                }
+                .buttonStyle(.plain)
+            }
+            Spacer()
+        }
+        .padding(.vertical, 2)
+    }
+
+    private var emptyFavoritesView: some View {
+        VStack(spacing: 12) {
+            Spacer()
+            Image(systemName: "star.slash")
+                .font(.system(size: 28))
+                .foregroundColor(.white.opacity(0.2))
+            Text("暂无收藏")
+                .font(.system(size: 14))
+                .foregroundColor(.white.opacity(0.35))
+            Spacer()
+        }
+        .transition(.opacity)
+    }
+
     // MARK: - Preview Management
 
     private func togglePreview() {
@@ -566,14 +749,13 @@ struct HistoryPopupContent: View {
 
     private var itemCountBar: some View {
         HStack(spacing: 4) {
-            if effectiveSearchText.isEmpty {
-                Text("\(backend.items.count) 项")
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundColor(.white.opacity(0.7))
-            } else {
-                Text("\(displayItems.count)/\(backend.items.count) 项")
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundColor(.white.opacity(0.7))
+            Text("\(displayItems.count) 项")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundColor(.white.opacity(0.7))
+            if !effectiveSearchText.isEmpty {
+                Text("/ \(backend.items.count) 项")
+                    .font(.system(size: 10))
+                    .foregroundColor(.white.opacity(0.5))
             }
             Text("·")
                 .font(.system(size: 10))
@@ -624,7 +806,8 @@ struct HistoryPopupContent: View {
                         item: item,
                         isSelected: selectedIndex == index + 1,
                         isDeleteModifierPressed: isControlPressed,
-                        shortcutHint: shortcut
+                        shortcutHint: shortcut,
+                        isFavorite: backend.favoriteIds.contains(item.id)
                     )
                     .contentShape(Rectangle())
                     .onTapGesture {
@@ -752,8 +935,12 @@ struct HistoryPopupContent: View {
         // so selectedIndex is not immediately overwritten by onChange(of: searchText)
         // which sets selectedIndex = 0.
         DispatchQueue.main.async {
-            self.selectedIndex = 1
-            self.scrollTarget = self.backend.items.first?.id
+            if self.displayItems.isEmpty {
+                self.selectedIndex = 0
+            } else {
+                self.selectedIndex = 1
+                self.scrollTarget = self.displayItems.first?.id
+            }
         }
     }
 }
@@ -765,6 +952,7 @@ struct ItemRowView: View {
     let isSelected: Bool
     let isDeleteModifierPressed: Bool
     let shortcutHint: String?
+    let isFavorite: Bool
     @State private var isHovering = false
 
     private static let hexColorRegex = try! NSRegularExpression(pattern: "#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})\\b")
@@ -789,6 +977,13 @@ struct ItemRowView: View {
                 }
             }
             Spacer(minLength: 2)
+            if isFavorite {
+                Image(systemName: "star.fill")
+                    .font(.system(size: 10))
+                    .foregroundColor(Color(nsColor: .systemYellow))
+                    .frame(width: 16, alignment: .center)
+                    .transition(.scale.combined(with: .opacity))
+            }
             if isSelected && isDeleteModifierPressed {
                 Image(systemName: "delete.left.fill")
                     .font(.system(size: 13))

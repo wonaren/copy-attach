@@ -33,10 +33,12 @@ pub(crate) fn open_db() -> Option<Connection> {
 }
 
 /// Create the history table if it does not already exist.
+/// Adds the `entry_id` column via migration for schema versioning.
 pub(crate) fn ensure_history_table(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS clipboard_history (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            entry_id        INTEGER NOT NULL DEFAULT 0,
             entry_type      INTEGER NOT NULL,
             text            TEXT,
             png_data        BLOB,
@@ -50,14 +52,39 @@ pub(crate) fn ensure_history_table(conn: &Connection) -> Result<(), rusqlite::Er
             source_name     TEXT NOT NULL DEFAULT '',
             source_bundle_id TEXT NOT NULL DEFAULT ''
         );"
-    )
+    )?;
+    // Add entry_id column if this is an old DB that lacks it.
+    // We try ALTER TABLE and only propagate the error if the column still
+    // doesn't exist afterwards (duplicate-column on re-run is harmless).
+    if let Err(e) = conn.execute_batch(
+        "ALTER TABLE clipboard_history ADD COLUMN entry_id INTEGER NOT NULL DEFAULT 0;"
+    ) {
+        let has_column: bool = conn
+            .prepare("SELECT entry_id FROM clipboard_history LIMIT 0")
+            .is_ok();
+        if !has_column {
+            eprintln!("CopyAttach: failed to add entry_id column: {}", e);
+            return Err(e);
+        }
+    }
+    // Backfill entry_id for rows that still have the default (0) using the
+    // stable SQLite rowid, ensuring every entry has a persistent, unique ID
+    // that survives restarts and reordering. Running this multiple times is
+    // safe: once a row has a non-zero entry_id, the UPDATE is a no-op.
+    // NB: if this fails, load_history_from_db will read entry_id=0 and
+    // assign fresh IDs on every restart, breaking favorites — so we
+    // propagate the error rather than silently falling back.
+    conn.execute_batch(
+        "UPDATE clipboard_history SET entry_id = id WHERE entry_id = 0;"
+    )?;
+    Ok(())
 }
 
 /// Load up to `DEFAULT_CLEANUP_THRESHOLD` entries from the DB, newest first.
 /// Image entries carry only metadata (png_data is empty, loaded on demand).
 pub(crate) fn load_history_from_db(conn: &Connection) -> Vec<ClipboardEntry> {
     let mut stmt = match conn.prepare(
-        "SELECT id, entry_type, text,
+        "SELECT id, entry_id, entry_type, text,
                 width, height,
                 thumb_width, thumb_height, hash,
                 timestamp, source_name, source_bundle_id
@@ -73,18 +100,20 @@ pub(crate) fn load_history_from_db(conn: &Connection) -> Vec<ClipboardEntry> {
     };
 
     let rows = match stmt.query_map([DEFAULT_CLEANUP_THRESHOLD as i64], |row| {
-        let entry_type: i32 = row.get(1)?;
+        let entry_type: i32 = row.get(2)?;
+        let entry_id: i64 = row.get(1)?;
         Ok((entry_type,
             row.get::<_, i64>(0)?,
-            row.get::<_, Option<String>>(2)?,
-            row.get::<_, Option<i64>>(3)?,
+            entry_id,
+            row.get::<_, Option<String>>(3)?,
             row.get::<_, Option<i64>>(4)?,
             row.get::<_, Option<i64>>(5)?,
             row.get::<_, Option<i64>>(6)?,
             row.get::<_, Option<i64>>(7)?,
-            row.get::<_, i64>(8)?,
-            row.get::<_, String>(9)?,
-            row.get::<_, String>(10)?))
+            row.get::<_, Option<i64>>(8)?,
+            row.get::<_, i64>(9)?,
+            row.get::<_, String>(10)?,
+            row.get::<_, String>(11)?))
     }) {
         Ok(r) => r,
         Err(e) => {
@@ -96,7 +125,7 @@ pub(crate) fn load_history_from_db(conn: &Connection) -> Vec<ClipboardEntry> {
     let mut result = Vec::new();
     let mut skipped = 0u32;
     for row in rows {
-        let (entry_type, db_id, text, width, height,
+        let (entry_type, db_id, entry_id, text, width, height,
              thumb_width, thumb_height, hash, timestamp, source_name, source_bundle_id) = match row {
             Ok(r) => r,
             Err(e) => {
@@ -105,9 +134,11 @@ pub(crate) fn load_history_from_db(conn: &Connection) -> Vec<ClipboardEntry> {
                 continue;
             }
         };
+        // Use the persisted entry_id, or assign a fresh one for legacy rows.
+        let id = if entry_id != 0 { entry_id as u64 } else { crate::backend::new_entry_id() };
         match entry_type {
             0 => result.push(ClipboardEntry::Text {
-                id: crate::backend::new_entry_id(),
+                id,
                 text: text.unwrap_or_default(),
                 timestamp: timestamp as u64,
                 source_name,
@@ -115,7 +146,7 @@ pub(crate) fn load_history_from_db(conn: &Connection) -> Vec<ClipboardEntry> {
                 db_id,
             }),
             1 => result.push(ClipboardEntry::Image {
-                id: crate::backend::new_entry_id(),
+                id,
                 png_data: Vec::new(),
                 width: width.unwrap_or(0) as u32,
                 height: height.unwrap_or(0) as u32,
@@ -149,19 +180,19 @@ pub(crate) fn insert_entry_to_db(
     image_thumb: Option<(&[u8], u32, u32)>,
 ) -> Result<(), ()> {
     let result = match entry {
-        ClipboardEntry::Text { text, timestamp, source_name, source_bundle_id, .. } => {
+        ClipboardEntry::Text { text, timestamp, source_name, source_bundle_id, id, .. } => {
             conn.execute(
                 "INSERT INTO clipboard_history
                     (entry_type, text, png_data, width, height,
                      thumb_data, thumb_width, thumb_height, hash,
-                     timestamp, source_name, source_bundle_id)
-                 VALUES (0, ?1, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?2, ?3, ?4)",
-                rusqlite::params![text, *timestamp as i64, source_name, source_bundle_id],
+                     timestamp, source_name, source_bundle_id, entry_id)
+                 VALUES (0, ?1, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?2, ?3, ?4, ?5)",
+                rusqlite::params![text, *timestamp as i64, source_name, source_bundle_id, *id as i64],
             ).map(|_| ()).map_err(|e| { eprintln!("CopyAttach: failed to insert text entry: {}", e); })
         }
         ClipboardEntry::Image { width, height,
                                 thumb_width: _, thumb_height: _, hash,
-                                timestamp, source_name, source_bundle_id, .. } => {
+                                timestamp, source_name, source_bundle_id, id, .. } => {
             let png = match image_png {
                 Some(data) => data,
                 None => {
@@ -180,13 +211,14 @@ pub(crate) fn insert_entry_to_db(
                 "INSERT INTO clipboard_history
                     (entry_type, text, png_data, width, height,
                      thumb_data, thumb_width, thumb_height, hash,
-                     timestamp, source_name, source_bundle_id)
-                 VALUES (1, NULL, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                     timestamp, source_name, source_bundle_id, entry_id)
+                 VALUES (1, NULL, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 rusqlite::params![
                     png, *width as i64, *height as i64,
                     thumb_data, tw as i64, th as i64,
                     *hash as i64, *timestamp as i64,
                     source_name, source_bundle_id,
+                    *id as i64,
                 ],
             ).map(|_| ()).map_err(|e| { eprintln!("CopyAttach: failed to insert image entry: {}", e); })
         }

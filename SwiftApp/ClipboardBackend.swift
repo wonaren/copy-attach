@@ -19,8 +19,39 @@ class ClipboardBackend: ObservableObject {
         return c
     }()
 
+    @Published var favoriteIds: Set<Int> = []
+
+    private let favoritesKey = "FavoriteIds"
+
+    private func loadFavorites() {
+        if let data = UserDefaults.standard.data(forKey: favoritesKey),
+           let ids = try? JSONDecoder().decode(Set<Int>.self, from: data) {
+            favoriteIds = ids
+        }
+    }
+
+    private func saveFavorites() {
+        if let data = try? JSONEncoder().encode(favoriteIds) {
+            UserDefaults.standard.set(data, forKey: favoritesKey)
+        }
+    }
+
+    func toggleFavorite(_ entryId: Int) {
+        if favoriteIds.contains(entryId) {
+            favoriteIds.remove(entryId)
+        } else {
+            favoriteIds.insert(entryId)
+        }
+        saveFavorites()
+    }
+
+    func isFavorite(_ entryId: Int) -> Bool {
+        favoriteIds.contains(entryId)
+    }
+
     private init() {
         permissionGranted = checkPermission()
+        loadFavorites()
     }
 
     func start() -> Bool {
@@ -249,9 +280,11 @@ class ClipboardBackend: ObservableObject {
 
     func deleteEntry(at index: Int) -> Bool {
         guard index < items.count else { return false }
-        let entryId = UInt64(items[index].id)
-        let result = clipboard_delete_by_id(entryId) != 0
+        let entryId = items[index].id
+        let result = clipboard_delete_by_id(UInt64(entryId)) != 0
         if result {
+            favoriteIds.remove(entryId)
+            saveFavorites()
             items.remove(at: index)
             count = items.count
             // Bump generation to discard any stale in-flight snapshot
