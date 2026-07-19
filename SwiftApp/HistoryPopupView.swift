@@ -160,6 +160,25 @@ class PopupHostingView: NSHostingView<HistoryPopupContent> {
                 return
             }
         }
+
+        // Printable character while on an item: switch focus to search bar
+        // and re-send the event so the search field's IME can process it
+        // (e.g. Chinese/Japanese IME composition).
+        if let chars = event.characters,
+           let first = chars.first,
+           !event.modifierFlags.contains(.command),
+           !event.modifierFlags.contains(.control),
+           (first.isLetter || first.isNumber || first.isPunctuation)
+        {
+            NotificationCenter.default.post(name: focusSearchNotification, object: nil)
+            // After focus switches to search bar, re-send the original event
+            // so the search field's NSTextView handles it with full IME support.
+            DispatchQueue.main.async { [event] in
+                NSApp.keyWindow?.firstResponder?.keyDown(with: event)
+            }
+            return
+        }
+
         super.keyDown(with: event)
     }
 
@@ -178,6 +197,7 @@ private let deleteKeyNotification = Notification.Name("PopupDeleteKeyPressed")
 private let controlKeyNotification = Notification.Name("PopupControlKeyChanged")
 private let commandKeyNotification = Notification.Name("PopupCommandKeyChanged")
 private let commandNumberNotification = Notification.Name("PopupCommandNumberPressed")
+private let focusSearchNotification = Notification.Name("PopupFocusSearch")
 
 // MARK: - SwiftUI Content for Popup — Native HUD Aesthetic
 
@@ -284,7 +304,7 @@ struct HistoryPopupContent: View {
             return .handled
         }
         .onAppear {
-            selectedIndex = 0
+            selectedIndex = backend.items.isEmpty ? 0 : 1
             searchText = ""
             isControlPressed = NSEvent.modifierFlags.contains(.control)
             isCommandPressed = NSEvent.modifierFlags.contains(.command)
@@ -307,9 +327,13 @@ struct HistoryPopupContent: View {
                 }
             }
 
-            // Focus search field after animation completes
+            // Focus first item (or search bar if empty) after animation
             DispatchQueue.main.asyncAfter(deadline: .now() + animDuration + 0.05) {
-                isSearchFocused = true
+                if selectedIndex == 0 {
+                    isSearchFocused = true
+                } else {
+                    isContainerFocused = true
+                }
             }
         }
         .onDisappear {
@@ -341,6 +365,9 @@ struct HistoryPopupContent: View {
                   number >= 1 && number <= filteredItems.count else { return }
             selectItem(at: number - 1)
         }
+        .onReceive(NotificationCenter.default.publisher(for: focusSearchNotification)) { _ in
+            selectedIndex = 0
+        }
         .onChange(of: searchText) { _, newValue in
             selectedIndex = 0
             searchTask?.cancel()
@@ -368,6 +395,13 @@ struct HistoryPopupContent: View {
             if newValue == 0 {
                 isSearchFocused = true
                 isContainerFocused = false
+                // Clear default selection (NSTextField selects all on focus)
+                DispatchQueue.main.async {
+                    if let editor = NSApp.keyWindow?.firstResponder as? NSTextView {
+                        let end = editor.string.count
+                        editor.selectedRange = NSRange(location: end, length: 0)
+                    }
+                }
             } else {
                 isSearchFocused = false
                 isContainerFocused = true
