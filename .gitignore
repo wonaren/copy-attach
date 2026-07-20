@@ -21,3 +21,5 @@ assets/AppIcon.icns
 # Rust debug symbol bundles
 target/
 main
+vision.js
+CLAUDE.md

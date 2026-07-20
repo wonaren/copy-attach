@@ -56,10 +56,10 @@ class HistoryPopupWindow: NSPanel {
     func show() {
         debugLog("HistoryPopupWindow.show() called")
 
-        let contentView = HistoryPopupContent(onClose: { [weak self] in
+        let contentView = AnyView(HistoryPopupContent(onClose: { [weak self] in
             debugLog("HistoryPopupContent onClose callback")
             self?.close()
-        })
+        }).withAppTheme())
         let hosting = PopupHostingView(rootView: contentView)
         let contentRect = self.contentRect(forFrameRect: self.frame)
         hosting.frame = contentRect
@@ -145,7 +145,7 @@ class HistoryPopupWindow: NSPanel {
 }
 
 /// NSHostingView subclass that accepts first responder for keyboard events
-class PopupHostingView: NSHostingView<HistoryPopupContent> {
+class PopupHostingView: NSHostingView<AnyView> {
     override var acceptsFirstResponder: Bool { true }
 
     /// Local event monitor to intercept ←/→ from the empty search field
@@ -298,6 +298,7 @@ struct HistoryPopupContent: View {
     @State private var showPreview: Bool = false
     @State private var isControlPressed: Bool = false
     @State private var isCommandPressed: Bool = false
+    @Environment(\.appTheme) private var theme
     @State private var searchText: String = ""
     @State private var effectiveSearchText: String = ""
     @State private var searchTask: Task<Void, Never>?
@@ -340,7 +341,7 @@ struct HistoryPopupContent: View {
     var body: some View {
         ZStack {
             // === Layer 0: Dark Translucent Background (HUD look) ===
-            Color.black.opacity(0.8)
+            theme.popupBackground
                 .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
 
             // === Layer 1: Content ===
@@ -588,19 +589,19 @@ struct HistoryPopupContent: View {
         HStack(spacing: 6) {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 11, weight: .medium))
-                .foregroundColor(.white.opacity(0.45))
+                .foregroundColor(theme.popupDimText)
 
             TextField("搜索", text: $searchText)
                 .textFieldStyle(.plain)
                 .focused($isSearchFocused)
                 .font(.system(size: 12.5))
-                .foregroundColor(.white.opacity(0.9))
+                .foregroundColor(theme.popupPrimaryText)
 
             if !searchText.isEmpty {
                 Button(action: { searchText = "" }) {
                     Image(systemName: "xmark.circle.fill")
                         .font(.system(size: 12))
-                        .foregroundColor(.white.opacity(0.45))
+                        .foregroundColor(theme.popupDimText)
                 }
                 .buttonStyle(.plain)
             }
@@ -609,14 +610,14 @@ struct HistoryPopupContent: View {
         .padding(.vertical, 5)
         .background(
             RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .fill(Color.white.opacity(0.07))
+                .fill(theme.popupSearchBackground)
         )
         .overlay(
             RoundedRectangle(cornerRadius: 7, style: .continuous)
                 .strokeBorder(
                     selectedIndex == 0
                         ? Color(nsColor: .controlAccentColor)
-                        : Color.white.opacity(0.08),
+                        : theme.popupRowHover,
                     lineWidth: selectedIndex == 0 ? 2.5 : 1
                 )
         )
@@ -631,10 +632,10 @@ struct HistoryPopupContent: View {
             Spacer()
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 28))
-                .foregroundColor(.white.opacity(0.2))
+                .foregroundColor(theme.popupDimText)
             Text("无匹配结果")
                 .font(.system(size: 14))
-                .foregroundColor(.white.opacity(0.35))
+                .foregroundColor(theme.popupDimText)
             Spacer()
         }
         .transition(.opacity)
@@ -655,21 +656,21 @@ struct HistoryPopupContent: View {
                         .frame(height: 16)
                         .foregroundColor(mode == filterMode
                             ? Color(nsColor: .controlAccentColor)
-                            : .white.opacity(0.45))
+                            : theme.popupDimText)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 4)
                         .background(
                             RoundedRectangle(cornerRadius: 6, style: .continuous)
                                 .fill(mode == filterMode
                                     ? Color(nsColor: .controlAccentColor).opacity(0.15)
-                                    : Color.white.opacity(0.05))
+                                    : theme.popupFilterTabBackground)
                         )
                         .overlay(
                             RoundedRectangle(cornerRadius: 6, style: .continuous)
                                 .strokeBorder(
                                     mode == filterMode
                                         ? Color(nsColor: .controlAccentColor).opacity(0.3)
-                                        : Color.white.opacity(0.06),
+                                        : theme.popupFilterTabBackground,
                                     lineWidth: 1
                                 )
                         )
@@ -686,10 +687,10 @@ struct HistoryPopupContent: View {
             Spacer()
             Image(systemName: "star.slash")
                 .font(.system(size: 28))
-                .foregroundColor(.white.opacity(0.2))
+                .foregroundColor(theme.popupDimText)
             Text("暂无收藏")
                 .font(.system(size: 14))
-                .foregroundColor(.white.opacity(0.35))
+                .foregroundColor(theme.popupDimText)
             Spacer()
         }
         .transition(.opacity)
@@ -751,23 +752,23 @@ struct HistoryPopupContent: View {
         HStack(spacing: 4) {
             Text("\(displayItems.count) 项")
                 .font(.system(size: 10, weight: .medium))
-                .foregroundColor(.white.opacity(0.7))
+                .foregroundColor(theme.popupSecondaryText)
             if !effectiveSearchText.isEmpty {
                 Text("/ \(backend.items.count) 项")
                     .font(.system(size: 10))
-                    .foregroundColor(.white.opacity(0.5))
+                    .foregroundColor(theme.popupMutedText)
             }
             Text("·")
                 .font(.system(size: 10))
-                .foregroundColor(.white.opacity(0.3))
+                .foregroundColor(theme.popupDimText)
             let textCount = displayItems.filter { $0.isText }.count
             let imageCount = displayItems.filter { $0.isImage }.count
             Text("\(textCount) 文本")
                 .font(.system(size: 10))
-                .foregroundColor(.white.opacity(0.5))
+                .foregroundColor(theme.popupMutedText)
             Text("\(imageCount) 图片")
                 .font(.system(size: 10))
-                .foregroundColor(.white.opacity(0.5))
+                .foregroundColor(theme.popupMutedText)
             Spacer()
         }
         .padding(.horizontal, 6)
@@ -824,10 +825,10 @@ struct HistoryPopupContent: View {
             }
             .padding(.all, 2)
         }
-        .background(Color(nsColor: .windowBackgroundColor).opacity(0.06))
+        .background(theme.popupRowDefault)
         .overlay(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(Color(nsColor: .separatorColor).opacity(0.1), lineWidth: 1)
+                .stroke(theme.popupRowBorder, lineWidth: 1)
         )
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
@@ -954,15 +955,16 @@ struct ItemRowView: View {
     let shortcutHint: String?
     let isFavorite: Bool
     @State private var isHovering = false
+    @Environment(\.appTheme) private var theme
 
     private static let hexColorRegex = try! NSRegularExpression(pattern: "#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})\\b")
 
     private func textColor(_ isSelected: Bool) -> Color {
-        isSelected ? Color.white : Color.white.opacity(0.9)
+        isSelected ? Color.white : theme.popupPrimaryText
     }
-    private let mutedText = Color.white.opacity(0.6)
+    private var mutedText: Color { theme.popupMutedText }
     private func sourceNameColor(_ isSelected: Bool) -> Color {
-        isSelected ? Color.white.opacity(0.9) : Color.white.opacity(0.7)
+        isSelected ? theme.popupPrimaryText : theme.popupSecondaryText
     }
 
     var body: some View {
@@ -1005,7 +1007,7 @@ struct ItemRowView: View {
                     .lineLimit(1)
                     .padding(.horizontal, 2)
                     .padding(.vertical, 1.5)
-                    .background(Capsule().fill(Color.black.opacity(0.2)))
+                    .background(Capsule().fill(theme.popupTagBackground))
                     .transition(.scale.combined(with: .opacity))
             }
         }
@@ -1030,8 +1032,8 @@ struct ItemRowView: View {
         Group {
             if isSelected && isDeleteModifierPressed { Color(nsColor: .systemRed) }
             else if isSelected { Color(nsColor: .controlAccentColor) }
-            else if isHovering { Color.white.opacity(0.1) }
-            else { Color(nsColor: .windowBackgroundColor).opacity(0.04) }
+            else if isHovering { theme.popupRowHover }
+            else { theme.popupRowDefault }
         }
     }
 
@@ -1146,7 +1148,7 @@ struct ItemRowView: View {
                     .frame(maxHeight: 100)
                     .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
                     .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous)
-                        .stroke(Color.white.opacity(0.1), lineWidth: 0.5))
+                        .stroke(theme.popupRowHover, lineWidth: 0.5))
             } else {
                 ZStack {
                     RoundedRectangle(cornerRadius: 7, style: .continuous)
@@ -1161,7 +1163,7 @@ struct ItemRowView: View {
                                     .foregroundColor(mutedText.opacity(0.8))
                             }
                             .frame(width: 36, height: 36)
-                            .background(Color.white.opacity(0.03))
+                            .background(theme.popupRowDefault)
                             .cornerRadius(6)
                             .overlay(
                                 RoundedRectangle(cornerRadius: 6)
@@ -1185,7 +1187,7 @@ struct ItemRowView: View {
                                     .foregroundColor(mutedText.opacity(0.8))
                             }
                             .frame(width: 36, height: 36)
-                            .background(Color.white.opacity(0.03))
+                            .background(theme.popupRowDefault)
                             .cornerRadius(6)
                             .overlay(
                                 RoundedRectangle(cornerRadius: 6)
@@ -1207,6 +1209,7 @@ struct ItemRowView: View {
 
 struct LargeTextView: NSViewRepresentable {
     let text: String
+    let textColor: NSColor
 
     func makeNSView(context: Context) -> NSScrollView {
         let scrollView = NSScrollView()
@@ -1225,7 +1228,7 @@ struct LargeTextView: NSViewRepresentable {
         textView.backgroundColor = .clear
         textView.textContainerInset = NSSize(width: 16, height: 12)
         textView.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
-        textView.textColor = NSColor.white.withAlphaComponent(0.95)
+        textView.textColor = textColor
         textView.layoutManager?.allowsNonContiguousLayout = true
         textView.isHorizontallyResizable = false
         textView.textContainer!.widthTracksTextView = true
@@ -1239,8 +1242,6 @@ struct LargeTextView: NSViewRepresentable {
         guard let textView = scrollView.documentView as? NSTextView else { return }
 
         // Force text view width to match scroll view's clip view width.
-        // autoresizingMask + isHorizontallyResizable doesn't guarantee this
-        // due to timing of makeNSView vs SwiftUI layout vs updateNSView.
         let clipWidth = scrollView.bounds.width
         textView.frame.size.width = clipWidth
         let inset = textView.textContainerInset
@@ -1248,6 +1249,9 @@ struct LargeTextView: NSViewRepresentable {
 
         if textView.string != text {
             textView.string = text
+        }
+        if textView.textColor != textColor {
+            textView.textColor = textColor
         }
     }
 }

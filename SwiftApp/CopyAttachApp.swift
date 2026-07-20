@@ -148,17 +148,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         @State private var thresholdBeforeEdit: Double = 3000
         @State private var showDragGuide = false
         @State private var isHoveringDragIcon = false
+        @Environment(\.appTheme) private var theme
         
         var body: some View {
             VStack(spacing: 0) {
                 tabBar
                 Divider()
                     .frame(height: 1)
-                    .background(Color(nsColor: NSColor(calibratedRed: 0.25, green: 0.25, blue: 0.27, alpha: 1.0)))
+                    .background(theme.divider)
                 tabContent
             }
             .frame(width: 520, height: 600)
-            .background(Color(nsColor: NSColor(calibratedRed: 0.12, green: 0.12, blue: 0.13, alpha: 1.0)))
+            .background(theme.background)
         }
 
         private var textCount: Int { backend.items.filter { $0.isText }.count }
@@ -201,7 +202,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                         .background(
                             selectedTab == i
                             ? Color.accentColor.opacity(0.12)
-                            : hoveredTab == i ? Color.white.opacity(0.06) : Color.clear
+                            : hoveredTab == i ? theme.popupRowHover : Color.clear
                         )
                         .cornerRadius(8)
                         .overlay(
@@ -215,8 +216,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                         selectedTab == i
                         ? Color.accentColor
                         : hoveredTab == i
-                        ? Color(nsColor: NSColor(calibratedRed: 0.75, green: 0.75, blue: 0.78, alpha: 1.0))
-                        : Color(nsColor: NSColor(calibratedRed: 0.6, green: 0.6, blue: 0.62, alpha: 1.0))
+                        ? theme.secondaryText
+                        : theme.tertiaryText
                     )
                     .onHover { hovering in
                         hoveredTab = hovering ? i : nil
@@ -225,7 +226,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 Spacer()
             }
             .padding(.vertical, 10)
-            .background(Color(nsColor: NSColor(calibratedRed: 0.14, green: 0.14, blue: 0.15, alpha: 1.0)))
+            .background(theme.tabBackground)
         }
 
         // MARK: - Tab Content Router
@@ -245,23 +246,23 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             VStack(alignment: .leading, spacing: 0) { content() }
                 .padding(16)
                 .frame(maxWidth: .infinity)
-                .background(Color(nsColor: NSColor(calibratedRed: 0.175, green: 0.175, blue: 0.19, alpha: 1.0)))
+                .background(theme.cardBackground)
                 .cornerRadius(12)
                 .overlay(
                     RoundedRectangle(cornerRadius: 12)
-                        .stroke(Color(nsColor: NSColor(calibratedRed: 0.24, green: 0.24, blue: 0.26, alpha: 1.0)), lineWidth: 1)
+                        .stroke(theme.cardBorder, lineWidth: 1)
                 )
         }
 
         private func kbdBadge(_ text: String) -> some View {
             Text(text)
                 .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                .foregroundColor(Color(white: 0.85))
+                .foregroundColor(theme.primaryText)
                 .padding(.horizontal, 5).padding(.vertical, 2)
-                .background(Color(nsColor: NSColor(calibratedRed: 0.22, green: 0.22, blue: 0.24, alpha: 1.0)))
+                .background(theme.buttonBackground)
                 .overlay(
                     RoundedRectangle(cornerRadius: 5)
-                        .stroke(Color(nsColor: NSColor(calibratedRed: 0.35, green: 0.35, blue: 0.37, alpha: 1.0)), lineWidth: 1)
+                        .stroke(theme.cardBorder, lineWidth: 1)
                 )
                 .cornerRadius(5)
         }
@@ -304,7 +305,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                      ? "按 \(hotkeyManager.config.displayString) 打开剪贴板历史"
                      : "应用需要辅助功能权限才能使用全局快捷键和自动粘贴")
                     .font(.system(size: 11.5))
-                    .foregroundColor(Color(nsColor: NSColor(calibratedRed: 0.75, green: 0.75, blue: 0.78, alpha: 1.0)))
+                    .foregroundColor(theme.secondaryText)
                     .lineSpacing(2)
                 if !backend.permissionGranted && !showDragGuide {
                     Button(action: {
@@ -389,10 +390,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     VStack(alignment: .leading, spacing: 3) {
                         Text("将图标拖入系统辅助功能列表")
                             .font(.system(size: 12, weight: .medium))
-                            .foregroundColor(Color(white: 0.85))
+                            .foregroundColor(theme.primaryText)
                         Text("已打开「系统设置 → 隐私与安全性 → 辅助功能」")
                             .font(.system(size: 10.5))
-                            .foregroundColor(Color(nsColor: NSColor(calibratedRed: 0.6, green: 0.6, blue: 0.62, alpha: 1.0)))
+                            .foregroundColor(theme.secondaryText)
                         Button(action: { backend.openPreferences() }) {
                             Text("再次打开系统设置")
                                 .font(.system(size: 10.5))
@@ -411,7 +412,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     }) {
                         Image(systemName: "xmark.circle.fill")
                             .font(.system(size: 16))
-                            .foregroundColor(Color(nsColor: NSColor(calibratedRed: 0.5, green: 0.5, blue: 0.53, alpha: 1.0)))
+                            .foregroundColor(theme.tertiaryText)
                     }
                     .buttonStyle(.plain)
                 }
@@ -473,6 +474,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
+
+
         // MARK: - 🟢 SHORTCUTS TAB
         private var shortcutsTab: some View {
             ScrollView {
@@ -491,10 +494,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("呼出剪贴板")
                             .font(.system(size: 13, weight: .medium))
-                            .foregroundColor(Color(white: 0.85))
+                            .foregroundColor(theme.primaryText)
                         Text("在全局任意地方呼出或隐藏剪贴板窗口。")
                             .font(.system(size: 11))
-                            .foregroundColor(Color(nsColor: NSColor(calibratedRed: 0.6, green: 0.6, blue: 0.62, alpha: 1.0)))
+                            .foregroundColor(theme.secondaryText)
                     }
                     Spacer()
                     Button(action: {
@@ -519,12 +522,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                                 ForEach(parts, id: \.self) { p in
                                     Text(p)
                                         .font(.system(size: 14, weight: .bold, design: .monospaced))
-                                        .foregroundColor(Color(white: 0.95))
+                                        .foregroundColor(theme.buttonText)
                                         .padding(.horizontal, 12).padding(.vertical, 6)
-                                        .background(Color(nsColor: NSColor(calibratedRed: 0.22, green: 0.22, blue: 0.24, alpha: 1.0)))
+                                        .background(theme.buttonBackground)
                                         .overlay(
                                             RoundedRectangle(cornerRadius: 8)
-                                                .stroke(Color(nsColor: NSColor(calibratedRed: 0.45, green: 0.45, blue: 0.48, alpha: 1.0)), lineWidth: 1.5)
+                                                .stroke(theme.buttonBorder, lineWidth: 1.5)
                                         )
                                         .cornerRadius(8)
                                 }
@@ -553,13 +556,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 ForEach(parts, id: \.self) { p in
                     Text(p)
                         .font(.system(size: 14, weight: .bold, design: .monospaced))
-                        .foregroundColor(Color(white: 0.95))
+                        .foregroundColor(theme.buttonText)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 8)
-                        .background(Color(nsColor: NSColor(calibratedRed: 0.22, green: 0.22, blue: 0.24, alpha: 1.0)))
+                        .background(theme.buttonBackground)
                         .overlay(
                             RoundedRectangle(cornerRadius: 8)
-                                .stroke(Color(nsColor: NSColor(calibratedRed: 0.45, green: 0.45, blue: 0.48, alpha: 1.0)), lineWidth: 1.5)
+                                .stroke(theme.buttonBorder, lineWidth: 1.5)
                         )
                         .cornerRadius(8)
                 }
@@ -592,7 +595,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             HStack {
                 Text(label)
                     .font(.system(size: 12))
-                    .foregroundColor(Color(white: 0.8))
+                    .foregroundColor(theme.primaryText)
                 Spacer()
                 HStack(spacing: 3) {
                     ForEach(keycaps, id: \.self) { k in
@@ -622,10 +625,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                         .foregroundColor(Color.accentColor)
                     Text("存储统计")
                         .font(.system(size: 13, weight: .semibold))
-                        .foregroundColor(Color(white: 0.9))
+                        .foregroundColor(theme.primaryText)
                     Text("(\(backend.items.count) / \(Int(cleanupThreshold)))")
                         .font(.system(size: 11, weight: .medium, design: .monospaced))
-                        .foregroundColor(Color(nsColor: NSColor(calibratedRed: 0.55, green: 0.55, blue: 0.58, alpha: 1.0)))
+                        .foregroundColor(theme.tertiaryText)
                     Spacer()
                 }
                 .padding(.bottom, 12)
@@ -635,7 +638,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                             let w = geo.size.width
                             ZStack(alignment: .leading) {
                                 RoundedRectangle(cornerRadius: 6)
-                                    .fill(Color(nsColor: NSColor(calibratedRed: 0.24, green: 0.24, blue: 0.26, alpha: 1.0)))
+                                    .fill(theme.cardBorder)
                                     .frame(height: 12)
                                 HStack(spacing: 0) {
                                     Color.accentColor
@@ -651,37 +654,37 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                         .frame(height: 12)
                         .overlay(
                             RoundedRectangle(cornerRadius: 6)
-                                .stroke(Color(nsColor: NSColor(calibratedRed: 0.3, green: 0.3, blue: 0.32, alpha: 1.0)), lineWidth: 1)
+                                .stroke(theme.cardBorder, lineWidth: 1)
                         )
                         HStack(spacing: 16) {
                             HStack(spacing: 5) {
                                 Circle().fill(Color.accentColor).frame(width: 8, height: 8)
                                 Text("文本项目 (\(textCount))")
-                                    .font(.system(size: 10)).foregroundColor(Color(nsColor: NSColor(calibratedRed: 0.6, green: 0.6, blue: 0.62, alpha: 1.0)))
+                                    .font(.system(size: 10)).foregroundColor(theme.secondaryText)
                             }
                             HStack(spacing: 5) {
                                 Circle().fill(Color.green).frame(width: 8, height: 8)
                                 Text("图片项目 (\(imageCount))")
-                                    .font(.system(size: 10)).foregroundColor(Color(nsColor: NSColor(calibratedRed: 0.6, green: 0.6, blue: 0.62, alpha: 1.0)))
+                                    .font(.system(size: 10)).foregroundColor(theme.secondaryText)
                             }
                         }
                     }
                     VStack(alignment: .leading, spacing: 4) {
                         Text("已使用存储空间")
                             .font(.system(size: 11))
-                            .foregroundColor(Color(nsColor: NSColor(calibratedRed: 0.6, green: 0.6, blue: 0.62, alpha: 1.0)))
+                            .foregroundColor(theme.secondaryText)
                         Text(formatStorageSize(backend.getStorageSize()))
                             .font(.system(size: 28, weight: .bold))
-                            .foregroundColor(Color(white: 0.9))
+                            .foregroundColor(theme.primaryText)
                         Text("共 \(backend.items.count) 个剪贴板历史项目")
                             .font(.system(size: 11))
-                            .foregroundColor(Color(nsColor: NSColor(calibratedRed: 0.55, green: 0.55, blue: 0.58, alpha: 1.0)))
+                            .foregroundColor(theme.tertiaryText)
                     }
                     .frame(width: 140)
                     .padding(.leading, 16)
                     .overlay(
                         Rectangle()
-                            .fill(Color(nsColor: NSColor(calibratedRed: 0.25, green: 0.25, blue: 0.27, alpha: 1.0)))
+                            .fill(theme.divider)
                             .frame(width: 1),
                         alignment: .leading
                     )
@@ -696,7 +699,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     HStack {
                         Text("自动清理阈值")
                             .font(.system(size: 13, weight: .medium))
-                            .foregroundColor(Color(white: 0.85))
+                            .foregroundColor(theme.primaryText)
                         Spacer()
                         Text("\(Int(cleanupThreshold)) 条")
                             .font(.system(size: 12, weight: .semibold, design: .monospaced))
@@ -729,7 +732,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                                     .font(.system(size: 9))
                                     .foregroundColor(
                                         abs(cleanupThreshold - value) < 50
-                                        ? Color.accentColor : Color(nsColor: NSColor(calibratedRed: 0.5, green: 0.5, blue: 0.53, alpha: 1.0))
+                                        ? Color.accentColor : theme.tertiaryText
                                     )
                                     .onTapGesture {
                                         let newVal = Int(value)
@@ -749,7 +752,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 }
                 Text("当历史项目超过该阈值时，自动清理最早记录，以保护磁盘存储。")
                     .font(.system(size: 11))
-                    .foregroundColor(Color(nsColor: NSColor(calibratedRed: 0.6, green: 0.6, blue: 0.62, alpha: 1.0)))
+                    .foregroundColor(theme.secondaryText)
                     .padding(.top, 4)
 
                 sectionDivider().padding(.vertical, 4)
@@ -836,14 +839,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                         .foregroundColor(Color.accentColor)
                     Text("忽略的应用程序")
                         .font(.system(size: 13, weight: .semibold))
-                        .foregroundColor(Color(white: 0.9))
+                        .foregroundColor(theme.primaryText)
                     todoBadge
                     Spacer()
                 }
                 .padding(.bottom, 12)
                 Text("来自已选应用所复制的内容，CopyAttach 将不做任何记录和收集。")
                     .font(.system(size: 11.5))
-                    .foregroundColor(Color(nsColor: NSColor(calibratedRed: 0.6, green: 0.6, blue: 0.62, alpha: 1.0)))
+                    .foregroundColor(theme.secondaryText)
 
                 VStack(spacing: 0) {
                     ForEach(ignoredApps, id: \.self) { app in
@@ -853,7 +856,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                                 .foregroundColor(.secondary)
                             Text(app)
                                 .font(.system(size: 12))
-                                .foregroundColor(Color(white: 0.8))
+                                .foregroundColor(theme.primaryText)
                             Spacer()
                             Button {
                                 ignoredApps.removeAll { $0 == app }
@@ -861,7 +864,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                             } label: {
                                 Image(systemName: "xmark")
                                     .font(.system(size: 9, weight: .bold))
-                                    .foregroundColor(Color(nsColor: NSColor(calibratedRed: 0.5, green: 0.5, blue: 0.53, alpha: 1.0)))
+                                    .foregroundColor(theme.tertiaryText)
                             }
                             .buttonStyle(.plain)
                             .opacity(0.7)
@@ -872,11 +875,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                         }
                     }
                 }
-                .background(Color(nsColor: NSColor(calibratedRed: 0.12, green: 0.12, blue: 0.13, alpha: 1.0)))
+                .background(theme.background)
                 .cornerRadius(8)
                 .overlay(
                     RoundedRectangle(cornerRadius: 8)
-                        .stroke(Color(nsColor: NSColor(calibratedRed: 0.24, green: 0.24, blue: 0.26, alpha: 1.0)), lineWidth: 1)
+                        .stroke(theme.cardBorder, lineWidth: 1)
                 )
 
                 if ignoredApps.isEmpty {
@@ -920,7 +923,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                         .foregroundColor(Color.accentColor)
                     Text("过滤规则")
                         .font(.system(size: 13, weight: .semibold))
-                        .foregroundColor(Color(white: 0.9))
+                        .foregroundColor(theme.primaryText)
                     todoBadge
                     Spacer()
                 }
@@ -931,7 +934,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                         VStack(alignment: .leading, spacing: 1) {
                             Text("忽略小于三个字符的文本")
                                 .font(.system(size: 12))
-                                .foregroundColor(Color(white: 0.8))
+                                .foregroundColor(theme.primaryText)
                         }
                     }
                     .toggleStyle(.switch)
@@ -943,7 +946,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     HStack(spacing: 4) {
                         Text("阈值:")
                             .font(.system(size: 11))
-                            .foregroundColor(Color(nsColor: NSColor(calibratedRed: 0.6, green: 0.6, blue: 0.62, alpha: 1.0)))
+                            .foregroundColor(theme.secondaryText)
                         Picker("", selection: $shortTextThreshold) {
                             Text("2 个字符").tag(2)
                             Text("3 个字符").tag(3)
@@ -964,7 +967,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                         VStack(alignment: .leading, spacing: 1) {
                             Text("忽略复制自受保护窗口的内容")
                                 .font(.system(size: 12))
-                                .foregroundColor(Color(white: 0.8))
+                                .foregroundColor(theme.primaryText)
                         }
                     }
                     .toggleStyle(.switch)
@@ -975,7 +978,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     Spacer()
                     Text("对密码输入框及无痕浏览窗口自动排除")
                         .font(.system(size: 10))
-                        .foregroundColor(Color(nsColor: NSColor(calibratedRed: 0.55, green: 0.55, blue: 0.58, alpha: 1.0)))
+                        .foregroundColor(theme.tertiaryText)
                         .frame(maxWidth: 140, alignment: .trailing)
                 }
             }
@@ -998,15 +1001,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     VStack(spacing: 4) {
                         Text("CopyAttach")
                             .font(.system(size: 24, weight: .bold))
-                            .foregroundColor(Color(white: 0.9))
+                            .foregroundColor(theme.primaryText)
                         Text("版本 v\(appVersion)")
                             .font(.system(size: 12))
-                            .foregroundColor(Color(nsColor: NSColor(calibratedRed: 0.55, green: 0.55, blue: 0.58, alpha: 1.0)))
+                            .foregroundColor(theme.tertiaryText)
                     }
 
                     Text("CopyAttach 是一款轻量、快捷的 macOS 全局剪贴板与附件管理工具，专注于提升开发者及科研人员的工作流吞吐效率。")
                         .font(.system(size: 12.5))
-                        .foregroundColor(Color(nsColor: NSColor(calibratedRed: 0.7, green: 0.7, blue: 0.73, alpha: 1.0)))
+                        .foregroundColor(theme.secondaryText)
                         .multilineTextAlignment(.center)
                         .lineSpacing(3)
                         .frame(maxWidth: 300)
@@ -1022,8 +1025,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                         Button("官方网站") {}
                             .font(.system(size: 12, weight: .medium))
                             .padding(.horizontal, 16).padding(.vertical, 8)
-                            .background(Color(nsColor: NSColor(calibratedRed: 0.22, green: 0.22, blue: 0.24, alpha: 1.0)))
-                            .foregroundColor(Color(white: 0.8))
+                            .background(theme.buttonBackground)
+                            .foregroundColor(theme.primaryText)
                             .cornerRadius(6)
                             .buttonStyle(.plain)
                     }
@@ -1043,7 +1046,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     .foregroundColor(Color.accentColor)
                 Text(text)
                     .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(Color(white: 0.9))
+                    .foregroundColor(theme.primaryText)
                 Spacer()
             }
             .padding(.bottom, 12)
@@ -1058,10 +1061,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 VStack(alignment: .leading, spacing: 1) {
                     Text(title)
                         .font(.system(size: 12.5, weight: .medium))
-                        .foregroundColor(Color(white: 0.85))
+                        .foregroundColor(theme.primaryText)
                     Text(desc)
                         .font(.system(size: 10.5))
-                        .foregroundColor(Color(nsColor: NSColor(calibratedRed: 0.55, green: 0.55, blue: 0.58, alpha: 1.0)))
+                        .foregroundColor(theme.tertiaryText)
                 }
                 Spacer()
                 Toggle("", isOn: isOn)
@@ -1071,7 +1074,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         private func sectionDivider() -> some View {
-            Color(nsColor: NSColor(calibratedRed: 0.24, green: 0.24, blue: 0.26, alpha: 1.0))
+            theme.divider
                 .frame(height: 1)
         }
 
@@ -1098,7 +1101,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         window.isReleasedWhenClosed = false
         window.hidesOnDeactivate = false
 
-        let content = NSHostingController(rootView: InlineSettingsView())
+        let content = NSHostingController(rootView: InlineSettingsView().withAppTheme())
         content.view.frame = NSRect(x: 0, y: 0, width: 520, height: 600)
         content.view.autoresizingMask = [NSView.AutoresizingMask.width, NSView.AutoresizingMask.height]
         window.contentViewController = content

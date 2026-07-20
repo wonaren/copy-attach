@@ -77,6 +77,7 @@ echo "==> Compiling Swift sources…"
     -Xlinker -rpath -Xlinker "/usr/local/lib" \
     "${SWIFT_SRC}/CopyAttachApp.swift" \
     "${SWIFT_SRC}/ClipboardBackend.swift" \
+    "${SWIFT_SRC}/ColorTheme.swift" \
     "${SWIFT_SRC}/HistoryPopupView.swift" \
     "${SWIFT_SRC}/PreviewWindow.swift" \
     "${SWIFT_SRC}/HotkeyManager.swift"

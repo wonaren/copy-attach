@@ -5,7 +5,8 @@ import SwiftUI
 
 class PreviewWindow: NSPanel {
     private let centerAnchor: NSPoint
-    private var hostingView: NSHostingView<PreviewContent>!
+    private var hostingView: NSHostingView<AnyView>!
+    private var currentItemId: Int = 0
 
     /// Cache text heights per entryId so arrow-key navigation doesn't re-layout.
     private static var textHeightCache: [Int: CGFloat] = [:]
@@ -19,6 +20,8 @@ class PreviewWindow: NSPanel {
         let y = screenCenter.y - size.height / 2
 
         self.centerAnchor = screenCenter
+
+        self.currentItemId = item.id
 
         super.init(
             contentRect: NSRect(x: x, y: y, width: size.width, height: size.height),
@@ -35,7 +38,7 @@ class PreviewWindow: NSPanel {
         self.hasShadow = true
         self.isMovableByWindowBackground = true
 
-        let content = PreviewContent(item: item)
+        let content = AnyView(PreviewContent(item: item).withAppTheme())
         let hosting = NSHostingView(rootView: content)
         let contentRect = self.contentRect(forFrameRect: self.frame)
         hosting.frame = contentRect
@@ -52,7 +55,8 @@ class PreviewWindow: NSPanel {
 
     /// Update displayed content and resize window — called by popup on selection change.
     func updateContent(item: ClipboardItem) {
-        guard hostingView.rootView.item.id != item.id else { return }
+        guard currentItemId != item.id else { return }
+        currentItemId = item.id
 
         // Cross-fade content during transition
         let fade = CATransition()
@@ -61,7 +65,7 @@ class PreviewWindow: NSPanel {
         fade.type = .fade
         hostingView.layer?.add(fade, forKey: kCATransition)
 
-        hostingView.rootView = PreviewContent(item: item)
+        hostingView.rootView = AnyView(PreviewContent(item: item).withAppTheme())
         resizeToFitContent(for: item)
     }
 
@@ -150,20 +154,28 @@ struct PreviewContent: View {
 
     @State private var image: NSImage?
     @State private var isLoadingImage = false
+    @Environment(\.appTheme) private var theme
+    @Environment(\.colorScheme) private var colorScheme
 
     private var currentDbId: Int {
         guard case .image(_, let dbId, _, _, _, _, _, _) = item else { return 0 }
         return dbId
     }
 
+    private var previewTextNSColor: NSColor {
+        colorScheme == .dark
+            ? NSColor.white.withAlphaComponent(0.95)
+            : NSColor(white: 0.12, alpha: 1.0)
+    }
+
     var body: some View {
         ZStack {
-            Color.black.opacity(0.88)
+            theme.previewBackground
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
 
             switch item {
             case .text(_, let text, _, _, _, _, _):
-                LargeTextView(text: text)
+                LargeTextView(text: text, textColor: previewTextNSColor)
             case .image(_, let dbId, _, _, _, _, _, _):
                 imageContent(dbId: dbId)
             }
@@ -184,11 +196,11 @@ struct PreviewContent: View {
                     .progressViewStyle(.circular)
                     .scaleEffect(0.6)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .foregroundColor(.white.opacity(0.5))
+                    .foregroundColor(theme.previewSecondaryText)
             } else {
                 Image(systemName: "photo.badge.exclamationmark")
                     .font(.system(size: 24))
-                    .foregroundColor(.white.opacity(0.3))
+                    .foregroundColor(theme.previewSecondaryText)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
