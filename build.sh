@@ -42,6 +42,10 @@ if [ -f "assets/AppIcon.icns" ]; then
     cp "assets/AppIcon.icns" "${APP_NAME}.app/Contents/Resources/AppIcon.icns"
 fi
 
+# Copy SVG resources
+cp "assets/about/github.svg" "${APP_NAME}.app/Contents/Resources/github.svg"
+cp "assets/about/menubar-stack.svg" "${APP_NAME}.app/Contents/Resources/menubar-stack.svg"
+
 # Copy the Rust dylib into Frameworks and set its install name
 cp "target/release/libcopy_attach.dylib" "${APP_NAME}.app/Contents/Frameworks/"
 install_name_tool -id "@rpath/libcopy_attach.dylib" "${APP_NAME}.app/Contents/Frameworks/libcopy_attach.dylib"

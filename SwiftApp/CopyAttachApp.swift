@@ -10,11 +10,26 @@ struct ClipboardManagerApp: App {
 
     var body: some Scene {
         // Menu bar
-        MenuBarExtra("剪贴板", systemImage: "clipboard", isInserted: $showMenuBarIcon) {
+        MenuBarExtra(isInserted: $showMenuBarIcon) {
             AppMenuBarContent()
+        } label: {
+            if let img = menuBarIcon() {
+                Image(nsImage: img)
+            } else {
+                Image(systemName: "clipboard")
+            }
         }
         .menuBarExtraStyle(.menu)
     }
+}
+
+// MARK: - Menu Bar Icon
+
+private func menuBarIcon() -> NSImage? {
+    guard let url = Bundle.main.resourceURL?.appendingPathComponent("menubar-stack.svg"),
+          let img = NSImage(contentsOf: url) else { return nil }
+    img.isTemplate = true
+    return img
 }
 
 /// Menu bar content that dynamically observes hotkey changes
@@ -369,7 +384,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                             .overlay(alignment: .topTrailing) {
                                 Image(systemName: "hand.point.up")
                                     .font(.system(size: 10, weight: .bold))
-                                    .foregroundColor(.white)
+                                    .foregroundColor(theme.buttonText)
                                     .padding(3)
                                     .background(Circle().fill(Color.accentColor))
                                     .offset(x: 5, y: -5)
@@ -908,7 +923,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     .font(.system(size: 12, weight: .medium))
                     .padding(.horizontal, 12).padding(.vertical, 6)
                     .background(Color.accentColor)
-                    .foregroundColor(.white)
+                    .foregroundColor(theme.buttonText)
                     .cornerRadius(6)
                     .buttonStyle(.plain)
                 }
@@ -994,17 +1009,40 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                         .clipShape(RoundedRectangle(cornerRadius: 18))
                         .overlay(
                             RoundedRectangle(cornerRadius: 18)
-                                .stroke(Color.white.opacity(0.1), lineWidth: 1)
+                                .stroke(theme.cardBorder.opacity(0.5), lineWidth: 1)
                         )
                         .shadow(color: .black.opacity(0.2), radius: 8, y: 4)
 
-                    VStack(spacing: 4) {
+                    VStack(spacing: 6) {
                         Text("CopyAttach")
                             .font(.system(size: 24, weight: .bold))
                             .foregroundColor(theme.primaryText)
-                        Text("版本 v\(appVersion)")
-                            .font(.system(size: 12))
-                            .foregroundColor(theme.tertiaryText)
+
+                        HStack(spacing: 5) {
+                            Text("版本")
+                                .foregroundColor(theme.secondaryText)
+                            Text("v\(appVersion)")
+                                .font(.system(size: 15, weight: .semibold, design: .monospaced))
+                                .foregroundColor(theme.primaryText)
+                        }
+                        .font(.system(size: 13))
+
+                        Button {
+                            NSWorkspace.shared.open(authorGitHubURL)
+                        } label: {
+                            HStack(spacing: 5) {
+                                if let img = githubIconImage() {
+                                    Image(nsImage: img)
+                                        .resizable()
+                                        .frame(width: 13, height: 13)
+                                }
+                                Text("surpassbefore")
+                                    .font(.system(size: 12, weight: .medium))
+                            }
+                            .foregroundColor(Color.accentColor)
+                        }
+                        .buttonStyle(.plain)
+                        .help("github.com/surpassbefore")
                     }
 
                     Text("CopyAttach 是一款轻量、快捷的 macOS 全局剪贴板与附件管理工具，专注于提升开发者及科研人员的工作流吞吐效率。")
@@ -1015,18 +1053,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                         .frame(maxWidth: 300)
 
                     HStack(spacing: 12) {
-                        Button("检查更新") {}
+                        Button("检查更新", action: checkForUpdates)
                             .font(.system(size: 12, weight: .medium))
                             .padding(.horizontal, 16).padding(.vertical, 8)
                             .background(Color.accentColor)
-                            .foregroundColor(.white)
-                            .cornerRadius(6)
-                            .buttonStyle(.plain)
-                        Button("官方网站") {}
-                            .font(.system(size: 12, weight: .medium))
-                            .padding(.horizontal, 16).padding(.vertical, 8)
-                            .background(theme.buttonBackground)
-                            .foregroundColor(theme.primaryText)
+                            .foregroundColor(theme.buttonText)
                             .cornerRadius(6)
                             .buttonStyle(.plain)
                     }
@@ -1078,6 +1109,70 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 .frame(height: 1)
         }
 
+        // MARK: - About tab actions
+
+        private func githubIconImage() -> NSImage? {
+            guard let url = Bundle.main.resourceURL?.appendingPathComponent("github.svg"),
+                  let img = NSImage(contentsOf: url) else { return nil }
+            img.isTemplate = true
+            return img
+        }
+
+        private var repoURL: URL { URL(string: "https://github.com/surpassbefore/copy-attach")! }
+        private var authorGitHubURL: URL { URL(string: "https://github.com/surpassbefore")! }
+
+        private func openWebsite() {
+            NSWorkspace.shared.open(repoURL)
+        }
+
+        private func checkForUpdates() {
+            let url = URL(string: "https://api.github.com/repos/surpassbefore/copy-attach/releases/latest")!
+            URLSession.shared.dataTask(with: url) { [self] data, _, error in
+                DispatchQueue.main.async {
+                    if let error {
+                        let alert = NSAlert()
+                        alert.messageText = "检查更新失败"
+                        alert.informativeText = "无法连接到更新服务器：\(error.localizedDescription)"
+                        alert.alertStyle = .warning
+                        alert.runModal()
+                        return
+                    }
+                    guard let data,
+                          let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                          let tagName = json["tag_name"] as? String else {
+                        let alert = NSAlert()
+                        alert.messageText = "检查更新失败"
+                        alert.informativeText = "无法解析更新信息"
+                        alert.alertStyle = .warning
+                        alert.runModal()
+                        return
+                    }
+
+                    let latestVersion = tagName.hasPrefix("v") ? String(tagName.dropFirst()) : tagName
+                    let currentVersion = self.appVersion
+
+                    if latestVersion.compare(currentVersion, options: .numeric) == .orderedDescending {
+                        let alert = NSAlert()
+                        alert.messageText = "发现新版本 v\(latestVersion)"
+                        alert.informativeText = "当前版本：v\(currentVersion)\n是否前往下载页面？"
+                        alert.alertStyle = .informational
+                        alert.addButton(withTitle: "前往下载")
+                        alert.addButton(withTitle: "取消")
+                        if alert.runModal() == .alertFirstButtonReturn {
+                            self.openWebsite()
+                        }
+                    } else {
+                        let alert = NSAlert()
+                        alert.messageText = "已是最新版本"
+                        alert.informativeText = "当前版本 v\(currentVersion) 已是最新"
+                        alert.alertStyle = .informational
+                        alert.addButton(withTitle: "好的")
+                        alert.runModal()
+                    }
+                }
+            }.resume()
+        }
+
         private var todoBadge: some View {
             Text("TODO")
                 .font(.system(size: 9, weight: .bold))
@@ -1087,6 +1182,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 .background(Color(red: 0.92, green: 0.58, blue: 0.20).opacity(0.15))
                 .cornerRadius(4)
         }
+
     }
 
     private func createSettingsWindow() {
