@@ -48,6 +48,10 @@ pub(crate) struct Backend {
     pub(crate) cleanup_threshold: Arc<AtomicUsize>,
     /// Stack of deleted entries for undo (Cmd+Z). Max 10 items.
     pub(crate) deleted_stack: Arc<Mutex<Vec<ClipboardEntry>>>,
+    /// Entry ID of the most recently undo-restored entry (0 if none).
+    /// Used by Swift to find the restored entry in a snapshot despite
+    /// monitor-thread insert races.
+    pub(crate) last_restored_id: Arc<AtomicU64>,
 }
 
 static BACKEND: OnceLock<Backend> = OnceLock::new();

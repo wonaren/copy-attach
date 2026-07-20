@@ -6,7 +6,7 @@
 //! contract documented on each group of functions.
 
 use std::ffi::{c_char, c_int, c_longlong, CStr, CString};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -202,6 +202,7 @@ pub extern "C" fn clipboard_init() -> c_int {
     let db = Arc::new(Mutex::new(conn));
     let cleanup_threshold = Arc::new(AtomicUsize::new(DEFAULT_CLEANUP_THRESHOLD));
     let deleted_stack: Arc<Mutex<Vec<ClipboardEntry>>> = Arc::new(Mutex::new(Vec::new()));
+    let last_restored_id = Arc::new(AtomicU64::new(0));
 
     let backend = Backend {
         history: Arc::clone(&history),
@@ -213,6 +214,7 @@ pub extern "C" fn clipboard_init() -> c_int {
         db: Arc::clone(&db),
         cleanup_threshold: Arc::clone(&cleanup_threshold),
         deleted_stack: Arc::clone(&deleted_stack),
+        last_restored_id: Arc::clone(&last_restored_id),
     };
 
     if set_backend(backend).is_err() {
@@ -803,44 +805,36 @@ pub extern "C" fn clipboard_delete_by_id(entry_id: u64) -> c_int {
         }
     }
 
-    // Step 3: All undo data captured. Now remove from history.
+    // Step 3: Delete from DB first. If this fails, history entry stays intact.
     {
-        let mut hist = b.history.lock().unwrap();
-        hist.retain(|e| match e {
-            ClipboardEntry::Text { id, .. } => *id != entry_id,
-            ClipboardEntry::Image { id, .. } => *id != entry_id,
-        });
-    }
-
-    // Step 4: Delete from DB while entry is still in memory history.
-    // If this fails, history entry stays intact; caller can retry.
-    let conn = match b.db.lock() {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("CopyAttach: DB lock poisoned deleting entry {}: {}", entry_id, e);
+        let conn = match b.db.lock() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("CopyAttach: DB lock poisoned deleting entry {}: {}", entry_id, e);
+                return 0;
+            }
+        };
+        if let Err(e) = match &entry {
+            ClipboardEntry::Text { db_id, .. } if *db_id != 0 => {
+                conn.execute(
+                    "DELETE FROM clipboard_history WHERE id = ?1",
+                    rusqlite::params![*db_id],
+                )
+            }
+            ClipboardEntry::Image { db_id, .. } if *db_id != 0 => {
+                conn.execute(
+                    "DELETE FROM clipboard_history WHERE id = ?1",
+                    rusqlite::params![*db_id],
+                )
+            }
+            _ => Ok(0),
+        } {
+            eprintln!("CopyAttach: failed to delete entry {} from DB: {}", entry_id, e);
             return 0;
         }
-    };
-    if let Err(e) = match &entry {
-        ClipboardEntry::Text { db_id, .. } if *db_id != 0 => {
-            conn.execute(
-                "DELETE FROM clipboard_history WHERE id = ?1",
-                rusqlite::params![*db_id],
-            )
-        }
-        ClipboardEntry::Image { db_id, .. } if *db_id != 0 => {
-            conn.execute(
-                "DELETE FROM clipboard_history WHERE id = ?1",
-                rusqlite::params![*db_id],
-            )
-        }
-        _ => Ok(0),
-    } {
-        eprintln!("CopyAttach: failed to delete entry {} from DB: {}", entry_id, e);
-        return 0;
     }
 
-    // Step 5: All data captured and DB cleaned up. Now remove from history.
+    // Step 4: DB delete succeeded. Now remove from history.
     {
         let mut hist = b.history.lock().unwrap();
         hist.retain(|e| match e {
@@ -849,7 +843,7 @@ pub extern "C" fn clipboard_delete_by_id(entry_id: u64) -> c_int {
         });
     }
 
-    // Step 6: Push to undo stack with fully captured data.
+    // Step 5: Push to undo stack with fully captured data.
     {
         let mut stack = b.deleted_stack.lock().unwrap();
         stack.push(entry.clone());
@@ -920,10 +914,16 @@ pub extern "C" fn clipboard_undo_delete() -> c_int {
     // Use add_to_history for dedup: if the same content was re-captured
     // by the monitor between deletion and undo, remove the existing copy
     // before inserting the restored one at head.
+    let restored_id = entry.entry_id();
     *hist = add_to_history(std::mem::take(&mut *hist), entry);
     while hist.len() > b.cleanup_threshold.load(Ordering::Relaxed) {
         hist.pop();
     }
+    drop(hist);
+
+    // Record the restored entry ID so Swift can find it in the snapshot
+    // even if the monitor thread inserted new content at position 0.
+    b.last_restored_id.store(restored_id, Ordering::SeqCst);
 
     1
 }
@@ -933,6 +933,17 @@ pub extern "C" fn clipboard_undo_delete() -> c_int {
 pub extern "C" fn clipboard_can_undo() -> c_int {
     match crate::backend::try_backend() {
         Some(b) => !b.deleted_stack.lock().unwrap().is_empty() as c_int,
+        None => 0,
+    }
+}
+
+/// Returns the entry_id of the most recently undo-restored entry, or 0 if none.
+/// Used by Swift to locate the restored entry in a snapshot despite monitor
+/// thread races inserting new content at position 0.
+#[no_mangle]
+pub extern "C" fn clipboard_last_restored_id() -> u64 {
+    match crate::backend::try_backend() {
+        Some(b) => b.last_restored_id.load(Ordering::SeqCst),
         None => 0,
     }
 }

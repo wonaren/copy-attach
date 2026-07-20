@@ -372,7 +372,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
                 HStack(spacing: 14) {
                     ZStack {
-                        Image(nsImage: .appIcon)
+                        Image(nsImage: .appIconSVG ?? .appIcon)
                             .resizable()
                             .frame(width: 52, height: 52)
                             .clipShape(RoundedRectangle(cornerRadius: 11))
@@ -384,7 +384,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                             .overlay(alignment: .topTrailing) {
                                 Image(systemName: "hand.point.up")
                                     .font(.system(size: 10, weight: .bold))
-                                    .foregroundColor(theme.buttonText)
+                                    .foregroundColor(.white)
                                     .padding(3)
                                     .background(Circle().fill(Color.accentColor))
                                     .offset(x: 5, y: -5)
@@ -1003,7 +1003,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         private var aboutTab: some View {
             ScrollView {
                 VStack(spacing: 16) {
-                    Image(nsImage: .appIcon)
+                    Image(nsImage: .appIconSVG ?? .appIcon)
                         .resizable()
                         .frame(width: 80, height: 80)
                         .clipShape(RoundedRectangle(cornerRadius: 18))
@@ -1057,7 +1057,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                             .font(.system(size: 12, weight: .medium))
                             .padding(.horizontal, 16).padding(.vertical, 8)
                             .background(Color.accentColor)
-                            .foregroundColor(theme.buttonText)
+                            .foregroundColor(.white)
                             .cornerRadius(6)
                             .buttonStyle(.plain)
                     }

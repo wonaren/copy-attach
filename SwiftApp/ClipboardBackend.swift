@@ -315,13 +315,10 @@ class ClipboardBackend: ObservableObject {
         // Clear thumbnail cache: restored images get new db_ids, old keys are orphans.
         clearThumbnailCache()
 
-        // Lightweight synchronous prepend: read only the first (restored) entry from
-        // snapshot and insert it at the front of items. O(1) instead of O(n) full clone.
+        // Lightweight synchronous prepend: find the restored entry in the snapshot
+        // by its entry_id (set by Rust after undo). Avoids TOCTOU races where the
+        // monitor thread inserts new content at index 0 between undo and snapshot.
         guard let snap = clipboard_snapshot_acquire() else {
-            // Snapshot acquisition only fails when backend is uninitialized (teardown
-            // between clipboard_undo_delete and here). Return false — the caller must
-            // not proceed with animation/UI changes, and Rust side has already popped
-            // the stack. The 0.5s timer refresh picks up the new state.
             return false
         }
         defer { clipboard_snapshot_release(snap) }
@@ -329,22 +326,39 @@ class ClipboardBackend: ObservableObject {
         // Sync count to suppress redundant timer refresh.
         count = Int(clipboard_snapshot_count(snap))
 
-        guard let restoredItem = readFirstSnapshotItem(snap) else {
-            // Shouldn't happen: restore just inserted one entry. Return false to
-            // let the caller handle it — items will refresh on the 0.5s timer tick.
-            return false
+        let restoredId = Int(clipboard_last_restored_id())
+        guard restoredId > 0 else {
+            // Rust didn't record a restored ID — use first-snapshot fallback.
+            guard let restoredItem = readFirstSnapshotItem(snap) else { return false }
+            items.insert(restoredItem, at: 0)
+            reloadGeneration &+= 1
+            return true
         }
 
-        items.insert(restoredItem, at: 0)
-        // Bump generation so any stale in-flight snapshot from the timer is discarded.
+        // Scan the snapshot for the entry matching the restored ID.
+        let c = Int(clipboard_snapshot_count(snap))
+        for i in 0..<c {
+            let sid = Int(clipboard_snapshot_item_id(snap, Int32(i)))
+            if sid == restoredId {
+                if let restoredItem = readSnapshotItem(snap, at: Int32(i)) {
+                    items.insert(restoredItem, at: 0)
+                }
+                break
+            }
+        }
+
         reloadGeneration &+= 1
         return true
     }
 
     /// Read the first entry from a snapshot and build a ClipboardItem (O(1)).
     private func readFirstSnapshotItem(_ snap: UnsafeMutableRawPointer) -> ClipboardItem? {
-        guard clipboard_snapshot_count(snap) > 0 else { return nil }
-        let i: Int32 = 0
+        return readSnapshotItem(snap, at: 0)
+    }
+
+    /// Read the entry at index `i` from a snapshot and build a ClipboardItem.
+    private func readSnapshotItem(_ snap: UnsafeMutableRawPointer, at i: Int32) -> ClipboardItem? {
+        guard Int(clipboard_snapshot_count(snap)) > Int(i) else { return nil }
         let type = Int(clipboard_snapshot_item_type(snap, i))
         let id = Int(clipboard_snapshot_item_id(snap, i))
         let timestamp = UInt64(clipboard_snapshot_item_timestamp(snap, i))
@@ -516,6 +530,15 @@ extension NSImage {
             return image
         }
         return NSImage(systemSymbolName: "clipboard", accessibilityDescription: nil) ?? NSImage()
+    }
+
+    /// Load the application icon SVG from the bundle as an NSImage.
+    /// Uses icon_inner.svg which includes a white background for in-app display.
+    static var appIconSVG: NSImage? {
+        guard let url = Bundle.main.url(forResource: "icon_inner", withExtension: "svg") else {
+            return nil
+        }
+        return NSImage(contentsOf: url)
     }
 }
 

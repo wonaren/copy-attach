@@ -43,6 +43,13 @@ pub(crate) enum ClipboardEntry {
 }
 
 impl ClipboardEntry {
+    pub(crate) fn entry_id(&self) -> u64 {
+        match self {
+            ClipboardEntry::Text { id, .. } => *id,
+            ClipboardEntry::Image { id, .. } => *id,
+        }
+    }
+
     pub(crate) fn timestamp(&self) -> u64 {
         match self {
             ClipboardEntry::Text { timestamp, .. } => *timestamp,

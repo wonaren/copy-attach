@@ -68,3 +68,4 @@ int64_t clipboard_get_storage_size(void);
 int32_t clipboard_delete_by_id(uint64_t entry_id);
 int32_t clipboard_undo_delete(void);
 int32_t clipboard_can_undo(void);
+uint64_t clipboard_last_restored_id(void);

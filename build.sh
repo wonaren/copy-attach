@@ -45,6 +45,8 @@ fi
 # Copy SVG resources
 cp "assets/about/github.svg" "${APP_NAME}.app/Contents/Resources/github.svg"
 cp "assets/about/menubar-stack.svg" "${APP_NAME}.app/Contents/Resources/menubar-stack.svg"
+cp "assets/icon.svg" "${APP_NAME}.app/Contents/Resources/icon.svg"
+cp "assets/icon_inner.svg" "${APP_NAME}.app/Contents/Resources/icon_inner.svg"
 
 # Copy the Rust dylib into Frameworks and set its install name
 cp "target/release/libcopy_attach.dylib" "${APP_NAME}.app/Contents/Frameworks/"

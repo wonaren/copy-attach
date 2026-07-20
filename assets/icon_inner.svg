@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- Logo 4: Stack (Color Version)
+       三条历史记录从蓝渐变到深色
+       顶部（最新）= Action Blue → 底部（最旧）= Ink
+       层次代表时间的推移 -->
+  <rect x="0" y="0" width="512" height="512" rx="92" fill="#ffffff"/>
+  <!-- 条 1（最近 — Action Blue） -->
+  <rect x="112" y="120" width="240" height="56" rx="14" fill="#0066cc"/>
+  <!-- 条 2（中间 — 过渡色） -->
+  <rect x="112" y="212" width="290" height="56" rx="14" fill="#333399"/>
+  <!-- 条 3（最早 — Ink） -->
+  <rect x="112" y="304" width="340" height="56" rx="14" fill="#1d1d1f"/>
+  <!-- 底部指示线（更多条目 — 浅灰） -->
+  <rect x="112" y="380" width="80" height="56" rx="14" fill="#1d1d1f" opacity="0.15"/>
+</svg>
