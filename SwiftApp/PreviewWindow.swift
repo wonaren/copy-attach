@@ -1,6 +1,45 @@
 import AppKit
 import SwiftUI
 
+// MARK: - Text Layout Helpers
+
+/// Shared text attributes for preview text (font + line spacing).
+/// Both the height measurement in PreviewWindow and the rendering in
+/// LargeTextView must use the same metrics so the window height matches
+/// the actual text layout.
+enum PreviewTextLayout {
+    static let font: NSFont = .monospacedSystemFont(ofSize: 14, weight: .regular)
+    static let lineSpacing: CGFloat = 5
+
+    /// Prebuilt paragraph style — avoids heap allocation on every attributes() call.
+    private static let _paragraphStyle: NSParagraphStyle = {
+        let ps = NSMutableParagraphStyle()
+        ps.lineSpacing = lineSpacing
+        return ps
+    }()
+
+    static func attributes(textColor: NSColor) -> [NSAttributedString.Key: Any] {
+        [
+            .font: font,
+            .foregroundColor: textColor,
+            .paragraphStyle: _paragraphStyle
+        ]
+    }
+
+    /// Measure the rendered height of `text` constrained to `width`.
+    static func measureHeight(_ text: String, width: CGFloat) -> CGFloat {
+        let textStorage = NSTextStorage()
+        let layoutManager = NSLayoutManager()
+        let textContainer = NSTextContainer(containerSize: NSSize(width: width, height: .greatestFiniteMagnitude))
+        textContainer.lineFragmentPadding = 0
+        layoutManager.addTextContainer(textContainer)
+        textStorage.addLayoutManager(layoutManager)
+        textStorage.setAttributedString(NSAttributedString(string: text, attributes: attributes(textColor: .white)))
+        _ = layoutManager.glyphRange(for: textContainer)
+        return layoutManager.usedRect(for: textContainer).height
+    }
+}
+
 // MARK: - Preview Window (non-key, auto-sized, content driven by direct value)
 
 class PreviewWindow: NSPanel {
@@ -103,10 +142,9 @@ class PreviewWindow: NSPanel {
         switch item {
         case .text(let entryId, let text, _, _, _, _, _):
             let pad: CGFloat = 32
-            let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
             // Find the longest line in the text to determine adaptive window width
             let longestLine = text.components(separatedBy: .newlines).max(by: { $0.count < $1.count }) ?? ""
-            let lineWidth = (longestLine as NSString).size(withAttributes: [.font: font]).width
+            let lineWidth = (longestLine as NSString).size(withAttributes: [.font: PreviewTextLayout.font]).width
             let textWidth = min(max(lineWidth + pad, 300), maxW)
             let containerW = textWidth - pad
             let textH = calculateTextHeight(text, width: containerW, entryId: entryId)
@@ -128,20 +166,7 @@ class PreviewWindow: NSPanel {
 
     private static func calculateTextHeight(_ text: String, width: CGFloat, entryId: Int) -> CGFloat {
         if let cached = textHeightCache[entryId] { return cached }
-
-        let textStorage = NSTextStorage()
-        let layoutManager = NSLayoutManager()
-        let textContainer = NSTextContainer(containerSize: NSSize(width: width, height: .greatestFiniteMagnitude))
-        textContainer.lineFragmentPadding = 0
-        layoutManager.addTextContainer(textContainer)
-        textStorage.addLayoutManager(layoutManager)
-
-        let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
-        textStorage.setAttributedString(NSAttributedString(string: text, attributes: [.font: font]))
-
-        _ = layoutManager.glyphRange(for: textContainer)
-        let rect = layoutManager.usedRect(for: textContainer)
-        let height = rect.height + 24
+        let height = PreviewTextLayout.measureHeight(text, width: width) + 28
         textHeightCache[entryId] = height
         return height
     }
@@ -162,10 +187,18 @@ struct PreviewContent: View {
         return dbId
     }
 
+    /// Derive NSColor from theme.previewPrimaryText so there's a single source
+    /// of truth for the preview text color.
     private var previewTextNSColor: NSColor {
-        colorScheme == .dark
-            ? NSColor.white.withAlphaComponent(0.95)
-            : NSColor(white: 0.12, alpha: 1.0)
+        if let cgColor = theme.previewPrimaryText.cgColor,
+           let color = NSColor(cgColor: cgColor) {
+            return color
+        }
+        // Fallback: should not be reached since AppTheme uses numeric Color values,
+        // but guarded in case a semantic Color is introduced in the future.
+        return colorScheme == .dark
+            ? NSColor(white: 0.83, alpha: 1.0)
+            : NSColor(white: 0.22, alpha: 1.0)
     }
 
     var body: some View {

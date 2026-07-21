@@ -72,9 +72,9 @@ struct AppTheme {
         popupFilterTabBackgroundSelected: Color(nsColor: .controlAccentColor).opacity(0.15),
 
         // Preview
-        previewBackground: Color.black.opacity(0.88),
-        previewPrimaryText: Color.white.opacity(0.95),
-        previewSecondaryText: Color.white.opacity(0.5)
+        previewBackground: Color(nsColor: NSColor(calibratedRed: 0.118, green: 0.118, blue: 0.118, alpha: 0.92)),
+        previewPrimaryText: Color(white: 0.83),
+        previewSecondaryText: Color(white: 0.5)
     )
 
     // MARK: - Light Theme
@@ -110,9 +110,9 @@ struct AppTheme {
         popupFilterTabBackground: Color.black.opacity(0.04),
         popupFilterTabBackgroundSelected: Color(nsColor: .controlAccentColor).opacity(0.12),
 
-        // Preview — light panel
-        previewBackground: Color(nsColor: NSColor(calibratedRed: 0.94, green: 0.94, blue: 0.96, alpha: 0.88)),
-        previewPrimaryText: Color(white: 0.12),
+        // Preview — light panel closer to VS Code Light+
+        previewBackground: Color(nsColor: NSColor(calibratedRed: 1.0, green: 1.0, blue: 1.0, alpha: 0.88)),
+        previewPrimaryText: Color(white: 0.22),
         previewSecondaryText: Color(white: 0.5)
     )
 }

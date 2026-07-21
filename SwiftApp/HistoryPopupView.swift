@@ -1226,13 +1226,19 @@ struct LargeTextView: NSViewRepresentable {
         textView.isSelectable = true
         textView.drawsBackground = false
         textView.backgroundColor = .clear
-        textView.textContainerInset = NSSize(width: 16, height: 12)
-        textView.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
-        textView.textColor = textColor
+        textView.textContainerInset = NSSize(width: 16, height: 14)
         textView.layoutManager?.allowsNonContiguousLayout = true
         textView.isHorizontallyResizable = false
         textView.textContainer!.widthTracksTextView = true
         textView.textContainer!.lineFragmentPadding = 0
+
+        // Set attributed string with font + line spacing + color (shared metrics)
+        textView.textStorage?.setAttributedString(
+            NSAttributedString(string: text, attributes: PreviewTextLayout.attributes(textColor: textColor)))
+        // Also set NSTextView-level font/color so readers of textView.font and the
+        // else-if comparison in updateNSView get the expected value.
+        textView.font = PreviewTextLayout.font
+        textView.textColor = textColor
 
         scrollView.documentView = textView
         return scrollView
@@ -1248,10 +1254,14 @@ struct LargeTextView: NSViewRepresentable {
         textView.textContainer!.containerSize.width = clipWidth - inset.width * 2
 
         if textView.string != text {
-            textView.string = text
-        }
-        if textView.textColor != textColor {
+            textView.textStorage?.setAttributedString(
+                NSAttributedString(string: text, attributes: PreviewTextLayout.attributes(textColor: textColor)))
+        } else if textView.textColor != textColor {
             textView.textColor = textColor
+            let len = textView.textStorage?.length ?? 0
+            if len > 0 {
+                textView.textStorage?.addAttribute(.foregroundColor, value: textColor, range: NSRange(location: 0, length: len))
+            }
         }
     }
 }
