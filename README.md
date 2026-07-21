@@ -115,24 +115,54 @@ CopyAttach 替你保留了完整的剪贴板历史：
 ## 项目结构
 
 ```
-├── src/
-│   └── lib.rs              # Rust 后端（约 1786 行）：FFI、监控、图片处理、
-│                               SQLite、粘贴模拟 —— 全部核心逻辑
-├── SwiftApp/
-│   ├── CopyAttachApp.swift      # 应用入口 + 设置窗口
-│   ├── ClipboardBackend.swift   # Rust FFI 封装 + 定时轮询 + 缓存
-│   ├── HistoryPopupView.swift   # 历史弹窗 UI + 键盘导航
-│   ├── PreviewWindow.swift      # 预览窗口（文本/图片）
-│   ├── HotkeyManager.swift      # 全局快捷键注册 + 录制
+├── src/                       # Rust 后端（cdylib → libcopy_attach.dylib）
+│   ├── lib.rs                 # 模块声明 + allow(dead_code)
+│   ├── ffi.rs                 # 所有 extern "C" 导出函数、Snapshot API、存储管理
+│   ├── backend.rs             # OnceLock 单例、entry_id 生成、常量
+│   ├── monitor.rs             # 后台线程 300ms 轮询 arboard
+│   ├── db.rs                  # SQLite write-through（mmap + page cache）
+│   ├── history.rs             # 去重 + 头部插入，纯函数式
+│   ├── image.rs               # PNG 编解码、Lanczos3 缩略图、内容哈希
+│   ├── macos.rs               # changeCount 检测、CGEventPost Cmd+V
+│   ├── types.rs               # ClipboardEntry 枚举、SourceApp 元数据
+│   └── tests.rs               # cfg-gated 单元测试
+├── SwiftApp/                  # Swift 前端（菜单栏应用）
+│   ├── CopyAttachApp.swift        # @main, MenuBarExtra
+│   ├── ClipboardBackend.swift     # Rust FFI 封装 + ObservableObject
+│   ├── ColorTheme.swift           # 深色/浅色 AppTheme
 │   ├── CopyAttach-Bridging-Header.h  # C FFI 声明
-│   └── Info.plist
+│   ├── Info.plist
+│   ├── App/
+│   │   └── AppDelegate.swift      # 生命周期 + 弹窗/设置窗口管理
+│   ├── Settings/
+│   │   └── InlineSettingsView.swift  # 5 标签页设置面板
+│   ├── Popup/
+│   │   ├── HistoryPopupContent.swift  # 搜索/列表/预览/Undo
+│   │   ├── HistoryPopupWindow.swift   # NSPanel 浮动弹窗
+│   │   ├── PopupHostingView.swift     # 键盘事件拦截
+│   │   ├── ItemRowView.swift          # 条目行渲染
+│   │   └── LargeTextView.swift        # NSTextView 大文本
+│   ├── Preview/
+│   │   ├── PreviewWindow.swift        # 非 key 预览 NSPanel
+│   │   ├── PreviewContent.swift       # 预览内容
+│   │   └── PreviewTextLayout.swift    # 文本度量
+│   ├── Backend/
+│   │   ├── ClipboardItem.swift        # 条目枚举
+│   │   └── AppIcon+Ext.swift          # 图标缓存
+│   ├── Hotkey/
+│   │   ├── HotkeyManager.swift        # Carbon + NSEvent 双注册
+│   │   └── HotkeyConfig.swift         # Codable 配置
+│   └── Utility/
+│       ├── DebugLog.swift             # 调试日志
+│       └── VisualWidth.swift          # CJK 视觉宽度
 ├── assets/
-│   ├── icon.svg             # 应用图标源文件
-│   └── AppIcon.icns         # 构建时生成的图标
-├── build.sh                 # 构建脚本（cargo + swiftc + codesign）
-├── Cargo.toml               # Rust crate 配置
-├── CLAUDE.md                # 开发者指南
-└── README.md
+│   ├── icon.svg                 # 应用图标源文件
+│   ├── icon_inner.svg           # 内嵌白底版本
+│   └── about/                   # SVG 资源
+├── build.sh                     # 构建脚本
+├── Cargo.toml                   # Rust crate 配置
+├── CLAUDE.md                    # 开发者指南
+└── README.md                    # 本文件
 ```
 
 ## 构建依赖

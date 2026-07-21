@@ -81,12 +81,7 @@ echo "==> Compiling Swift sources…"
     -import-objc-header "${SWIFT_SRC}/CopyAttach-Bridging-Header.h" \
     -Xlinker -rpath -Xlinker "@executable_path/../Frameworks" \
     -Xlinker -rpath -Xlinker "/usr/local/lib" \
-    "${SWIFT_SRC}/CopyAttachApp.swift" \
-    "${SWIFT_SRC}/ClipboardBackend.swift" \
-    "${SWIFT_SRC}/ColorTheme.swift" \
-    "${SWIFT_SRC}/HistoryPopupView.swift" \
-    "${SWIFT_SRC}/PreviewWindow.swift" \
-    "${SWIFT_SRC}/HotkeyManager.swift"
+    $(find "${SWIFT_SRC}" -name '*.swift' | sort)
 
 # Copy Info.plist
 cp "${SWIFT_SRC}/Info.plist" "${APP_NAME}.app/Contents/"
