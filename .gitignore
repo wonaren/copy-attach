@@ -23,3 +23,4 @@ target/
 main
 vision.js
 CLAUDE.md
+vision-hook.js

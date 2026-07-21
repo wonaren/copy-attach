@@ -171,6 +171,8 @@ pub(crate) fn clipboard_monitor(
                                     }
                                 }
                             }
+                            // Signal Swift that a thumbnail is now available via DB
+                            crate::backend::IMAGE_ENCODING_COUNTER.fetch_add(1, Ordering::Relaxed);
                         }
                     }
                 });

@@ -13,6 +13,7 @@ class ClipboardBackend: ObservableObject {
     private var sourceAppTimer: Timer?
     private let reloadQueue = DispatchQueue(label: "com.copyattach.reload", qos: .userInitiated)
     private var reloadGeneration = 0
+    private var lastImageEncodingCounter: UInt64 = 0
     private let thumbnailCache: NSCache<NSNumber, NSImage> = {
         let c = NSCache<NSNumber, NSImage>()
         c.totalCostLimit = 30 * 1024 * 1024  // 30 MB
@@ -104,8 +105,10 @@ class ClipboardBackend: ObservableObject {
 
     private func refresh() {
         let newCount = Int(clipboard_get_count())
-        if newCount != count {
+        let newEncCounter = clipboard_get_image_encoding_counter()
+        if newCount != count || newEncCounter != lastImageEncodingCounter {
             count = newCount
+            lastImageEncodingCounter = newEncCounter
             reloadItems()
         }
         permissionGranted = checkPermission()

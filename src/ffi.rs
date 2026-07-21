@@ -297,6 +297,14 @@ pub extern "C" fn clipboard_get_count() -> c_int {
     hist.len() as c_int
 }
 
+/// Returns a monotonically increasing counter that increments each time a
+/// Phase 2 image encoding finishes and updates db_id in memory. Swift uses
+/// this to detect thumbnail-ready items without a change in entry count.
+#[no_mangle]
+pub extern "C" fn clipboard_get_image_encoding_counter() -> u64 {
+    crate::backend::IMAGE_ENCODING_COUNTER.load(Ordering::Relaxed)
+}
+
 #[no_mangle]
 pub extern "C" fn clipboard_get_item_type(index: c_int) -> c_int {
     let hist = backend().history.lock().unwrap();
