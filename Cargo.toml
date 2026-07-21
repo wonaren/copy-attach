@@ -1,6 +1,6 @@
 [package]
 name = "copy-attach"
-version = "0.65.0-beta"
+version = "0.66.0-beta"
 edition = "2021"
 
 [lib]
@@ -11,7 +11,7 @@ name = "copy_attach"
 arboard = "3.6"
 objc2 = "0.6"
 objc2-core-graphics = "0.3"
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }

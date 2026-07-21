@@ -43,6 +43,145 @@ pub(crate) fn pasteboard_change_count() -> Option<i64> {
     }
 }
 
+/// Check whether the general pasteboard contains file URLs.
+///
+/// When a file is copied in Finder, macOS populates the pasteboard with
+/// `public.file-url` types and provides the file icon as an image preview.
+/// This function checks for the presence of `public.file-url` so callers
+/// can skip capturing the icon as a clipboard image entry.
+///
+/// Returns `false` if the pasteboard is inaccessible or no file items exist.
+pub(crate) fn pasteboard_has_files() -> bool {
+    unsafe { !pasteboard_file_url_strings().is_empty() }
+}
+
+/// Extract file paths from the general pasteboard.
+///
+/// When files are copied in Finder, each pasteboard item with `public.file-url`
+/// type corresponds to a file URL. This function converts those URLs to
+/// absolute file paths using NSURL's `path` method for proper percent-decoding.
+///
+/// Returns an empty `Vec` if the pasteboard is inaccessible or has no file URLs.
+/// Malformed or unconvertible URLs are silently skipped (not returned as
+/// degraded data) — the caller receives only usable absolute paths.
+pub(crate) fn pasteboard_file_paths() -> Vec<String> {
+    unsafe {
+        let url_strings = pasteboard_file_url_strings();
+        if url_strings.is_empty() {
+            return vec![];
+        }
+
+        // NSURL + NSString always exist in the ObjC runtime on macOS.
+        // Return empty if somehow absent — don't fall back to raw file:// strings.
+        let nsurl_cls = match objc2::runtime::AnyClass::get(c"NSURL") {
+            Some(c) => c,
+            None => {
+                eprintln!("CopyAttach: NSURL class not found in ObjC runtime, cannot convert file URLs");
+                return vec![];
+            }
+        };
+        let nsstr_cls = match objc2::runtime::AnyClass::get(c"NSString") {
+            Some(c) => c,
+            None => {
+                eprintln!("CopyAttach: NSString class not found in ObjC runtime, cannot convert file URLs");
+                return vec![];
+            }
+        };
+
+        let mut paths = Vec::with_capacity(url_strings.len());
+        for url_str in &url_strings {
+            let c_bytes = match std::ffi::CString::new(url_str.as_str()) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let ns_url_str: *mut objc2::runtime::NSObject =
+                msg_send![nsstr_cls, stringWithUTF8String: c_bytes.as_ptr()];
+            if ns_url_str.is_null() {
+                continue;
+            }
+
+            let url_obj: *mut objc2::runtime::NSObject =
+                msg_send![nsurl_cls, URLWithString: ns_url_str];
+            if url_obj.is_null() {
+                continue;
+            }
+
+            let path_obj: *mut objc2::runtime::NSObject = msg_send![url_obj, path];
+            if path_obj.is_null() {
+                continue;
+            }
+
+            let c_path: *const i8 = msg_send![path_obj, UTF8String];
+            if c_path.is_null() {
+                continue;
+            }
+
+            let path = std::ffi::CStr::from_ptr(c_path)
+                .to_string_lossy()
+                .into_owned();
+            paths.push(path);
+        }
+        paths
+    }
+}
+
+/// Internal helper: extract raw `file://` URL strings from pasteboard items.
+unsafe fn pasteboard_file_url_strings() -> Vec<String> {
+    let cls = match objc2::runtime::AnyClass::get(c"NSPasteboard") {
+        Some(c) => c,
+        None => return vec![],
+    };
+    let pasteboard: *mut objc2::runtime::NSObject = msg_send![cls, generalPasteboard];
+    if pasteboard.is_null() {
+        return vec![];
+    }
+
+    let items: *mut objc2::runtime::NSObject = msg_send![pasteboard, pasteboardItems];
+    if items.is_null() {
+        return vec![];
+    }
+
+    let count: usize = msg_send![items, count];
+    if count == 0 {
+        return vec![];
+    }
+
+    let nsstr_cls = match objc2::runtime::AnyClass::get(c"NSString") {
+        Some(c) => c,
+        None => return vec![],
+    };
+    let c_bytes = b"public.file-url\0";
+    let file_url_type: *mut objc2::runtime::NSObject =
+        msg_send![nsstr_cls, stringWithUTF8String: c_bytes.as_ptr() as *const i8];
+    if file_url_type.is_null() {
+        return vec![];
+    }
+
+    let mut results = vec![];
+    for i in 0..count {
+        let item: *mut objc2::runtime::NSObject = msg_send![items, objectAtIndex: i];
+        if item.is_null() {
+            continue;
+        }
+
+        let url_str: *mut objc2::runtime::NSObject =
+            msg_send![item, stringForType: file_url_type];
+        if url_str.is_null() {
+            continue;
+        }
+
+        let c_str: *const i8 = msg_send![url_str, UTF8String];
+        if c_str.is_null() {
+            continue;
+        }
+
+        if let Ok(s) = std::ffi::CStr::from_ptr(c_str).to_str() {
+            results.push(s.to_owned());
+        }
+    }
+    results
+}
+
 /// Simulate Cmd+V key press via CGEventPostToPid.
 /// `pid` must be the frontmost application's process identifier (> 0).
 /// Returns `false` if pid is 0 or event creation fails.

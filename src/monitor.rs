@@ -30,6 +30,169 @@ use crate::macos;
 /// Maximum length of the longest edge for thumbnail generation.
 const THUMBNAIL_MAX_DIM: u32 = 300;
 
+/// Shared image processing pipeline: Phase 1 (in-memory) + Phase 2 (async DB).
+///
+/// Accepts raw RGBA pixel data as a slice (borrowed for Phase 1, cloned only
+/// for the async Phase 2 closure). This avoids an extra allocation on the
+/// clipboard path where img_data.bytes is already live.
+fn ingest_rgba_image(
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+    history: &Arc<Mutex<Vec<ClipboardEntry>>>,
+    last_seen_image_hash: &Arc<Mutex<Option<u64>>>,
+    last_seen_text: &Arc<Mutex<Option<String>>>,
+    db: &Arc<Mutex<rusqlite::Connection>>,
+    src: &crate::types::SourceApp,
+    now: u64,
+    cleanup_threshold: &Arc<AtomicUsize>,
+) {
+    let hash = image_hash(rgba, width, height);
+    let is_new = {
+        let last = last_seen_image_hash.lock().unwrap();
+        match *last {
+            Some(h) => h != hash,
+            None => true,
+        }
+    };
+
+    if is_new && width > 0 && height > 0 {
+        // ── Phase 1 (sync): fast thumbnail → in-memory history ──
+        let (thumb_data, thumb_w, thumb_h) = match create_thumbnail_fast(width, height, rgba, THUMBNAIL_MAX_DIM) {
+            Some(t) => t,
+            None => {
+                eprintln!("CopyAttach: thumbnail creation failed for image {}x{}, skipping entry", width, height);
+                *last_seen_image_hash.lock().unwrap() = Some(hash);
+                *last_seen_text.lock().unwrap() = None;
+                return;
+            }
+        };
+
+        let item = ClipboardEntry::Image {
+            id: crate::backend::new_entry_id(),
+            png_data: Vec::new(),
+            width,
+            height,
+            thumb_data: Vec::new(),
+            thumb_width: thumb_w,
+            thumb_height: thumb_h,
+            hash,
+            timestamp: now,
+            source_name: src.name.clone(),
+            source_bundle_id: src.bundle_id.clone(),
+            db_id: 0,
+        };
+
+        // In-memory update (metadata only — no PNG blobs held)
+        {
+            let mut hist = history.lock().unwrap();
+            *hist = add_to_history(std::mem::take(&mut *hist), item);
+            while hist.len() > cleanup_threshold.load(Ordering::Relaxed) {
+                hist.pop();
+            }
+        }
+
+        // Prevent re-capture before async phase completes
+        *last_seen_image_hash.lock().unwrap() = Some(hash);
+        *last_seen_text.lock().unwrap() = None;
+
+        // ── Phase 2 (async): full PNG encode → DB write ────────
+        let db = db.clone();
+        let history = history.clone();
+        let threshold = cleanup_threshold.load(Ordering::Relaxed);
+        let rgba_owned = rgba.to_vec();
+        let item_hash = hash;
+        let thumb_async = thumb_data;
+
+        thread::spawn(move || {
+            let full_png = match encode_png(width, height, &rgba_owned) {
+                Some(png) => png,
+                None => {
+                    eprintln!("CopyAttach: failed to encode full-size PNG for image {}x{} (db_id stays 0)", width, height);
+                    return;
+                }
+            };
+
+            // Lock history FIRST to find and clone the item (consistent lock order)
+            let db_item = {
+                let hist = history.lock().unwrap();
+                hist.iter().find(|e| match e {
+                    ClipboardEntry::Image { hash: h, .. } => *h == item_hash,
+                    _ => false,
+                }).cloned()
+            };
+
+            if let Some(db_item) = db_item {
+                if let Ok(conn) = db.lock() {
+                    let _ = insert_entry_to_db(
+                        &conn, &db_item,
+                        Some(&full_png),
+                        Some((&thumb_async, thumb_w, thumb_h)),
+                    );
+                    delete_matching_entry(&conn, &db_item);
+                    let row_id = conn.last_insert_rowid();
+                    trim_db_history(&conn, threshold);
+
+                    // Re-acquire history lock to update db_id in memory
+                    let mut hist = history.lock().unwrap();
+                    for entry in hist.iter_mut() {
+                        if let ClipboardEntry::Image { hash: h, db_id, .. } = entry {
+                            if *h == item_hash {
+                                *db_id = row_id;
+                                break;
+                            }
+                        }
+                    }
+                    // Signal Swift that a thumbnail is now available via DB
+                    crate::backend::IMAGE_ENCODING_COUNTER.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        });
+    } else if is_new {
+        // Zero-size image — just record the hash
+        *last_seen_image_hash.lock().unwrap() = Some(hash);
+        *last_seen_text.lock().unwrap() = None;
+    }
+}
+
+/// Try to decode image files from the given file paths and process them
+/// through the standard image pipeline. Returns `true` if any file was
+/// successfully decoded and ingested.
+///
+/// Non-image files are silently skipped (the caller's `continue` ensures
+/// the file icon from the pasteboard is not recorded).
+fn try_ingest_image_files(
+    paths: &[String],
+    history: &Arc<Mutex<Vec<ClipboardEntry>>>,
+    last_seen_image_hash: &Arc<Mutex<Option<u64>>>,
+    last_seen_text: &Arc<Mutex<Option<String>>>,
+    db: &Arc<Mutex<rusqlite::Connection>>,
+    src: &crate::types::SourceApp,
+    now: u64,
+    cleanup_threshold: &Arc<AtomicUsize>,
+) -> bool {
+    for path in paths {
+        // image::open checks magic bytes, not extension — reliable format detection
+        let img = match image::open(path) {
+            Ok(img) => img,
+            Err(_) => continue,
+        };
+
+        let rgba = img.to_rgba8();
+        let (w, h) = rgba.dimensions();
+        let pixels = rgba.into_raw();
+
+        eprintln!("CopyAttach: captured image file: {path} ({}x{})", w, h);
+
+        ingest_rgba_image(
+            &pixels, w, h,
+            history, last_seen_image_hash, last_seen_text, db, src, now, cleanup_threshold,
+        );
+        return true;
+    }
+    false
+}
+
 pub(crate) fn clipboard_monitor(
     history: Arc<Mutex<Vec<ClipboardEntry>>>,
     running: Arc<AtomicBool>,
@@ -70,119 +233,31 @@ pub(crate) fn clipboard_monitor(
 
         let src = source_app.lock().unwrap().clone();
 
-        // ── Try image first ────────────────────────────────────────────
+        // ── Handle file copies ───────────────────────────────────────────
+        // When files are copied in Finder, macOS provides the file icon as
+        // an image on the pasteboard. We skip the clipboard image read and
+        // instead try to decode the actual files from disk.
+        if macos::pasteboard_has_files() {
+            let paths = macos::pasteboard_file_paths();
+            try_ingest_image_files(
+                &paths,
+                &history, &last_seen_image_hash, &last_seen_text,
+                &db, &src, now, &cleanup_threshold,
+            );
+            continue;
+        }
+
+        // ── Try image from clipboard ─────────────────────────────────────
         if let Ok(img_data) = cb.get_image() {
-            let hash = image_hash(&img_data.bytes, img_data.width as u32, img_data.height as u32);
-            let is_new = {
-                let last = last_seen_image_hash.lock().unwrap();
-                match *last {
-                    Some(h) => h != hash,
-                    None => true,
-                }
-            };
-
-            if is_new && img_data.width > 0 && img_data.height > 0 {
-                let w = img_data.width as u32;
-                let h = img_data.height as u32;
-
-                // ── Phase 1 (sync): fast thumbnail → in-memory history ──
-                let (thumb_data, thumb_w, thumb_h) = match create_thumbnail_fast(w, h, &img_data.bytes, THUMBNAIL_MAX_DIM) {
-                    Some(t) => t,
-                    None => {
-                        eprintln!("CopyAttach: thumbnail creation failed for image {}x{}, skipping entry", w, h);
-                        *last_seen_image_hash.lock().unwrap() = Some(hash);
-                        *last_seen_text.lock().unwrap() = None;
-                        continue;
-                    }
-                };
-
-                let item = ClipboardEntry::Image {
-                    id: crate::backend::new_entry_id(),
-                    png_data: Vec::new(),
-                    width: w,
-                    height: h,
-                    thumb_data: Vec::new(),
-                    thumb_width: thumb_w,
-                    thumb_height: thumb_h,
-                    hash,
-                    timestamp: now,
-                    source_name: src.name,
-                    source_bundle_id: src.bundle_id,
-                    db_id: 0,
-                };
-
-                // In-memory update (metadata only — no PNG blobs held)
-                {
-                    let mut hist = history.lock().unwrap();
-                    *hist = add_to_history(std::mem::take(&mut *hist), item);
-                    while hist.len() > cleanup_threshold.load(Ordering::Relaxed) {
-                        hist.pop();
-                    }
-                }
-
-                // Prevent re-capture before async phase completes
-                *last_seen_image_hash.lock().unwrap() = Some(hash);
-                *last_seen_text.lock().unwrap() = None;
-
-                // ── Phase 2 (async): full PNG encode → DB write ────────
-                let db = db.clone();
-                let history = history.clone();
-                let threshold = cleanup_threshold.load(Ordering::Relaxed);
-                let rgba = img_data.bytes.to_vec();
-                let item_hash = hash;
-
-                thread::spawn(move || {
-                    let full_png = match encode_png(w, h, &rgba) {
-                        Some(png) => png,
-                        None => {
-                            eprintln!("CopyAttach: failed to encode full-size PNG for image {}x{} (db_id stays 0)", w, h);
-                            return;
-                        }
-                    };
-
-                    // Lock history FIRST to find and clone the item (consistent lock order)
-                    let db_item = {
-                        let hist = history.lock().unwrap();
-                        hist.iter().find(|e| match e {
-                            ClipboardEntry::Image { hash: h, .. } => *h == item_hash,
-                            _ => false,
-                        }).cloned()
-                    };
-
-                    if let Some(db_item) = db_item {
-                        // Lock DB WITHOUT holding history lock
-                        if let Ok(conn) = db.lock() {
-                            let _ = insert_entry_to_db(
-                                &conn, &db_item,
-                                Some(&full_png),
-                                Some((&thumb_data, thumb_w, thumb_h)),
-                            );
-                            delete_matching_entry(&conn, &db_item);
-                            let row_id = conn.last_insert_rowid();
-                            trim_db_history(&conn, threshold);
-
-                            // Re-acquire history lock to update db_id in memory
-                            let mut hist = history.lock().unwrap();
-                            for entry in hist.iter_mut() {
-                                if let ClipboardEntry::Image { hash: h, db_id, .. } = entry {
-                                    if *h == item_hash {
-                                        *db_id = row_id;
-                                        break;
-                                    }
-                                }
-                            }
-                            // Signal Swift that a thumbnail is now available via DB
-                            crate::backend::IMAGE_ENCODING_COUNTER.fetch_add(1, Ordering::Relaxed);
-                        }
-                    }
-                });
-            } else if is_new {
-                // Zero-size image — just record the hash
-                *last_seen_image_hash.lock().unwrap() = Some(hash);
-                *last_seen_text.lock().unwrap() = None;
-            }
+            ingest_rgba_image(
+                &img_data.bytes,
+                img_data.width as u32,
+                img_data.height as u32,
+                &history, &last_seen_image_hash, &last_seen_text,
+                &db, &src, now, &cleanup_threshold,
+            );
         } else {
-            // ── Text (always sync — fast: no PNG encoding) ────────────
+            // ── Text (always sync — fast: no PNG encoding) ───────────────
             if let Ok(text) = cb.get_text() {
                 let is_new = {
                     let last = last_seen_text.lock().unwrap();
