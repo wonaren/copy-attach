@@ -576,6 +576,20 @@ pub extern "C" fn clipboard_free_bytes(data: *mut u8, len: c_int) {
 /// Loads full image data from DB if needed, writes to system clipboard,
 /// write-through DB, moves item to top of history, then simulates paste.
 fn select_and_paste_impl(mut item: ClipboardEntry) -> c_int {
+    // The entry is moved to the top of history below. Stamp it with the current
+    // time so the list order (most-recently-used) stays consistent with the
+    // entry's timestamp — the day separator groups rely on this invariant.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    match &mut item {
+        ClipboardEntry::Text { ref mut timestamp, .. }
+        | ClipboardEntry::Image { ref mut timestamp, .. } => {
+            *timestamp = now;
+        }
+    }
+
     let db_item = match &item {
         ClipboardEntry::Image { db_id, .. } if *db_id != 0 => {
             let mut loaded = item.clone();
@@ -881,6 +895,21 @@ pub extern "C" fn clipboard_undo_delete() -> c_int {
         }
     };
 
+    // The restored entry goes to the top of history. Stamp it with the current
+    // time before the DB write so the stored row and the in-memory entry agree —
+    // the day separator groups rely on list order matching the timestamp.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let mut entry = entry;
+    match &mut entry {
+        ClipboardEntry::Text { ref mut timestamp, .. }
+        | ClipboardEntry::Image { ref mut timestamp, .. } => {
+            *timestamp = now;
+        }
+    }
+
     // DB lock failure is fatal — entry has already been popped from the stack.
     // Panic so the crash report reveals the poisoning rather than silently losing data.
     let conn = b.db.lock().unwrap_or_else(|e| {
@@ -910,7 +939,6 @@ pub extern "C" fn clipboard_undo_delete() -> c_int {
     }
     let new_row_id = conn.last_insert_rowid();
 
-    let mut entry = entry;
     match &mut entry {
         ClipboardEntry::Text { ref mut db_id, .. }
         | ClipboardEntry::Image { ref mut db_id, .. } => {

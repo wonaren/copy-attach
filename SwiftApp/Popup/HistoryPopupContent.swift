@@ -15,6 +15,26 @@ enum FilterMode: String, CaseIterable {
     }
 }
 
+// MARK: - Popup Row (item or date separator)
+
+/// A row in the flattened list stream. `selectedIndex` indexes into the real
+/// items only, so separators never occupy a selectable position.
+private enum PopupRow: Identifiable {
+    case separator(timestamp: UInt64, isFirst: Bool)
+    case item(index: Int, item: ClipboardItem)
+
+    var id: Int {
+        switch self {
+        case .separator(let timestamp, _):
+            // Negative ids: -timestamp-1 so id is never 0 and always
+            // distinct from positive entry_ids. (timestamp=0 → -1)
+            return -Int(Int64(bitPattern: timestamp)) - 1
+        case .item(_, let item):
+            return item.id
+        }
+    }
+}
+
 // MARK: - SwiftUI Content for Popup — Native HUD Aesthetic
 
 struct HistoryPopupContent: View {
@@ -44,14 +64,14 @@ struct HistoryPopupContent: View {
     @State private var searchResults: [ClipboardItem] = []
 
     /// Items to display: full history when idle, cached results when searching.
+    /// Sorted by timestamp descending so day separators receive a monotonic stream.
     private var displayItems: [ClipboardItem] {
         let base = effectiveSearchText.isEmpty ? backend.items : searchResults
-        switch filterMode {
-        case .all:
-            return base
-        case .favorites:
-            return base.filter { backend.favoriteIds.contains($0.id) }
+        let filtered = switch filterMode {
+        case .all: base
+        case .favorites: base.filter { backend.favoriteIds.contains($0.id) }
         }
+        return filtered.sorted { $0.timestamp > $1.timestamp }
     }
 
     /// The highest valid selectedIndex (search bar + item count).
@@ -247,7 +267,7 @@ struct HistoryPopupContent: View {
             if selectedIndex > maxIndex {
                 selectedIndex = max(0, maxIndex)
             }
-            scrollTarget = displayItems.first?.id
+            scrollTarget = scrollTargetForItem(at: 0)
         }
         .onChange(of: searchText) { _, newValue in
             selectedIndex = 0
@@ -257,7 +277,7 @@ struct HistoryPopupContent: View {
                     effectiveSearchText = ""
                 }
                 searchResults = []
-                scrollTarget = displayItems.first?.id
+                scrollTarget = scrollTargetForItem(at: 0)
                 return
             }
 
@@ -277,7 +297,9 @@ struct HistoryPopupContent: View {
                     items.filter {
                         $0.label.localizedCaseInsensitiveContains(newValue) ||
                         $0.sourceName.localizedCaseInsensitiveContains(newValue) ||
-                        $0.fullText.localizedCaseInsensitiveContains(newValue)
+                        $0.fullText.localizedCaseInsensitiveContains(newValue) ||
+                        DayGroup.label(for: $0.timestamp)
+                            .localizedCaseInsensitiveContains(newValue)
                     }
                 }.value
 
@@ -287,7 +309,7 @@ struct HistoryPopupContent: View {
                         searchResults = filtered
                     }
                     if selectedIndex == 0 {
-                        scrollTarget = displayItems.first?.id
+                        scrollTarget = scrollTargetForItem(at: 0)
                     }
                 }
             }
@@ -476,8 +498,9 @@ struct HistoryPopupContent: View {
     // MARK: - Item Count Bar
 
     private var itemCountBar: some View {
-        HStack(spacing: 4) {
-            Text("\(displayItems.count) 项")
+        let items = displayItems  // snapshot to avoid re-sorting
+        return HStack(spacing: 4) {
+            Text("\(items.count) 项")
                 .font(.system(size: 10, weight: .medium))
                 .foregroundColor(theme.popupSecondaryText)
             if !effectiveSearchText.isEmpty {
@@ -488,8 +511,8 @@ struct HistoryPopupContent: View {
             Text("·")
                 .font(.system(size: 10))
                 .foregroundColor(theme.popupDimText)
-            let textCount = displayItems.filter { $0.isText }.count
-            let imageCount = displayItems.filter { $0.isImage }.count
+            let textCount = items.filter { $0.isText }.count
+            let imageCount = items.filter { $0.isImage }.count
             Text("\(textCount) 文本")
                 .font(.system(size: 10))
                 .foregroundColor(theme.popupMutedText)
@@ -519,7 +542,7 @@ struct HistoryPopupContent: View {
                 }
                 let itemIndex = newValue - 1
                 if itemIndex < displayItems.count {
-                    scrollTarget = displayItems[itemIndex].id
+                    scrollTarget = scrollTargetForItem(at: itemIndex)
                 }
                 updatePreviewContent()
             }
@@ -528,26 +551,35 @@ struct HistoryPopupContent: View {
     private var itemsListScrollView: some View {
         ScrollView {
             LazyVStack(spacing: 3) {
-                ForEach(Array(displayItems.enumerated()), id: \.element.id) { index, item in
-                    let shortcut: String? = isCommandPressed && index < 9 ? "⌘\(index + 1)" : nil
-                    ItemRowView(
-                        item: item,
-                        isSelected: selectedIndex == index + 1,
-                        isDeleteModifierPressed: isControlPressed,
-                        shortcutHint: shortcut,
-                        isFavorite: backend.favoriteIds.contains(item.id)
-                    )
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        let itemIdx = index + 1
-                        if selectedIndex == itemIdx {
-                            selectItem(at: index)
-                        } else {
-                            selectedIndex = itemIdx
+                ForEach(popupRows, id: \.id) { row in
+                    switch row {
+                    case .separator(let timestamp, let isFirst):
+                        DateSeparatorView(timestamp: timestamp)
+                            .padding(.top, isFirst ? 2 : 8)
+                            .padding(.bottom, 1)
+                            .transition(.opacity)
+                            .id(row.id)
+                    case .item(let index, let item):
+                        let shortcut: String? = isCommandPressed && index < 9 ? "⌘\(index + 1)" : nil
+                        ItemRowView(
+                            item: item,
+                            isSelected: selectedIndex == index + 1,
+                            isDeleteModifierPressed: isControlPressed,
+                            shortcutHint: shortcut,
+                            isFavorite: backend.favoriteIds.contains(item.id)
+                        )
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            let itemIdx = index + 1
+                            if selectedIndex == itemIdx {
+                                selectItem(at: index)
+                            } else {
+                                selectedIndex = itemIdx
+                            }
                         }
+                        .id(item.id)
+                        .transition(.opacity)
                     }
-                    .id(item.id)
-                    .transition(.opacity)
                 }
             }
             .padding(.all, 2)
@@ -558,6 +590,37 @@ struct HistoryPopupContent: View {
                 .stroke(theme.popupRowBorder, lineWidth: 1)
         )
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+
+    /// Flattens `displayItems` into a row stream, inserting a `DateSeparatorView`
+    /// before any item whose calendar day differs from the preceding item's.
+    /// Separators are purely visual — they carry no selection index, so
+    /// `selectedIndex` keeps mapping to real item positions (index + 1).
+    private var popupRows: [PopupRow] {
+        var rows: [PopupRow] = []
+        var prevDay: UInt64? = nil
+        for (index, item) in displayItems.enumerated() {
+            let needsSeparator = prevDay.map { !DayGroup.isSameDay($0, item.timestamp) } ?? true
+            if needsSeparator {
+                rows.append(.separator(timestamp: item.timestamp, isFirst: prevDay == nil))
+            }
+            rows.append(.item(index: index, item: item))
+            prevDay = item.timestamp
+        }
+        return rows
+    }
+
+    /// Returns the id to target for `scrollPosition` so that both the item at
+    /// `itemIndex` and any date separator above it are visible after the scroll.
+    private func scrollTargetForItem(at itemIndex: Int) -> Int? {
+        let items = displayItems
+        guard itemIndex >= 0, itemIndex < items.count else { return nil }
+        let hasSeparator = itemIndex == 0
+            || !DayGroup.isSameDay(items[itemIndex - 1].timestamp, items[itemIndex].timestamp)
+        if hasSeparator {
+            return -Int(Int64(bitPattern: items[itemIndex].timestamp)) - 1
+        }
+        return items[itemIndex].id
     }
 
     // MARK: - Empty State
@@ -607,8 +670,9 @@ struct HistoryPopupContent: View {
     // MARK: - Actions
 
     private func deleteItem(at index: Int) {
-        guard index < displayItems.count else { return }
-        let item = displayItems[index]
+        let items = displayItems
+        guard index < items.count else { return }
+        let item = items[index]
         guard let backendIdx = backend.items.firstIndex(where: { $0.id == item.id }) else { return }
         closePreview()
         var deleted = false
@@ -625,8 +689,9 @@ struct HistoryPopupContent: View {
     }
 
     private func selectItem(at index: Int) {
-        guard index < displayItems.count else { return }
-        let item = displayItems[index]
+        let items = displayItems
+        guard index < items.count else { return }
+        let item = items[index]
         guard let backendIdx = backend.items.firstIndex(where: { $0.id == item.id }) else { return }
         if backend.selectAndPaste(at: backendIdx) {
             closePreview()
@@ -667,7 +732,7 @@ struct HistoryPopupContent: View {
                 self.selectedIndex = 0
             } else {
                 self.selectedIndex = 1
-                self.scrollTarget = self.displayItems.first?.id
+                self.scrollTarget = self.scrollTargetForItem(at: 0)
             }
         }
     }

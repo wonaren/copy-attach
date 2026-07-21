@@ -1,6 +1,6 @@
 [package]
 name = "copy-attach"
-version = "0.66.0-beta"
+version = "0.67.0-beta"
 edition = "2021"
 
 [lib]
