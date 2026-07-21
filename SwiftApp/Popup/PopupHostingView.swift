@@ -91,10 +91,19 @@ class PopupHostingView: NSHostingView<AnyView> {
 
         // Command + number (1-9): quick select item
         if event.modifierFlags.contains(.command) {
-            let keyCode = event.keyCode
-            // kVK_ANSI_1=18 ... kVK_ANSI_9=26
-            if keyCode >= 18 && keyCode <= 26 {
-                let number = Int(keyCode - 18 + 1)
+            // kVK_ANSI key codes are NOT sequential — use a direct map.
+            let keyCodeToNumber: [UInt16: Int] = [
+                18: 1,  // kVK_ANSI_1
+                19: 2,  // kVK_ANSI_2
+                20: 3,  // kVK_ANSI_3
+                21: 4,  // kVK_ANSI_4
+                23: 5,  // kVK_ANSI_5
+                22: 6,  // kVK_ANSI_6
+                26: 7,  // kVK_ANSI_7
+                28: 8,  // kVK_ANSI_8
+                25: 9,  // kVK_ANSI_9
+            ]
+            if let number = keyCodeToNumber[event.keyCode] {
                 NotificationCenter.default.post(name: commandNumberNotification, object: number)
                 return
             }

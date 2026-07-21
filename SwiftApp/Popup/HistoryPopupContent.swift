@@ -109,7 +109,7 @@ struct HistoryPopupContent: View {
                         emptyFavoritesView
                     } else {
                         itemsList
-                        itemCountBar
+                        bottomBar
                     }
                 }
                 .padding(.all, 3)
@@ -495,11 +495,12 @@ struct HistoryPopupContent: View {
         }
     }
 
-    // MARK: - Item Count Bar
+    // MARK: - Bottom Bar (item count + shortcuts, single row)
 
-    private var itemCountBar: some View {
-        let items = displayItems  // snapshot to avoid re-sorting
-        return HStack(spacing: 4) {
+    private var bottomBar: some View {
+        let items = displayItems
+        return HStack(spacing: 0) {
+            // --- Left: item count stats ---
             Text("\(items.count) 项")
                 .font(.system(size: 10, weight: .medium))
                 .foregroundColor(theme.popupSecondaryText)
@@ -508,7 +509,7 @@ struct HistoryPopupContent: View {
                     .font(.system(size: 10))
                     .foregroundColor(theme.popupMutedText)
             }
-            Text("·")
+            Text(" · ")
                 .font(.system(size: 10))
                 .foregroundColor(theme.popupDimText)
             let textCount = items.filter { $0.isText }.count
@@ -519,10 +520,30 @@ struct HistoryPopupContent: View {
             Text("\(imageCount) 图片")
                 .font(.system(size: 10))
                 .foregroundColor(theme.popupMutedText)
+
             Spacer()
+
+            // --- Right: shortcut hints ---
+            shortcutHint(key: "⌥P", label: "收藏/取消")
+            shortcutHint(key: "Space", label: "预览")
+            shortcutHint(key: "⌃⌫", label: "删除")
+            shortcutHint(key: "⌘Z", label: "撤销")
+            shortcutHint(key: "⌘1~9", label: "快速选择")
         }
         .padding(.horizontal, 6)
-        .padding(.vertical, 4)
+        .padding(.vertical, 3)
+    }
+
+    private func shortcutHint(key: String, label: String) -> some View {
+        HStack(spacing: 3) {
+            Text(key)
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundColor(theme.popupMutedText)
+            Text(label)
+                .font(.system(size: 9))
+                .foregroundColor(theme.popupDimText)
+        }
+        .padding(.leading, 4)
     }
 
     // MARK: - Items List
