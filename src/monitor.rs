@@ -61,10 +61,15 @@ fn ingest_rgba_image(
         let (thumb_data, thumb_w, thumb_h) = match create_thumbnail_fast(width, height, rgba, THUMBNAIL_MAX_DIM) {
             Some(t) => t,
             None => {
-                eprintln!("CopyAttach: thumbnail creation failed for image {}x{}, skipping entry", width, height);
+                // Thumbnail creation failed (likely corrupt pixel data). Create
+                // the entry anyway — Phase 2 full encode will determine if the
+                // image data is truly broken and remove the entry if so.
+                // Set last_seen to avoid an infinite retry loop.
+                eprintln!("CopyAttach: thumbnail creation failed for image {}x{} — capturing without thumbnail", width, height);
                 *last_seen_image_hash.lock().unwrap() = Some(hash);
                 *last_seen_text.lock().unwrap() = None;
-                return;
+                // Fall through: create entry with empty thumbnail, continue to Phase 2
+                (Vec::new(), 0u32, 0u32)
             }
         };
 
@@ -108,7 +113,15 @@ fn ingest_rgba_image(
             let full_png = match encode_png(width, height, &rgba_owned) {
                 Some(png) => png,
                 None => {
-                    eprintln!("CopyAttach: failed to encode full-size PNG for image {}x{} (db_id stays 0)", width, height);
+                    eprintln!("CopyAttach: failed to encode full-size PNG for image {}x{} — removing broken entry from history", width, height);
+                    // Remove the entry created in Phase 1 — without PNG data it can
+                    // never be pasted. The user sees the entry appear and disappear,
+                    // which is better than a ghost entry that silently fails on paste.
+                    let mut hist = history.lock().unwrap();
+                    hist.retain(|e| match e {
+                        ClipboardEntry::Image { hash: h, .. } => *h != item_hash,
+                        _ => true,
+                    });
                     return;
                 }
             };
@@ -123,29 +136,37 @@ fn ingest_rgba_image(
             };
 
             if let Some(db_item) = db_item {
-                if let Ok(conn) = db.lock() {
-                    let _ = insert_entry_to_db(
-                        &conn, &db_item,
-                        Some(&full_png),
-                        Some((&thumb_async, thumb_w, thumb_h)),
-                    );
-                    delete_matching_entry(&conn, &db_item);
-                    let row_id = conn.last_insert_rowid();
-                    trim_db_history(&conn, threshold);
+                let conn = match db.lock() {
+                    Ok(c) => c,
+                    Err(e) => {
+                        eprintln!("CopyAttach: DB mutex poisoned in Phase 2 image persist: {}", e);
+                        return;
+                    }
+                };
+                if insert_entry_to_db(
+                    &conn, &db_item,
+                    Some(&full_png),
+                    Some((&thumb_async, thumb_w, thumb_h)),
+                ).is_err() {
+                    eprintln!("CopyAttach: Phase 2 DB insert failed for image {}x{} — entry stays with db_id=0", width, height);
+                    return;
+                }
+                delete_matching_entry(&conn, &db_item);
+                let row_id = conn.last_insert_rowid();
+                trim_db_history(&conn, threshold);
 
-                    // Re-acquire history lock to update db_id in memory
-                    let mut hist = history.lock().unwrap();
-                    for entry in hist.iter_mut() {
-                        if let ClipboardEntry::Image { hash: h, db_id, .. } = entry {
-                            if *h == item_hash {
-                                *db_id = row_id;
-                                break;
-                            }
+                // Re-acquire history lock to update db_id in memory
+                let mut hist = history.lock().unwrap();
+                for entry in hist.iter_mut() {
+                    if let ClipboardEntry::Image { hash: h, db_id, .. } = entry {
+                        if *h == item_hash {
+                            *db_id = row_id;
+                            break;
                         }
                     }
-                    // Signal Swift that a thumbnail is now available via DB
-                    crate::backend::IMAGE_ENCODING_COUNTER.fetch_add(1, Ordering::Relaxed);
                 }
+                // Signal Swift that a thumbnail is now available via DB
+                crate::backend::IMAGE_ENCODING_COUNTER.fetch_add(1, Ordering::Relaxed);
             }
         });
     } else if is_new {
@@ -202,11 +223,14 @@ pub(crate) fn clipboard_monitor(
     last_seen_image_hash: Arc<Mutex<Option<u64>>>,
     cleanup_threshold: Arc<AtomicUsize>,
 ) {
-    let mut cb = match Clipboard::new() {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("clipboard-monitor: failed to open clipboard: {e}");
-            return;
+    let mut cb = loop {
+        match Clipboard::new() {
+            Ok(c) => break c,
+            Err(e) => {
+                eprintln!("clipboard-monitor: failed to open clipboard: {e}, retrying in 1s...");
+                if !running.load(Ordering::SeqCst) { return; }
+                thread::sleep(Duration::from_secs(1));
+            }
         }
     };
 
@@ -290,16 +314,26 @@ pub(crate) fn clipboard_monitor(
                         }; // history lock released
 
                         // Scope 2: DB write-through (db lock only — no history lock held)
-                        if let Ok(conn) = db.lock() {
-                            let _ = insert_entry_to_db(&conn, &item_for_db, None, None);
-                            delete_matching_entry(&conn, &item_for_db);
-                            let row_id = conn.last_insert_rowid();
-                            trim_db_history(&conn, cleanup_threshold.load(Ordering::Relaxed));
+                        match db.lock() {
+                            Ok(conn) => {
+                                if insert_entry_to_db(&conn, &item_for_db, None, None).is_ok() {
+                                    delete_matching_entry(&conn, &item_for_db);
+                                    let row_id = conn.last_insert_rowid();
+                                    trim_db_history(&conn, cleanup_threshold.load(Ordering::Relaxed));
 
-                            // Re-acquire history lock to set db_id on the head entry
-                            let mut hist = history.lock().unwrap();
-                            if let Some(ClipboardEntry::Text { db_id, .. }) = hist.get_mut(0) {
-                                *db_id = row_id;
+                                    // Re-acquire history lock to set db_id on the head entry
+                                    let mut hist = history.lock().unwrap();
+                                    if let Some(ClipboardEntry::Text { db_id, .. }) = hist.get_mut(0) {
+                                        *db_id = row_id;
+                                    }
+                                } else {
+                                    eprintln!("CopyAttach: failed to insert text entry to DB — entry stays with db_id=0");
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("CopyAttach: DB mutex poisoned in text capture persist: {}", e);
+                                // Entry already in in-memory history. DB persistence
+                                // skipped; entry stays with db_id=0 until DB recovers.
                             }
                         }
                     }

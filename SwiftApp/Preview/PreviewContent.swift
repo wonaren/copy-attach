@@ -48,9 +48,7 @@ struct PreviewContent: View {
     private func imageContent(dbId: Int) -> some View {
         Group {
             if let img = image {
-                Image(nsImage: img)
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
+                ZoomableImageView(image: img)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .padding(12)
             } else if isLoadingImage {

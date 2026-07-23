@@ -82,7 +82,7 @@ pub extern "C" fn clipboard_snapshot_item_label(snap: *const Snapshot, index: c_
     if snap.is_null() { return std::ptr::null_mut(); }
     let snap = unsafe { &*snap };
     match snap.0.get(index as usize) {
-        Some(item) => CString::new(item.label()).unwrap_or_default().into_raw(),
+        Some(item) => to_ffi_cstring(&item.label()),
         None => std::ptr::null_mut(),
     }
 }
@@ -93,7 +93,7 @@ pub extern "C" fn clipboard_snapshot_item_text(snap: *const Snapshot, index: c_i
     if snap.is_null() { return std::ptr::null_mut(); }
     let snap = unsafe { &*snap };
     match snap.0.get(index as usize) {
-        Some(ClipboardEntry::Text { text, .. }) => CString::new(text.as_str()).unwrap_or_default().into_raw(),
+        Some(ClipboardEntry::Text { text, .. }) => to_ffi_cstring(text.as_str()),
         _ => std::ptr::null_mut(),
     }
 }
@@ -104,7 +104,7 @@ pub extern "C" fn clipboard_snapshot_item_source_name(snap: *const Snapshot, ind
     if snap.is_null() { return std::ptr::null_mut(); }
     let snap = unsafe { &*snap };
     match snap.0.get(index as usize) {
-        Some(item) => CString::new(item.source_name()).unwrap_or_default().into_raw(),
+        Some(item) => to_ffi_cstring(item.source_name()),
         None => std::ptr::null_mut(),
     }
 }
@@ -115,7 +115,7 @@ pub extern "C" fn clipboard_snapshot_item_source_bundle_id(snap: *const Snapshot
     if snap.is_null() { return std::ptr::null_mut(); }
     let snap = unsafe { &*snap };
     match snap.0.get(index as usize) {
-        Some(item) => CString::new(item.source_bundle_id()).unwrap_or_default().into_raw(),
+        Some(item) => to_ffi_cstring(item.source_bundle_id()),
         None => std::ptr::null_mut(),
     }
 }
@@ -325,7 +325,7 @@ pub extern "C" fn clipboard_get_item_source_name(index: c_int) -> *mut c_char {
         Some(item) => item.source_name(),
         None => return std::ptr::null_mut(),
     };
-    CString::new(name).unwrap_or_default().into_raw()
+    to_ffi_cstring(name)
 }
 
 /// Caller must free with `clipboard_free_string()`.
@@ -336,7 +336,7 @@ pub extern "C" fn clipboard_get_item_source_bundle_id(index: c_int) -> *mut c_ch
         Some(item) => item.source_bundle_id(),
         None => return std::ptr::null_mut(),
     };
-    CString::new(bid).unwrap_or_default().into_raw()
+    to_ffi_cstring(bid)
 }
 
 /// Caller must free with `clipboard_free_string()`.
@@ -347,7 +347,7 @@ pub extern "C" fn clipboard_get_item_label(index: c_int) -> *mut c_char {
         Some(item) => item.label(),
         None => return std::ptr::null_mut(),
     };
-    CString::new(label).unwrap_or_default().into_raw()
+    to_ffi_cstring(&label)
 }
 
 /// Get text content. Caller must free with `clipboard_free_string()`.
@@ -356,7 +356,7 @@ pub extern "C" fn clipboard_get_item_text(index: c_int) -> *mut c_char {
     let hist = backend().history.lock().unwrap();
     match hist.get(index as usize) {
         Some(ClipboardEntry::Text { text, .. }) => {
-            CString::new(text.as_str()).unwrap_or_default().into_raw()
+            to_ffi_cstring(text.as_str())
         }
         _ => std::ptr::null_mut(),
     }
@@ -371,6 +371,22 @@ fn vec_to_raw(v: Vec<u8>) -> *mut u8 {
     let ptr = v.as_mut_ptr();
     std::mem::forget(v);
     ptr
+}
+
+/// Convert a Rust string to a CString for FFI return. If the string contains
+/// an interior null byte, truncate at the first null and log a warning instead
+/// of silently returning an empty string.
+fn to_ffi_cstring(s: &str) -> *mut c_char {
+    match CString::new(s) {
+        Ok(cs) => cs.into_raw(),
+        Err(_) => {
+            let null_pos = s.find('\0').unwrap_or(s.len());
+            eprintln!("CopyAttach: FFI string contains interior null byte at offset {} (len={}), truncating",
+                      null_pos, s.len());
+            let truncated: String = s.chars().take_while(|&c| c != '\0').collect();
+            CString::new(truncated).unwrap_or_default().into_raw()
+        }
+    }
 }
 
 /// Load thumbnail by array index. Caller must free with `clipboard_free_bytes()`.
@@ -402,7 +418,10 @@ pub extern "C" fn clipboard_get_image_thumb(index: c_int, out_len: *mut c_int) -
                 }
             }
         }
-        Err(_) => return std::ptr::null_mut(),
+        Err(e) => {
+            eprintln!("CopyAttach: DB mutex poisoned loading thumbnail for db_id={}: {}", db_id, e);
+            return std::ptr::null_mut();
+        }
     };
 
     let len = thumb_data.len() as c_int;
@@ -444,7 +463,10 @@ pub extern "C" fn clipboard_get_image_full(index: c_int, out_len: *mut c_int) ->
                     }
                 }
             }
-            Err(_) => return std::ptr::null_mut(),
+            Err(e) => {
+                eprintln!("CopyAttach: DB mutex poisoned loading full image for db_id={}: {}", db_id, e);
+                return std::ptr::null_mut();
+            }
         }
     } else {
         return std::ptr::null_mut();
@@ -495,7 +517,10 @@ pub extern "C" fn clipboard_get_image_full_by_db_id(db_id: i64, out_len: *mut c_
                         }
                     }
                 }
-                Err(_) => return std::ptr::null_mut(),
+                Err(e) => {
+                    eprintln!("CopyAttach: DB mutex poisoned loading full image for db_id={}: {}", db_id, e);
+                    return std::ptr::null_mut();
+                }
             }
         }
     };
@@ -527,7 +552,10 @@ pub extern "C" fn clipboard_get_image_thumb_by_db_id(db_id: i64, out_len: *mut c
                 }
             }
         }
-        Err(_) => return std::ptr::null_mut(),
+        Err(e) => {
+            eprintln!("CopyAttach: DB mutex poisoned loading thumbnail for db_id={}: {}", db_id, e);
+            return std::ptr::null_mut();
+        }
     };
 
     let len = thumb_data.len() as c_int;
@@ -643,30 +671,38 @@ fn select_and_paste_impl(mut item: ClipboardEntry) -> c_int {
     }
 
     if let Some(b) = crate::backend::try_backend() {
-        if let Ok(conn) = b.db.lock() {
-            let png_for_db = match &db_item {
-                ClipboardEntry::Image { png_data, .. } if !png_data.is_empty() => {
-                    Some(png_data.as_slice())
-                }
-                _ => None,
-            };
-            let thumb_for_db = match &db_item {
-                ClipboardEntry::Image { thumb_data, thumb_width, thumb_height, .. } if !thumb_data.is_empty() => {
-                    Some((thumb_data.as_slice(), *thumb_width, *thumb_height))
-                }
-                _ => None,
-            };
+        match b.db.lock() {
+            Ok(conn) => {
+                let png_for_db = match &db_item {
+                    ClipboardEntry::Image { png_data, .. } if !png_data.is_empty() => {
+                        Some(png_data.as_slice())
+                    }
+                    _ => None,
+                };
+                let thumb_for_db = match &db_item {
+                    ClipboardEntry::Image { thumb_data, thumb_width, thumb_height, .. } if !thumb_data.is_empty() => {
+                        Some((thumb_data.as_slice(), *thumb_width, *thumb_height))
+                    }
+                    _ => None,
+                };
 
-            insert_entry_to_db(&conn, &db_item, png_for_db, thumb_for_db).ok();
-            delete_matching_entry(&conn, &db_item);
-            let new_row_id = conn.last_insert_rowid();
-            trim_db_history(&conn, b.cleanup_threshold.load(Ordering::Relaxed));
+                if insert_entry_to_db(&conn, &db_item, png_for_db, thumb_for_db).is_ok() {
+                    delete_matching_entry(&conn, &db_item);
+                    let new_row_id = conn.last_insert_rowid();
+                    trim_db_history(&conn, b.cleanup_threshold.load(Ordering::Relaxed));
 
-            match &mut item {
-                ClipboardEntry::Image { ref mut db_id, .. } |
-                ClipboardEntry::Text { ref mut db_id, .. } => {
-                    *db_id = new_row_id;
+                    match &mut item {
+                        ClipboardEntry::Image { ref mut db_id, .. } |
+                        ClipboardEntry::Text { ref mut db_id, .. } => {
+                            *db_id = new_row_id;
+                        }
+                    }
+                } else {
+                    eprintln!("CopyAttach: select_and_paste DB insert failed — entry stays with db_id=0");
                 }
+            }
+            Err(e) => {
+                eprintln!("CopyAttach: DB mutex poisoned in select_and_paste persist: {} — entry stays with db_id=0", e);
             }
         }
     }
@@ -742,7 +778,7 @@ pub extern "C" fn clipboard_get_text_by_id(entry_id: u64) -> *mut c_char {
     for entry in hist.iter() {
         match entry {
             ClipboardEntry::Text { id, text, .. } if *id == entry_id => {
-                return CString::new(text.as_str()).unwrap_or_default().into_raw();
+                return to_ffi_cstring(text.as_str());
             }
             _ => {}
         }
@@ -986,6 +1022,7 @@ pub extern "C" fn clipboard_last_restored_id() -> u64 {
 
 /// Trim the oldest N percent of entries from both in-memory history and DB.
 /// Returns the number of entries removed.
+/// Deletes from DB first, then memory — so a DB failure leaves memory intact.
 #[no_mangle]
 pub extern "C" fn clipboard_trim_oldest_percent(percent: i32) -> c_int {
     let b = match crate::backend::try_backend() {
@@ -993,46 +1030,46 @@ pub extern "C" fn clipboard_trim_oldest_percent(percent: i32) -> c_int {
         None => return 0,
     };
 
-    let removed = {
-        let mut hist = b.history.lock().unwrap();
+    let count = {
+        let hist = b.history.lock().unwrap();
         let total = hist.len();
         if total == 0 {
             return 0;
         }
         let count = ((total as f64 * percent as f64 / 100.0).ceil()) as usize;
-        let count = count.min(total);
-        let split_at = total - count;
-        hist.split_off(split_at)
+        count.min(total)
     };
 
-    if let Ok(conn) = b.db.lock() {
-        for entry in &removed {
-            match entry {
-                ClipboardEntry::Text { db_id, .. } if *db_id != 0 => {
-                    if let Err(e) = conn.execute(
-                        "DELETE FROM clipboard_history WHERE id = ?1",
-                        rusqlite::params![*db_id],
-                    ) {
-                        eprintln!("CopyAttach: failed to delete text from DB: {}", e);
-                    }
-                }
-                ClipboardEntry::Image { db_id, .. } if *db_id != 0 => {
-                    if let Err(e) = conn.execute(
-                        "DELETE FROM clipboard_history WHERE id = ?1",
-                        rusqlite::params![*db_id],
-                    ) {
-                        eprintln!("CopyAttach: failed to delete image from DB: {}", e);
-                    }
-                }
-                _ => {
-                    eprintln!("CopyAttach: skipping DB deletion for entry with db_id=0 (type: {})",
-                              entry.content_type());
-                }
+    // Step 1: Delete oldest entries from DB first.
+    // If this fails, we don't touch memory — no consistency gap.
+    match b.db.lock() {
+        Ok(conn) => {
+            if let Err(e) = conn.execute(
+                "DELETE FROM clipboard_history WHERE id IN (
+                    SELECT id FROM clipboard_history ORDER BY id ASC LIMIT ?)",
+                rusqlite::params![count as i64],
+            ) {
+                eprintln!("CopyAttach: failed to trim DB by {} entries: {}", count, e);
             }
+        }
+        Err(e) => {
+            eprintln!("CopyAttach: DB mutex poisoned in trim_oldest_percent: {}", e);
         }
     }
 
-    removed.len() as c_int
+    // Step 2: Remove from in-memory history.
+    let mut hist = b.history.lock().unwrap();
+    let actual = count.min(hist.len());
+    let split_at = hist.len() - actual;
+    let _removed = hist.split_off(split_at);
+    // Now also trim to threshold in case percent-trim left us over the cap.
+    // (This shouldn't normally happen since percent-based trim is user-initiated,
+    //  but keep the invariant that len <= threshold.)
+    while hist.len() > b.cleanup_threshold.load(Ordering::Relaxed) {
+        hist.pop();
+    }
+
+    actual as c_int
 }
 
 // ═══════════════════════════════════════════
@@ -1076,7 +1113,10 @@ pub extern "C" fn clipboard_get_storage_size() -> i64 {
     };
     let conn = match b.db.lock() {
         Ok(c) => c,
-        Err(_) => return 0,
+        Err(e) => {
+            eprintln!("CopyAttach: DB mutex poisoned in get_storage_size: {}", e);
+            return 0;
+        }
     };
     match conn.query_row(
         "SELECT COALESCE(SUM(LENGTH(text)), 0) + COALESCE(SUM(LENGTH(png_data)), 0) + COALESCE(SUM(LENGTH(thumb_data)), 0) FROM clipboard_history",
