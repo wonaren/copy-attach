@@ -53,6 +53,8 @@ uint8_t* clipboard_get_image_full_by_db_id(int64_t db_id, int32_t* out_len);
 
 // ─── Source App ───
 void clipboard_set_source_app(const char* name, const char* bundle_id, int32_t pid);
+// Newline-delimited application bundle IDs; 0 disables the text-length rule.
+int32_t clipboard_set_ignore_rules(const char* app_bundle_ids, int32_t ignore_text, int32_t ignore_images, int32_t min_text_characters);
 char* clipboard_get_item_source_name(int32_t index);
 char* clipboard_get_item_source_bundle_id(int32_t index);
 

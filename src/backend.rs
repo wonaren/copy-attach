@@ -6,6 +6,7 @@ use std::thread;
 use rusqlite::Connection;
 
 use crate::types::{ClipboardEntry, SourceApp};
+use crate::ignore::IgnoreRules;
 
 // ═══════════════════════════════════════════
 // Constants
@@ -51,6 +52,9 @@ pub(crate) struct Backend {
     pub(crate) last_seen_image_hash: Arc<Mutex<Option<u64>>>,
     pub(crate) db: Arc<Mutex<Connection>>,
     pub(crate) cleanup_threshold: Arc<AtomicUsize>,
+    /// Small, live-replaceable capture policy. It contains only configured rule
+    /// metadata; clipboard payloads are never retained here.
+    pub(crate) ignore_rules: Arc<Mutex<IgnoreRules>>,
     /// Stack of deleted entries for undo (Cmd+Z). Max 10 items.
     pub(crate) deleted_stack: Arc<Mutex<Vec<ClipboardEntry>>>,
     /// Entry ID of the most recently undo-restored entry (0 if none).

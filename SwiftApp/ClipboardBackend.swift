@@ -69,6 +69,7 @@ class ClipboardBackend: ObservableObject {
         if saved >= 100 {
             clipboard_set_cleanup_threshold(Int32(saved))
         }
+        syncIgnoreRules()
 
         timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             self?.refresh()
@@ -91,6 +92,24 @@ class ClipboardBackend: ObservableObject {
         sourceAppTimer?.invalidate()
         sourceAppTimer = nil
         clipboard_cleanup()
+    }
+
+    /// Pushes the persisted capture policy to Rust. The monitor evaluates it
+    /// before creating history entries or reading image payloads.
+    func syncIgnoreRules() {
+        let appIDs = UserDefaults.standard.stringArray(forKey: "IgnoredAppBundleIDs") ?? []
+        let payload = appIDs.joined(separator: "\n")
+        let ignoreText = UserDefaults.standard.bool(forKey: "IgnoreTextClipboardType")
+        let ignoreImages = UserDefaults.standard.bool(forKey: "IgnoreImageClipboardType")
+        let ignoreShortText = UserDefaults.standard.bool(forKey: "IgnoreShortText")
+        let shortTextThreshold = UserDefaults.standard.integer(forKey: "ShortTextThreshold")
+        let minimum = ignoreShortText ? max(shortTextThreshold, 1) : 0
+        let result = payload.withCString {
+            clipboard_set_ignore_rules($0, ignoreText ? 1 : 0, ignoreImages ? 1 : 0, Int32(minimum))
+        }
+        if result == 0 {
+            debugLog("Failed to apply clipboard ignore rules")
+        }
     }
 
     /// Detect the current frontmost app and tell Rust about it

@@ -23,6 +23,7 @@ mod backend;
 mod image;
 mod history;
 mod db;
+mod ignore;
 
 #[cfg(target_os = "macos")]
 mod macos;

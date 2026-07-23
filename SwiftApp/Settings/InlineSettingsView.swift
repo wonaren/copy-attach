@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import ServiceManagement
+import UniformTypeIdentifiers
 
 // MARK: - Inline Settings View
 
@@ -15,10 +16,11 @@ struct InlineSettingsView: View {
         let saved = UserDefaults.standard.integer(forKey: "CleanupThreshold")
         return Double(saved >= 100 ? saved : 3000)
     }()
-    @State private var ignoredApps: [String] = UserDefaults.standard.stringArray(forKey: "IgnoredApps") ?? ["1Password", "Keychain Access", "System Settings"]
+    @State private var ignoredAppBundleIDs = UserDefaults.standard.stringArray(forKey: "IgnoredAppBundleIDs") ?? []
+    @State private var ignoreTextClipboardType = UserDefaults.standard.bool(forKey: "IgnoreTextClipboardType")
+    @State private var ignoreImageClipboardType = UserDefaults.standard.bool(forKey: "IgnoreImageClipboardType")
     @State private var ignoreShortText = UserDefaults.standard.bool(forKey: "IgnoreShortText")
     @State private var shortTextThreshold = UserDefaults.standard.integer(forKey: "ShortTextThreshold") != 0 ? UserDefaults.standard.integer(forKey: "ShortTextThreshold") : 3
-    @State private var ignoreProtectedWindows = UserDefaults.standard.bool(forKey: "IgnoreProtectedWindows") != false
     @State private var pendingThreshold: Int? = nil
     @State private var thresholdBeforeEdit: Double = 3000
     @State private var showDragGuide = false
@@ -708,115 +710,83 @@ struct InlineSettingsView: View {
 
     private var ignoreAppsCard: some View {
         settingsCard {
-            HStack(spacing: 10) {
-                Image(systemName: "eye.slash")
-                    .font(.system(size: 16))
-                    .foregroundColor(Color.accentColor)
-                Text("忽略的应用程序")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(theme.primaryText)
-                todoBadge
-                Spacer()
-            }
-            .padding(.bottom, 12)
-            Text("来自已选应用所复制的内容，CopyAttach 将不做任何记录和收集。")
+            cardTitle(icon: "app.badge", text: "按应用忽略")
+            Text("匹配应用的 bundle identifier；在读取剪贴板内容之前跳过，因此不会写入内存或数据库。")
                 .font(.system(size: 11.5))
                 .foregroundColor(theme.secondaryText)
 
             VStack(spacing: 0) {
-                ForEach(ignoredApps, id: \.self) { app in
-                    HStack {
-                        Image(systemName: "lock.square")
-                            .font(.system(size: 12))
-                            .foregroundColor(.secondary)
-                        Text(app)
-                            .font(.system(size: 12))
-                            .foregroundColor(theme.primaryText)
-                        Spacer()
-                        Button {
-                            ignoredApps.removeAll { $0 == app }
-                            UserDefaults.standard.set(ignoredApps, forKey: "IgnoredApps")
-                        } label: {
-                            Image(systemName: "xmark")
-                                .font(.system(size: 9, weight: .bold))
-                                .foregroundColor(theme.tertiaryText)
+                if ignoredAppBundleIDs.isEmpty {
+                    Text("未设置应用规则")
+                        .font(.system(size: 11))
+                        .foregroundColor(theme.tertiaryText)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
+                } else {
+                    ForEach(ignoredAppBundleIDs, id: \.self) { bundleID in
+                        HStack(spacing: 8) {
+                            Image(systemName: "app.dashed")
+                                .font(.system(size: 12))
+                                .foregroundColor(Color.accentColor)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(applicationName(for: bundleID))
+                                    .font(.system(size: 12, weight: .medium))
+                                    .foregroundColor(theme.primaryText)
+                                Text(bundleID)
+                                    .font(.system(size: 10))
+                                    .foregroundColor(theme.tertiaryText)
+                            }
+                            Spacer()
+                            Button {
+                                ignoredAppBundleIDs.removeAll { $0 == bundleID }
+                                persistIgnoreRules()
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundColor(theme.tertiaryText)
+                            }
+                            .buttonStyle(.plain)
                         }
-                        .buttonStyle(.plain)
-                        .opacity(0.7)
-                    }
-                    .padding(.horizontal, 12).padding(.vertical, 8)
-                    if app != ignoredApps.last {
-                        sectionDivider()
+                        .padding(.horizontal, 12).padding(.vertical, 7)
+                        if bundleID != ignoredAppBundleIDs.last { sectionDivider() }
                     }
                 }
             }
             .background(theme.background)
             .cornerRadius(8)
-            .overlay(
-                RoundedRectangle(cornerRadius: 8)
-                    .stroke(theme.cardBorder, lineWidth: 1)
-            )
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(theme.cardBorder, lineWidth: 1))
 
-            if ignoredApps.isEmpty {
-                Text("暂无忽略的应用")
-                    .font(.system(size: 11))
-                    .foregroundColor(.secondary)
+            Button(action: chooseIgnoredApplication) {
+                Label("选择应用…", systemImage: "plus")
+                    .font(.system(size: 12, weight: .medium))
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, 8)
+                    .padding(.vertical, 7)
             }
-
-            HStack(spacing: 8) {
-                Picker("", selection: .constant("")) {
-                    Text("选择想要忽略的应用...").tag("")
-                    Text("Safari").tag("Safari")
-                    Text("Google Chrome").tag("Google Chrome")
-                    Text("Terminal").tag("Terminal")
-                    Text("Slack").tag("Slack")
-                    Text("微信 (WeChat)").tag("WeChat")
-                }
-                .pickerStyle(.menu)
-                .frame(maxWidth: .infinity)
-                .font(.system(size: 12))
-
-                Button("添加") {
-                }
-                .font(.system(size: 12, weight: .medium))
-                .padding(.horizontal, 12).padding(.vertical, 6)
-                .background(Color.accentColor)
-                .foregroundColor(theme.buttonText)
-                .cornerRadius(6)
-                .buttonStyle(.plain)
-            }
+            .buttonStyle(.bordered)
+            .padding(.top, 10)
         }
     }
 
     private var filterRulesCard: some View {
         settingsCard {
-            HStack(spacing: 10) {
-                Image(systemName: "line.3.horizontal.decrease")
-                    .font(.system(size: 16))
-                    .foregroundColor(Color.accentColor)
-                Text("过滤规则")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(theme.primaryText)
-                todoBadge
-                Spacer()
-            }
-            .padding(.bottom, 12)
+            cardTitle(icon: "line.3.horizontal.decrease", text: "按类型与特点忽略")
+            settingToggleRow(icon: "textformat", iconColor: .accentColor, title: "忽略文本", desc: "不记录任何纯文本剪贴板内容。", isOn: $ignoreTextClipboardType)
+                .onChange(of: ignoreTextClipboardType) { _, _ in persistIgnoreRules() }
+            sectionDivider().padding(.vertical, 4)
+            settingToggleRow(icon: "photo", iconColor: .green, title: "忽略图片", desc: "不读取、编码或存储图片剪贴板内容。", isOn: $ignoreImageClipboardType)
+                .onChange(of: ignoreImageClipboardType) { _, _ in persistIgnoreRules() }
+            sectionDivider().padding(.vertical, 4)
 
             HStack {
                 Toggle(isOn: $ignoreShortText) {
                     VStack(alignment: .leading, spacing: 1) {
-                        Text("忽略小于三个字符的文本")
+                        Text("忽略小于 \(shortTextThreshold) 个字符的文本")
                             .font(.system(size: 12))
                             .foregroundColor(theme.primaryText)
                     }
                 }
                 .toggleStyle(.switch)
                 .controlSize(.small)
-                .onChange(of: ignoreShortText) { _, newValue in
-                    UserDefaults.standard.set(newValue, forKey: "IgnoreShortText")
-                }
+                .onChange(of: ignoreShortText) { _, _ in persistIgnoreRules() }
                 Spacer()
                 HStack(spacing: 4) {
                     Text("阈值:")
@@ -833,30 +803,37 @@ struct InlineSettingsView: View {
                     .font(.system(size: 11))
                 }
                 .opacity(ignoreShortText ? 1 : 0.5)
-            }
-
-            sectionDivider().padding(.vertical, 4)
-
-            HStack {
-                Toggle(isOn: $ignoreProtectedWindows) {
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text("忽略复制自受保护窗口的内容")
-                            .font(.system(size: 12))
-                            .foregroundColor(theme.primaryText)
-                    }
-                }
-                .toggleStyle(.switch)
-                .controlSize(.small)
-                .onChange(of: ignoreProtectedWindows) { _, newValue in
-                    UserDefaults.standard.set(newValue, forKey: "IgnoreProtectedWindows")
-                }
-                Spacer()
-                Text("对密码输入框及无痕浏览窗口自动排除")
-                    .font(.system(size: 10))
-                    .foregroundColor(theme.tertiaryText)
-                    .frame(maxWidth: 140, alignment: .trailing)
+                .onChange(of: shortTextThreshold) { _, _ in persistIgnoreRules() }
             }
         }
+    }
+
+    private func applicationName(for bundleID: String) -> String {
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else { return bundleID }
+        return FileManager.default.displayName(atPath: url.path)
+    }
+
+    private func chooseIgnoredApplication() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [.applicationBundle]
+        panel.prompt = "添加"
+        guard panel.runModal() == .OK, let url = panel.url,
+              let bundle = Bundle(url: url), let bundleID = bundle.bundleIdentifier else { return }
+        guard !ignoredAppBundleIDs.contains(bundleID) else { return }
+        ignoredAppBundleIDs.append(bundleID)
+        persistIgnoreRules()
+    }
+
+    private func persistIgnoreRules() {
+        UserDefaults.standard.set(ignoredAppBundleIDs, forKey: "IgnoredAppBundleIDs")
+        UserDefaults.standard.set(ignoreTextClipboardType, forKey: "IgnoreTextClipboardType")
+        UserDefaults.standard.set(ignoreImageClipboardType, forKey: "IgnoreImageClipboardType")
+        UserDefaults.standard.set(ignoreShortText, forKey: "IgnoreShortText")
+        UserDefaults.standard.set(shortTextThreshold, forKey: "ShortTextThreshold")
+        backend.syncIgnoreRules()
     }
 
     // MARK: - ⚪ ABOUT TAB

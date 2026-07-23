@@ -25,6 +25,7 @@ use crate::types::ClipboardEntry;
 use crate::image::{encode_png, create_thumbnail_fast, image_hash};
 use crate::history::add_to_history;
 use crate::db::{insert_entry_to_db, delete_matching_entry, trim_db_history};
+use crate::ignore::IgnoreRules;
 use crate::macos;
 
 /// Maximum length of the longest edge for thumbnail generation.
@@ -46,7 +47,11 @@ fn ingest_rgba_image(
     src: &crate::types::SourceApp,
     now: u64,
     cleanup_threshold: &Arc<AtomicUsize>,
+    ignore_rules: &Arc<Mutex<IgnoreRules>>,
 ) {
+    if ignore_rules.lock().unwrap().ignores_image() {
+        return;
+    }
     let hash = image_hash(rgba, width, height);
     let is_new = {
         let last = last_seen_image_hash.lock().unwrap();
@@ -191,7 +196,11 @@ fn try_ingest_image_files(
     src: &crate::types::SourceApp,
     now: u64,
     cleanup_threshold: &Arc<AtomicUsize>,
+    ignore_rules: &Arc<Mutex<IgnoreRules>>,
 ) -> bool {
+    if ignore_rules.lock().unwrap().ignores_image() {
+        return false;
+    }
     for path in paths {
         // image::open checks magic bytes, not extension — reliable format detection
         let img = match image::open(path) {
@@ -207,7 +216,7 @@ fn try_ingest_image_files(
 
         ingest_rgba_image(
             &pixels, w, h,
-            history, last_seen_image_hash, last_seen_text, db, src, now, cleanup_threshold,
+            history, last_seen_image_hash, last_seen_text, db, src, now, cleanup_threshold, ignore_rules,
         );
         return true;
     }
@@ -222,6 +231,7 @@ pub(crate) fn clipboard_monitor(
     last_seen_text: Arc<Mutex<Option<String>>>,
     last_seen_image_hash: Arc<Mutex<Option<u64>>>,
     cleanup_threshold: Arc<AtomicUsize>,
+    ignore_rules: Arc<Mutex<IgnoreRules>>,
 ) {
     let mut cb = loop {
         match Clipboard::new() {
@@ -256,6 +266,9 @@ pub(crate) fn clipboard_monitor(
             .as_secs();
 
         let src = source_app.lock().unwrap().clone();
+        if ignore_rules.lock().unwrap().ignores_app(&src.bundle_id) {
+            continue;
+        }
 
         // ── Handle file copies ───────────────────────────────────────────
         // When files are copied in Finder, macOS provides the file icon as
@@ -266,22 +279,30 @@ pub(crate) fn clipboard_monitor(
             try_ingest_image_files(
                 &paths,
                 &history, &last_seen_image_hash, &last_seen_text,
-                &db, &src, now, &cleanup_threshold,
+                &db, &src, now, &cleanup_threshold, &ignore_rules,
             );
             continue;
         }
 
         // ── Try image from clipboard ─────────────────────────────────────
-        if let Ok(img_data) = cb.get_image() {
-            ingest_rgba_image(
-                &img_data.bytes,
-                img_data.width as u32,
-                img_data.height as u32,
-                &history, &last_seen_image_hash, &last_seen_text,
-                &db, &src, now, &cleanup_threshold,
-            );
-        } else {
-            // ── Text (always sync — fast: no PNG encoding) ───────────────
+        let image_allowed = !ignore_rules.lock().unwrap().ignores_image();
+        let mut captured = false;
+
+        if image_allowed {
+            if let Ok(img_data) = cb.get_image() {
+                ingest_rgba_image(
+                    &img_data.bytes,
+                    img_data.width as u32,
+                    img_data.height as u32,
+                    &history, &last_seen_image_hash, &last_seen_text,
+                    &db, &src, now, &cleanup_threshold, &ignore_rules,
+                );
+                captured = true;
+            }
+        }
+
+        // ── Text (always sync — fast: no PNG encoding) ───────────────
+        if !captured {
             if let Ok(text) = cb.get_text() {
                 let is_new = {
                     let last = last_seen_text.lock().unwrap();
@@ -293,7 +314,7 @@ pub(crate) fn clipboard_monitor(
 
                 if !text.is_empty() && is_new {
                     let trimmed = text.trim();
-                    if trimmed.len() >= 2 {
+                    if trimmed.len() >= 2 && !ignore_rules.lock().unwrap().ignores_text(&text) {
                         let item = ClipboardEntry::Text {
                             id: crate::backend::new_entry_id(),
                             text: text.clone(),

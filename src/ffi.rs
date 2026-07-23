@@ -15,6 +15,7 @@ use arboard::Clipboard;
 
 use crate::backend::{backend, set_backend, Backend, DEFAULT_CLEANUP_THRESHOLD};
 use crate::types::ClipboardEntry;
+use crate::ignore::IgnoreRules;
 use crate::image::{decode_png, image_hash};
 use crate::history::add_to_history;
 use crate::db::{open_db, ensure_history_table, load_history_from_db,
@@ -201,6 +202,7 @@ pub extern "C" fn clipboard_init() -> c_int {
     let last_seen_image_hash: Arc<Mutex<Option<u64>>> = Arc::new(Mutex::new(None));
     let db = Arc::new(Mutex::new(conn));
     let cleanup_threshold = Arc::new(AtomicUsize::new(DEFAULT_CLEANUP_THRESHOLD));
+    let ignore_rules = Arc::new(Mutex::new(IgnoreRules::default()));
     let deleted_stack: Arc<Mutex<Vec<ClipboardEntry>>> = Arc::new(Mutex::new(Vec::new()));
     let last_restored_id = Arc::new(AtomicU64::new(0));
 
@@ -213,6 +215,7 @@ pub extern "C" fn clipboard_init() -> c_int {
         last_seen_image_hash: Arc::clone(&last_seen_image_hash),
         db: Arc::clone(&db),
         cleanup_threshold: Arc::clone(&cleanup_threshold),
+        ignore_rules: Arc::clone(&ignore_rules),
         deleted_stack: Arc::clone(&deleted_stack),
         last_restored_id: Arc::clone(&last_restored_id),
     };
@@ -243,7 +246,7 @@ pub extern "C" fn clipboard_init() -> c_int {
     let handle = thread::spawn(|| clipboard_monitor(
         history, running, source_app, db,
         last_seen_text, last_seen_image_hash,
-        cleanup_threshold,
+        cleanup_threshold, ignore_rules,
     ));
 
     if let Some(b) = crate::backend::try_backend() {
@@ -284,6 +287,44 @@ pub extern "C" fn clipboard_set_source_app(name: *const c_char, bundle_id: *cons
         src.name = name;
         src.bundle_id = bundle_id;
         src.pid = pid;
+    }
+}
+
+// ═══════════════════════════════════════════
+// Capture Ignore Rules
+// ═══════════════════════════════════════════
+
+/// Replaces the configured rules atomically with respect to capture. Strings
+/// are copied only when the user commits a settings change, never per poll.
+#[no_mangle]
+pub extern "C" fn clipboard_set_ignore_rules(
+    app_bundle_ids: *const c_char,
+    ignore_text: c_int,
+    ignore_images: c_int,
+    min_text_characters: c_int,
+) -> c_int {
+    if app_bundle_ids.is_null() || min_text_characters < 0 {
+        return 0;
+    }
+    let encoded = match unsafe { CStr::from_ptr(app_bundle_ids) }.to_str() {
+        Ok(value) => value,
+        Err(_) => return 0,
+    };
+    let rules = IgnoreRules::from_encoded(
+        encoded,
+        ignore_text != 0,
+        ignore_images != 0,
+        match min_text_characters {
+            0 => None,
+            value => Some(value as usize),
+        },
+    );
+    match crate::backend::try_backend() {
+        Some(backend) => {
+            *backend.ignore_rules.lock().unwrap() = rules;
+            1
+        }
+        None => 0,
     }
 }
 
