@@ -27,6 +27,15 @@ static NEXT_ENTRY_ID: AtomicU64 = AtomicU64::new(1);
 /// without a count change.
 pub(crate) static IMAGE_ENCODING_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// Incremented whenever history ordering or entry metadata changes. The UI
+/// must observe this separately from item count: deduplicating a re-copy keeps
+/// the count constant while moving an existing item to the top.
+pub(crate) static HISTORY_REVISION: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn mark_history_changed() {
+    HISTORY_REVISION.fetch_add(1, Ordering::Relaxed);
+}
+
 pub(crate) fn new_entry_id() -> u64 {
     NEXT_ENTRY_ID.fetch_add(1, Ordering::SeqCst)
 }
@@ -37,6 +46,13 @@ pub(crate) fn new_entry_id() -> u64 {
 /// the store is called once during init with a value >= loaded max + 1).
 pub(crate) fn prime_entry_id(min_next: u64) {
     NEXT_ENTRY_ID.store(min_next, Ordering::SeqCst);
+}
+
+/// The exact pasteboard change made by this app while selecting an item. The
+/// monitor consumes this change count once; it applies equally to text and
+/// images and retains no clipboard payload.
+pub(crate) struct PendingSelfWrite {
+    pub(crate) change_count: i64,
 }
 
 // ═══════════════════════════════════════════
@@ -50,6 +66,11 @@ pub(crate) struct Backend {
     pub(crate) source_app: Arc<Mutex<SourceApp>>,
     pub(crate) last_seen_text: Arc<Mutex<Option<String>>>,
     pub(crate) last_seen_image_hash: Arc<Mutex<Option<u64>>>,
+    /// Serializes our pasteboard writes with monitor event consumption, making
+    /// self-write suppression race-free without retaining clipboard payloads.
+    pub(crate) pasteboard_event_lock: Arc<Mutex<()>>,
+    /// Exact pasteboard mutation produced by select-and-paste, if any.
+    pub(crate) pending_self_write: Arc<Mutex<Option<PendingSelfWrite>>>,
     pub(crate) db: Arc<Mutex<Connection>>,
     pub(crate) cleanup_threshold: Arc<AtomicUsize>,
     /// Small, live-replaceable capture policy. It contains only configured rule

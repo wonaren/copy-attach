@@ -11,6 +11,7 @@ void clipboard_cleanup(void);
 // ─── Query ───
 int32_t clipboard_get_count(void);
 uint64_t clipboard_get_image_encoding_counter(void);
+uint64_t clipboard_get_history_revision(void);
 int32_t clipboard_get_item_type(int32_t index);
 int64_t clipboard_get_item_timestamp(int32_t index);
 char* clipboard_get_item_label(int32_t index);

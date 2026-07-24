@@ -14,6 +14,7 @@ class ClipboardBackend: ObservableObject {
     private let reloadQueue = DispatchQueue(label: "com.copyattach.reload", qos: .userInitiated)
     private var reloadGeneration = 0
     private var lastImageEncodingCounter: UInt64 = 0
+    private var lastHistoryRevision: UInt64 = 0
     private let thumbnailCache: NSCache<NSNumber, NSImage> = {
         let c = NSCache<NSNumber, NSImage>()
         c.totalCostLimit = 30 * 1024 * 1024  // 30 MB
@@ -125,9 +126,13 @@ class ClipboardBackend: ObservableObject {
     private func refresh() {
         let newCount = Int(clipboard_get_count())
         let newEncCounter = clipboard_get_image_encoding_counter()
-        if newCount != count || newEncCounter != lastImageEncodingCounter {
+        let newHistoryRevision = clipboard_get_history_revision()
+        // A duplicate re-copy changes ordering/timestamp but not count. Observe
+        // the backend revision as well so the Popup reloads in that case.
+        if newCount != count || newEncCounter != lastImageEncodingCounter || newHistoryRevision != lastHistoryRevision {
             count = newCount
             lastImageEncodingCounter = newEncCounter
+            lastHistoryRevision = newHistoryRevision
             reloadItems()
         }
         permissionGranted = checkPermission()

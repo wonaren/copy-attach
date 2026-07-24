@@ -200,6 +200,8 @@ pub extern "C" fn clipboard_init() -> c_int {
     let source_app = Arc::new(Mutex::new(crate::types::SourceApp::default()));
     let last_seen_text: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let last_seen_image_hash: Arc<Mutex<Option<u64>>> = Arc::new(Mutex::new(None));
+    let pasteboard_event_lock = Arc::new(Mutex::new(()));
+    let pending_self_write = Arc::new(Mutex::new(None));
     let db = Arc::new(Mutex::new(conn));
     let cleanup_threshold = Arc::new(AtomicUsize::new(DEFAULT_CLEANUP_THRESHOLD));
     let ignore_rules = Arc::new(Mutex::new(IgnoreRules::default()));
@@ -213,6 +215,8 @@ pub extern "C" fn clipboard_init() -> c_int {
         source_app: Arc::clone(&source_app),
         last_seen_text: Arc::clone(&last_seen_text),
         last_seen_image_hash: Arc::clone(&last_seen_image_hash),
+        pasteboard_event_lock: Arc::clone(&pasteboard_event_lock),
+        pending_self_write: Arc::clone(&pending_self_write),
         db: Arc::clone(&db),
         cleanup_threshold: Arc::clone(&cleanup_threshold),
         ignore_rules: Arc::clone(&ignore_rules),
@@ -245,7 +249,7 @@ pub extern "C" fn clipboard_init() -> c_int {
 
     let handle = thread::spawn(|| clipboard_monitor(
         history, running, source_app, db,
-        last_seen_text, last_seen_image_hash,
+        last_seen_text, last_seen_image_hash, pasteboard_event_lock, pending_self_write,
         cleanup_threshold, ignore_rules,
     ));
 
@@ -344,6 +348,12 @@ pub extern "C" fn clipboard_get_count() -> c_int {
 #[no_mangle]
 pub extern "C" fn clipboard_get_image_encoding_counter() -> u64 {
     crate::backend::IMAGE_ENCODING_COUNTER.load(Ordering::Relaxed)
+}
+
+/// Monotonic revision of in-memory history ordering and metadata.
+#[no_mangle]
+pub extern "C" fn clipboard_get_history_revision() -> u64 {
+    crate::backend::HISTORY_REVISION.load(Ordering::Relaxed)
 }
 
 #[no_mangle]
@@ -688,10 +698,13 @@ fn select_and_paste_impl(mut item: ClipboardEntry) -> c_int {
 
     let mut cb = match Clipboard::new() { Ok(c) => c, Err(_) => return 0 };
 
+    // The monitor consumes pasteboard events under this same lock. Register
+    // the resulting changeCount before it can observe our write.
+    let b = backend();
+    let _event_guard = b.pasteboard_event_lock.lock().unwrap();
     match &db_item {
         ClipboardEntry::Text { text, .. } => {
             if cb.set_text(text).is_err() { return 0; }
-            let b = backend();
             *b.last_seen_text.lock().unwrap() = Some(text.clone());
             *b.last_seen_image_hash.lock().unwrap() = None;
         }
@@ -704,12 +717,17 @@ fn select_and_paste_impl(mut item: ClipboardEntry) -> c_int {
                     bytes: rgba.into(),
                 };
                 if cb.set_image(img).is_err() { return 0; }
-                let b = backend();
                 *b.last_seen_text.lock().unwrap() = None;
                 *b.last_seen_image_hash.lock().unwrap() = Some(*hash);
             } else { return 0; }
         }
     }
+    let change_count = macos::pasteboard_change_count()
+        .expect("CopyAttach: cannot identify self-written pasteboard change");
+    *b.pending_self_write.lock().unwrap() = Some(
+        crate::backend::PendingSelfWrite { change_count },
+    );
+    drop(_event_guard);
 
     if let Some(b) = crate::backend::try_backend() {
         match b.db.lock() {
@@ -755,6 +773,7 @@ fn select_and_paste_impl(mut item: ClipboardEntry) -> c_int {
         while hist.len() > b.cleanup_threshold.load(Ordering::Relaxed) {
             hist.pop();
         }
+        crate::backend::mark_history_changed();
     }
 
     let front_pid = crate::backend::try_backend()

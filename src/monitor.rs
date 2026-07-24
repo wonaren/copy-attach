@@ -20,7 +20,7 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use arboard::Clipboard;
 
-use crate::backend::POLL_INTERVAL_MS;
+use crate::backend::{PendingSelfWrite, POLL_INTERVAL_MS};
 use crate::types::ClipboardEntry;
 use crate::image::{encode_png, create_thumbnail_fast, image_hash};
 use crate::history::add_to_history;
@@ -53,15 +53,10 @@ fn ingest_rgba_image(
         return;
     }
     let hash = image_hash(rgba, width, height);
-    let is_new = {
-        let last = last_seen_image_hash.lock().unwrap();
-        match *last {
-            Some(h) => h != hash,
-            None => true,
-        }
-    };
 
-    if is_new && width > 0 && height > 0 {
+    // The caller invokes us only for a new pasteboard changeCount. Equal image
+    // content is therefore a genuine re-copy and must refresh its history use.
+    if width > 0 && height > 0 {
         // ── Phase 1 (sync): fast thumbnail → in-memory history ──
         let (thumb_data, thumb_w, thumb_h) = match create_thumbnail_fast(width, height, rgba, THUMBNAIL_MAX_DIM) {
             Some(t) => t,
@@ -100,6 +95,7 @@ fn ingest_rgba_image(
             while hist.len() > cleanup_threshold.load(Ordering::Relaxed) {
                 hist.pop();
             }
+            crate::backend::mark_history_changed();
         }
 
         // Prevent re-capture before async phase completes
@@ -174,8 +170,8 @@ fn ingest_rgba_image(
                 crate::backend::IMAGE_ENCODING_COUNTER.fetch_add(1, Ordering::Relaxed);
             }
         });
-    } else if is_new {
-        // Zero-size image — just record the hash
+    } else {
+        // Zero-size image — record the observed payload but create no entry.
         *last_seen_image_hash.lock().unwrap() = Some(hash);
         *last_seen_text.lock().unwrap() = None;
     }
@@ -230,6 +226,8 @@ pub(crate) fn clipboard_monitor(
     db: Arc<Mutex<rusqlite::Connection>>,
     last_seen_text: Arc<Mutex<Option<String>>>,
     last_seen_image_hash: Arc<Mutex<Option<u64>>>,
+    pasteboard_event_lock: Arc<Mutex<()>>,
+    pending_self_write: Arc<Mutex<Option<PendingSelfWrite>>>,
     cleanup_threshold: Arc<AtomicUsize>,
     ignore_rules: Arc<Mutex<IgnoreRules>>,
 ) {
@@ -247,17 +245,47 @@ pub(crate) fn clipboard_monitor(
     let mut last_change_count: Option<i64> = None;
 
     while running.load(Ordering::SeqCst) {
-        // Lightweight check: skip all pasteboard reads if changeCount matches.
-        match (macos::pasteboard_change_count(), last_change_count) {
-            (Some(cc), Some(last)) if cc == last => {
-                for _ in 0..10 {
-                    if !running.load(Ordering::SeqCst) { return; }
-                    thread::sleep(Duration::from_millis(POLL_INTERVAL_MS / 10));
-                }
-                continue;
+        // A new changeCount is a new clipboard-use event, even if its payload
+        // equals the previous payload. Serialize this observation with our own
+        // pasteboard writes so their suppression token cannot race us.
+        let event_guard = pasteboard_event_lock.lock().unwrap();
+        let observed_change_count = match (macos::pasteboard_change_count(), last_change_count) {
+            (Some(cc), Some(last)) if cc == last => None,
+            (Some(cc), _) => {
+                last_change_count = Some(cc);
+                Some(cc)
             }
-            (Some(cc), _) => last_change_count = Some(cc),
-            _ => {}
+            _ => None,
+        };
+
+        // A token can only suppress its own exact pasteboard change. Once a
+        // different change arrives it is stale and must not affect later copies.
+        let is_self_write = if let Some(cc) = observed_change_count {
+            let mut pending = pending_self_write.lock().unwrap();
+            match pending.as_ref() {
+                Some(PendingSelfWrite { change_count }) if *change_count == cc => {
+                    *pending = None;
+                    true
+                }
+                Some(_) => {
+                    *pending = None;
+                    false
+                }
+                None => false,
+            }
+        } else {
+            false
+        };
+        drop(event_guard);
+
+        if observed_change_count.is_none() || is_self_write {
+            // No new platform event, or precisely the event written by this
+            // app. In neither case may we fabricate a history capture.
+            for _ in 0..10 {
+                if !running.load(Ordering::SeqCst) { return; }
+                thread::sleep(Duration::from_millis(POLL_INTERVAL_MS / 10));
+            }
+            continue;
         }
 
         let now = SystemTime::now()
@@ -304,15 +332,7 @@ pub(crate) fn clipboard_monitor(
         // ── Text (always sync — fast: no PNG encoding) ───────────────
         if !captured {
             if let Ok(text) = cb.get_text() {
-                let is_new = {
-                    let last = last_seen_text.lock().unwrap();
-                    match &*last {
-                        Some(last) => &text != last,
-                        None => !text.is_empty(),
-                    }
-                };
-
-                if !text.is_empty() && is_new {
+                if !text.is_empty() {
                     let trimmed = text.trim();
                     if trimmed.len() >= 2 && !ignore_rules.lock().unwrap().ignores_text(&text) {
                         let item = ClipboardEntry::Text {
@@ -331,6 +351,7 @@ pub(crate) fn clipboard_monitor(
                             while hist.len() > cleanup_threshold.load(Ordering::Relaxed) {
                                 hist.pop();
                             }
+                            crate::backend::mark_history_changed();
                             hist[0].clone()
                         }; // history lock released
 
