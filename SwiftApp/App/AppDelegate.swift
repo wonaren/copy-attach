@@ -3,7 +3,7 @@ import SwiftUI
 
 // MARK: - App Delegate
 
-class AppDelegate: NSObject, NSApplicationDelegate {
+class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     static var shared: AppDelegate?
     private var settingsWindow: NSWindow?
     private var firstLaunchDone = false
@@ -38,8 +38,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             return event
         }
 
-        // Show settings window on launch
-        openSettingsWindow()
+        // Silent launch: only show settings on first-ever launch so the user
+        // can configure hotkeys and permissions. Subsequent launches stay
+        // quietly in the menu bar.
+        let hasLaunchedBefore = UserDefaults.standard.bool(forKey: "HasLaunchedBefore")
+        if !hasLaunchedBefore {
+            UserDefaults.standard.set(true, forKey: "HasLaunchedBefore")
+            openSettingsWindow()
+        }
 
         firstLaunchDone = true
         debugLog("Initialization complete")
@@ -47,6 +53,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         ClipboardBackend.shared.stop()
+    }
+
+    // MARK: - NSWindowDelegate
+
+    func windowWillClose(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow,
+              window === settingsWindow else { return }
+        settingsWindow = nil
+
+        // When "Run in background" is off, closing the settings window quits
+        // the app (conventional single-window app behavior). When on, the app
+        // stays alive in the menu bar.
+        let runInBackground = UserDefaults.standard.bool(forKey: "RunInBackground") != false
+        if !runInBackground {
+            NSApp.terminate(nil)
+        }
     }
 
     // MARK: - Popup
@@ -103,6 +125,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         window.title = "CopyAttach"
         window.isReleasedWhenClosed = false
         window.hidesOnDeactivate = false
+        window.delegate = self
 
         let content = NSHostingController(rootView: InlineSettingsView().withAppTheme())
         content.view.frame = NSRect(x: 0, y: 0, width: 520, height: 600)

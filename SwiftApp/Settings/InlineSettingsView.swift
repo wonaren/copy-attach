@@ -330,7 +330,6 @@ struct InlineSettingsView: View {
             )
             .onChange(of: runInBackground) { _, newValue in
                 UserDefaults.standard.set(newValue, forKey: "RunInBackground")
-                if !newValue { NSApp.terminate(nil) }
             }
         }
     }
