@@ -242,7 +242,12 @@ pub(crate) fn clipboard_monitor(
         }
     };
 
-    let mut last_change_count: Option<i64> = None;
+    // Seed with the current changeCount so the first poll doesn't treat
+    // the existing clipboard state as a new change. Without this, every
+    // app restart would capture a duplicate entry with empty source-app
+    // metadata (SourceApp::default), which overwrites the DB-loaded
+    // entry's correct source info via dedup.
+    let mut last_change_count: Option<i64> = macos::pasteboard_change_count();
 
     while running.load(Ordering::SeqCst) {
         // A new changeCount is a new clipboard-use event, even if its payload

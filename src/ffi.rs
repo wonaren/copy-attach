@@ -933,19 +933,37 @@ pub extern "C" fn clipboard_delete_by_id(entry_id: u64) -> c_int {
             }
         };
         if let Err(e) = match &entry {
-            ClipboardEntry::Text { db_id, .. } if *db_id != 0 => {
-                conn.execute(
-                    "DELETE FROM clipboard_history WHERE id = ?1",
-                    rusqlite::params![*db_id],
-                )
+            ClipboardEntry::Text { db_id, text, .. } => {
+                if *db_id != 0 {
+                    conn.execute(
+                        "DELETE FROM clipboard_history WHERE id = ?1",
+                        rusqlite::params![*db_id],
+                    )
+                } else {
+                    // db_id not yet set (e.g. monitor DB write still in
+                    // progress). Fall back to content-based deletion so the
+                    // row doesn't survive a restart.
+                    conn.execute(
+                        "DELETE FROM clipboard_history WHERE entry_type = 0 AND text = ?1",
+                        rusqlite::params![text],
+                    )
+                }
             }
-            ClipboardEntry::Image { db_id, .. } if *db_id != 0 => {
-                conn.execute(
-                    "DELETE FROM clipboard_history WHERE id = ?1",
-                    rusqlite::params![*db_id],
-                )
+            ClipboardEntry::Image { db_id, hash, .. } => {
+                if *db_id != 0 {
+                    conn.execute(
+                        "DELETE FROM clipboard_history WHERE id = ?1",
+                        rusqlite::params![*db_id],
+                    )
+                } else {
+                    // db_id not yet set (Phase 2 async persist still in
+                    // progress). Fall back to hash-based deletion.
+                    conn.execute(
+                        "DELETE FROM clipboard_history WHERE entry_type = 1 AND hash = ?1",
+                        rusqlite::params![*hash as i64],
+                    )
+                }
             }
-            _ => Ok(0),
         } {
             eprintln!("CopyAttach: failed to delete entry {} from DB: {}", entry_id, e);
             return 0;

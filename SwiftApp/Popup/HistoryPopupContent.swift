@@ -6,11 +6,15 @@ import SwiftUI
 enum FilterMode: String, CaseIterable {
     case favorites
     case all
+    case image
+    case text
 
     var icon: String {
         switch self {
         case .favorites: return "star.fill"
         case .all: return "line.3.horizontal"
+        case .image: return "photo"
+        case .text: return "doc.text"
         }
     }
 }
@@ -70,6 +74,8 @@ struct HistoryPopupContent: View {
         let filtered = switch filterMode {
         case .all: base
         case .favorites: base.filter { backend.favoriteIds.contains($0.id) }
+        case .image: base.filter { $0.isImage }
+        case .text: base.filter { $0.isText }
         }
         return filtered.sorted { $0.timestamp > $1.timestamp }
     }
