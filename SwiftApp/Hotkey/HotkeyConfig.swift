@@ -6,9 +6,9 @@ struct HotkeyConfig: Codable, Equatable {
     var flags: UInt
 
     static var `default`: HotkeyConfig {
-        // Default: ⌥⌘V (Option+Command+V)
-        HotkeyConfig(keyCode: UInt16(kVK_ANSI_V),
-                     flags: NSEvent.ModifierFlags.command.rawValue | NSEvent.ModifierFlags.option.rawValue)
+        // Default: ⌥X (Option+X)
+        HotkeyConfig(keyCode: UInt16(kVK_ANSI_X),
+                     flags: NSEvent.ModifierFlags.option.rawValue)
     }
 
     var displayString: String {

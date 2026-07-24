@@ -453,17 +453,23 @@ struct InlineSettingsView: View {
             VStack(spacing: 0) {
                 shortcutGuideRow(label: "呼出 / 隐藏剪贴板历史", keycaps: hotkeyManager.config.displayString.components(separatedBy: " "))
                 sectionDivider()
-                shortcutGuideRow(label: "列表中导航上移", keycaps: ["↑"])
+                shortcutGuideRow(label: "选择条目", keycaps: ["↑","↓"])
                 sectionDivider()
-                shortcutGuideRow(label: "列表中导航下移", keycaps: ["↓"])
+                shortcutGuideRow(label: "确认并粘贴", keycaps: ["⏎"])
                 sectionDivider()
-                shortcutGuideRow(label: "确认并粘贴所选项", keycaps: ["⏎"])
-                sectionDivider()
-                shortcutGuideRow(label: "预览选中的多媒体/大文本项目", keycaps: ["Space"])
+                shortcutGuideRow(label: "预览 / 关闭预览", keycaps: ["Space"])
                 sectionDivider()
                 shortcutGuideRow(label: "关闭弹窗", keycaps: ["Esc"])
                 sectionDivider()
-                shortcutGuideRow(label: "快速删除选中历史项目", keycaps: ["⌃", "⌫"])
+                shortcutGuideRow(label: "切换Tab", keycaps: ["←", "→"])
+                sectionDivider()
+                shortcutGuideRow(label: "收藏 / 取消收藏", keycaps: ["⌥", "P"])
+                sectionDivider()
+                shortcutGuideRow(label: "快速删除选中条目", keycaps: ["⌃", "⌫"])
+                sectionDivider()
+                shortcutGuideRow(label: "撤销删除(最多10步)", keycaps: ["⌘", "Z"])
+                sectionDivider()
+                shortcutGuideRow(label: "快速选择第 1 ~ 9 项", keycaps: ["⌘", "1~9"])
             }
         }
     }
@@ -882,7 +888,7 @@ struct InlineSettingsView: View {
                     .help("github.com/surpassbefore")
                 }
 
-                Text("CopyAttach 是一款轻量、快捷的 macOS 全局剪贴板与附件管理工具，专注于提升开发者及科研人员的工作流吞吐效率。")
+                Text("CopyAttach 是一款极轻量的剪贴板历史管理应用,它在性能体验、内存占用、存储效率、功耗表现、操作逻辑、UI界面都经过精心设计,旨在为用户提供一个简洁、高效、无负担的剪贴板历史管理工具。")
                     .font(.system(size: 12.5))
                     .foregroundColor(theme.secondaryText)
                     .multilineTextAlignment(.center)
