@@ -18,6 +18,7 @@
 #
 # 触发方式:
 #   - git tag v0.81.0 && git push origin v0.81.0
+#   - 手动触发时勾选 "创建 GitHub Release" 可直接发布
 
 name: Build CopyAttach
 
@@ -33,6 +34,12 @@ on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      create_release:
+        description: 创建 GitHub Release（基于 Cargo.toml 版本号）
+        type: boolean
+        default: false
+        required: false
 
 # 环境变量
 env:
@@ -174,7 +181,7 @@ jobs:
           path: build/CopyAttach-*.dmg
           if-no-files-found: error
 
-      # 如果是正式发布，上传到 GitHub Release
+      # 如果是从已有 Release 触发，上传 DMG 到该 Release
       - name: Upload to Release
         if: github.event_name == 'release'
         uses: softprops/action-gh-release@v2
@@ -184,11 +191,14 @@ jobs:
           files: build/CopyAttach-${{ steps.version.outputs.version }}.dmg
 
   # ──────────────────────────────────────────────
-  # 创建 GitHub Release（手动 tag 推送时）
+  # 创建 GitHub Release
+  # 触发方式：
+  #   - 推送 tag v*（如 git push origin v0.81.0）
+  #   - 手动触发 workflow 时勾选 "创建 GitHub Release"
   # ──────────────────────────────────────────────
   release:
     name: Create Release
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.create_release)
     needs: build
     runs-on: ubuntu-latest
     permissions:
@@ -205,6 +215,7 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: v${{ needs.build.outputs.version }}
           files: build/CopyAttach-*.dmg
           generate_release_notes: true
           name: CopyAttach v${{ needs.build.outputs.version }}
