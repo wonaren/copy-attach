@@ -221,9 +221,18 @@ struct HistoryPopupContent: View {
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: deleteKeyNotification)) { _ in
+            // When the search bar is focused (selectedIndex == 0), delete the
+            // first visible item in the filtered results so ⌃⌫ still works
+            // while the user is typing a search query.
+            let itemIndex: Int
             if selectedIndex > 0 {
-                deleteItem(at: selectedIndex - 1)
+                itemIndex = selectedIndex - 1
+            } else if !displayItems.isEmpty {
+                itemIndex = 0
+            } else {
+                return
             }
+            deleteItem(at: itemIndex)
         }
         .onReceive(NotificationCenter.default.publisher(for: commandKeyNotification)) { note in
             let pressed = (note.object as? Bool) ?? NSEvent.modifierFlags.contains(.command)
@@ -240,6 +249,27 @@ struct HistoryPopupContent: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: focusSearchNotification)) { _ in
             selectedIndex = 0
+        }
+        .onReceive(NotificationCenter.default.publisher(for: focusSearchAndBackspaceNotification)) { _ in
+            // Plain Delete pressed while an item is selected (not the search
+            // bar): focus search and remove the last character. PopupHostingView
+            // intercepts this at the AppKit level before NSHostingView can
+            // consume the delete key internally.
+            selectedIndex = 0
+            if !searchText.isEmpty {
+                searchText.removeLast()
+            }
+            // NSTextField auto-selects all text on focus gain. The onChange(of:
+            // selectedIndex) above tries to move the cursor but runs before the
+            // NSTextView becomes first responder. Fix it here after the focus
+            // transfer and text mutation have settled in the next render pass.
+            DispatchQueue.main.async {
+                if let editor = NSApp.keyWindow?.firstResponder as? NSTextView,
+                   editor.isEditable {
+                    let end = editor.string.count
+                    editor.selectedRange = NSRange(location: end, length: 0)
+                }
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: undoKeyNotification)) { _ in
             performUndo()
@@ -705,6 +735,14 @@ struct HistoryPopupContent: View {
         var deleted = false
         withAnimation(.easeInOut(duration: 0.2)) {
             deleted = backend.deleteEntry(at: backendIdx)
+            // When search is active, displayItems draws from the cached
+            // searchResults snapshot. Mutate it inside the animation block
+            // so the item removal animates with the same transition.
+            // Only mutate searchResults when the delete actually succeeded,
+            // otherwise the in-memory cache desyncs from backend.items.
+            if deleted, !effectiveSearchText.isEmpty {
+                searchResults.removeAll { $0.id == item.id }
+            }
         }
         guard deleted else { return }
         if backend.items.isEmpty {

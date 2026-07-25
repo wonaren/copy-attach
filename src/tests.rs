@@ -1371,3 +1371,68 @@ fn test_entry_id_backfill_old_rows() {
         assert_eq!(oid, rid, "legacy entry_id stable across restarts");
     }
 }
+
+#[test]
+fn test_clipboard_delete_by_id_returns_zero_on_failure() {
+    // Verify that clipboard_delete_by_id returns 0 (failure) when the entry
+    // doesn't exist — proving the failure path that Finding 1 relies on.
+    //
+    // This path triggers in the Swift deleteItem(at:) flow when:
+    //   1. deleteKeyNotification handler -> deleteItem(at: itemIndex)
+    //   2. backend.deleteEntry(at:) calls clipboard_delete_by_id in Rust
+    //   3. If this returns 0, deleteEntry returns false
+    //   4. But searchResults.removeAll { $0.id == item.id } has already run
+
+    use std::sync::{Arc, Mutex, atomic::{AtomicBool, AtomicU64, AtomicUsize}};
+    use crate::backend::{Backend, set_backend};
+    use crate::ffi::clipboard_delete_by_id;
+    use crate::ignore::IgnoreRules;
+    use crate::types::SourceApp;
+
+    // Initialize the Backend singleton exactly once for all tests that need it.
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| {
+        let conn = Connection::open_in_memory()
+            .expect("in-memory DB for test");
+        crate::db::ensure_history_table(&conn)
+            .expect("schema creation");
+        let backend = Backend {
+            history: Arc::new(Mutex::new(Vec::new())),       // empty history
+            running: Arc::new(AtomicBool::new(true)),
+            monitor_handle: Mutex::new(None),
+            source_app: Arc::new(Mutex::new(SourceApp::default())),
+            last_seen_text: Arc::new(Mutex::new(None)),
+            last_seen_image_hash: Arc::new(Mutex::new(None)),
+            pasteboard_event_lock: Arc::new(Mutex::new(())),
+            pending_self_write: Arc::new(Mutex::new(None)),
+            db: Arc::new(Mutex::new(conn)),
+            cleanup_threshold: Arc::new(AtomicUsize::new(3000)),
+            ignore_rules: Arc::new(Mutex::new(IgnoreRules::default())),
+            deleted_stack: Arc::new(Mutex::new(Vec::new())),
+            last_restored_id: Arc::new(AtomicU64::new(0)),
+        };
+        set_backend(backend)
+            .expect("Backend singleton must not be set before this test");
+    });
+
+    // Test 1: non-existent entry ID → returns 0
+    assert_eq!(
+        clipboard_delete_by_id(99999),
+        0,
+        "deleting a non-existent entry ID must return 0 (failure)"
+    );
+
+    // Test 2: entry ID 0 (never valid) → returns 0
+    assert_eq!(
+        clipboard_delete_by_id(0),
+        0,
+        "deleting entry ID 0 must return 0 (failure)"
+    );
+
+    // Test 3: empty history → any ID returns 0
+    assert_eq!(
+        clipboard_delete_by_id(1),
+        0,
+        "deleting from empty history must return 0 (failure)"
+    );
+}

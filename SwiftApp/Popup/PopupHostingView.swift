@@ -11,6 +11,7 @@ let focusSearchNotification = Notification.Name("PopupFocusSearch")
 let undoKeyNotification = Notification.Name("PopupUndoKeyPressed")
 let favoriteToggleNotification = Notification.Name("PopupFavoriteToggle")
 let arrowKeyFromSearchNotification = Notification.Name("PopupArrowKeyFromSearch")
+let focusSearchAndBackspaceNotification = Notification.Name("PopupFocusSearchAndBackspace")
 
 // MARK: - Popup Hosting View
 
@@ -108,10 +109,24 @@ class PopupHostingView: NSHostingView<AnyView> {
                 return
             }
         }
-        // Control + Delete: delete item
+        // Delete / Backspace (keyCode 51) and Forward Delete (keyCode 117)
         if event.keyCode == 51 || event.keyCode == 117 {
+            // Control + Delete: delete the selected item
             if event.modifierFlags.contains(.control) {
                 NotificationCenter.default.post(name: deleteKeyNotification, object: nil)
+                return
+            }
+            // Plain Delete while the search field is NOT focused: focus the
+            // search bar and remove the last character. When the search field
+            // IS focused, let the NSTextView handle it normally.
+            if !event.modifierFlags.contains(.command) &&
+               !event.modifierFlags.contains(.option) &&
+               !event.modifierFlags.contains(.shift) {
+                if let textView = window?.firstResponder as? NSTextView, textView.isEditable {
+                    super.keyDown(with: event)
+                    return
+                }
+                NotificationCenter.default.post(name: focusSearchAndBackspaceNotification, object: nil)
                 return
             }
         }
