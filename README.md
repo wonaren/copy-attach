@@ -13,7 +13,7 @@
   <img src="https://img.shields.io/badge/Swift-5.9%2B-f05138?style=flat&logo=swift&logoColor=white" alt="Swift 5.9+">
   <img src="https://img.shields.io/badge/macOS-14.0%2B-000000?style=flat&logo=apple&logoColor=white" alt="macOS 14.0+">
   <img src="https://img.shields.io/badge/version-0.80.0--beta-6c9fff?style=flat" alt="Version 0.80.0-beta">
-  <img src="https://img.shields.io/badge/license-MIT-3da639?style=flat" alt="License MIT">
+  <img src="https://img.shields.io/badge/license-Apache%202.0-3da639?style=flat" alt="License Apache 2.0">
 </p>
 
 ---
