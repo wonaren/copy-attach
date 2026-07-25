@@ -1,6 +1,6 @@
 [package]
 name = "copy-attach"
-version = "0.79.0-beta"
+version = "0.80.0-beta"
 edition = "2021"
 
 [lib]
@@ -28,6 +28,11 @@ rand = "0.8"
 [[bin]]
 name = "stress-gen"
 path = "src/bin/stress_gen.rs"
+required-features = ["stress-test"]
+
+[[bin]]
+name = "bench"
+path = "src/bin/bench.rs"
 required-features = ["stress-test"]
 
 [profile.release]
