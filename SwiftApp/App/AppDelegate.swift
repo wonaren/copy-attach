@@ -98,9 +98,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         settingsWindow = nil
 
-        // Look for the window by title
+        // Look for the window by title — skip NSPanel instances (popup,
+        // preview) which coincidentally use the same title "CopyAttach",
+        // to avoid falsely "reusing" the popup when no settings window exists.
         for window in NSApp.windows {
-            if window.title == "CopyAttach" {
+            if !(window is NSPanel) && window.title == "CopyAttach" {
                 debugLog("Found existing settings window by title")
                 settingsWindow = window
                 window.makeKeyAndOrderFront(nil)
