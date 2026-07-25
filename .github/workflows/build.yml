@@ -1,0 +1,213 @@
+# CopyAttach — GitHub Actions 自动构建工作流
+#
+# 功能:
+#   - CI 构建: 每次 push/PR 到 master，验证编译通过
+#   - 发布构建: 打 tag（如 v0.81.0）时自动构建并打包 DMG，上传到 Release
+#   - 手动触发: 通过 GitHub 页面上的 "Run workflow" 按钮手动构建
+#
+# 使用前准备:
+#   1. 代码签名（可选但推荐）
+#      在 repo Settings → Secrets and variables → Actions 中添加:
+#      - MACOS_CERTIFICATE:       base64 编码的 Developer ID Application 证书 (.p12)
+#      - MACOS_CERTIFICATE_PWD:   证书导出密码
+#      - MACOS_NOTARIZATION_ACCOUNT: Apple ID 邮箱（用于公证）
+#      - MACOS_NOTARIZATION_PWD:  Apple ID 应用专用密码
+#   2. 不配置证书也可以构建，但打出的 DMG 会显示 "未验证的开发者"
+#   3. 修改 CFBundleIdentifier（SwiftApp/Info.plist）为你的真实 bundle ID
+#      （当前是 com.example.copyattach，不签名不影响使用）
+#
+# 触发方式:
+#   - git tag v0.81.0 && git push origin v0.81.0
+
+name: Build CopyAttach
+
+on:
+  push:
+    branches: [master]
+    paths-ignore:
+      - '**.md'
+      - 'assets/**'
+      - 'LICENSE'
+  pull_request:
+    branches: [master]
+  release:
+    types: [published]
+  workflow_dispatch:
+
+# 环境变量
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ──────────────────────────────────────────────
+  # 测试 + Lint（Rust）
+  # ──────────────────────────────────────────────
+  lint:
+    name: Lint & Test
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Run tests
+        run: cargo test
+
+  # ──────────────────────────────────────────────
+  # 构建 app bundle + 打包 DMG
+  # ──────────────────────────────────────────────
+  build:
+    name: Build App
+    needs: lint
+    runs-on: macos-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      dmg_name: ${{ steps.version.outputs.dmg_name }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # 读取版本号
+      - name: Read version from Cargo.toml
+        id: version
+        run: |
+          VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "dmg_name=CopyAttach-${VERSION}.dmg" >> "$GITHUB_OUTPUT"
+          echo "Building CopyAttach v${VERSION}"
+
+      # 选择最新的 Xcode（build.sh 需要 macOS SDK 15.0，对应 Xcode 16+）
+      - name: Select latest Xcode
+        run: |
+          AVAILABLE=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V)
+          LATEST=$(echo "$AVAILABLE" | tail -1)
+          if [ -n "$LATEST" ]; then
+            sudo xcode-select -s "$LATEST/Contents/Developer"
+            echo "Selected Xcode: $(xcodebuild -version)"
+          else
+            echo "No Xcode.app found at standard paths, using xcrun fallback"
+          fi
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # 缓存 Rust 构建产物
+      - name: Cache Rust build
+        uses: actions/cache@v4
+        with:
+          path: |
+            target/release/
+            target/release/build/
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('Cargo.toml', 'Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-release-
+
+      # 执行构建
+      - name: Build app bundle
+        run: ./build.sh
+
+      # 代码签名（如果有证书密钥）
+      - name: Code sign with Developer ID (if configured)
+        if: env.MACOS_CERTIFICATE != ''
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
+          KEYCHAIN: ${{ runner.temp }}/build.keychain
+        run: |
+          # 导入证书到临时钥匙串
+          echo "$MACOS_CERTIFICATE" | base64 --decode > /tmp/cert.p12
+          security create-keychain -p temp "$KEYCHAIN"
+          security default-keychain -s "$KEYCHAIN"
+          security unlock-keychain -p temp "$KEYCHAIN"
+          security import /tmp/cert.p12 -k "$KEYCHAIN" -P "$MACOS_CERTIFICATE_PWD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k temp "$KEYCHAIN"
+
+          # 签名（替换 - 为具体证书 Common Name）
+          CODESIGN_IDENTITY=$(security find-identity -v -p basic "$KEYCHAIN" | grep "Developer ID Application" | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          echo "Signing with identity: ${CODESIGN_IDENTITY}"
+          codesign --force --deep --sign "${CODESIGN_IDENTITY}" --keychain "$KEYCHAIN" CopyAttach.app
+
+          # 验证签名
+          codesign -dvvv CopyAttach.app
+
+          security delete-keychain "$KEYCHAIN"
+
+      # 公证（如果有 Apple ID 凭证）
+      - name: Notarize (if configured)
+        if: env.MACOS_NOTARIZATION_ACCOUNT != ''
+        env:
+          AC_USERNAME: ${{ secrets.MACOS_NOTARIZATION_ACCOUNT }}
+          AC_PASSWORD: ${{ secrets.MACOS_NOTARIZATION_PWD }}
+        run: |
+          # 先打包为 DMG 再公证（公证不接受目录结构）
+          build/package_dmg.sh
+
+          DMG=$(ls build/CopyAttach-*.dmg | head -1)
+          echo "Notarizing ${DMG}..."
+
+          xcrun notarytool submit "$DMG" \
+            --apple-id "$AC_USERNAME" \
+            --password "$AC_PASSWORD" \
+            --team-id "${{ secrets.APPLE_TEAM_ID }}" \
+            --wait
+
+          #  staple（将公证凭证附在 DMG 上）
+          xcrun stapler staple "$DMG"
+          xcrun stapler validate "$DMG"
+
+      # 打包 DMG
+      - name: Package DMG
+        run: build/package_dmg.sh
+
+      # 上传 DMG 为构建产物
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CopyAttach-${{ steps.version.outputs.version }}
+          path: build/CopyAttach-*.dmg
+          if-no-files-found: error
+
+      # 如果是正式发布，上传到 GitHub Release
+      - name: Upload to Release
+        if: github.event_name == 'release'
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ github.event.release.upload_url }}
+          asset_path: build/CopyAttach-${{ steps.version.outputs.version }}.dmg
+          asset_name: CopyAttach-${{ steps.version.outputs.version }}.dmg
+          asset_content_type: application/x-apple-diskimage
+
+  # ──────────────────────────────────────────────
+  # 创建 GitHub Release（手动 tag 推送时）
+  # ──────────────────────────────────────────────
+  release:
+    name: Create Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download DMG artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: CopyAttach-${{ needs.build.outputs.version }}
+          path: build/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/CopyAttach-*.dmg
+          generate_release_notes: true
+          name: CopyAttach v${{ needs.build.outputs.version }}
