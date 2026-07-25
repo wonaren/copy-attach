@@ -186,8 +186,16 @@ unsafe fn pasteboard_file_url_strings() -> Vec<String> {
 /// `pid` must be the frontmost application's process identifier (> 0).
 /// Returns `false` if pid is 0 or event creation fails.
 pub(crate) fn simulate_cmd_v(pid: i32) -> bool {
+    simulate_paste_v(pid, false)
+}
+
+/// Simulate paste key press (V key) via CGEventPostToPid.
+/// When `use_ctrl` is true, sends Ctrl+V; otherwise sends Cmd+V.
+/// `pid` must be the frontmost application's process identifier (> 0).
+/// Returns `false` if pid is 0 or event creation fails.
+pub(crate) fn simulate_paste_v(pid: i32, use_ctrl: bool) -> bool {
     if pid <= 0 {
-        eprintln!("CopyAttach: simulate_cmd_v: no target PID (frontmost app unknown)");
+        eprintln!("CopyAttach: simulate_paste_v: no target PID (frontmost app unknown)");
         return false;
     }
     let source = CGEventSource::new(CGEventSourceStateID::Private);
@@ -196,8 +204,13 @@ pub(crate) fn simulate_cmd_v(pid: i32) -> bool {
     let key_up = CGEvent::new_keyboard_event(source, 9, false);
     match (key_down, key_up) {
         (Some(kd), Some(ku)) => {
-            CGEvent::set_flags(Some(&*kd), CGEventFlags::MaskCommand);
-            CGEvent::set_flags(Some(&*ku), CGEventFlags::MaskCommand);
+            let flags = if use_ctrl {
+                CGEventFlags::MaskControl
+            } else {
+                CGEventFlags::MaskCommand
+            };
+            CGEvent::set_flags(Some(&*kd), flags);
+            CGEvent::set_flags(Some(&*ku), flags);
 
             CGEvent::post_to_pid(pid, Some(&*kd));
             CGEvent::post_to_pid(pid, Some(&*ku));

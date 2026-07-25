@@ -82,6 +82,9 @@ pub(crate) struct Backend {
     /// Used by Swift to find the restored entry in a snapshot despite
     /// monitor-thread insert races.
     pub(crate) last_restored_id: Arc<AtomicU64>,
+    /// When true, image pastes use Ctrl+V instead of Cmd+V.
+    /// Useful for terminals (e.g. Ghostty) where image paste requires Ctrl+V.
+    pub(crate) image_paste_use_ctrl_v: Arc<AtomicBool>,
 }
 
 static BACKEND: OnceLock<Backend> = OnceLock::new();

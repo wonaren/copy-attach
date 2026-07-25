@@ -71,6 +71,7 @@ class ClipboardBackend: ObservableObject {
             clipboard_set_cleanup_threshold(Int32(saved))
         }
         syncIgnoreRules()
+        syncImagePasteModifier()
 
         timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             self?.refresh()
@@ -113,6 +114,12 @@ class ClipboardBackend: ObservableObject {
         }
     }
 
+    /// Push the image paste modifier preference to Rust.
+    func syncImagePasteModifier() {
+        let useCtrl = UserDefaults.standard.bool(forKey: "ImagePasteUseCtrlV")
+        clipboard_set_paste_image_with_ctrl_v(useCtrl ? 1 : 0)
+    }
+
     /// Detect the current frontmost app and tell Rust about it
     private func updateSourceApp() {
         if let app = NSWorkspace.shared.frontmostApplication {
@@ -135,7 +142,14 @@ class ClipboardBackend: ObservableObject {
             lastHistoryRevision = newHistoryRevision
             reloadItems()
         }
+        let wasGranted = permissionGranted
         permissionGranted = checkPermission()
+        if !wasGranted && permissionGranted {
+            // Permission newly granted — bring settings window to front
+            // so the user sees the updated "已授权" state without
+            // having to manually switch back after closing System Settings.
+            AppDelegate.shared?.focusSettingsWindow()
+        }
     }
 
     private func reloadItems() {

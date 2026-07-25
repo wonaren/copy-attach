@@ -23,6 +23,7 @@ struct InlineSettingsView: View {
     @State private var shortTextThreshold = UserDefaults.standard.integer(forKey: "ShortTextThreshold") != 0 ? UserDefaults.standard.integer(forKey: "ShortTextThreshold") : 3
     @State private var pendingThreshold: Int? = nil
     @State private var thresholdBeforeEdit: Double = 3000
+    @State private var imagePasteUseCtrlV = UserDefaults.standard.bool(forKey: "ImagePasteUseCtrlV")
     @State private var showDragGuide = false
     @State private var isHoveringDragIcon = false
     @Environment(\.appTheme) private var theme
@@ -178,12 +179,12 @@ struct InlineSettingsView: View {
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundColor(backend.permissionGranted ? .green : .orange)
             }
-            Text(backend.permissionGranted
-                 ? "按 \(hotkeyManager.config.displayString) 打开剪贴板历史"
-                 : "应用需要辅助功能权限才能使用全局快捷键和自动粘贴")
-                .font(.system(size: 11.5))
-                .foregroundColor(theme.secondaryText)
-                .lineSpacing(2)
+            if !backend.permissionGranted {
+                Text("应用需要辅助功能权限才能使用全局快捷键和自动粘贴")
+                    .font(.system(size: 11.5))
+                    .foregroundColor(theme.secondaryText)
+                    .lineSpacing(2)
+            }
             if !backend.permissionGranted && !showDragGuide {
                 Button(action: {
                     backend.openPreferences()
@@ -330,6 +331,18 @@ struct InlineSettingsView: View {
             )
             .onChange(of: runInBackground) { _, newValue in
                 UserDefaults.standard.set(newValue, forKey: "RunInBackground")
+            }
+            sectionDivider().padding(.vertical, 4)
+            settingToggleRow(
+                icon: "arrow.up.doc",
+                iconColor: imagePasteUseCtrlV ? .orange : .secondary,
+                title: "终端图片使用 Ctrl+V 粘贴(适配ClaudeCode)",
+                desc: "在 Ghostty、iTerm2、Kitty 等终端中粘贴图片时发送 Ctrl+V（对其他应用无影响）。",
+                isOn: $imagePasteUseCtrlV
+            )
+            .onChange(of: imagePasteUseCtrlV) { _, newValue in
+                UserDefaults.standard.set(newValue, forKey: "ImagePasteUseCtrlV")
+                backend.syncImagePasteModifier()
             }
         }
     }

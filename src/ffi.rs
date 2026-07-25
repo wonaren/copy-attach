@@ -207,6 +207,7 @@ pub extern "C" fn clipboard_init() -> c_int {
     let ignore_rules = Arc::new(Mutex::new(IgnoreRules::default()));
     let deleted_stack: Arc<Mutex<Vec<ClipboardEntry>>> = Arc::new(Mutex::new(Vec::new()));
     let last_restored_id = Arc::new(AtomicU64::new(0));
+    let image_paste_use_ctrl_v = Arc::new(AtomicBool::new(false));
 
     let backend = Backend {
         history: Arc::clone(&history),
@@ -222,6 +223,7 @@ pub extern "C" fn clipboard_init() -> c_int {
         ignore_rules: Arc::clone(&ignore_rules),
         deleted_stack: Arc::clone(&deleted_stack),
         last_restored_id: Arc::clone(&last_restored_id),
+        image_paste_use_ctrl_v: Arc::clone(&image_paste_use_ctrl_v),
     };
 
     if set_backend(backend).is_err() {
@@ -651,6 +653,26 @@ pub extern "C" fn clipboard_free_bytes(data: *mut u8, len: c_int) {
 // Select & Paste
 // ═══════════════════════════════════════════
 
+/// Known terminal emulator bundle IDs. When the user enables Ctrl+V for image
+/// paste, it only activates when the frontmost app matches one of these.
+const TERMINAL_BUNDLE_IDS: &[&str] = &[
+    "com.mitchellh.ghostty",      // Ghostty
+    "com.googlecode.iterm2",      // iTerm2
+    "net.kovidgoyal.kitty",       // Kitty
+    "com.apple.Terminal",         // Terminal.app
+    "dev.warp.Warp-Stable",       // Warp
+    "org.alacritty",              // Alacritty
+    "co.zeit.hyper",              // Hyper
+    "com.github.wez.wezterm",     // WezTerm
+];
+
+fn is_terminal_app(bundle_id: &str) -> bool {
+    if bundle_id.is_empty() {
+        return false;
+    }
+    TERMINAL_BUNDLE_IDS.contains(&bundle_id)
+}
+
 /// Shared implementation for select-and-paste.
 /// Loads full image data from DB if needed, writes to system clipboard,
 /// write-through DB, moves item to top of history, then simulates paste.
@@ -781,12 +803,21 @@ fn select_and_paste_impl(mut item: ClipboardEntry) -> c_int {
         .map(|src| src.pid)
         .unwrap_or(0);
 
+    let is_image = matches!(db_item, ClipboardEntry::Image { .. });
+    let is_terminal = crate::backend::try_backend()
+        .and_then(|b| b.source_app.lock().ok())
+        .map(|src| is_terminal_app(&src.bundle_id))
+        .unwrap_or(false);
+    let use_ctrl = is_image
+        && is_terminal
+        && b.image_paste_use_ctrl_v.load(Ordering::Relaxed);
+
     thread::sleep(Duration::from_millis(50));
     #[cfg(target_os = "macos")]
     {
         if macos::check_permission() {
-            if !macos::simulate_cmd_v(front_pid) {
-                eprintln!("CopyAttach: simulate_cmd_v failed");
+            if !macos::simulate_paste_v(front_pid, use_ctrl) {
+                eprintln!("CopyAttach: simulate_paste_v failed");
                 return 0;
             }
         } else {
@@ -1176,6 +1207,19 @@ pub extern "C" fn clipboard_set_cleanup_threshold(threshold: i32) {
         if let Ok(conn) = b.db.lock() {
             trim_db_history(&conn, t);
         }
+    }
+}
+
+// ═══════════════════════════════════════════
+// Paste Modifier for Images
+// ═══════════════════════════════════════════
+
+/// When `use_ctrl` is non-zero, pasting images uses Ctrl+V instead of Cmd+V.
+/// Useful for terminal applications (e.g. Ghostty) where images require Ctrl+V.
+#[no_mangle]
+pub extern "C" fn clipboard_set_paste_image_with_ctrl_v(use_ctrl: c_int) {
+    if let Some(b) = crate::backend::try_backend() {
+        b.image_paste_use_ctrl_v.store(use_ctrl != 0, Ordering::Relaxed);
     }
 }
 

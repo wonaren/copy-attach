@@ -71,6 +71,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
+    /// Bring the settings window to front and activate the app.
+    /// Called automatically when accessibility permission is newly granted.
+    func focusSettingsWindow() {
+        if let window = settingsWindow, window.isVisible {
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        }
+    }
+
     // MARK: - Popup
 
     @objc func togglePopup() {
