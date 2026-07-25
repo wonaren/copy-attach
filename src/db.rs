@@ -8,7 +8,6 @@ use std::path::PathBuf;
 use rusqlite::Connection;
 
 use crate::types::ClipboardEntry;
-use crate::backend::DEFAULT_CLEANUP_THRESHOLD;
 
 /// Resolve the storage directory under `~/Library/Application Support/CopyAttach`.
 pub(crate) fn get_persist_dir() -> Option<PathBuf> {
@@ -80,9 +79,9 @@ pub(crate) fn ensure_history_table(conn: &Connection) -> Result<(), rusqlite::Er
     Ok(())
 }
 
-/// Load up to `DEFAULT_CLEANUP_THRESHOLD` entries from the DB, newest first.
+/// Load up to `threshold` entries from the DB, newest first.
 /// Image entries carry only metadata (png_data is empty, loaded on demand).
-pub(crate) fn load_history_from_db(conn: &Connection) -> Vec<ClipboardEntry> {
+pub(crate) fn load_history_from_db(conn: &Connection, threshold: usize) -> Vec<ClipboardEntry> {
     let mut stmt = match conn.prepare(
         "SELECT id, entry_id, entry_type, text,
                 width, height,
@@ -99,7 +98,7 @@ pub(crate) fn load_history_from_db(conn: &Connection) -> Vec<ClipboardEntry> {
         }
     };
 
-    let rows = match stmt.query_map([DEFAULT_CLEANUP_THRESHOLD as i64], |row| {
+    let rows = match stmt.query_map([threshold as i64], |row| {
         let entry_type: i32 = row.get(2)?;
         let entry_id: i64 = row.get(1)?;
         Ok((entry_type,

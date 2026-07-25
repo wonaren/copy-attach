@@ -1189,7 +1189,7 @@ fn test_entry_id_persistence_and_restore() {
     let _b = insert_text(&conn, "beta", 200);
     let _c = insert_text(&conn, "gamma", 300);
 
-    let loaded = load_history_from_db(&conn);
+    let loaded = load_history_from_db(&conn, crate::backend::DEFAULT_CLEANUP_THRESHOLD);
     assert_eq!(loaded.len(), 3, "should load all 3 entries");
 
     assert_eq!(loaded[0].text(), "gamma", "newest first");
@@ -1209,7 +1209,7 @@ fn test_entry_id_persistence_and_restore() {
     // Reopen same DB file (simulates app restart).
     let conn = Connection::open(&db_path).expect("failed to reopen temp DB");
     ensure_history_table(&conn).expect("migration idempotent");
-    let reloaded = load_history_from_db(&conn);
+    let reloaded = load_history_from_db(&conn, crate::backend::DEFAULT_CLEANUP_THRESHOLD);
     assert_eq!(reloaded.len(), 3, "same count after reload");
 
     let reloaded_ids: Vec<u64> = reloaded.iter().map(|e| match e {
@@ -1228,7 +1228,7 @@ fn test_entry_id_stable_after_delete() {
     let _id_b = insert_text(&conn, "b", 200);
     let _id_c = insert_text(&conn, "c", 300);
 
-    let before = load_history_from_db(&conn);
+    let before = load_history_from_db(&conn, crate::backend::DEFAULT_CLEANUP_THRESHOLD);
     let ids_before: Vec<u64> = before.iter().map(|e| match e {
         ClipboardEntry::Text { id, .. } | ClipboardEntry::Image { id, .. } => *id,
     }).collect();
@@ -1244,7 +1244,7 @@ fn test_entry_id_stable_after_delete() {
     conn.execute("DELETE FROM clipboard_history WHERE id = ?1", rusqlite::params![db_id_b])
         .unwrap();
 
-    let after = load_history_from_db(&conn);
+    let after = load_history_from_db(&conn, crate::backend::DEFAULT_CLEANUP_THRESHOLD);
     assert_eq!(after.len(), 2, "one entry deleted");
 
     let ids_after: Vec<u64> = after.iter().map(|e| match e {
@@ -1270,7 +1270,7 @@ fn test_entry_id_monotonic_after_reload() {
     let _c = insert_text(&conn, "first-batch-c", 300);
 
     // Simulate restart: reload, then prime the counter.
-    let loaded = load_history_from_db(&conn);
+    let loaded = load_history_from_db(&conn, crate::backend::DEFAULT_CLEANUP_THRESHOLD);
     let max_loaded = loaded.iter().map(|e| match e {
         ClipboardEntry::Text { id, .. } | ClipboardEntry::Image { id, .. } => *id,
     }).max().unwrap();
@@ -1292,7 +1292,7 @@ fn test_entry_id_monotonic_after_reload() {
     insert_entry_to_db(&conn, &entry_new, None, None).unwrap();
 
     // Reload again — all 4 entries must have stable IDs.
-    let reloaded = load_history_from_db(&conn);
+    let reloaded = load_history_from_db(&conn, crate::backend::DEFAULT_CLEANUP_THRESHOLD);
     assert_eq!(reloaded.len(), 4, "4 entries total after post-restart insert");
 
     let all_ids: Vec<u64> = reloaded.iter().map(|e| match e {
@@ -1350,7 +1350,7 @@ fn test_entry_id_backfill_old_rows() {
     ensure_history_table(&conn).unwrap();
 
     // Load — both rows must have non-zero entry_ids.
-    let loaded = load_history_from_db(&conn);
+    let loaded = load_history_from_db(&conn, crate::backend::DEFAULT_CLEANUP_THRESHOLD);
     assert_eq!(loaded.len(), 2);
     for e in &loaded {
         let eid = match e {
@@ -1360,7 +1360,7 @@ fn test_entry_id_backfill_old_rows() {
     }
 
     // Reload (simulate second restart) — IDs must be identical.
-    let loaded2 = load_history_from_db(&conn);
+    let loaded2 = load_history_from_db(&conn, crate::backend::DEFAULT_CLEANUP_THRESHOLD);
     for (orig, reload) in loaded.iter().zip(loaded2.iter()) {
         let oid = match orig {
             ClipboardEntry::Text { id, .. } | ClipboardEntry::Image { id, .. } => *id,

@@ -113,6 +113,10 @@ struct HistoryPopupContent: View {
                         noResultsView
                     } else if displayItems.isEmpty && filterMode == .favorites {
                         emptyFavoritesView
+                    } else if displayItems.isEmpty && filterMode == .image {
+                        emptyImageView
+                    } else if displayItems.isEmpty && filterMode == .text {
+                        emptyTextView
                     } else {
                         itemsList
                         bottomBar
@@ -202,10 +206,14 @@ struct HistoryPopupContent: View {
 
             // Focus first item (or search bar if empty) after animation
             DispatchQueue.main.asyncAfter(deadline: .now() + animDuration + 0.05) {
-                if selectedIndex == 0 {
-                    isSearchFocused = true
+                if self.backend.items.isEmpty {
+                    // Empty state: focus container so onKeyPress (e.g. Escape)
+                    // works even without a search field or items.
+                    self.isContainerFocused = true
+                } else if self.selectedIndex == 0 {
+                    self.isSearchFocused = true
                 } else {
-                    isContainerFocused = true
+                    self.isContainerFocused = true
                 }
             }
         }
@@ -351,7 +359,7 @@ struct HistoryPopupContent: View {
             }
         }
         .onChange(of: selectedIndex) { _, newValue in
-            if newValue == 0 {
+            if newValue == 0 && !backend.items.isEmpty {
                 isSearchFocused = true
                 isContainerFocused = false
                 // Move cursor to end — NSTextField selects all on focus by default.
@@ -474,6 +482,34 @@ struct HistoryPopupContent: View {
                 .font(.system(size: 28))
                 .foregroundColor(theme.popupDimText)
             Text("暂无收藏")
+                .font(.system(size: 14))
+                .foregroundColor(theme.popupDimText)
+            Spacer()
+        }
+        .transition(.opacity)
+    }
+
+    private var emptyImageView: some View {
+        VStack(spacing: 12) {
+            Spacer()
+            Image(systemName: "photo")
+                .font(.system(size: 28))
+                .foregroundColor(theme.popupDimText)
+            Text("暂无图片")
+                .font(.system(size: 14))
+                .foregroundColor(theme.popupDimText)
+            Spacer()
+        }
+        .transition(.opacity)
+    }
+
+    private var emptyTextView: some View {
+        VStack(spacing: 12) {
+            Spacer()
+            Image(systemName: "doc.text")
+                .font(.system(size: 28))
+                .foregroundColor(theme.popupDimText)
+            Text("暂无文本")
                 .font(.system(size: 14))
                 .foregroundColor(theme.popupDimText)
             Spacer()
@@ -682,46 +718,21 @@ struct HistoryPopupContent: View {
 
     // MARK: - Empty State
 
-    /// SVG image shown when clipboard history is empty.
-    private var emptyStateImage: NSImage? {
-        let svg = """
-        <svg xmlns="http://www.w3.org/2000/svg" width="400" height="300" viewBox="0 0 400 300">
-          <defs>
-            <style>
-              .bg { fill: rgba(255,255,255,0.06); }
-              .icon { fill: none; stroke: rgba(255,255,255,0.15); stroke-width: 2; stroke-linejoin: round; }
-              .line { fill: none; stroke: rgba(255,255,255,0.08); stroke-width: 2; stroke-linecap: round; }
-              .text { fill: rgba(255,255,255,0.40); font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; font-size: 22px; text-anchor: middle; }
-            </style>
-          </defs>
-          <!-- Clipboard body -->
-          <rect class="icon" x="140" y="20" width="120" height="160" rx="14"/>
-          <!-- Clip -->
-          <rect class="bg" x="160" y="12" width="80" height="18" rx="6"/>
-          <!-- Text lines -->
-          <line class="line" x1="160" y1="60" x2="240" y2="60"/>
-          <line class="line" x1="160" y1="85" x2="240" y2="85"/>
-          <line class="line" x1="160" y1="110" x2="240" y2="110"/>
-          <line class="line" x1="160" y1="135" x2="215" y2="135"/>
-          <!-- Text -->
-          <text class="text" x="200" y="240">剪贴板记录为空</text>
-        </svg>
-        """
-        guard let data = svg.data(using: .utf8) else { return nil }
-        return NSImage(data: data)
-    }
-
     private var emptyStateView: some View {
-        VStack(spacing: 0) {
+        VStack(spacing: 12) {
             Spacer()
-            if let nsImage = emptyStateImage {
-                Image(nsImage: nsImage)
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
-                    .frame(width: 320, height: 240)
-            }
+            Image(systemName: "clipboard")
+                .font(.system(size: 44))
+                .foregroundColor(theme.popupDimText)
+            Text("剪贴板记录为空")
+                .font(.system(size: 16, weight: .medium))
+                .foregroundColor(theme.popupPrimaryText)
+            Text("复制文本或图片后将自动出现在这里")
+                .font(.system(size: 12))
+                .foregroundColor(theme.popupMutedText)
             Spacer()
         }
+        .transition(.opacity)
     }
 
     // MARK: - Actions

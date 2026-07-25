@@ -6,6 +6,7 @@ import SwiftUI
 class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     static var shared: AppDelegate?
     private var settingsWindow: NSWindow?
+    private var stressWindowController: StressTestWindowController?
     private var firstLaunchDone = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -33,6 +34,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             if event.keyCode == 43 && event.modifierFlags.contains(.command) { // kVK_ANSI_Comma = 43
                 self?.openSettings()
+                return nil
+            }
+            // ⌥⌘S opens stress-test panel (debug/benchmark use)
+            if event.keyCode == 1 && event.modifierFlags.contains(.command) && event.modifierFlags.contains(.option) {
+                self?.toggleStressPanel()
                 return nil
             }
             return event
@@ -88,6 +94,30 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             popup.close()
         } else {
             popup.show()
+        }
+    }
+
+    // MARK: - Stress Test Panel
+
+    @objc func toggleStressPanel() {
+        // Check if stress-test feature is compiled in
+        guard clipboard_stress_available() == 1 else {
+            let alert = NSAlert()
+            alert.messageText = "Stress-Test 功能未启用"
+            alert.informativeText = "当前构建未包含 stress-test feature。\n请使用 STRESS=1 ./build.sh 重新构建。"
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "确定")
+            alert.runModal()
+            return
+        }
+        if let wc = stressWindowController, let window = wc.window, window.isVisible {
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        } else {
+            let wc = StressTestWindowController()
+            stressWindowController = wc
+            wc.showWindow(nil)
+            NSApp.activate(ignoringOtherApps: true)
         }
     }
 

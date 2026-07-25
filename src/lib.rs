@@ -43,5 +43,8 @@ mod macos {
 mod monitor;
 mod ffi;
 
+#[cfg(feature = "stress-test")]
+pub mod stress;
+
 #[cfg(test)]
 mod tests;

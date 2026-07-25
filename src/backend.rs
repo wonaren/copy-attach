@@ -104,3 +104,24 @@ pub(crate) fn set_backend(b: Backend) -> Result<(), ()> {
 pub(crate) fn try_backend() -> Option<&'static Backend> {
     BACKEND.get()
 }
+
+/// Reload the in-memory history from the database, respecting the configured
+/// cleanup threshold. Returns the number of entries loaded.
+///
+/// Single source of truth for the pattern: lock db → load → take(threshold) →
+/// drop db → lock history → assign → bump revision. Every caller that needs to
+/// refresh the in-memory state from the DB should go through this function.
+pub(crate) fn reload_history_from_db(b: &Backend) -> usize {
+    let conn = b.db.lock().unwrap();
+    let threshold = b.cleanup_threshold.load(std::sync::atomic::Ordering::Relaxed);
+    let loaded = crate::db::load_history_from_db(&conn, threshold);
+    let trimmed: Vec<ClipboardEntry> = loaded.into_iter().take(threshold).collect();
+    let count = trimmed.len();
+    drop(conn);
+
+    let mut hist = b.history.lock().unwrap();
+    *hist = trimmed;
+    crate::backend::HISTORY_REVISION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+    count
+}

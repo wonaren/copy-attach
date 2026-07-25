@@ -12,7 +12,14 @@ echo "==> Building Rust backend library…"
 # Read version from Cargo.toml and sync to Info.plist
 CARGO_VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
 /usr/libexec/PlistBuddy -c "Set CFBundleShortVersionString ${CARGO_VERSION}" "${SWIFT_SRC}/Info.plist" 2>/dev/null || true
-cargo build --release
+
+# Build with optional stress-test feature (set STRESS=1 to enable)
+CARGO_FEATURES=""
+if [ "${STRESS}" = "1" ]; then
+    echo "==> Including stress-test feature…"
+    CARGO_FEATURES="--features stress-test"
+fi
+cargo build --release ${CARGO_FEATURES}
 
 echo "==> Building Swift frontend app…"
 

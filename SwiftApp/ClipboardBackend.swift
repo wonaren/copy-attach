@@ -65,7 +65,9 @@ class ClipboardBackend: ObservableObject {
         print("[ClipboardBackend] init result: \(result)")
         permissionGranted = checkPermission()
 
-        // Restore saved cleanup threshold from UserDefaults
+        // Restore saved cleanup threshold from UserDefaults.
+        // Note: in stress-test builds, clipboard_init() already loads
+        // with a higher limit, so no explicit reload is needed here.
         let saved = UserDefaults.standard.integer(forKey: "CleanupThreshold")
         if saved >= 100 {
             clipboard_set_cleanup_threshold(Int32(saved))

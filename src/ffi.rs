@@ -179,10 +179,16 @@ pub extern "C" fn clipboard_init() -> c_int {
 
     migrate_from_json_to_db(&mut conn);
 
-    trim_db_history(&conn, DEFAULT_CLEANUP_THRESHOLD);
+    // First determine the load limit; then load, THEN trim — otherwise the
+    // trim below the load limit discards entries before we can read them.
+    #[cfg(feature = "stress-test")]
+    const INIT_LOAD: usize = 10000;
+    #[cfg(not(feature = "stress-test"))]
+    const INIT_LOAD: usize = DEFAULT_CLEANUP_THRESHOLD;
 
-    let saved = load_history_from_db(&conn);
-    let saved: Vec<ClipboardEntry> = saved.into_iter().take(DEFAULT_CLEANUP_THRESHOLD).collect();
+    let saved = load_history_from_db(&conn, INIT_LOAD);
+    let saved: Vec<ClipboardEntry> = saved.into_iter().take(INIT_LOAD).collect();
+    trim_db_history(&conn, INIT_LOAD);
 
     // Prime the entry-id counter above the highest loaded ID so new entries
     // never collide with restored ones. This is safe even when loaded IDs are
@@ -1265,4 +1271,78 @@ pub extern "C" fn clipboard_check_permission() -> c_int {
 pub extern "C" fn clipboard_open_preferences() {
     #[cfg(target_os = "macos")]
     macos::open_preferences();
+}
+
+/// Reload the in-memory history from the database using the current cleanup
+/// threshold.  Useful after changing the threshold or injecting test data.
+/// Returns the number of entries loaded.
+#[no_mangle]
+pub extern "C" fn clipboard_reload_history() -> c_int {
+    let b = match crate::backend::try_backend() {
+        Some(b) => b,
+        None => return 0,
+    };
+    // Verify DB lock is healthy before calling the shared helper.
+    if b.db.lock().is_err() {
+        return 0;
+    }
+    crate::backend::reload_history_from_db(b) as c_int
+}
+
+// ═══════════════════════════════════════════
+// Stress-Test FFI (cfg-gated)
+// ═══════════════════════════════════════════
+
+/// Returns 1 if the stress-test feature is compiled in, 0 otherwise.
+/// Swift should gate stress-panel access on this to avoid misleading results.
+#[no_mangle]
+pub extern "C" fn clipboard_stress_available() -> c_int {
+    #[cfg(feature = "stress-test")] { 1 }
+    #[cfg(not(feature = "stress-test"))] { 0 }
+}
+
+/// Inject test data into the running backend.
+/// Returns the number of entries actually inserted.
+#[cfg(feature = "stress-test")]
+#[no_mangle]
+pub extern "C" fn clipboard_stress_inject(count: c_int, text_ratio: f64, seed: i64) -> c_int {
+    crate::stress::ffi_inject(count, text_ratio, seed)
+}
+
+/// Provide a stub when stress-test is not enabled so the Swift bridge
+/// doesn't fail to link.  The Swift side should only call these when
+/// the debug panel is active.
+#[cfg(not(feature = "stress-test"))]
+#[no_mangle]
+pub extern "C" fn clipboard_stress_inject(_count: c_int, _text_ratio: f64, _seed: i64) -> c_int { 0 }
+
+/// Reset stress-injected data by reloading from DB.
+#[cfg(feature = "stress-test")]
+#[no_mangle]
+pub extern "C" fn clipboard_stress_reset() {
+    crate::stress::ffi_reset();
+}
+
+#[cfg(not(feature = "stress-test"))]
+#[no_mangle]
+pub extern "C" fn clipboard_stress_reset() {}
+
+/// Run internal Rust-side benchmarks and return a JSON string.
+/// Caller must free with clipboard_free_string().
+#[cfg(feature = "stress-test")]
+#[no_mangle]
+pub extern "C" fn clipboard_stress_run_bench() -> *mut c_char {
+    let snap_us = crate::stress::bench_snapshot_clone(100);
+    let cnt_ns = crate::stress::bench_count(1000);
+    let json = format!(
+        r#"{{"snapshot_clone_avg_us":{:.1},"count_lock_avg_ns":{:.1}}}"#,
+        snap_us, cnt_ns
+    );
+    to_ffi_cstring(&json)
+}
+
+#[cfg(not(feature = "stress-test"))]
+#[no_mangle]
+pub extern "C" fn clipboard_stress_run_bench() -> *mut c_char {
+    to_ffi_cstring(r#"{"error":"stress-test feature not enabled"}"#)
 }

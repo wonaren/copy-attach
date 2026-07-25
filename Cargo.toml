@@ -1,6 +1,6 @@
 [package]
 name = "copy-attach"
-version = "0.78.0-beta"
+version = "0.79.0-beta"
 edition = "2021"
 
 [lib]
@@ -20,6 +20,15 @@ base64 = { version = "0.22", optional = true }
 [features]
 default = ["migration"]
 migration = ["serde", "serde_json", "base64"]
+stress-test = []
+
+[dev-dependencies]
+rand = "0.8"
+
+[[bin]]
+name = "stress-gen"
+path = "src/bin/stress_gen.rs"
+required-features = ["stress-test"]
 
 [profile.release]
 strip = true

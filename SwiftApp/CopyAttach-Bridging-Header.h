@@ -74,3 +74,12 @@ int32_t clipboard_undo_delete(void);
 int32_t clipboard_can_undo(void);
 uint64_t clipboard_last_restored_id(void);
 void clipboard_set_paste_image_with_ctrl_v(int32_t use_ctrl);
+
+// ─── History Reload (for stress testing) ───
+int32_t clipboard_reload_history(void);
+
+// ─── Stress Test (cfg-gated, stubs at link time) ───
+int32_t clipboard_stress_available(void);
+int32_t clipboard_stress_inject(int32_t count, double text_ratio, int64_t seed);
+void clipboard_stress_reset(void);
+char* clipboard_stress_run_bench(void);
