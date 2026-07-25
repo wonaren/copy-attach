@@ -36,6 +36,7 @@ const THUMBNAIL_MAX_DIM: u32 = 300;
 /// Accepts raw RGBA pixel data as a slice (borrowed for Phase 1, cloned only
 /// for the async Phase 2 closure). This avoids an extra allocation on the
 /// clipboard path where img_data.bytes is already live.
+#[allow(clippy::too_many_arguments)]
 fn ingest_rgba_image(
     rgba: &[u8],
     width: u32,
@@ -183,6 +184,7 @@ fn ingest_rgba_image(
 ///
 /// Non-image files are silently skipped (the caller's `continue` ensures
 /// the file icon from the pasteboard is not recorded).
+#[allow(clippy::too_many_arguments)]
 fn try_ingest_image_files(
     paths: &[String],
     history: &Arc<Mutex<Vec<ClipboardEntry>>>,
@@ -219,6 +221,7 @@ fn try_ingest_image_files(
     false
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn clipboard_monitor(
     history: Arc<Mutex<Vec<ClipboardEntry>>>,
     running: Arc<AtomicBool>,

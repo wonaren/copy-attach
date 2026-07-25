@@ -1202,7 +1202,7 @@ pub extern "C" fn clipboard_get_cleanup_threshold() -> i32 {
 #[no_mangle]
 pub extern "C" fn clipboard_set_cleanup_threshold(threshold: i32) {
     if let Some(b) = crate::backend::try_backend() {
-        let t = threshold.max(100).min(10000) as usize;
+        let t = threshold.clamp(100, 10000) as usize;
         b.cleanup_threshold.store(t, Ordering::Relaxed);
         {
             let mut hist = b.history.lock().unwrap();

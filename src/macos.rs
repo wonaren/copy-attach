@@ -199,7 +199,7 @@ pub(crate) fn simulate_paste_v(pid: i32, use_ctrl: bool) -> bool {
         return false;
     }
     let source = CGEventSource::new(CGEventSourceStateID::Private);
-    let source = source.as_ref().map(|s| &**s);
+    let source = source.as_deref();
     let key_down = CGEvent::new_keyboard_event(source, 9, true);
     let key_up = CGEvent::new_keyboard_event(source, 9, false);
     match (key_down, key_up) {

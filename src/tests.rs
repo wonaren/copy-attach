@@ -99,7 +99,7 @@ fn test_image_deduplication() {
 #[test]
 fn test_add_multiple_items_order() {
     let history = vec![];
-    let items = vec!["c", "b", "a"];
+    let items = ["c", "b", "a"];
     let mut history = history;
     for (i, &s) in items.iter().enumerate() {
         history = add_to_history(history, make_text(s, i as u64));
