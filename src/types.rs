@@ -98,4 +98,12 @@ impl ClipboardEntry {
             }
         }
     }
+
+    /// Accessor for Text variant content. Panics for Image entries.
+    pub(crate) fn text(&self) -> &str {
+        match self {
+            ClipboardEntry::Text { text, .. } => text,
+            _ => panic!("text() called on a non-Text ClipboardEntry"),
+        }
+    }
 }

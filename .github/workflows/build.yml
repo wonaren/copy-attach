@@ -47,7 +47,7 @@ jobs:
     name: Lint & Test
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -72,7 +72,7 @@ jobs:
       dmg_name: ${{ steps.version.outputs.dmg_name }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # 读取版本号
       - name: Read version from Cargo.toml
@@ -100,7 +100,7 @@ jobs:
 
       # 缓存 Rust 构建产物
       - name: Cache Rust build
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             target/release/
@@ -168,7 +168,7 @@ jobs:
 
       # 上传 DMG 为构建产物
       - name: Upload DMG artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: CopyAttach-${{ steps.version.outputs.version }}
           path: build/CopyAttach-*.dmg
@@ -177,14 +177,11 @@ jobs:
       # 如果是正式发布，上传到 GitHub Release
       - name: Upload to Release
         if: github.event_name == 'release'
-        uses: actions/upload-release-asset@v1
+        uses: softprops/action-gh-release@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          upload_url: ${{ github.event.release.upload_url }}
-          asset_path: build/CopyAttach-${{ steps.version.outputs.version }}.dmg
-          asset_name: CopyAttach-${{ steps.version.outputs.version }}.dmg
-          asset_content_type: application/x-apple-diskimage
+          files: build/CopyAttach-${{ steps.version.outputs.version }}.dmg
 
   # ──────────────────────────────────────────────
   # 创建 GitHub Release（手动 tag 推送时）
@@ -197,10 +194,10 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Download DMG artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           name: CopyAttach-${{ needs.build.outputs.version }}
           path: build/

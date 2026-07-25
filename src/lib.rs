@@ -48,3 +48,6 @@ pub mod stress;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, feature = "stress-test"))]
+mod bench_tests;
