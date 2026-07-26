@@ -12,24 +12,46 @@ let undoKeyNotification = Notification.Name("PopupUndoKeyPressed")
 let favoriteToggleNotification = Notification.Name("PopupFavoriteToggle")
 let arrowKeyFromSearchNotification = Notification.Name("PopupArrowKeyFromSearch")
 let focusSearchAndBackspaceNotification = Notification.Name("PopupFocusSearchAndBackspace")
+let escapeKeyNotification = Notification.Name("PopupEscapeKeyPressed")
 
 // MARK: - Popup Hosting View
 
 /// NSHostingView subclass that accepts first responder for keyboard events
 class PopupHostingView: NSHostingView<AnyView> {
+    /// Keep the outer 3 pt chrome as an explicit window-drag region. The
+    /// content area—including every history row—never forwards a mouse drag to
+    /// NSWindow, so an item drag cannot move the popup as well.
+    private let windowDragBorder: CGFloat = 3
+
     override var acceptsFirstResponder: Bool { true }
+
+    override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        guard point.x <= windowDragBorder || point.x >= bounds.maxX - windowDragBorder ||
+              point.y <= windowDragBorder || point.y >= bounds.maxY - windowDragBorder else {
+            super.mouseDown(with: event)
+            return
+        }
+        window?.performDrag(with: event)
+    }
 
     /// Local event monitor to intercept ←/→ from the empty search field
     /// before NSTextView swallows them for cursor movement.
     private var arrowMonitor: Any?
+    /// Escape must work while the embedded search NSTextView is first responder;
+    /// it therefore needs AppKit-level interception rather than relying on the
+    /// SwiftUI container's focus alone.
+    private var escapeMonitor: Any?
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         if window != nil {
             window?.makeFirstResponder(self)
             installArrowMonitor()
+            installEscapeMonitor()
         } else {
             removeArrowMonitor()
+            removeEscapeMonitor()
         }
     }
 
@@ -56,8 +78,25 @@ class PopupHostingView: NSHostingView<AnyView> {
         }
     }
 
+    private func installEscapeMonitor() {
+        removeEscapeMonitor()
+        escapeMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard event.keyCode == 53, self?.window?.isKeyWindow == true else { return event }
+            NotificationCenter.default.post(name: escapeKeyNotification, object: nil)
+            return nil
+        }
+    }
+
+    private func removeEscapeMonitor() {
+        if let monitor = escapeMonitor {
+            NSEvent.removeMonitor(monitor)
+            escapeMonitor = nil
+        }
+    }
+
     deinit {
         removeArrowMonitor()
+        removeEscapeMonitor()
     }
 
     /// Intercept ⌘Z before the search field's NSTextView swallows it for text undo.

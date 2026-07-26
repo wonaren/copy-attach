@@ -9,6 +9,15 @@ class HistoryPopupWindow: NSPanel {
     /// Non-key preview panel managed by the popup content.
     weak var previewPanel: PreviewWindow?
 
+    /// A native item drag necessarily hands key status to the destination app.
+    /// Suppress only that focus transition. Once the drag has ended, the next
+    /// deliberate click outside the popup dismisses it normally.
+    private var itemDragInProgress = false
+    private var awaitingPostDragInteraction = false
+    private var dragMouseUpMonitor: Any?
+    private var dragLocalMouseUpMonitor: Any?
+    private var postDragClickMonitor: Any?
+
     private init() {
         // Match show() — use visibleFrame so first-open position matches
         // subsequent repositioning. Using frame.size (full screen) would
@@ -34,10 +43,21 @@ class HistoryPopupWindow: NSPanel {
         self.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         self.hasShadow = true
         self.title = "CopyAttach"
-        self.isMovableByWindowBackground = true
+        // A panel with movable-background enabled wins the initial mouse drag
+        // before SwiftUI can start a row drag. PopupHostingView owns a narrow
+        // explicit border drag region instead, leaving list rows exclusively
+        // responsible for their native drag sessions.
+        self.isMovableByWindowBackground = false
     }
 
     override var canBecomeKey: Bool { return true }
+
+    func beginItemDrag() {
+        itemDragInProgress = true
+        awaitingPostDragInteraction = false
+        removePostDragClickMonitor()
+        installDragCompletionMonitors()
+    }
 
     func show() {
         debugLog("HistoryPopupWindow.show() called")
@@ -81,18 +101,86 @@ class HistoryPopupWindow: NSPanel {
             _ = hosting.becomeFirstResponder()
         }
 
-        // Auto-close when window loses key status (click outside)
+        NotificationCenter.default.removeObserver(self, name: NSWindow.didResignKeyNotification, object: self)
+        NotificationCenter.default.removeObserver(self, name: NSWindow.didBecomeKeyNotification, object: self)
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(didResignKey),
             name: NSWindow.didResignKeyNotification,
             object: self
         )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(didBecomeKey),
+            name: NSWindow.didBecomeKeyNotification,
+            object: self
+        )
+    }
+
+    @objc private func didBecomeKey(_ notification: Notification) {
+        // Returning to the popup consumes the retained post-drag state; a
+        // subsequent ordinary focus loss must again close immediately.
+        awaitingPostDragInteraction = false
+        removePostDragClickMonitor()
     }
 
     @objc private func didResignKey(_ notification: Notification) {
-        debugLog("Popup resigned key, animated close")
+        guard !itemDragInProgress && !awaitingPostDragInteraction else {
+            debugLog("Popup resigned key during item drag; awaiting next interaction")
+            return
+        }
+        debugLog("Popup resigned key; animated close")
         closeWithAnimation()
+    }
+
+    private func installDragCompletionMonitors() {
+        removeDragCompletionMonitors()
+        let complete: (NSEvent) -> NSEvent? = { [weak self] event in
+            self?.completeItemDrag()
+            return event
+        }
+        // A local monitor handles drops back inside this app; a global monitor
+        // handles drops in another application. Mouse events need no
+        // accessibility permission for global observation.
+        dragLocalMouseUpMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseUp, handler: complete)
+        dragMouseUpMonitor = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseUp) { [weak self] _ in
+            self?.completeItemDrag()
+        }
+    }
+
+    private func completeItemDrag() {
+        guard itemDragInProgress else { return }
+        itemDragInProgress = false
+        awaitingPostDragInteraction = true
+        removeDragCompletionMonitors()
+        installPostDragClickMonitor()
+    }
+
+    private func installPostDragClickMonitor() {
+        removePostDragClickMonitor()
+        postDragClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
+            // This monitor observes clicks in other applications only. A click
+            // back in this popup is handled by didBecomeKey instead.
+            self?.closeWithAnimation()
+        }
+    }
+
+    private func removeDragCompletionMonitors() {
+        if let monitor = dragMouseUpMonitor {
+            NSEvent.removeMonitor(monitor)
+            dragMouseUpMonitor = nil
+        }
+        if let monitor = dragLocalMouseUpMonitor {
+            NSEvent.removeMonitor(monitor)
+            dragLocalMouseUpMonitor = nil
+        }
+    }
+
+    private func removePostDragClickMonitor() {
+        if let monitor = postDragClickMonitor {
+            NSEvent.removeMonitor(monitor)
+            postDragClickMonitor = nil
+        }
     }
 
     /// Animated close: popup fades → preview fades → both close.
@@ -122,6 +210,11 @@ class HistoryPopupWindow: NSPanel {
 
     override func close() {
         NotificationCenter.default.removeObserver(self, name: NSWindow.didResignKeyNotification, object: self)
+        NotificationCenter.default.removeObserver(self, name: NSWindow.didBecomeKeyNotification, object: self)
+        itemDragInProgress = false
+        awaitingPostDragInteraction = false
+        removeDragCompletionMonitors()
+        removePostDragClickMonitor()
         previewPanel?.close()
         previewPanel = nil
         super.close()

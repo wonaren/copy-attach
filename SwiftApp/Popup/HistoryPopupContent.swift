@@ -149,12 +149,7 @@ struct HistoryPopupContent: View {
             return .handled
         }
         .onKeyPress(.escape) {
-            if showPreview {
-                closePreview()
-            } else {
-                searchText = ""
-                onClose()
-            }
+            handleEscape()
             return .handled
         }
         .onKeyPress(.space) {
@@ -219,6 +214,9 @@ struct HistoryPopupContent: View {
         }
         .onDisappear {
             closePreview()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: escapeKeyNotification)) { _ in
+            handleEscape()
         }
         .onReceive(NotificationCenter.default.publisher(for: controlKeyNotification)) { note in
             let pressed = (note.object as? Bool) ?? NSEvent.modifierFlags.contains(.control)
@@ -519,6 +517,15 @@ struct HistoryPopupContent: View {
 
     // MARK: - Preview Management
 
+    private func handleEscape() {
+        if showPreview {
+            closePreview()
+        } else {
+            searchText = ""
+            onClose()
+        }
+    }
+
     private func togglePreview() {
         if showPreview { closePreview() } else { openPreview() }
     }
@@ -661,6 +668,14 @@ struct HistoryPopupContent: View {
                             shortcutHint: shortcut,
                             isFavorite: backend.favoriteIds.contains(item.id)
                         )
+                        // Rows exclusively own drag gestures. PopupHostingView
+                        // exposes only its outer 3 pt border for moving the
+                        // window, so this native drag cannot move the popup.
+                        .onDrag {
+                            selectedIndex = index + 1
+                            popupWindow?.beginItemDrag()
+                            return ClipboardDragProvider.provider(for: item)
+                        }
                         .contentShape(Rectangle())
                         .onTapGesture {
                             let itemIdx = index + 1
