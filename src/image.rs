@@ -26,7 +26,7 @@ pub(crate) fn create_thumbnail(
     create_thumbnail_with_filter(width, height, rgba_bytes, max_dim, FilterType::Lanczos3)
 }
 
-/// Create a thumbnail with CatmullRom filtering.
+/// Create a thumbnail with `CatmullRom` filtering.
 /// Visually indistinguishable from Lanczos3 at small output sizes, ~2× faster.
 pub(crate) fn create_thumbnail_fast(
     width: u32, height: u32, rgba_bytes: &[u8], max_dim: u32,
@@ -36,7 +36,7 @@ pub(crate) fn create_thumbnail_fast(
 
 /// Ensure the thumbnail short side has at least this many pixels
 /// so that horizontally long images don't render blurry in the UI.
-/// Computed as max_dim/5 so it scales with the caller's max_dim
+/// Computed as `max_dim/5` so it scales with the caller's `max_dim`
 /// (e.g. 60px for the standard 300px max thumbnail dimension).
 const MIN_THUMB_SHORT_RATIO: u32 = 5;
 
@@ -50,7 +50,7 @@ fn create_thumbnail_with_filter(
     filter: FilterType,
 ) -> Option<(Vec<u8>, u32, u32)> {
     use image::{ImageBuffer, Rgba};
-    let scale_long = (max_dim as f64 / width.max(height) as f64).min(1.0);
+    let scale_long = (f64::from(max_dim) / f64::from(width.max(height))).min(1.0);
     if scale_long >= 1.0 {
         return encode_png(width, height, rgba_bytes).map(|d| (d, width, height));
     }
@@ -59,11 +59,11 @@ fn create_thumbnail_with_filter(
     // Without this, a 1920×100 image would produce a 300×16 thumbnail
     // that gets upscaled 3× in the UI row → blurry.
     let min_short = (max_dim / MIN_THUMB_SHORT_RATIO).max(1);
-    let scale = if (width.min(height) as f64 * scale_long) < min_short as f64 {
-        let by_short = (min_short as f64 / width.min(height) as f64).min(1.0);
-        let long_candidate = width.max(height) as f64 * by_short;
-        if long_candidate > MAX_THUMB_LONG as f64 {
-            MAX_THUMB_LONG as f64 / width.max(height) as f64
+    let scale = if (f64::from(width.min(height)) * scale_long) < f64::from(min_short) {
+        let by_short = (f64::from(min_short) / f64::from(width.min(height))).min(1.0);
+        let long_candidate = f64::from(width.max(height)) * by_short;
+        if long_candidate > f64::from(MAX_THUMB_LONG) {
+            f64::from(MAX_THUMB_LONG) / f64::from(width.max(height))
         } else {
             by_short
         }
@@ -71,8 +71,8 @@ fn create_thumbnail_with_filter(
         scale_long
     };
 
-    let new_w = (width as f64 * scale).round() as u32;
-    let new_h = (height as f64 * scale).round() as u32;
+    let new_w = (f64::from(width) * scale).round() as u32;
+    let new_h = (f64::from(height) * scale).round() as u32;
     let img = ImageBuffer::<Rgba<u8>, &[u8]>::from_raw(width, height, rgba_bytes)?;
     let thumb = image::imageops::resize(&img, new_w.max(1), new_h.max(1), filter);
     let mut output = Vec::new();

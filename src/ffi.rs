@@ -56,7 +56,7 @@ pub extern "C" fn clipboard_snapshot_count(snap: *const Snapshot) -> c_int {
 pub extern "C" fn clipboard_snapshot_item_type(snap: *const Snapshot, index: c_int) -> c_int {
     if snap.is_null() { return -1; }
     let snap = unsafe { &*snap };
-    snap.0.get(index as usize).map_or(-1, |item| item.content_type())
+    snap.0.get(index as usize).map_or(-1, super::types::ClipboardEntry::content_type)
 }
 
 #[no_mangle]
@@ -164,16 +164,13 @@ pub extern "C" fn clipboard_snapshot_release(snap: *mut Snapshot) {
 
 #[no_mangle]
 pub extern "C" fn clipboard_init() -> c_int {
-    let mut conn = match open_db() {
-        Some(c) => c,
-        None => {
-            eprintln!("CopyAttach: failed to open database, init failed");
-            return 0;
-        }
+    let mut conn = if let Some(c) = open_db() { c } else {
+        eprintln!("CopyAttach: failed to open database, init failed");
+        return 0;
     };
 
     if let Err(e) = ensure_history_table(&conn) {
-        eprintln!("CopyAttach: failed to create table: {}", e);
+        eprintln!("CopyAttach: failed to create table: {e}");
         return 0;
     }
 
@@ -351,7 +348,7 @@ pub extern "C" fn clipboard_get_count() -> c_int {
 }
 
 /// Returns a monotonically increasing counter that increments each time a
-/// Phase 2 image encoding finishes and updates db_id in memory. Swift uses
+/// Phase 2 image encoding finishes and updates `db_id` in memory. Swift uses
 /// this to detect thumbnail-ready items without a change in entry count.
 #[no_mangle]
 pub extern "C" fn clipboard_get_image_encoding_counter() -> u64 {
@@ -367,7 +364,7 @@ pub extern "C" fn clipboard_get_history_revision() -> u64 {
 #[no_mangle]
 pub extern "C" fn clipboard_get_item_type(index: c_int) -> c_int {
     let hist = backend().history.lock().unwrap();
-    hist.get(index as usize).map_or(-1, |item| item.content_type())
+    hist.get(index as usize).map_or(-1, super::types::ClipboardEntry::content_type)
 }
 
 #[no_mangle]
@@ -432,19 +429,16 @@ fn vec_to_raw(v: Vec<u8>) -> *mut u8 {
     ptr
 }
 
-/// Convert a Rust string to a CString for FFI return. If the string contains
+/// Convert a Rust string to a `CString` for FFI return. If the string contains
 /// an interior null byte, truncate at the first null and log a warning instead
 /// of silently returning an empty string.
 fn to_ffi_cstring(s: &str) -> *mut c_char {
-    match CString::new(s) {
-        Ok(cs) => cs.into_raw(),
-        Err(_) => {
-            let null_pos = s.find('\0').unwrap_or(s.len());
-            eprintln!("CopyAttach: FFI string contains interior null byte at offset {} (len={}), truncating",
-                      null_pos, s.len());
-            let truncated: String = s.chars().take_while(|&c| c != '\0').collect();
-            CString::new(truncated).unwrap_or_default().into_raw()
-        }
+    if let Ok(cs) = CString::new(s) { cs.into_raw() } else {
+        let null_pos = s.find('\0').unwrap_or(s.len());
+        eprintln!("CopyAttach: FFI string contains interior null byte at offset {} (len={}), truncating",
+                  null_pos, s.len());
+        let truncated: String = s.chars().take_while(|&c| c != '\0').collect();
+        CString::new(truncated).unwrap_or_default().into_raw()
     }
 }
 
@@ -472,13 +466,13 @@ pub extern "C" fn clipboard_get_image_thumb(index: c_int, out_len: *mut c_int) -
             ) {
                 Ok(data) => data,
                 Err(e) => {
-                    eprintln!("CopyAttach: failed to load thumbnail for db_id={}: {}", db_id, e);
+                    eprintln!("CopyAttach: failed to load thumbnail for db_id={db_id}: {e}");
                     return std::ptr::null_mut();
                 }
             }
         }
         Err(e) => {
-            eprintln!("CopyAttach: DB mutex poisoned loading thumbnail for db_id={}: {}", db_id, e);
+            eprintln!("CopyAttach: DB mutex poisoned loading thumbnail for db_id={db_id}: {e}");
             return std::ptr::null_mut();
         }
     };
@@ -489,7 +483,7 @@ pub extern "C" fn clipboard_get_image_thumb(index: c_int, out_len: *mut c_int) -
     vec_to_raw(thumb_data)
 }
 
-/// Load full image by array index. Checks in-memory cache first, then SQLite.
+/// Load full image by array index. Checks in-memory cache first, then `SQLite`.
 /// Caller must free with `clipboard_free_bytes()`.
 #[no_mangle]
 pub extern "C" fn clipboard_get_image_full(index: c_int, out_len: *mut c_int) -> *mut u8 {
@@ -517,13 +511,13 @@ pub extern "C" fn clipboard_get_image_full(index: c_int, out_len: *mut c_int) ->
                 ) {
                     Ok(data) => data,
                     Err(e) => {
-                        eprintln!("CopyAttach: failed to load full image for db_id={}: {}", db_id, e);
+                        eprintln!("CopyAttach: failed to load full image for db_id={db_id}: {e}");
                         return std::ptr::null_mut();
                     }
                 }
             }
             Err(e) => {
-                eprintln!("CopyAttach: DB mutex poisoned loading full image for db_id={}: {}", db_id, e);
+                eprintln!("CopyAttach: DB mutex poisoned loading full image for db_id={db_id}: {e}");
                 return std::ptr::null_mut();
             }
         }
@@ -537,8 +531,8 @@ pub extern "C" fn clipboard_get_image_full(index: c_int, out_len: *mut c_int) ->
 }
 
 /// Load full image directly by database row id.
-/// Checks in-memory cache first (history entry with matching db_id),
-/// falls back to SQLite load. Does NOT hold the history lock except
+/// Checks in-memory cache first (history entry with matching `db_id`),
+/// falls back to `SQLite` load. Does NOT hold the history lock except
 /// for the brief cache check.
 /// Caller must free with `clipboard_free_bytes()`.
 #[no_mangle]
@@ -571,13 +565,13 @@ pub extern "C" fn clipboard_get_image_full_by_db_id(db_id: i64, out_len: *mut c_
                     ) {
                         Ok(data) => data,
                         Err(e) => {
-                            eprintln!("CopyAttach: failed to load full image for db_id={}: {}", db_id, e);
+                            eprintln!("CopyAttach: failed to load full image for db_id={db_id}: {e}");
                             return std::ptr::null_mut();
                         }
                     }
                 }
                 Err(e) => {
-                    eprintln!("CopyAttach: DB mutex poisoned loading full image for db_id={}: {}", db_id, e);
+                    eprintln!("CopyAttach: DB mutex poisoned loading full image for db_id={db_id}: {e}");
                     return std::ptr::null_mut();
                 }
             }
@@ -606,13 +600,13 @@ pub extern "C" fn clipboard_get_image_thumb_by_db_id(db_id: i64, out_len: *mut c
             ) {
                 Ok(data) => data,
                 Err(e) => {
-                    eprintln!("CopyAttach: failed to load thumbnail for db_id={}: {}", db_id, e);
+                    eprintln!("CopyAttach: failed to load thumbnail for db_id={db_id}: {e}");
                     return std::ptr::null_mut();
                 }
             }
         }
         Err(e) => {
-            eprintln!("CopyAttach: DB mutex poisoned loading thumbnail for db_id={}: {}", db_id, e);
+            eprintln!("CopyAttach: DB mutex poisoned loading thumbnail for db_id={db_id}: {e}");
             return std::ptr::null_mut();
         }
     };
@@ -789,7 +783,7 @@ fn select_and_paste_impl(mut item: ClipboardEntry) -> c_int {
                 }
             }
             Err(e) => {
-                eprintln!("CopyAttach: DB mutex poisoned in select_and_paste persist: {} — entry stays with db_id=0", e);
+                eprintln!("CopyAttach: DB mutex poisoned in select_and_paste persist: {e} — entry stays with db_id=0");
             }
         }
     }
@@ -806,14 +800,12 @@ fn select_and_paste_impl(mut item: ClipboardEntry) -> c_int {
 
     let front_pid = crate::backend::try_backend()
         .and_then(|b| b.source_app.lock().ok())
-        .map(|src| src.pid)
-        .unwrap_or(0);
+        .map_or(0, |src| src.pid);
 
     let is_image = matches!(db_item, ClipboardEntry::Image { .. });
     let is_terminal = crate::backend::try_backend()
         .and_then(|b| b.source_app.lock().ok())
-        .map(|src| is_terminal_app(&src.bundle_id))
-        .unwrap_or(false);
+        .is_some_and(|src| is_terminal_app(&src.bundle_id));
     let use_ctrl = is_image
         && is_terminal
         && b.image_paste_use_ctrl_v.load(Ordering::Relaxed);
@@ -863,7 +855,7 @@ pub extern "C" fn clipboard_select_and_paste_by_id(entry_id: u64) -> c_int {
 }
 
 /// Load full text by entry ID (for on-demand preview loading).
-/// Returns null if entry_id is not found or is not a text entry.
+/// Returns null if `entry_id` is not found or is not a text entry.
 /// Caller must free with `clipboard_free_string()`.
 #[no_mangle]
 pub extern "C" fn clipboard_get_text_by_id(entry_id: u64) -> *mut c_char {
@@ -896,7 +888,7 @@ pub extern "C" fn clipboard_clear_history() {
         }
         if let Ok(conn) = b.db.lock() {
             if let Err(e) = conn.execute("DELETE FROM clipboard_history", []) {
-                eprintln!("CopyAttach: failed to clear DB history: {}", e);
+                eprintln!("CopyAttach: failed to clear DB history: {e}");
             }
         }
     }
@@ -928,7 +920,7 @@ pub extern "C" fn clipboard_delete_by_id(entry_id: u64) -> c_int {
     if let ClipboardEntry::Image { db_id, png_data, thumb_data, thumb_width, thumb_height, .. } = &mut entry {
         if png_data.is_empty() && *db_id != 0 {
             let conn = b.db.lock().unwrap_or_else(|e| {
-                panic!("CopyAttach: DB lock poisoned loading image for undo: {}", e);
+                panic!("CopyAttach: DB lock poisoned loading image for undo: {e}");
             });
             let loaded = conn.query_row(
                 "SELECT png_data, thumb_data, thumb_width, thumb_height FROM clipboard_history WHERE id = ?",
@@ -948,14 +940,14 @@ pub extern "C" fn clipboard_delete_by_id(entry_id: u64) -> c_int {
                     *thumb_height = th as u32;
                 }
                 Err(e) => {
-                    eprintln!("CopyAttach: failed to load image data from DB for undo: {}", e);
+                    eprintln!("CopyAttach: failed to load image data from DB for undo: {e}");
                     return 0;
                 }
             }
         } else if png_data.is_empty() && *db_id == 0 {
             // Phase 2 async persist has not completed — no image data exists in DB.
             // Reject deletion: the entry stays in history, user can retry later.
-            eprintln!("CopyAttach: cannot delete image entry {}: Phase 2 not yet complete (db_id=0)", entry_id);
+            eprintln!("CopyAttach: cannot delete image entry {entry_id}: Phase 2 not yet complete (db_id=0)");
             return 0;
         }
     }
@@ -965,7 +957,7 @@ pub extern "C" fn clipboard_delete_by_id(entry_id: u64) -> c_int {
         let conn = match b.db.lock() {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("CopyAttach: DB lock poisoned deleting entry {}: {}", entry_id, e);
+                eprintln!("CopyAttach: DB lock poisoned deleting entry {entry_id}: {e}");
                 return 0;
             }
         };
@@ -1002,7 +994,7 @@ pub extern "C" fn clipboard_delete_by_id(entry_id: u64) -> c_int {
                 }
             }
         } {
-            eprintln!("CopyAttach: failed to delete entry {} from DB: {}", entry_id, e);
+            eprintln!("CopyAttach: failed to delete entry {entry_id} from DB: {e}");
             return 0;
         }
     }
@@ -1064,7 +1056,7 @@ pub extern "C" fn clipboard_undo_delete() -> c_int {
     // DB lock failure is fatal — entry has already been popped from the stack.
     // Panic so the crash report reveals the poisoning rather than silently losing data.
     let conn = b.db.lock().unwrap_or_else(|e| {
-        panic!("CopyAttach: DB lock poisoned during undo: {}", e);
+        panic!("CopyAttach: DB lock poisoned during undo: {e}");
     });
     let png_for_db = match &entry {
         ClipboardEntry::Image { png_data, .. } if !png_data.is_empty() => {
@@ -1119,12 +1111,12 @@ pub extern "C" fn clipboard_undo_delete() -> c_int {
 #[no_mangle]
 pub extern "C" fn clipboard_can_undo() -> c_int {
     match crate::backend::try_backend() {
-        Some(b) => !b.deleted_stack.lock().unwrap().is_empty() as c_int,
+        Some(b) => c_int::from(!b.deleted_stack.lock().unwrap().is_empty()),
         None => 0,
     }
 }
 
-/// Returns the entry_id of the most recently undo-restored entry, or 0 if none.
+/// Returns the `entry_id` of the most recently undo-restored entry, or 0 if none.
 /// Used by Swift to locate the restored entry in a snapshot despite monitor
 /// thread races inserting new content at position 0.
 #[no_mangle]
@@ -1151,7 +1143,7 @@ pub extern "C" fn clipboard_trim_oldest_percent(percent: i32) -> c_int {
         if total == 0 {
             return 0;
         }
-        let count = ((total as f64 * percent as f64 / 100.0).ceil()) as usize;
+        let count = ((total as f64 * f64::from(percent) / 100.0).ceil()) as usize;
         count.min(total)
     };
 
@@ -1164,11 +1156,11 @@ pub extern "C" fn clipboard_trim_oldest_percent(percent: i32) -> c_int {
                     SELECT id FROM clipboard_history ORDER BY id ASC LIMIT ?)",
                 rusqlite::params![count as i64],
             ) {
-                eprintln!("CopyAttach: failed to trim DB by {} entries: {}", count, e);
+                eprintln!("CopyAttach: failed to trim DB by {count} entries: {e}");
             }
         }
         Err(e) => {
-            eprintln!("CopyAttach: DB mutex poisoned in trim_oldest_percent: {}", e);
+            eprintln!("CopyAttach: DB mutex poisoned in trim_oldest_percent: {e}");
         }
     }
 
@@ -1194,8 +1186,7 @@ pub extern "C" fn clipboard_trim_oldest_percent(percent: i32) -> c_int {
 #[no_mangle]
 pub extern "C" fn clipboard_get_cleanup_threshold() -> i32 {
     crate::backend::try_backend()
-        .map(|b| b.cleanup_threshold.load(Ordering::Relaxed) as i32)
-        .unwrap_or(DEFAULT_CLEANUP_THRESHOLD as i32)
+        .map_or(DEFAULT_CLEANUP_THRESHOLD as i32, |b| b.cleanup_threshold.load(Ordering::Relaxed) as i32)
 }
 
 /// Clamped to [100, 10000]. Immediately trims both DB and in-memory history.
@@ -1242,7 +1233,7 @@ pub extern "C" fn clipboard_get_storage_size() -> i64 {
     let conn = match b.db.lock() {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("CopyAttach: DB mutex poisoned in get_storage_size: {}", e);
+            eprintln!("CopyAttach: DB mutex poisoned in get_storage_size: {e}");
             return 0;
         }
     };
@@ -1253,7 +1244,7 @@ pub extern "C" fn clipboard_get_storage_size() -> i64 {
     ) {
         Ok(size) => size,
         Err(e) => {
-            eprintln!("CopyAttach: failed to query storage size: {}", e);
+            eprintln!("CopyAttach: failed to query storage size: {e}");
             0
         }
     }
@@ -1262,7 +1253,7 @@ pub extern "C" fn clipboard_get_storage_size() -> i64 {
 #[no_mangle]
 pub extern "C" fn clipboard_check_permission() -> c_int {
     #[cfg(target_os = "macos")]
-    { macos::check_permission() as c_int }
+    { c_int::from(macos::check_permission()) }
     #[cfg(not(target_os = "macos"))]
     { 1 }
 }

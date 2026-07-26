@@ -26,7 +26,28 @@ struct InlineSettingsView: View {
     @State private var imagePasteUseCtrlV = UserDefaults.standard.bool(forKey: "ImagePasteUseCtrlV")
     @State private var showDragGuide = false
     @State private var isHoveringDragIcon = false
+    @State private var updateState: UpdateCheckState = .idle
     @Environment(\.appTheme) private var theme
+
+    // MARK: - Update Check
+
+    private enum UpdateCheckState: Equatable, Identifiable {
+        case idle
+        case checking
+        case upToDate(currentVersion: String)
+        case updateAvailable(latestVersion: String, releaseURL: URL, isDowngrade: Bool)
+        case error(String)
+
+        var id: String {
+            switch self {
+            case .idle: return "idle"
+            case .checking: return "checking"
+            case .upToDate: return "upToDate"
+            case .updateAvailable: return "updateAvailable"
+            case .error: return "error"
+            }
+        }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -908,18 +929,70 @@ struct InlineSettingsView: View {
                     .frame(maxWidth: 300)
 
                 HStack(spacing: 12) {
-                    Button("检查更新", action: checkForUpdates)
-                        .font(.system(size: 12, weight: .medium))
-                        .padding(.horizontal, 16).padding(.vertical, 8)
-                        .background(Color.accentColor)
-                        .foregroundColor(.white)
-                        .cornerRadius(6)
-                        .buttonStyle(.plain)
+                    Button(action: checkForUpdates) {
+                        if case .checking = updateState {
+                            HStack(spacing: 6) {
+                                ProgressView()
+                                    .controlSize(.small)
+                                    .scaleEffect(0.8)
+                                Text("检查中…")
+                                    .font(.system(size: 12, weight: .medium))
+                            }
+                        } else {
+                            Text("检查更新")
+                                .font(.system(size: 12, weight: .medium))
+                        }
+                    }
+                    .disabled(updateState == .checking)
+                    .padding(.horizontal, 16).padding(.vertical, 8)
+                    .background(Color.accentColor)
+                    .foregroundColor(.white)
+                    .cornerRadius(6)
+                    .buttonStyle(.plain)
                 }
                 .padding(.top, 4)
             }
             .padding(40)
             .frame(maxWidth: .infinity)
+        }
+        .alert(item: alertBinding) { result in
+            switch result {
+            case .upToDate(let version):
+                return Alert(
+                    title: Text("已是最新版本"),
+                    message: Text("当前版本 v\(version) 已是最新"),
+                    dismissButton: .default(Text("好的"))
+                )
+            case .updateAvailable(let latestVersion, let releaseURL, let isDowngrade):
+                if isDowngrade {
+                    return Alert(
+                        title: Text("正式版可用 v\(latestVersion)"),
+                        message: Text("当前为开发版本 v\(appVersion)\n是否切换到正式版？"),
+                        primaryButton: .default(Text("前往下载")) {
+                            NSWorkspace.shared.open(releaseURL)
+                        },
+                        secondaryButton: .cancel(Text("继续使用开发版"))
+                    )
+                } else {
+                    return Alert(
+                        title: Text("发现新版本 v\(latestVersion)"),
+                        message: Text("当前版本：v\(appVersion)\n是否前往下载页面？"),
+                        primaryButton: .default(Text("前往下载")) {
+                            NSWorkspace.shared.open(releaseURL)
+                        },
+                        secondaryButton: .cancel(Text("取消"))
+                    )
+                }
+            case .error(let message):
+                return Alert(
+                    title: Text("检查更新失败"),
+                    message: Text(message),
+                    dismissButton: .default(Text("好的"))
+                )
+            case .idle, .checking:
+                // Should never be shown — alertBinding filters these out.
+                return Alert(title: Text(""))
+            }
         }
     }
 
@@ -973,56 +1046,94 @@ struct InlineSettingsView: View {
         return img
     }
 
-    private var repoURL: URL { URL(string: "https://github.com/wonaren/copy-attach")! }
+    private var repoURL: URL { URL(string: "https://github.com/wonaren/copyattach-release")! }
     private var authorGitHubURL: URL { URL(string: "https://github.com/wonaren")! }
 
     private func openWebsite() {
         NSWorkspace.shared.open(repoURL)
     }
 
+    private var alertBinding: Binding<UpdateCheckState?> {
+        Binding {
+            if case .idle = updateState { return nil }
+            if case .checking = updateState { return nil }
+            return updateState
+        } set: { _ in
+            updateState = .idle
+        }
+    }
+
+    /// Strip pre-release suffix (e.g. "-dev") for version comparison.
+    /// "0.82.0-dev" → "0.82.0" so that a released "0.82.0" is correctly
+    /// detected as newer.
+    private static func stripDevSuffix(_ version: String) -> String {
+        version.components(separatedBy: "-").first ?? version
+    }
+    private func stripDevSuffix(_ version: String) -> String { Self.stripDevSuffix(version) }
+
     private func checkForUpdates() {
-        let url = URL(string: "https://api.github.com/repos/wonaren/copy-attach/releases/latest")!
-        URLSession.shared.dataTask(with: url) { [self] data, _, error in
+        guard case .idle = updateState else { return }
+        updateState = .checking
+
+        let url = URL(string: "https://api.github.com/repos/wonaren/copyattach-release/releases/latest")!
+        var request = URLRequest(url: url)
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        request.timeoutInterval = 15
+
+        URLSession.shared.dataTask(with: request) { [self] data, response, error in
             DispatchQueue.main.async {
                 if let error {
-                    let alert = NSAlert()
-                    alert.messageText = "检查更新失败"
-                    alert.informativeText = "无法连接到更新服务器：\(error.localizedDescription)"
-                    alert.alertStyle = .warning
-                    alert.runModal()
+                    updateState = .error("无法连接到更新服务器：\(error.localizedDescription)")
                     return
                 }
+
+                guard let httpResponse = response as? HTTPURLResponse else {
+                    updateState = .error("无效的服务器响应")
+                    return
+                }
+
+                switch httpResponse.statusCode {
+                case 200:
+                    break // continue parsing
+                case 404:
+                    updateState = .error("未找到版本信息（仓库中尚无正式 Release）")
+                    return
+                case 403:
+                    updateState = .error("API 请求过于频繁，请稍后再试")
+                    return
+                default:
+                    updateState = .error("服务器返回错误 (HTTP \(httpResponse.statusCode))")
+                    return
+                }
+
                 guard let data,
                       let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                       let tagName = json["tag_name"] as? String else {
-                    let alert = NSAlert()
-                    alert.messageText = "检查更新失败"
-                    alert.informativeText = "无法解析更新信息"
-                    alert.alertStyle = .warning
-                    alert.runModal()
+                    updateState = .error("无法解析更新信息")
                     return
                 }
 
                 let latestVersion = tagName.hasPrefix("v") ? String(tagName.dropFirst()) : tagName
                 let currentVersion = self.appVersion
+                let currentBase = stripDevSuffix(currentVersion)
+                let isDev = currentVersion != currentBase
 
-                if latestVersion.compare(currentVersion, options: .numeric) == .orderedDescending {
-                    let alert = NSAlert()
-                    alert.messageText = "发现新版本 v\(latestVersion)"
-                    alert.informativeText = "当前版本：v\(currentVersion)\n是否前往下载页面？"
-                    alert.alertStyle = .informational
-                    alert.addButton(withTitle: "前往下载")
-                    alert.addButton(withTitle: "取消")
-                    if alert.runModal() == .alertFirstButtonReturn {
-                        self.openWebsite()
-                    }
+                let releaseURL: URL
+                if let htmlURL = json["html_url"] as? String, let url = URL(string: htmlURL) {
+                    releaseURL = url
                 } else {
-                    let alert = NSAlert()
-                    alert.messageText = "已是最新版本"
-                    alert.informativeText = "当前版本 v\(currentVersion) 已是最新"
-                    alert.alertStyle = .informational
-                    alert.addButton(withTitle: "好的")
-                    alert.runModal()
+                    releaseURL = URL(string: "https://github.com/wonaren/copyattach-release/releases/tag/v\(latestVersion)")!
+                }
+
+                if latestVersion.compare(currentBase, options: .numeric) == .orderedDescending {
+                    // Normal upgrade: a newer version exists
+                    updateState = .updateAvailable(latestVersion: latestVersion, releaseURL: releaseURL, isDowngrade: false)
+                } else if isDev {
+                    // Dev → stable: offer the stable release even if it's the same
+                    // version number or slightly behind (downgrade from dev)
+                    updateState = .updateAvailable(latestVersion: latestVersion, releaseURL: releaseURL, isDowngrade: true)
+                } else {
+                    updateState = .upToDate(currentVersion: currentVersion)
                 }
             }
         }.resume()

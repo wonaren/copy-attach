@@ -1,15 +1,15 @@
 //! Background clipboard monitor thread.
 //!
-//! Polls the system clipboard every 300ms, detects new content via NSPasteboard
+//! Polls the system clipboard every 300ms, detects new content via `NSPasteboard`
 //! `changeCount` (lightweight) + content comparison.
 //!
 //! ## Image capture pipeline (two-phase)
 //!
 //! **Phase 1 (sync — monitor thread)**:
-//!   hash → fast thumbnail (CatmullRom) → update in-memory history → set last_seen
+//!   hash → fast thumbnail (`CatmullRom`) → update in-memory history → set `last_seen`
 //!
 //! **Phase 2 (async — background thread)**:
-//!   full PNG encode (expensive) → write-through SQLite → update db_id in history
+//!   full PNG encode (expensive) → write-through `SQLite` → update `db_id` in history
 //!
 //! This split keeps the monitor thread responsive: 4K capture blocks for ~1s
 //! instead of ~5s, and changeCount checks continue to work during encoding.
@@ -35,7 +35,7 @@ const THUMBNAIL_MAX_DIM: u32 = 300;
 ///
 /// Accepts raw RGBA pixel data as a slice (borrowed for Phase 1, cloned only
 /// for the async Phase 2 closure). This avoids an extra allocation on the
-/// clipboard path where img_data.bytes is already live.
+/// clipboard path where `img_data.bytes` is already live.
 #[allow(clippy::too_many_arguments)]
 fn ingest_rgba_image(
     rgba: &[u8],
@@ -59,19 +59,16 @@ fn ingest_rgba_image(
     // content is therefore a genuine re-copy and must refresh its history use.
     if width > 0 && height > 0 {
         // ── Phase 1 (sync): fast thumbnail → in-memory history ──
-        let (thumb_data, thumb_w, thumb_h) = match create_thumbnail_fast(width, height, rgba, THUMBNAIL_MAX_DIM) {
-            Some(t) => t,
-            None => {
-                // Thumbnail creation failed (likely corrupt pixel data). Create
-                // the entry anyway — Phase 2 full encode will determine if the
-                // image data is truly broken and remove the entry if so.
-                // Set last_seen to avoid an infinite retry loop.
-                eprintln!("CopyAttach: thumbnail creation failed for image {}x{} — capturing without thumbnail", width, height);
-                *last_seen_image_hash.lock().unwrap() = Some(hash);
-                *last_seen_text.lock().unwrap() = None;
-                // Fall through: create entry with empty thumbnail, continue to Phase 2
-                (Vec::new(), 0u32, 0u32)
-            }
+        let (thumb_data, thumb_w, thumb_h) = if let Some(t) = create_thumbnail_fast(width, height, rgba, THUMBNAIL_MAX_DIM) { t } else {
+            // Thumbnail creation failed (likely corrupt pixel data). Create
+            // the entry anyway — Phase 2 full encode will determine if the
+            // image data is truly broken and remove the entry if so.
+            // Set last_seen to avoid an infinite retry loop.
+            eprintln!("CopyAttach: thumbnail creation failed for image {width}x{height} — capturing without thumbnail");
+            *last_seen_image_hash.lock().unwrap() = Some(hash);
+            *last_seen_text.lock().unwrap() = None;
+            // Fall through: create entry with empty thumbnail, continue to Phase 2
+            (Vec::new(), 0u32, 0u32)
         };
 
         let item = ClipboardEntry::Image {
@@ -112,20 +109,17 @@ fn ingest_rgba_image(
         let thumb_async = thumb_data;
 
         thread::spawn(move || {
-            let full_png = match encode_png(width, height, &rgba_owned) {
-                Some(png) => png,
-                None => {
-                    eprintln!("CopyAttach: failed to encode full-size PNG for image {}x{} — removing broken entry from history", width, height);
-                    // Remove the entry created in Phase 1 — without PNG data it can
-                    // never be pasted. The user sees the entry appear and disappear,
-                    // which is better than a ghost entry that silently fails on paste.
-                    let mut hist = history.lock().unwrap();
-                    hist.retain(|e| match e {
-                        ClipboardEntry::Image { hash: h, .. } => *h != item_hash,
-                        _ => true,
-                    });
-                    return;
-                }
+            let full_png = if let Some(png) = encode_png(width, height, &rgba_owned) { png } else {
+                eprintln!("CopyAttach: failed to encode full-size PNG for image {width}x{height} — removing broken entry from history");
+                // Remove the entry created in Phase 1 — without PNG data it can
+                // never be pasted. The user sees the entry appear and disappear,
+                // which is better than a ghost entry that silently fails on paste.
+                let mut hist = history.lock().unwrap();
+                hist.retain(|e| match e {
+                    ClipboardEntry::Image { hash: h, .. } => *h != item_hash,
+                    _ => true,
+                });
+                return;
             };
 
             // Lock history FIRST to find and clone the item (consistent lock order)
@@ -141,7 +135,7 @@ fn ingest_rgba_image(
                 let conn = match db.lock() {
                     Ok(c) => c,
                     Err(e) => {
-                        eprintln!("CopyAttach: DB mutex poisoned in Phase 2 image persist: {}", e);
+                        eprintln!("CopyAttach: DB mutex poisoned in Phase 2 image persist: {e}");
                         return;
                     }
                 };
@@ -150,7 +144,7 @@ fn ingest_rgba_image(
                     Some(&full_png),
                     Some((&thumb_async, thumb_w, thumb_h)),
                 ).is_err() {
-                    eprintln!("CopyAttach: Phase 2 DB insert failed for image {}x{} — entry stays with db_id=0", width, height);
+                    eprintln!("CopyAttach: Phase 2 DB insert failed for image {width}x{height} — entry stays with db_id=0");
                     return;
                 }
                 delete_matching_entry(&conn, &db_item);
@@ -210,7 +204,7 @@ fn try_ingest_image_files(
         let (w, h) = rgba.dimensions();
         let pixels = rgba.into_raw();
 
-        eprintln!("CopyAttach: captured image file: {path} ({}x{})", w, h);
+        eprintln!("CopyAttach: captured image file: {path} ({w}x{h})");
 
         ingest_rgba_image(
             &pixels, w, h,
@@ -381,7 +375,7 @@ pub(crate) fn clipboard_monitor(
                                 }
                             }
                             Err(e) => {
-                                eprintln!("CopyAttach: DB mutex poisoned in text capture persist: {}", e);
+                                eprintln!("CopyAttach: DB mutex poisoned in text capture persist: {e}");
                                 // Entry already in in-memory history. DB persistence
                                 // skipped; entry stays with db_id=0 until DB recovers.
                             }

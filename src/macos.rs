@@ -73,19 +73,13 @@ pub(crate) fn pasteboard_file_paths() -> Vec<String> {
 
         // NSURL + NSString always exist in the ObjC runtime on macOS.
         // Return empty if somehow absent — don't fall back to raw file:// strings.
-        let nsurl_cls = match objc2::runtime::AnyClass::get(c"NSURL") {
-            Some(c) => c,
-            None => {
-                eprintln!("CopyAttach: NSURL class not found in ObjC runtime, cannot convert file URLs");
-                return vec![];
-            }
+        let nsurl_cls = if let Some(c) = objc2::runtime::AnyClass::get(c"NSURL") { c } else {
+            eprintln!("CopyAttach: NSURL class not found in ObjC runtime, cannot convert file URLs");
+            return vec![];
         };
-        let nsstr_cls = match objc2::runtime::AnyClass::get(c"NSString") {
-            Some(c) => c,
-            None => {
-                eprintln!("CopyAttach: NSString class not found in ObjC runtime, cannot convert file URLs");
-                return vec![];
-            }
+        let nsstr_cls = if let Some(c) = objc2::runtime::AnyClass::get(c"NSString") { c } else {
+            eprintln!("CopyAttach: NSString class not found in ObjC runtime, cannot convert file URLs");
+            return vec![];
         };
 
         let mut paths = Vec::with_capacity(url_strings.len());
@@ -152,7 +146,7 @@ unsafe fn pasteboard_file_url_strings() -> Vec<String> {
     };
     let c_bytes = b"public.file-url\0";
     let file_url_type: *mut objc2::runtime::NSObject =
-        msg_send![nsstr_cls, stringWithUTF8String: c_bytes.as_ptr() as *const i8];
+        msg_send![nsstr_cls, stringWithUTF8String: c_bytes.as_ptr().cast::<i8>()];
     if file_url_type.is_null() {
         return vec![];
     }
@@ -182,14 +176,14 @@ unsafe fn pasteboard_file_url_strings() -> Vec<String> {
     results
 }
 
-/// Simulate Cmd+V key press via CGEventPostToPid.
+/// Simulate Cmd+V key press via `CGEventPostToPid`.
 /// `pid` must be the frontmost application's process identifier (> 0).
 /// Returns `false` if pid is 0 or event creation fails.
 pub(crate) fn simulate_cmd_v(pid: i32) -> bool {
     simulate_paste_v(pid, false)
 }
 
-/// Simulate paste key press (V key) via CGEventPostToPid.
+/// Simulate paste key press (V key) via `CGEventPostToPid`.
 /// When `use_ctrl` is true, sends Ctrl+V; otherwise sends Cmd+V.
 /// `pid` must be the frontmost application's process identifier (> 0).
 /// Returns `false` if pid is 0 or event creation fails.
@@ -202,23 +196,20 @@ pub(crate) fn simulate_paste_v(pid: i32, use_ctrl: bool) -> bool {
     let source = source.as_deref();
     let key_down = CGEvent::new_keyboard_event(source, 9, true);
     let key_up = CGEvent::new_keyboard_event(source, 9, false);
-    match (key_down, key_up) {
-        (Some(kd), Some(ku)) => {
-            let flags = if use_ctrl {
-                CGEventFlags::MaskControl
-            } else {
-                CGEventFlags::MaskCommand
-            };
-            CGEvent::set_flags(Some(&*kd), flags);
-            CGEvent::set_flags(Some(&*ku), flags);
+    if let (Some(kd), Some(ku)) = (key_down, key_up) {
+        let flags = if use_ctrl {
+            CGEventFlags::MaskControl
+        } else {
+            CGEventFlags::MaskCommand
+        };
+        CGEvent::set_flags(Some(&*kd), flags);
+        CGEvent::set_flags(Some(&*ku), flags);
 
-            CGEvent::post_to_pid(pid, Some(&*kd));
-            CGEvent::post_to_pid(pid, Some(&*ku));
-            true
-        }
-        _ => {
-            eprintln!("CopyAttach: failed to create CGEvent for paste simulation");
-            false
-        }
+        CGEvent::post_to_pid(pid, Some(&*kd));
+        CGEvent::post_to_pid(pid, Some(&*ku));
+        true
+    } else {
+        eprintln!("CopyAttach: failed to create CGEvent for paste simulation");
+        false
     }
 }

@@ -1,4 +1,4 @@
-//! 🗂️ CopyAttach - Rust Backend Library
+//! 🗂️ `CopyAttach` - Rust Backend Library
 //!
 //! Provides clipboard monitoring, history management, and C FFI for use by a Swift frontend.
 //!

@@ -11,7 +11,7 @@ pub(crate) struct SourceApp {
 /// A clipboard history entry.
 ///
 /// Each entry carries a stable monotonic `id` (survives reordering) and a
-/// SQLite `db_id` for on-demand image/thumb loading from the database.
+/// `SQLite` `db_id` for on-demand image/thumb loading from the database.
 #[derive(Clone, Debug)]
 pub(crate) enum ClipboardEntry {
     Text {
@@ -21,7 +21,7 @@ pub(crate) enum ClipboardEntry {
         timestamp: u64,
         source_name: String,
         source_bundle_id: String,
-        /// SQLite row id for DB-level operations (0 = unset).
+        /// `SQLite` row id for DB-level operations (0 = unset).
         db_id: i64,
     },
     Image {
@@ -37,7 +37,7 @@ pub(crate) enum ClipboardEntry {
         timestamp: u64,
         source_name: String,
         source_bundle_id: String,
-        /// SQLite row id for loading full image on demand (0 = unset).
+        /// `SQLite` row id for loading full image on demand (0 = unset).
         db_id: i64,
     },
 }
@@ -45,15 +45,13 @@ pub(crate) enum ClipboardEntry {
 impl ClipboardEntry {
     pub(crate) fn entry_id(&self) -> u64 {
         match self {
-            ClipboardEntry::Text { id, .. } => *id,
-            ClipboardEntry::Image { id, .. } => *id,
+            ClipboardEntry::Text { id, .. } | ClipboardEntry::Image { id, .. } => *id,
         }
     }
 
     pub(crate) fn timestamp(&self) -> u64 {
         match self {
-            ClipboardEntry::Text { timestamp, .. } => *timestamp,
-            ClipboardEntry::Image { timestamp, .. } => *timestamp,
+            ClipboardEntry::Text { timestamp, .. } | ClipboardEntry::Image { timestamp, .. } => *timestamp,
         }
     }
 
@@ -66,15 +64,13 @@ impl ClipboardEntry {
 
     pub(crate) fn source_name(&self) -> &str {
         match self {
-            ClipboardEntry::Text { source_name, .. } => source_name,
-            ClipboardEntry::Image { source_name, .. } => source_name,
+            ClipboardEntry::Text { source_name, .. } | ClipboardEntry::Image { source_name, .. } => source_name,
         }
     }
 
     pub(crate) fn source_bundle_id(&self) -> &str {
         match self {
-            ClipboardEntry::Text { source_bundle_id, .. } => source_bundle_id,
-            ClipboardEntry::Image { source_bundle_id, .. } => source_bundle_id,
+            ClipboardEntry::Text { source_bundle_id, .. } | ClipboardEntry::Image { source_bundle_id, .. } => source_bundle_id,
         }
     }
 
@@ -88,13 +84,13 @@ impl ClipboardEntry {
                 let char_count: usize = first.chars().count();
                 if char_count > 60 {
                     let truncated: String = first.chars().take(59).collect();
-                    format!("{}…", truncated)
+                    format!("{truncated}…")
                 } else {
                     first.to_string()
                 }
             }
             ClipboardEntry::Image { width, height, .. } => {
-                format!("Image ({}×{})", width, height)
+                format!("Image ({width}×{height})")
             }
         }
     }

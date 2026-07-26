@@ -1,4 +1,4 @@
-//! SQLite persistence layer — write-through DB for clipboard history.
+//! `SQLite` persistence layer — write-through DB for clipboard history.
 //!
 //! Schema: `clipboard_history` with columns for both text and image entries.
 //! All mutations go through write-through: the monitor thread and the
@@ -17,11 +17,11 @@ pub(crate) fn get_persist_dir() -> Option<PathBuf> {
     Some(dir)
 }
 
-/// Open (or create) the SQLite database with mmap and a small page cache.
+/// Open (or create) the `SQLite` database with mmap and a small page cache.
 pub(crate) fn open_db() -> Option<Connection> {
     let db_path = get_persist_dir()?.join("history.db");
     let conn = Connection::open(&db_path).map_err(|e| {
-        eprintln!("CopyAttach: failed to open database: {}", e);
+        eprintln!("CopyAttach: failed to open database: {e}");
     }).ok()?;
     // Use mmap for BLOB reads + minimal SQLite page cache (512KB)
     let _ = conn.execute_batch(
@@ -62,7 +62,7 @@ pub(crate) fn ensure_history_table(conn: &Connection) -> Result<(), rusqlite::Er
             .prepare("SELECT entry_id FROM clipboard_history LIMIT 0")
             .is_ok();
         if !has_column {
-            eprintln!("CopyAttach: failed to add entry_id column: {}", e);
+            eprintln!("CopyAttach: failed to add entry_id column: {e}");
             return Err(e);
         }
     }
@@ -80,7 +80,7 @@ pub(crate) fn ensure_history_table(conn: &Connection) -> Result<(), rusqlite::Er
 }
 
 /// Load up to `threshold` entries from the DB, newest first.
-/// Image entries carry only metadata (png_data is empty, loaded on demand).
+/// Image entries carry only metadata (`png_data` is empty, loaded on demand).
 pub(crate) fn load_history_from_db(conn: &Connection, threshold: usize) -> Vec<ClipboardEntry> {
     let mut stmt = match conn.prepare(
         "SELECT id, entry_id, entry_type, text,
@@ -93,7 +93,7 @@ pub(crate) fn load_history_from_db(conn: &Connection, threshold: usize) -> Vec<C
     ) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("CopyAttach: failed to prepare load query: {}", e);
+            eprintln!("CopyAttach: failed to prepare load query: {e}");
             return Vec::new();
         }
     };
@@ -116,7 +116,7 @@ pub(crate) fn load_history_from_db(conn: &Connection, threshold: usize) -> Vec<C
     }) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("CopyAttach: failed to query history: {}", e);
+            eprintln!("CopyAttach: failed to query history: {e}");
             return Vec::new();
         }
     };
@@ -159,13 +159,13 @@ pub(crate) fn load_history_from_db(conn: &Connection, threshold: usize) -> Vec<C
                 db_id,
             }),
             _ => {
-                eprintln!("CopyAttach: unknown entry_type {} in DB, skipped", entry_type);
+                eprintln!("CopyAttach: unknown entry_type {entry_type} in DB, skipped");
                 skipped += 1;
             }
         }
     }
     if skipped > 0 {
-        eprintln!("CopyAttach: skipped {} corrupt or unknown row(s) during history load", skipped);
+        eprintln!("CopyAttach: skipped {skipped} corrupt or unknown row(s) during history load");
     }
     result
 }
@@ -187,24 +187,18 @@ pub(crate) fn insert_entry_to_db(
                      timestamp, source_name, source_bundle_id, entry_id)
                  VALUES (0, ?1, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?2, ?3, ?4, ?5)",
                 rusqlite::params![text, *timestamp as i64, source_name, source_bundle_id, *id as i64],
-            ).map(|_| ()).map_err(|e| { eprintln!("CopyAttach: failed to insert text entry: {}", e); })
+            ).map(|_| ()).map_err(|e| { eprintln!("CopyAttach: failed to insert text entry: {e}"); })
         }
         ClipboardEntry::Image { width, height,
                                 thumb_width: _, thumb_height: _, hash,
                                 timestamp, source_name, source_bundle_id, id, .. } => {
-            let png = match image_png {
-                Some(data) => data,
-                None => {
-                    eprintln!("CopyAttach: cannot insert image entry: missing png_data");
-                    return Err(());
-                }
+            let png = if let Some(data) = image_png { data } else {
+                eprintln!("CopyAttach: cannot insert image entry: missing png_data");
+                return Err(());
             };
-            let (thumb_data, tw, th) = match image_thumb {
-                Some(t) => t,
-                None => {
-                    eprintln!("CopyAttach: cannot insert image entry: missing thumb_data");
-                    return Err(());
-                }
+            let (thumb_data, tw, th) = if let Some(t) = image_thumb { t } else {
+                eprintln!("CopyAttach: cannot insert image entry: missing thumb_data");
+                return Err(());
             };
             conn.execute(
                 "INSERT INTO clipboard_history
@@ -213,13 +207,13 @@ pub(crate) fn insert_entry_to_db(
                      timestamp, source_name, source_bundle_id, entry_id)
                  VALUES (1, NULL, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 rusqlite::params![
-                    png, *width as i64, *height as i64,
-                    thumb_data, tw as i64, th as i64,
+                    png, i64::from(*width), i64::from(*height),
+                    thumb_data, i64::from(tw), i64::from(th),
                     *hash as i64, *timestamp as i64,
                     source_name, source_bundle_id,
                     *id as i64,
                 ],
-            ).map(|_| ()).map_err(|e| { eprintln!("CopyAttach: failed to insert image entry: {}", e); })
+            ).map(|_| ()).map_err(|e| { eprintln!("CopyAttach: failed to insert image entry: {e}"); })
         }
     };
     result
@@ -251,7 +245,7 @@ pub(crate) fn delete_matching_entry(conn: &Connection, entry: &ClipboardEntry) {
         }
     };
     if let Err(e) = result {
-        eprintln!("CopyAttach: failed to delete matching entry: {}", e);
+        eprintln!("CopyAttach: failed to delete matching entry: {e}");
     }
 }
 
@@ -262,7 +256,7 @@ pub(crate) fn trim_db_history(conn: &Connection, threshold: usize) {
             SELECT id FROM clipboard_history ORDER BY id DESC LIMIT ?)",
         rusqlite::params![threshold as i64],
     ) {
-        eprintln!("CopyAttach: failed to trim DB history: {}", e);
+        eprintln!("CopyAttach: failed to trim DB history: {e}");
     }
 }
 
@@ -294,7 +288,7 @@ fn migrate_from_json_to_db_impl(conn: &mut Connection) {
     let content = match std::fs::read_to_string(&json_path) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("CopyAttach: cannot read history.json for migration: {}", e);
+            eprintln!("CopyAttach: cannot read history.json for migration: {e}");
             return;
         }
     };
@@ -336,7 +330,8 @@ fn migrate_from_json_to_db_impl(conn: &mut Connection) {
 
     fn decode_base64<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
         let s = <String as serde::Deserialize>::deserialize(d)?;
-        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &s)
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.decode(&s)
             .map_err(serde::de::Error::custom)
     }
 
@@ -349,7 +344,7 @@ fn migrate_from_json_to_db_impl(conn: &mut Connection) {
     let entries: Vec<LegacyEntry> = match serde_json::from_str(&content) {
         Ok(e) => e,
         Err(e) => {
-            eprintln!("CopyAttach: failed to parse history.json: {}", e);
+            eprintln!("CopyAttach: failed to parse history.json: {e}");
             return;
         }
     };
@@ -358,7 +353,7 @@ fn migrate_from_json_to_db_impl(conn: &mut Connection) {
     let tx = match conn.transaction() {
         Ok(t) => t,
         Err(e) => {
-            eprintln!("CopyAttach: failed to begin migration transaction: {}", e);
+            eprintln!("CopyAttach: failed to begin migration transaction: {e}");
             return;
         }
     };
@@ -376,8 +371,8 @@ fn migrate_from_json_to_db_impl(conn: &mut Connection) {
                     "INSERT INTO clipboard_history (entry_type, png_data, width, height, thumb_data, thumb_width, thumb_height, hash, timestamp, source_name, source_bundle_id)
                      VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                     rusqlite::params![
-                        li.png_data, li.width as i64, li.height as i64,
-                        li.thumb_data, li.thumb_width as i64, li.thumb_height as i64,
+                        li.png_data, i64::from(li.width), i64::from(li.height),
+                        li.thumb_data, i64::from(li.thumb_width), i64::from(li.thumb_height),
                         li.hash as i64, li.timestamp as i64,
                         li.source_name, li.source_bundle_id,
                     ],
@@ -385,12 +380,12 @@ fn migrate_from_json_to_db_impl(conn: &mut Connection) {
             }
         };
         if let Err(e) = result {
-            eprintln!("CopyAttach: migration insert error: {}", e);
+            eprintln!("CopyAttach: migration insert error: {e}");
             return;
         }
     }
     if let Err(e) = tx.commit() {
-        eprintln!("CopyAttach: failed to commit migration: {}", e);
+        eprintln!("CopyAttach: failed to commit migration: {e}");
         return;
     }
 
@@ -401,8 +396,8 @@ fn migrate_from_json_to_db_impl(conn: &mut Connection) {
 #[cfg(not(feature = "migration"))]
 fn migrate_from_json_to_db_impl(_conn: &mut Connection) {}
 
-/// Migrate clipboard history from legacy `history.json` to the SQLite database.
+/// Migrate clipboard history from legacy `history.json` to the `SQLite` database.
 /// No-op if the `migration` feature is disabled or no JSON file is present.
 pub(crate) fn migrate_from_json_to_db(conn: &mut Connection) {
-    migrate_from_json_to_db_impl(conn)
+    migrate_from_json_to_db_impl(conn);
 }

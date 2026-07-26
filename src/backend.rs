@@ -22,7 +22,7 @@ pub(crate) const POLL_INTERVAL_MS: u64 = 300;
 /// Monotonic counter for assigning stable, unique IDs to clipboard entries.
 static NEXT_ENTRY_ID: AtomicU64 = AtomicU64::new(1);
 
-/// Incremented each time Phase 2 image encoding completes and updates db_id
+/// Incremented each time Phase 2 image encoding completes and updates `db_id`
 /// in the in-memory history. Swift polls this to detect thumbnail-ready items
 /// without a count change.
 pub(crate) static IMAGE_ENCODING_COUNTER: AtomicU64 = AtomicU64::new(0);
