@@ -891,13 +891,13 @@ struct InlineSettingsView: View {
                                     .resizable()
                                     .frame(width: 13, height: 13)
                             }
-                            Text("surpassbefore")
+                            Text("wonaren")
                                 .font(.system(size: 12, weight: .medium))
                         }
                         .foregroundColor(Color.accentColor)
                     }
                     .buttonStyle(.plain)
-                    .help("github.com/surpassbefore")
+                    .help("github.com/wonaren")
                 }
 
                 Text("CopyAttach 是一款极轻量的剪贴板历史管理应用,它在性能体验、内存占用、存储效率、功耗表现、操作逻辑、UI界面都经过精心设计,旨在为用户提供一个简洁、高效、无负担的剪贴板历史管理工具。")
@@ -973,15 +973,15 @@ struct InlineSettingsView: View {
         return img
     }
 
-    private var repoURL: URL { URL(string: "https://github.com/surpassbefore/copy-attach")! }
-    private var authorGitHubURL: URL { URL(string: "https://github.com/surpassbefore")! }
+    private var repoURL: URL { URL(string: "https://github.com/wonaren/copy-attach")! }
+    private var authorGitHubURL: URL { URL(string: "https://github.com/wonaren")! }
 
     private func openWebsite() {
         NSWorkspace.shared.open(repoURL)
     }
 
     private func checkForUpdates() {
-        let url = URL(string: "https://api.github.com/repos/surpassbefore/copy-attach/releases/latest")!
+        let url = URL(string: "https://api.github.com/repos/wonaren/copy-attach/releases/latest")!
         URLSession.shared.dataTask(with: url) { [self] data, _, error in
             DispatchQueue.main.async {
                 if let error {
