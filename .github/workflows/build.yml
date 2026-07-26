@@ -25,6 +25,8 @@ name: Build CopyAttach
 on:
   push:
     branches: [master]
+    tags:
+      - 'v*'
     paths-ignore:
       - '**.md'
       - 'assets/**'
