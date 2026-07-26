@@ -33,8 +33,6 @@ on:
       - 'LICENSE'
   pull_request:
     branches: [master]
-  release:
-    types: [published]
   workflow_dispatch:
     inputs:
       create_release:
@@ -183,15 +181,6 @@ jobs:
           path: build/CopyAttach-*.dmg
           if-no-files-found: error
 
-      # 如果是从已有 Release 触发，上传 DMG 到该 Release
-      - name: Upload to Release
-        if: github.event_name == 'release'
-        uses: softprops/action-gh-release@v3
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          files: build/CopyAttach-${{ steps.version.outputs.version }}.dmg
-
   # ──────────────────────────────────────────────
   # 创建 GitHub Release
   # 触发方式：
@@ -199,25 +188,34 @@ jobs:
   #   - 手动触发 workflow 时勾选 "创建 GitHub Release"
   # ──────────────────────────────────────────────
   release:
-    name: Create Release
+    name: Publish Public Release
     if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.create_release)
     needs: build
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
-      - uses: actions/checkout@v5
-
       - name: Download DMG artifact
         uses: actions/download-artifact@v8
         with:
           name: CopyAttach-${{ needs.build.outputs.version }}
           path: build/
 
-      - name: Create Release
-        uses: softprops/action-gh-release@v3
-        with:
-          tag_name: v${{ needs.build.outputs.version }}
-          files: build/CopyAttach-*.dmg
-          generate_release_notes: true
-          name: CopyAttach v${{ needs.build.outputs.version }}
+      # PUBLIC_RELEASE_TOKEN is a fine-grained PAT scoped only to the public
+      # release repository, configured as an Actions repository secret.
+      - name: Create or update release in public repository
+        env:
+          GH_TOKEN: ${{ secrets.PUBLIC_RELEASE_TOKEN }}
+          PUBLIC_REPOSITORY: wonaren/copyattach-release
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          TAG="v${VERSION}"
+
+          if ! gh release view "$TAG" --repo "$PUBLIC_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --repo "$PUBLIC_REPOSITORY" \
+              --title "CopyAttach ${TAG}" \
+              --generate-notes
+          fi
+
+          gh release upload "$TAG" build/CopyAttach-*.dmg \
+            --repo "$PUBLIC_REPOSITORY" \
+            --clobber
