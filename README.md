@@ -119,4 +119,4 @@ CopyAttach 是一个 macOS 剪贴板管理器。它默默记录你复制的一�
 
 ## 许可证
 
-MIT
+Apache 2.0
