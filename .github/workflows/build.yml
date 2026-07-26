@@ -175,7 +175,7 @@ jobs:
 
       # 上传 DMG 为构建产物
       - name: Upload DMG artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: CopyAttach-${{ steps.version.outputs.version }}
           path: build/CopyAttach-*.dmg
@@ -184,7 +184,7 @@ jobs:
       # 如果是从已有 Release 触发，上传 DMG 到该 Release
       - name: Upload to Release
         if: github.event_name == 'release'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -207,13 +207,13 @@ jobs:
       - uses: actions/checkout@v5
 
       - name: Download DMG artifact
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         with:
           name: CopyAttach-${{ needs.build.outputs.version }}
           path: build/
 
       - name: Create Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: v${{ needs.build.outputs.version }}
           files: build/CopyAttach-*.dmg
