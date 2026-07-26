@@ -192,6 +192,8 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.create_release)
     needs: build
     runs-on: ubuntu-latest
+    # PUBLIC_RELEASE_TOKEN is stored as an Environment secret in this environment.
+    environment: src2release-env
     steps:
       - name: Download DMG artifact
         uses: actions/download-artifact@v8
