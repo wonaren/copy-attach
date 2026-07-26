@@ -24,7 +24,7 @@ name: Build CopyAttach
 
 on:
   push:
-    branches: [master]
+#    branches: [master]
     tags:
       - 'v*'
     paths-ignore:
