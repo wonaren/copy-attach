@@ -5,6 +5,7 @@
 #include <stdbool.h>
 
 // ─── Lifecycle ───
+int32_t clipboard_set_runtime_entitlement(int32_t state);
 int32_t clipboard_init(void);
 void clipboard_cleanup(void);
 

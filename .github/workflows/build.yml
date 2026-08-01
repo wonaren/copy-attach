@@ -6,13 +6,18 @@
 #   - 手动触发: 通过 GitHub 页面上的 "Run workflow" 按钮手动构建
 #
 # 使用前准备:
-#   1. 代码签名（可选但推荐）
+#   1. 代码签名（可选但强烈推荐）
 #      在 repo Settings → Secrets and variables → Actions 中添加:
-#      - MACOS_CERTIFICATE:       base64 编码的 Developer ID Application 证书 (.p12)
+#      - MACOS_CERTIFICATE:       base64 编码的证书 (.p12，含私钥)
 #      - MACOS_CERTIFICATE_PWD:   证书导出密码
-#      - MACOS_NOTARIZATION_ACCOUNT: Apple ID 邮箱（用于公证）
+#      - MACOS_NOTARIZATION_ACCOUNT: Apple ID 邮箱（用于公证，需 Developer ID）
 #      - MACOS_NOTARIZATION_PWD:  Apple ID 应用专用密码
-#   2. 不配置证书也可以构建，但打出的 DMG 会显示 "未验证的开发者"
+#      - APPLE_TEAM_ID:           团队 ID（如 U48NQ4655C）
+#      签名身份必须跨版本稳定（Developer ID 或 Apple Development）：
+#      否则每次更新发布版都会让用户重新弹钥匙串授权框。用稳定身份签名后，
+#      用户首次点一次「始终允许」即可，之后所有版本更新都不再弹。
+#   2. 不配置证书也可以构建，但打出的 DMG 是 ad-hoc 签名：会被 Gatekeeper
+#      拦截，且每次更新都会重新弹钥匙串授权框。
 #   3. 修改 CFBundleIdentifier（SwiftApp/Info.plist）为你的真实 bundle ID
 #      （当前是 com.example.copyattach，不签名不影响使用）
 #
@@ -121,6 +126,10 @@ jobs:
         run: ./build.sh
 
       # 代码签名（如果有证书密钥）
+      # 用正式身份签名解决钥匙串弹窗：稳定签名身份下，用户首次点一次
+      # 「始终允许」，之后所有版本更新都不再弹「CopyAttach想要使用
+      # 钥匙串中的机密信息」（ad-hoc 签名的 cdhash 每次构建都变，
+      # 每次更新都会重新弹窗）。
       - name: Code sign with Developer ID (if configured)
         if: env.MACOS_CERTIFICATE != ''
         env:
@@ -136,13 +145,16 @@ jobs:
           security import /tmp/cert.p12 -k "$KEYCHAIN" -P "$MACOS_CERTIFICATE_PWD" -T /usr/bin/codesign
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k temp "$KEYCHAIN"
 
-          # 签名（替换 - 为具体证书 Common Name）
-          CODESIGN_IDENTITY=$(security find-identity -v -p basic "$KEYCHAIN" | grep "Developer ID Application" | head -1 | sed 's/.*"\(.*\)".*/\1/')
-          echo "Signing with identity: ${CODESIGN_IDENTITY}"
-          codesign --force --deep --sign "${CODESIGN_IDENTITY}" --keychain "$KEYCHAIN" CopyAttach.app
-
-          # 验证签名
-          codesign -dvvv CopyAttach.app
+          # 签名（优先 Developer ID Application；也兼容 Apple Development，
+          # 两者都提供跨构建稳定的签名身份）
+          CODESIGN_IDENTITY=$(security find-identity -v -p basic "$KEYCHAIN" | grep -E "Developer ID Application|Apple Development" | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          if [ -n "$CODESIGN_IDENTITY" ]; then
+            echo "Signing with identity: ${CODESIGN_IDENTITY}"
+            codesign --force --deep --sign "${CODESIGN_IDENTITY}" --keychain "$KEYCHAIN" CopyAttach.app
+            codesign -dvvv CopyAttach.app
+          else
+            echo "警告: 钥匙串中未找到可用的签名身份，产物将保持 ad-hoc 签名（每次更新都会触发钥匙串弹窗）"
+          fi
 
           security delete-keychain "$KEYCHAIN"
 

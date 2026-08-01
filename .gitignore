@@ -19,6 +19,9 @@ assets/AppIcon.icns
 # User-local Claude Code config (permissions, environment-specific)
 .claude/
 
+# License server secrets + runtime DB (dev signing private key, activation/lease records)
+data/
+
 # Rust debug symbol bundles
 target/
 main

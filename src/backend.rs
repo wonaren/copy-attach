@@ -15,6 +15,10 @@ use crate::ignore::IgnoreRules;
 pub(crate) const DEFAULT_CLEANUP_THRESHOLD: usize = 3000;
 pub(crate) const POLL_INTERVAL_MS: u64 = 300;
 
+/// Process-local entitlement gate set by the Swift license verifier before the
+/// clipboard core starts. 0 = denied/unknown, 1 = trial, 2 = perpetual.
+pub(crate) static RUNTIME_ENTITLEMENT: AtomicUsize = AtomicUsize::new(0);
+
 // ═══════════════════════════════════════════
 // Entry-ID Generator
 // ═══════════════════════════════════════════

@@ -162,8 +162,52 @@ pub extern "C" fn clipboard_snapshot_release(snap: *mut Snapshot) {
 // Init / Cleanup
 // ═══════════════════════════════════════════
 
+/// Set only after Swift has cryptographically verified a device-bound lease.
+/// Invalid values are rejected instead of being treated as licensed.
+#[no_mangle]
+pub extern "C" fn clipboard_set_runtime_entitlement(state: c_int) -> c_int {
+    if !(0..=2).contains(&state) { return 0; }
+    crate::backend::RUNTIME_ENTITLEMENT.store(state as usize, Ordering::SeqCst);
+    if state == 0 {
+        if let Some(b) = crate::backend::try_backend() {
+            b.running.store(false, Ordering::SeqCst);
+        }
+    }
+    1
+}
+
 #[no_mangle]
 pub extern "C" fn clipboard_init() -> c_int {
+    if crate::backend::RUNTIME_ENTITLEMENT.load(Ordering::SeqCst) == 0 {
+        eprintln!("CopyAttach: clipboard_init rejected: runtime entitlement is denied");
+        return 0;
+    }
+    // OnceLock intentionally retains the backend for process lifetime. A
+    // license transition may stop and later re-enable monitoring, so resume
+    // the existing backend instead of attempting to replace the singleton.
+    if let Some(b) = crate::backend::try_backend() {
+        if b.running.swap(true, Ordering::SeqCst) {
+            return 1;
+        }
+        let handle = thread::spawn({
+            let history = Arc::clone(&b.history);
+            let running = Arc::clone(&b.running);
+            let source_app = Arc::clone(&b.source_app);
+            let db = Arc::clone(&b.db);
+            let last_seen_text = Arc::clone(&b.last_seen_text);
+            let last_seen_image_hash = Arc::clone(&b.last_seen_image_hash);
+            let pasteboard_event_lock = Arc::clone(&b.pasteboard_event_lock);
+            let pending_self_write = Arc::clone(&b.pending_self_write);
+            let cleanup_threshold = Arc::clone(&b.cleanup_threshold);
+            let ignore_rules = Arc::clone(&b.ignore_rules);
+            move || clipboard_monitor(history, running, source_app, db, last_seen_text,
+                last_seen_image_hash, pasteboard_event_lock, pending_self_write,
+                cleanup_threshold, ignore_rules)
+        });
+        *b.monitor_handle.lock().unwrap() = Some(handle);
+        return 1;
+    }
+
     let mut conn = if let Some(c) = open_db() { c } else {
         eprintln!("CopyAttach: failed to open database, init failed");
         return 0;

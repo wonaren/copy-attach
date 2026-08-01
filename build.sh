@@ -75,9 +75,39 @@ fi
 
 echo "==> Compiling Swift sources…"
 
+# License environment is selected at build time. The default is production
+# with baked-in values; override any COPYATTACH_* variable to point elsewhere.
+# Local development must pass the public key printed by license-server.
+LICENSE_ENV="${LICENSE_ENV:-production}"
+if [ "$LICENSE_ENV" = "local" ]; then
+    LICENSE_SERVER_URL="http://127.0.0.1:8787"
+    LICENSE_SIGNING_KEY_ID="${COPYATTACH_LICENSE_KEY_ID:-development-2026-01}"
+    COPYATTACH_LICENSE_PUBLIC_KEY="${COPYATTACH_LICENSE_PUBLIC_KEY:?Set COPYATTACH_LICENSE_PUBLIC_KEY to the local dev server Ed25519 public key}"
+else
+    LICENSE_SERVER_URL="${COPYATTACH_LICENSE_SERVER_URL:-https://api.abovepast.shop}"
+    LICENSE_SIGNING_KEY_ID="${COPYATTACH_LICENSE_KEY_ID:-production-2026-08}"
+    COPYATTACH_LICENSE_PUBLIC_KEY="${COPYATTACH_LICENSE_PUBLIC_KEY:-efsKYx9a7urNlr-UXR7b0-Fl9w0mJNKe3RME-OeseOs}"
+fi
+/usr/libexec/PlistBuddy -c "Delete CopyAttachLicenseServerURL" "${SWIFT_SRC}/Info.plist" 2>/dev/null || true
+/usr/libexec/PlistBuddy -c "Add CopyAttachLicenseServerURL string ${LICENSE_SERVER_URL}" "${SWIFT_SRC}/Info.plist"
+/usr/libexec/PlistBuddy -c "Delete CopyAttachLicenseSigningKeyID" "${SWIFT_SRC}/Info.plist" 2>/dev/null || true
+/usr/libexec/PlistBuddy -c "Add CopyAttachLicenseSigningKeyID string ${LICENSE_SIGNING_KEY_ID}" "${SWIFT_SRC}/Info.plist"
+/usr/libexec/PlistBuddy -c "Delete CopyAttachLicenseSigningPublicKey" "${SWIFT_SRC}/Info.plist" 2>/dev/null || true
+/usr/libexec/PlistBuddy -c "Add CopyAttachLicenseSigningPublicKey string ${COPYATTACH_LICENSE_PUBLIC_KEY}" "${SWIFT_SRC}/Info.plist"
+if [ "$LICENSE_ENV" = "local" ]; then
+    /usr/libexec/PlistBuddy -c "Delete NSAppTransportSecurity" "${SWIFT_SRC}/Info.plist" 2>/dev/null || true
+    /usr/libexec/PlistBuddy -c "Add NSAppTransportSecurity dict" "${SWIFT_SRC}/Info.plist"
+    /usr/libexec/PlistBuddy -c "Add NSAppTransportSecurity:NSAllowsLocalNetworking bool true" "${SWIFT_SRC}/Info.plist"
+else
+    /usr/libexec/PlistBuddy -c "Delete NSAppTransportSecurity" "${SWIFT_SRC}/Info.plist" 2>/dev/null || true
+fi
+
 # Compile with explicit args
 "$SWIFTC" $SDK \
     -target arm64-apple-macosx15.0 \
+    -framework CryptoKit \
+    -framework IOKit \
+    -framework Security \
     -o "${APP_NAME}.app/Contents/MacOS/CopyAttach" \
     -framework SwiftUI \
     -framework AppKit \
@@ -93,6 +123,13 @@ echo "==> Compiling Swift sources…"
 # Copy Info.plist
 cp "${SWIFT_SRC}/Info.plist" "${APP_NAME}.app/Contents/"
 
+# Keep generated environment-specific values out of the tracked source plist.
+# The app bundle already contains the configured copy above.
+/usr/libexec/PlistBuddy -c "Delete CopyAttachLicenseServerURL" "${SWIFT_SRC}/Info.plist" 2>/dev/null || true
+/usr/libexec/PlistBuddy -c "Delete CopyAttachLicenseSigningKeyID" "${SWIFT_SRC}/Info.plist" 2>/dev/null || true
+/usr/libexec/PlistBuddy -c "Delete CopyAttachLicenseSigningPublicKey" "${SWIFT_SRC}/Info.plist" 2>/dev/null || true
+/usr/libexec/PlistBuddy -c "Delete NSAppTransportSecurity" "${SWIFT_SRC}/Info.plist" 2>/dev/null || true
+
 # Copy bridging header for reference
 cp "${SWIFT_SRC}/CopyAttach-Bridging-Header.h" "${APP_NAME}.app/Contents/Resources/"
 
@@ -100,7 +137,18 @@ cp "${SWIFT_SRC}/CopyAttach-Bridging-Header.h" "${APP_NAME}.app/Contents/Resourc
 install_name_tool -add_rpath "@executable_path/../Frameworks" "${APP_NAME}.app/Contents/MacOS/CopyAttach" 2>/dev/null || true
 
 echo "==> Signing app bundle…"
-codesign --force --deep --sign - "${APP_NAME}.app" 2>&1
+# 优先用已安装的正式签名身份（Apple Development / Developer ID）签名。
+# 正式身份让钥匙串 ACL 按稳定标识匹配：ad-hoc 签名的 cdhash 每次构建都会变，
+# 导致每次重新打开 App 都弹「CopyAttach想要使用钥匙串中的机密信息」。
+# 用正式身份后重建/重装都不会再弹（首次启动对旧条目点一次「始终允许」即可）。
+SIGN_IDENTITY=$(security find-identity -v -p codesigning 2>/dev/null | grep -oE '[0-9A-F]{40}' | head -1 || true)
+if [ -n "$SIGN_IDENTITY" ]; then
+    echo "  Using signing identity: $SIGN_IDENTITY"
+    codesign --force --deep --sign "$SIGN_IDENTITY" "${APP_NAME}.app" 2>&1
+else
+    echo "  No signing identity found, falling back to ad-hoc signature"
+    codesign --force --deep --sign - "${APP_NAME}.app" 2>&1
+fi
 
 echo "==> Done! App bundle at '${APP_NAME}.app'"
 echo "==> Run: open \"${APP_NAME}.app\""

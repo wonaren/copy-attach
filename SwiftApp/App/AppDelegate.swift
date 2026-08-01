@@ -6,8 +6,15 @@ import SwiftUI
 class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     static var shared: AppDelegate?
     private var settingsWindow: NSWindow?
+    private var licenseGateWindow: NSWindow?
+    private var entitlementTimer: Timer?
     private var stressWindowController: StressTestWindowController?
     private var firstLaunchDone = false
+    private var backendStarted = false
+    /// When the backend was last attempted so a transient failure (e.g. a
+    /// locked SQLite file) is retried on a cooldown instead of staying dead
+    /// for the whole session.
+    private var lastBackendStartAttempt: Date?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         Self.shared = self
@@ -22,13 +29,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         debugLog("Hotkey callback set up")
 
-        // Initialize Rust backend
-        debugLog("Starting Rust backend...")
-        let started = ClipboardBackend.shared.start()
-        if !started {
-            debugLog("Rust backend failed to initialize — app may not function correctly")
+        // Licensing is initialized before the clipboard core. The Rust backend
+        // never starts while the entitlement is absent or invalid.
+        Task { @MainActor in
+            await LicenseManager.shared.initialize()
+            entitlementDidChange()
+            startEntitlementTimer()
         }
-        debugLog("Rust backend started")
 
         // Register local ⌘+, monitor for when app windows are active (popup, settings, etc.)
         NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
@@ -44,37 +51,127 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return event
         }
 
-        // Silent launch: only show settings on first-ever launch so the user
-        // can configure hotkeys and permissions. Subsequent launches stay
-        // quietly in the menu bar.
-        let hasLaunchedBefore = UserDefaults.standard.bool(forKey: "HasLaunchedBefore")
-        if !hasLaunchedBefore {
-            UserDefaults.standard.set(true, forKey: "HasLaunchedBefore")
-            openSettingsWindow()
-        }
+        // First-launch routing happens after licensing initialization above.
+        // An unlicensed app always opens directly on the License tab.
 
         firstLaunchDone = true
         debugLog("Initialization complete")
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        ClipboardBackend.shared.stop()
+        entitlementTimer?.invalidate()
+        if backendStarted { ClipboardBackend.shared.stop() }
+    }
+
+    @MainActor
+    func entitlementDidChange() {
+        if LicenseManager.shared.state.permitsCoreFeatures {
+            closeLicenseGate()
+            startBackendIfNeeded()
+        } else {
+            _ = clipboard_set_runtime_entitlement(0)
+            lastBackendStartAttempt = nil
+            if backendStarted {
+                debugLog("License no longer permits core features; stopping Rust backend")
+                ClipboardBackend.shared.stop()
+                backendStarted = false
+            }
+            showLicenseGate()
+        }
+    }
+
+    @MainActor
+    private func startBackendIfNeeded() {
+        guard !backendStarted else { return }
+        guard LicenseManager.shared.state.permitsCoreFeatures else { return }
+        let runtimeState: Int32
+        switch LicenseManager.shared.state {
+        case .trialActive: runtimeState = 1
+        case .licensed, .subscriptionActive: runtimeState = 2
+        default: return
+        }
+        guard clipboard_set_runtime_entitlement(runtimeState) == 1 else {
+            debugLog("Rust rejected runtime entitlement state")
+            return
+        }
+        lastBackendStartAttempt = Date()
+        debugLog("License permits core features; starting Rust backend")
+        backendStarted = ClipboardBackend.shared.start()
+        if !backendStarted { debugLog("Rust backend failed to initialize") }
+    }
+
+    /// Retries a failed backend start (transient DB lock etc.) on a 5s
+    /// cooldown so a licensed app recovers without a relaunch. Idempotent:
+    /// `start()` is a no-op once the Rust backend is running.
+    @MainActor
+    private func retryBackendStartIfNeeded() {
+        guard !backendStarted,
+              LicenseManager.shared.state.permitsCoreFeatures else { return }
+        if let last = lastBackendStartAttempt,
+           Date().timeIntervalSince(last) < 5 { return }
+        startBackendIfNeeded()
+    }
+
+    /// The activation celebration has finished. Return to the license page so
+    /// the user can confirm activation succeeded before dismissing the gate.
+    /// The backend starts now so the app is already functional while the gate
+    /// stays open.
+    @MainActor
+    func licenseCelebrationFinished() {
+        startBackendIfNeeded()
+    }
+
+    @MainActor
+    private func startEntitlementTimer() {
+        entitlementTimer?.invalidate()
+        entitlementTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
+            Task { @MainActor in
+                // Skip while the activation celebration is playing in the gate
+                // window; entitlementDidChange() would close it too early.
+                guard LicenseManager.shared.celebration == nil else { return }
+                // Recover from a transient backend-start failure while the
+                // license stays valid (see retryBackendStartIfNeeded).
+                AppDelegate.shared?.retryBackendStartIfNeeded()
+                if await LicenseManager.shared.maintainEntitlement() {
+                    AppDelegate.shared?.entitlementDidChange()
+                }
+            }
+        }
+    }
+
+    /// Called by LicenseManager right after a successful activation to signal
+    /// that the in-window celebration is about to play. Nothing needs to
+    /// happen here (the gate stays open on purpose), but the hook documents
+    /// the contract and keeps the flow explicit.
+    @MainActor
+    func licenseCelebrationDidStart() {
+        debugLog("License celebration started; gate stays open until animation finishes")
     }
 
     // MARK: - NSWindowDelegate
 
     func windowWillClose(_ notification: Notification) {
-        guard let window = notification.object as? NSWindow,
-              window === settingsWindow else { return }
+        guard let window = notification.object as? NSWindow else { return }
+        if window === licenseGateWindow {
+            licenseGateWindow = nil
+            if !LicenseManager.shared.state.permitsCoreFeatures { NSApp.terminate(nil) }
+            return
+        }
+        guard window === settingsWindow else { return }
         settingsWindow = nil
 
         // When "Run in background" is off, closing the settings window quits
         // the app (conventional single-window app behavior). When on, the app
         // stays alive in the menu bar.
-        let runInBackground = UserDefaults.standard.bool(forKey: "RunInBackground") != false
-        if !runInBackground {
+        // Without an entitlement there is no background functionality to run:
+        // closing the mandatory license window exits instead of leaving a
+        // non-functional menu-bar process alive.
+        if !LicenseManager.shared.state.permitsCoreFeatures {
             NSApp.terminate(nil)
+            return
         }
+        let runInBackground = UserDefaults.standard.bool(forKey: "RunInBackground") != false
+        if !runInBackground { NSApp.terminate(nil) }
     }
 
     /// Bring the settings window to front and activate the app.
@@ -88,7 +185,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     // MARK: - Popup
 
-    @objc func togglePopup() {
+    @MainActor @objc func togglePopup() {
+        guard LicenseManager.shared.state.permitsCoreFeatures else {
+            showLicenseGate()
+            return
+        }
         let popup = HistoryPopupWindow.shared
         if popup.isVisible {
             popup.close()
@@ -123,14 +224,67 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     // MARK: - Settings
 
-    @objc func openSettings() {
-        openSettingsWindow()
+    @MainActor @objc func openSettings() {
+        if LicenseManager.shared.state.permitsCoreFeatures { openSettingsWindow() }
+        else { showLicenseGate() }
     }
 
-    private func openSettingsWindow() {
+    @MainActor
+    func openLicenseWindow() {
+        if LicenseManager.shared.state.permitsCoreFeatures { openSettingsWindow(initialTab: 4) }
+        else { showLicenseGate() }
+    }
+
+    @MainActor
+    private func showLicenseGate() {
+        if let window = licenseGateWindow {
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 500, height: 470),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "激活 CopyAttach"
+        window.isReleasedWhenClosed = false
+        window.hidesOnDeactivate = false
+        window.delegate = self
+        window.contentViewController = NSHostingController(rootView: LicenseGateView().withAppTheme())
+        // Pin the gate window to its fixed size so SwiftUI fitting-size
+        // adjustments (e.g. when the in-window celebration swaps content)
+        // never resize or relocate the window.
+        window.setContentSize(NSSize(width: 500, height: 470))
+        window.center()
+        licenseGateWindow = window
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        // Re-center after the window is on screen: AppKit can still adjust the
+        // frame once the hosting view lays out, which would move the window
+        // away from the screen center.
+        DispatchQueue.main.async {
+            window.setContentSize(NSSize(width: 500, height: 470))
+            window.center()
+        }
+    }
+
+    @MainActor
+    func closeLicenseGate() {
+        guard let window = licenseGateWindow else { return }
+        window.delegate = nil
+        window.close()
+        licenseGateWindow = nil
+    }
+
+    private func openSettingsWindow(initialTab: Int = 0) {
         // If we already have a settings window, bring it to front
         if let existing = settingsWindow, existing.isVisible {
             debugLog("Reusing existing settings window")
+            if initialTab == 4 {
+                existing.contentViewController = makeSettingsContent(initialTab: 4)
+            }
             existing.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
             return
@@ -152,10 +306,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         // No window found - create one using NSWindow with NSHostingView
         debugLog("Creating new settings window")
-        createSettingsWindow()
+        createSettingsWindow(initialTab: initialTab)
     }
 
-    private func createSettingsWindow() {
+    private func makeSettingsContent(initialTab: Int) -> NSHostingController<AnyView> {
+        NSHostingController(rootView: AnyView(InlineSettingsView(initialTab: initialTab).withAppTheme()))
+    }
+
+    private func createSettingsWindow(initialTab: Int = 0) {
         debugLog("Creating settings window...")
         let window = NSWindow(
             contentRect: NSRect(x: 100, y: 100, width: 520, height: 600),
@@ -168,7 +326,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.hidesOnDeactivate = false
         window.delegate = self
 
-        let content = NSHostingController(rootView: InlineSettingsView().withAppTheme())
+        let content = makeSettingsContent(initialTab: initialTab)
         content.view.frame = NSRect(x: 0, y: 0, width: 520, height: 600)
         content.view.autoresizingMask = [NSView.AutoresizingMask.width, NSView.AutoresizingMask.height]
         window.contentViewController = content

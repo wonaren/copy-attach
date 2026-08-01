@@ -8,7 +8,7 @@ import UniformTypeIdentifiers
 struct InlineSettingsView: View {
     @StateObject private var backend = ClipboardBackend.shared
     @StateObject private var hotkeyManager = HotkeyManager.shared
-    @State private var selectedTab = 0
+    @State private var selectedTab: Int
     @State private var launchAtLogin = UserDefaults.standard.bool(forKey: "LaunchAtLogin")
     @State private var runInBackground = UserDefaults.standard.bool(forKey: "RunInBackground") != false
     @State private var showMenuBarIcon = UserDefaults.standard.bool(forKey: "ShowMenuBarIcon") != false
@@ -28,6 +28,10 @@ struct InlineSettingsView: View {
     @State private var isHoveringDragIcon = false
     @State private var updateState: UpdateCheckState = .idle
     @Environment(\.appTheme) private var theme
+
+    init(initialTab: Int = 0) {
+        _selectedTab = State(initialValue: initialTab)
+    }
 
     // MARK: - Update Check
 
@@ -77,8 +81,8 @@ struct InlineSettingsView: View {
         return CGFloat(imageCount) / threshold
     }
 
-    private let tabTitles = ["通用", "快捷键", "存储", "忽略", "关于"]
-    private let tabIcons = ["gearshape", "keyboard", "externaldrive", "eye.slash", "info.circle"]
+    private let tabTitles = ["通用", "快捷键", "存储", "忽略", "许可证", "关于"]
+    private let tabIcons = ["gearshape", "keyboard", "externaldrive", "eye.slash", "key", "info.circle"]
 
     // MARK: - Tab Bar
     @State private var hoveredTab: Int? = nil
@@ -86,7 +90,7 @@ struct InlineSettingsView: View {
     private var tabBar: some View {
         HStack(spacing: 4) {
             Spacer()
-            ForEach(0..<5, id: \.self) { i in
+            ForEach(0..<6, id: \.self) { i in
                 Button {
                     selectedTab = i
                 } label: {
@@ -135,6 +139,7 @@ struct InlineSettingsView: View {
             else if selectedTab == 1 { shortcutsTab }
             else if selectedTab == 2 { storageTab }
             else if selectedTab == 3 { ignoreTab }
+            else if selectedTab == 4 { LicenseSettingsView() }
             else { aboutTab }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)

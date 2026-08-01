@@ -35,15 +35,17 @@ private func menuBarIcon() -> NSImage? {
 /// Menu bar content that dynamically observes hotkey changes
 struct AppMenuBarContent: View {
     @ObservedObject private var hotkeyManager = HotkeyManager.shared
+    @ObservedObject private var licenseManager = LicenseManager.shared
 
     var body: some View {
-        Button("偏好设置") {
-            AppDelegate.shared?.openSettings()
-        }
-        .keyboardShortcut(",", modifiers: .command)
-        Divider()
-        Button("显示历史记录 (\(hotkeyManager.config.displayString))") {
-            AppDelegate.shared?.togglePopup()
+        if licenseManager.state.permitsCoreFeatures {
+            Button("偏好设置") { AppDelegate.shared?.openSettings() }
+                .keyboardShortcut(",", modifiers: .command)
+            Button("许可证…") { AppDelegate.shared?.openLicenseWindow() }
+            Divider()
+            Button("显示历史记录 (\(hotkeyManager.config.displayString))") { AppDelegate.shared?.togglePopup() }
+        } else {
+            Button("激活 CopyAttach…") { AppDelegate.shared?.openLicenseWindow() }
         }
         Divider()
         Button("退出") {
