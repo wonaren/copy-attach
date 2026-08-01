@@ -3,6 +3,8 @@ import Foundation
 @MainActor
 final class LicenseManager: ObservableObject {
     static let shared = LicenseManager()
+    /// 激活密钥购买页面。
+    static let purchaseURL = URL(string: "https://pay.ldxp.cn/shop/F5T5GUPN")!
 
     @Published private(set) var state: EntitlementState = .loading
     @Published private(set) var isWorking = false

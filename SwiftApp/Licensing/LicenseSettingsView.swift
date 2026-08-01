@@ -33,10 +33,18 @@ struct LicenseSettingsView: View {
                 }
 
                 Divider()
-                VStack(alignment: .leading, spacing: 5) {
+                VStack(alignment: .leading, spacing: 8) {
                     Text("还没有许可证密钥？").font(.system(size: 12, weight: .semibold)).foregroundColor(theme.primaryText)
-                    Text("购买后会获得一串以 CA- 开头的密钥。复制密钥 → 粘贴到上方输入框 → 点击“验证并激活”。一个密钥最多绑定 3 台 Mac。")
+                    Text("在购买页面支付后获得一串以 CA- 开头的密钥。复制密钥 → 粘贴到上方输入框 → 点击“验证并激活”。一个密钥最多绑定 3 台 Mac。")
                         .font(.system(size: 11.5)).foregroundColor(theme.secondaryText).lineSpacing(3)
+                    Button {
+                        NSWorkspace.shared.open(LicenseManager.purchaseURL)
+                    } label: {
+                        Label("购买激活密钥", systemImage: "cart.fill")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.regular)
+                    .padding(.top, 2)
                 }
 
                 Text("未开始试用或未激活时，CopyAttach 不会监控剪贴板。关闭此窗口将退出程序。许可证验证不会上传任何剪贴板内容。")

@@ -74,22 +74,22 @@ struct LicenseGateView: View {
 
     private var gateContent: some View {
         VStack(spacing: 0) {
-            VStack(spacing: 10) {
+            VStack(spacing: 8) {
                 Image(nsImage: .appIconSVG ?? .appIcon)
-                    .resizable().frame(width: 72, height: 72)
-                    .clipShape(RoundedRectangle(cornerRadius: 16))
-                Text(title).font(.system(size: 22, weight: .bold)).foregroundColor(theme.primaryText)
-                Text(detail).font(.system(size: 12.5)).foregroundColor(theme.secondaryText)
-                    .multilineTextAlignment(.center).lineSpacing(3).frame(maxWidth: 390)
+                    .resizable().frame(width: 60, height: 60)
+                    .clipShape(RoundedRectangle(cornerRadius: 13))
+                Text(title).font(.system(size: 20, weight: .bold)).foregroundColor(theme.primaryText)
+                Text(detail).font(.system(size: 12)).foregroundColor(theme.secondaryText)
+                    .multilineTextAlignment(.center).lineSpacing(2).frame(maxWidth: 380)
             }
-            .padding(.top, 28).padding(.bottom, 22)
+            .padding(.top, 18).padding(.bottom, 14)
 
             Divider()
 
-            VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 10) {
                 Text("输入许可证密钥").font(.system(size: 13, weight: .semibold)).foregroundColor(theme.primaryText)
                 Text("购买后获得以 CA- 开头的密钥。一个密钥最多激活 3 台 Mac。")
-                    .font(.system(size: 11.5)).foregroundColor(theme.secondaryText)
+                    .font(.system(size: 11)).foregroundColor(theme.secondaryText)
                 TextField("CA-ABCD-EFGH-IJKL-MNOP-QRST-UVWX", text: $licenseKey)
                     .textFieldStyle(.roundedBorder).font(.system(size: 12, design: .monospaced))
                     .onSubmit { activate() }
@@ -105,7 +105,7 @@ struct LicenseGateView: View {
 
                 if let error = manager.lastError {
                     Label(error, systemImage: "exclamationmark.triangle.fill")
-                        .font(.system(size: 11.5)).foregroundColor(.red)
+                        .font(.system(size: 11)).foregroundColor(.red)
                 }
 
                 if shouldOfferRetry {
@@ -116,16 +116,32 @@ struct LicenseGateView: View {
                 if canStartTrial {
                     Divider()
                     HStack {
-                        VStack(alignment: .leading, spacing: 3) {
+                        VStack(alignment: .leading, spacing: 2) {
                             Text("还没有许可证？").font(.system(size: 12, weight: .medium))
-                            Text("可先免费体验全部功能 30 天").font(.system(size: 11)).foregroundColor(theme.secondaryText)
+                            Text("可先免费体验全部功能 30 天").font(.system(size: 10.5)).foregroundColor(theme.secondaryText)
                         }
                         Spacer()
-                        Button("开始免费试用") { Task { await manager.startTrial() } }.disabled(manager.isWorking)
+                        Button("开始免费试用") { Task { await manager.startTrial() } }
+                            .buttonStyle(.borderedProminent).controlSize(.small).disabled(manager.isWorking)
                     }
                 }
+
+                Divider()
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("还没有激活密钥？").font(.system(size: 12, weight: .medium))
+                        Text("在购买页面支付后获得以 CA- 开头的密钥").font(.system(size: 10.5)).foregroundColor(theme.secondaryText)
+                    }
+                    Spacer()
+                    Button {
+                        NSWorkspace.shared.open(LicenseManager.purchaseURL)
+                    } label: {
+                        Label("购买密钥", systemImage: "cart.fill")
+                    }
+                    .buttonStyle(.borderedProminent).controlSize(.small)
+                }
             }
-            .padding(22)
+            .padding(16)
 
             Divider()
             HStack {
