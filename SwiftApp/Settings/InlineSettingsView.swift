@@ -24,6 +24,7 @@ struct InlineSettingsView: View {
     @State private var pendingThreshold: Int? = nil
     @State private var thresholdBeforeEdit: Double = 3000
     @State private var imagePasteUseCtrlV = UserDefaults.standard.bool(forKey: "ImagePasteUseCtrlV")
+    @State private var closePopupAfterDrag = HistoryPopupWindow.closePopupAfterDragEnabled
     @State private var showDragGuide = false
     @State private var isHoveringDragIcon = false
     @State private var updateState: UpdateCheckState = .idle
@@ -369,6 +370,17 @@ struct InlineSettingsView: View {
             .onChange(of: imagePasteUseCtrlV) { _, newValue in
                 UserDefaults.standard.set(newValue, forKey: "ImagePasteUseCtrlV")
                 backend.syncImagePasteModifier()
+            }
+            sectionDivider().padding(.vertical, 4)
+            settingToggleRow(
+                icon: closePopupAfterDrag ? "hand.draw.fill" : "hand.draw",
+                iconColor: closePopupAfterDrag ? Color.accentColor : .secondary,
+                title: "拖拽后自动关闭弹窗",
+                desc: "将历史条目拖拽到其他应用后自动关闭弹窗；关闭此开关可连续拖拽多个条目。",
+                isOn: $closePopupAfterDrag
+            )
+            .onChange(of: closePopupAfterDrag) { _, newValue in
+                UserDefaults.standard.set(newValue, forKey: HistoryPopupWindow.closePopupAfterDragDefaultsKey)
             }
         }
     }

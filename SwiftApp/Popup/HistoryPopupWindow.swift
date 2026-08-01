@@ -14,9 +14,22 @@ class HistoryPopupWindow: NSPanel {
     /// deliberate click outside the popup dismisses it normally.
     private var itemDragInProgress = false
     private var awaitingPostDragInteraction = false
-    private var dragMouseUpMonitor: Any?
-    private var dragLocalMouseUpMonitor: Any?
+    /// Polls `NSEvent.pressedMouseButtons` to detect the end of a drag
+    /// (mouse up). Event monitors never see the mouse-up of a drag session:
+    /// while dragging, the run loop runs in NSEventTrackingRunLoopMode, which
+    /// restricts which sources deliver events. A timer registered for both
+    /// common and event-tracking modes observes the button release reliably.
+    private var mouseUpWatcher: Timer?
     private var postDragClickMonitor: Any?
+
+    /// UserDefaults key for the "拖拽后自动关闭弹窗" preference (default ON).
+    static let closePopupAfterDragDefaultsKey = "ClosePopupAfterDrag"
+
+    /// Whether the popup should dismiss right after an item drag completes.
+    /// Defaults to ON when the user has never touched the preference.
+    static var closePopupAfterDragEnabled: Bool {
+        UserDefaults.standard.object(forKey: closePopupAfterDragDefaultsKey) as? Bool ?? true
+    }
 
     private init() {
         // Match show() — use visibleFrame so first-open position matches
@@ -56,7 +69,7 @@ class HistoryPopupWindow: NSPanel {
         itemDragInProgress = true
         awaitingPostDragInteraction = false
         removePostDragClickMonitor()
-        installDragCompletionMonitors()
+        startMouseUpWatcher()
     }
 
     func show() {
@@ -125,35 +138,64 @@ class HistoryPopupWindow: NSPanel {
     }
 
     @objc private func didResignKey(_ notification: Notification) {
-        guard !itemDragInProgress && !awaitingPostDragInteraction else {
-            debugLog("Popup resigned key during item drag; awaiting next interaction")
+        if itemDragInProgress || awaitingPostDragInteraction {
+            if Self.closePopupAfterDragEnabled {
+                // The drag left the popup and focus moved elsewhere (a drop
+                // into another app activates it). Dismiss now — the same
+                // outcome as pressing Esc.
+                itemDragInProgress = false
+                awaitingPostDragInteraction = false
+                stopMouseUpWatcher()
+                removePostDragClickMonitor()
+                debugLog("Popup resigned key after drag; closing (same as Esc)")
+                close()
+            } else {
+                debugLog("Popup resigned key during item drag; awaiting next interaction")
+            }
             return
         }
         debugLog("Popup resigned key; animated close")
         closeWithAnimation()
     }
 
-    private func installDragCompletionMonitors() {
-        removeDragCompletionMonitors()
-        let complete: (NSEvent) -> NSEvent? = { [weak self] event in
-            self?.completeItemDrag()
-            return event
+    /// Drag end detection: while the left button stays pressed the drag is in
+    /// progress; the tick that observes the release ends it. The 40 ms cadence
+    /// keeps the dismissal feeling immediate.
+    private func startMouseUpWatcher() {
+        stopMouseUpWatcher()
+        let timer = Timer(timeInterval: 0.04, repeats: true) { [weak self] _ in
+            guard let self = self else { return }
+            // Left button still down → drag still in progress.
+            guard NSEvent.pressedMouseButtons & 1 == 0 else { return }
+            self.completeItemDrag()
         }
-        // A local monitor handles drops back inside this app; a global monitor
-        // handles drops in another application. Mouse events need no
-        // accessibility permission for global observation.
-        dragLocalMouseUpMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseUp, handler: complete)
-        dragMouseUpMonitor = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseUp) { [weak self] _ in
-            self?.completeItemDrag()
-        }
+        RunLoop.main.add(timer, forMode: .common)
+        RunLoop.main.add(timer, forMode: .eventTracking)
+        mouseUpWatcher = timer
+    }
+
+    private func stopMouseUpWatcher() {
+        mouseUpWatcher?.invalidate()
+        mouseUpWatcher = nil
     }
 
     private func completeItemDrag() {
         guard itemDragInProgress else { return }
         itemDragInProgress = false
-        awaitingPostDragInteraction = true
-        removeDragCompletionMonitors()
-        installPostDragClickMonitor()
+        stopMouseUpWatcher()
+
+        if Self.closePopupAfterDragEnabled {
+            // 拖拽结束（已松手）→ 等同于按一次 Esc：直接关闭弹窗。
+            awaitingPostDragInteraction = false
+            removePostDragClickMonitor()
+            debugLog("Drag ended; closing popup (same as Esc)")
+            close()
+        } else {
+            // 开关关闭：保持弹窗开启，可连续拖拽多个条目；
+            // 下一次外部点击正常关闭。
+            awaitingPostDragInteraction = true
+            installPostDragClickMonitor()
+        }
     }
 
     private func installPostDragClickMonitor() {
@@ -165,17 +207,6 @@ class HistoryPopupWindow: NSPanel {
         }
     }
 
-    private func removeDragCompletionMonitors() {
-        if let monitor = dragMouseUpMonitor {
-            NSEvent.removeMonitor(monitor)
-            dragMouseUpMonitor = nil
-        }
-        if let monitor = dragLocalMouseUpMonitor {
-            NSEvent.removeMonitor(monitor)
-            dragLocalMouseUpMonitor = nil
-        }
-    }
-
     private func removePostDragClickMonitor() {
         if let monitor = postDragClickMonitor {
             NSEvent.removeMonitor(monitor)
@@ -183,7 +214,13 @@ class HistoryPopupWindow: NSPanel {
         }
     }
 
-    /// Animated close: popup fades → preview fades → both close.
+    /// Animated close: popup and preview fade independently, then close.
+    /// Closing must NOT depend on an animation completion chain. CA animation
+    /// completions are not reliably delivered while the run loop is in event
+    /// tracking (mouse-dragging / menu tracking — see NSEventTrackingRunLoopMode),
+    /// and a stalled preview fade used to block the popup close entirely,
+    /// leaving the window visible without focus. A timer registered for both
+    /// tracking and common run loop modes guarantees the close.
     func closeWithAnimation() {
         let preview = previewPanel
         previewPanel = nil
@@ -193,19 +230,32 @@ class HistoryPopupWindow: NSPanel {
             ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
             self.animator().alphaValue = 0
         }, completionHandler: { [weak self] in
+            self?.close()
+        })
+
+        if let pv = preview {
+            NSAnimationContext.runAnimationGroup({ ctx in
+                ctx.duration = 0.1
+                pv.animator().alphaValue = 0
+            }, completionHandler: {
+                pv.close()
+            })
+        }
+
+        // Guarantee: if the fades above never complete (e.g. their
+        // transactions were never serviced), close anyway.
+        let guarantee = Timer(timeInterval: 0.4, repeats: false) { [weak self] _ in
             guard let self = self else { return }
-            if let pv = preview {
-                NSAnimationContext.runAnimationGroup({ ctx in
-                    ctx.duration = 0.1
-                    pv.animator().alphaValue = 0
-                }, completionHandler: {
-                    pv.close()
-                    self.close()
-                })
-            } else {
+            if self.isVisible {
+                debugLog("closeWithAnimation: forcing close (animation stalled)")
                 self.close()
             }
-        })
+            if let pv = preview, pv.isVisible {
+                pv.close()
+            }
+        }
+        RunLoop.main.add(guarantee, forMode: .common)
+        RunLoop.main.add(guarantee, forMode: .eventTracking)
     }
 
     override func close() {
@@ -213,7 +263,7 @@ class HistoryPopupWindow: NSPanel {
         NotificationCenter.default.removeObserver(self, name: NSWindow.didBecomeKeyNotification, object: self)
         itemDragInProgress = false
         awaitingPostDragInteraction = false
-        removeDragCompletionMonitors()
+        stopMouseUpWatcher()
         removePostDragClickMonitor()
         previewPanel?.close()
         previewPanel = nil
