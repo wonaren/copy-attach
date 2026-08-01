@@ -28,10 +28,51 @@ use crate::{macos};
 // Snapshot API
 // ═══════════════════════════════════════════
 
-/// Opaque handle to a cloned snapshot of clipboard history, taken under a
-/// single history lock. All reads from this snapshot are race-free — the
-/// background monitor thread cannot modify it.
-pub struct Snapshot(Vec<ClipboardEntry>);
+/// Lightweight snapshot row: exactly the fields the frontend list consumes.
+/// The full text is deliberately NOT carried — a refresh snapshot must stay
+/// small even when history holds many multi-KB pasted documents.
+pub(crate) struct SnapshotRow {
+    pub(crate) entry_type: i32,
+    pub(crate) id: i64,
+    pub(crate) timestamp: i64,
+    pub(crate) label: String,
+    pub(crate) source_name: String,
+    pub(crate) source_bundle_id: String,
+    pub(crate) preview: String, // text entries only; empty for images
+    pub(crate) db_id: i64,      // image entries only; 0 otherwise
+    pub(crate) width: i32,
+    pub(crate) height: i32,
+}
+
+impl SnapshotRow {
+    pub(crate) fn from_entry(entry: &ClipboardEntry) -> SnapshotRow {
+        let (preview, db_id, width, height) = match entry {
+            ClipboardEntry::Text { .. } => (entry.preview(), 0, 0, 0),
+            ClipboardEntry::Image { db_id, width, height, .. } => {
+                (String::new(), *db_id, *width as i32, *height as i32)
+            }
+        };
+        SnapshotRow {
+            entry_type: entry.content_type(),
+            id: entry.entry_id() as i64,
+            timestamp: entry.timestamp() as i64,
+            label: entry.label(),
+            source_name: entry.source_name().to_string(),
+            source_bundle_id: entry.source_bundle_id().to_string(),
+            preview,
+            db_id,
+            width,
+            height,
+        }
+    }
+}
+
+/// Opaque handle to a lightweight snapshot of clipboard history, taken under a
+/// single history lock. Holds compact metadata + bounded previews — never full
+/// text — so acquiring it does not deep-clone potentially many MB of pasted
+/// content. All reads from this snapshot are race-free: the background monitor
+/// thread cannot modify it.
+pub struct Snapshot(Vec<SnapshotRow>);
 
 /// Acquire a consistent snapshot of all history entries under one lock.
 /// Returns an opaque handle (or null if the backend is uninitialized).
@@ -42,7 +83,8 @@ pub extern "C" fn clipboard_snapshot_acquire() -> *mut Snapshot {
         Some(b) => b.history.lock().unwrap(),
         None => return std::ptr::null_mut(),
     };
-    Box::into_raw(Box::new(Snapshot(hist.clone())))
+    let rows: Vec<SnapshotRow> = hist.iter().map(SnapshotRow::from_entry).collect();
+    Box::into_raw(Box::new(Snapshot(rows)))
 }
 
 #[no_mangle]
@@ -56,25 +98,21 @@ pub extern "C" fn clipboard_snapshot_count(snap: *const Snapshot) -> c_int {
 pub extern "C" fn clipboard_snapshot_item_type(snap: *const Snapshot, index: c_int) -> c_int {
     if snap.is_null() { return -1; }
     let snap = unsafe { &*snap };
-    snap.0.get(index as usize).map_or(-1, super::types::ClipboardEntry::content_type)
+    snap.0.get(index as usize).map_or(-1, |row| row.entry_type)
 }
 
 #[no_mangle]
 pub extern "C" fn clipboard_snapshot_item_id(snap: *const Snapshot, index: c_int) -> i64 {
     if snap.is_null() { return 0; }
     let snap = unsafe { &*snap };
-    match snap.0.get(index as usize) {
-        Some(ClipboardEntry::Text { id, .. }) => *id as i64,
-        Some(ClipboardEntry::Image { id, .. }) => *id as i64,
-        None => 0,
-    }
+    snap.0.get(index as usize).map_or(0, |row| row.id)
 }
 
 #[no_mangle]
 pub extern "C" fn clipboard_snapshot_item_timestamp(snap: *const Snapshot, index: c_int) -> c_longlong {
     if snap.is_null() { return 0; }
     let snap = unsafe { &*snap };
-    snap.0.get(index as usize).map_or(0, |item| item.timestamp() as c_longlong)
+    snap.0.get(index as usize).map_or(0, |row| row.timestamp)
 }
 
 /// Caller must free with `clipboard_free_string()`.
@@ -83,19 +121,28 @@ pub extern "C" fn clipboard_snapshot_item_label(snap: *const Snapshot, index: c_
     if snap.is_null() { return std::ptr::null_mut(); }
     let snap = unsafe { &*snap };
     match snap.0.get(index as usize) {
-        Some(item) => to_ffi_cstring(&item.label()),
+        Some(row) => to_ffi_cstring(&row.label),
         None => std::ptr::null_mut(),
     }
 }
 
-/// Get text content (text items only). Caller must free with `clipboard_free_string()`.
+/// Bounded preview text for a text item (first 256 Unicode scalars). The list
+/// row only renders the first ~200 chars, so the snapshot carries this bounded
+/// prefix instead of cloning the full text into the frontend. Caller must free
+/// with `clipboard_free_string()`. Image items return null.
 #[no_mangle]
-pub extern "C" fn clipboard_snapshot_item_text(snap: *const Snapshot, index: c_int) -> *mut c_char {
+pub extern "C" fn clipboard_snapshot_item_preview(snap: *const Snapshot, index: c_int) -> *mut c_char {
     if snap.is_null() { return std::ptr::null_mut(); }
     let snap = unsafe { &*snap };
     match snap.0.get(index as usize) {
-        Some(ClipboardEntry::Text { text, .. }) => to_ffi_cstring(text.as_str()),
-        _ => std::ptr::null_mut(),
+        Some(row) => {
+            if row.preview.is_empty() {
+                std::ptr::null_mut()
+            } else {
+                to_ffi_cstring(&row.preview)
+            }
+        }
+        None => std::ptr::null_mut(),
     }
 }
 
@@ -105,7 +152,7 @@ pub extern "C" fn clipboard_snapshot_item_source_name(snap: *const Snapshot, ind
     if snap.is_null() { return std::ptr::null_mut(); }
     let snap = unsafe { &*snap };
     match snap.0.get(index as usize) {
-        Some(item) => to_ffi_cstring(item.source_name()),
+        Some(row) => to_ffi_cstring(&row.source_name),
         None => std::ptr::null_mut(),
     }
 }
@@ -116,7 +163,7 @@ pub extern "C" fn clipboard_snapshot_item_source_bundle_id(snap: *const Snapshot
     if snap.is_null() { return std::ptr::null_mut(); }
     let snap = unsafe { &*snap };
     match snap.0.get(index as usize) {
-        Some(item) => to_ffi_cstring(item.source_bundle_id()),
+        Some(row) => to_ffi_cstring(&row.source_bundle_id),
         None => std::ptr::null_mut(),
     }
 }
@@ -125,30 +172,21 @@ pub extern "C" fn clipboard_snapshot_item_source_bundle_id(snap: *const Snapshot
 pub extern "C" fn clipboard_snapshot_get_image_db_id(snap: *const Snapshot, index: c_int) -> i64 {
     if snap.is_null() { return 0; }
     let snap = unsafe { &*snap };
-    match snap.0.get(index as usize) {
-        Some(ClipboardEntry::Image { db_id, .. }) => *db_id,
-        _ => 0,
-    }
+    snap.0.get(index as usize).map_or(0, |row| row.db_id)
 }
 
 #[no_mangle]
 pub extern "C" fn clipboard_snapshot_get_image_width(snap: *const Snapshot, index: c_int) -> c_int {
     if snap.is_null() { return 0; }
     let snap = unsafe { &*snap };
-    match snap.0.get(index as usize) {
-        Some(ClipboardEntry::Image { width, .. }) => *width as c_int,
-        _ => 0,
-    }
+    snap.0.get(index as usize).map_or(0, |row| row.width)
 }
 
 #[no_mangle]
 pub extern "C" fn clipboard_snapshot_get_image_height(snap: *const Snapshot, index: c_int) -> c_int {
     if snap.is_null() { return 0; }
     let snap = unsafe { &*snap };
-    match snap.0.get(index as usize) {
-        Some(ClipboardEntry::Image { height, .. }) => *height as c_int,
-        _ => 0,
-    }
+    snap.0.get(index as usize).map_or(0, |row| row.height)
 }
 
 /// Safe to call with null pointer (no-op).
@@ -156,6 +194,53 @@ pub extern "C" fn clipboard_snapshot_get_image_height(snap: *const Snapshot, ind
 pub extern "C" fn clipboard_snapshot_release(snap: *mut Snapshot) {
     if snap.is_null() { return; }
     unsafe { drop(Box::from_raw(snap)); }
+}
+
+// ═══════════════════════════════════════════
+// Text search (case-insensitive substring)
+// ═══════════════════════════════════════════
+
+/// Search all history entries for a case-insensitive substring over label,
+/// source name, and full text. Returns a malloc'd array of matching entry_ids
+/// (`out_count` = number of ids), or null when there are no matches. Caller
+/// must free with `clipboard_free_u64_array()`.
+#[no_mangle]
+pub extern "C" fn clipboard_search_ids(query: *const c_char, out_count: *mut c_int) -> *mut u64 {
+    if !out_count.is_null() {
+        unsafe { *out_count = 0; }
+    }
+    if query.is_null() {
+        return std::ptr::null_mut();
+    }
+    let q = unsafe { CStr::from_ptr(query) }.to_string_lossy();
+    if q.is_empty() {
+        return std::ptr::null_mut();
+    }
+    let hist = match crate::backend::try_backend() {
+        Some(b) => b.history.lock().unwrap(),
+        None => return std::ptr::null_mut(),
+    };
+    let mut ids: Vec<u64> = hist.iter()
+        .filter(|item| item.matches_search(&q))
+        .map(ClipboardEntry::entry_id)
+        .collect();
+    let len = ids.len();
+    if len == 0 {
+        return std::ptr::null_mut();
+    }
+    // Pin capacity == len so `clipboard_free_u64_array` can reconstruct the
+    // Vec with from_raw_parts(ptr, len, len) without layout mismatch.
+    ids.shrink_to_fit();
+    let ptr = ids.as_mut_ptr();
+    std::mem::forget(ids);
+    unsafe { *out_count = len as c_int; }
+    ptr
+}
+
+#[no_mangle]
+pub extern "C" fn clipboard_free_u64_array(ptr: *mut u64, len: c_int) {
+    if ptr.is_null() || len <= 0 { return; }
+    unsafe { let _ = Vec::from_raw_parts(ptr, len as usize, len as usize); }
 }
 
 // ═══════════════════════════════════════════

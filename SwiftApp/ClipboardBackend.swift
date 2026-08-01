@@ -192,8 +192,8 @@ class ClipboardBackend: ObservableObject {
 
                 switch type {
                 case 0: // Text
-                    let fullText: String = {
-                        guard let cStr = clipboard_snapshot_item_text(snap, Int32(i)) else { return label }
+                    let preview: String = {
+                        guard let cStr = clipboard_snapshot_item_preview(snap, Int32(i)) else { return label }
                         let s = String(cString: cStr)
                         clipboard_free_string(cStr)
                         return s
@@ -205,7 +205,7 @@ class ClipboardBackend: ObservableObject {
                         label: label,
                         sourceName: sourceName,
                         sourceBundleId: sourceBundleId,
-                        fullText: fullText
+                        preview: preview
                     ))
                 case 1: // Image
                     let dbId = Int(clipboard_snapshot_get_image_db_id(snap, Int32(i)))
@@ -253,6 +253,20 @@ class ClipboardBackend: ObservableObject {
         let str = String(cString: cStr)
         clipboard_free_string(cStr)
         return str
+    }
+
+    /// Case-insensitive substring search over label, source name, and full text
+    /// (fields Swift no longer keeps for text entries). Returns the matched
+    /// entry_ids; the caller unions these with its own date-label matches.
+    func searchIds(_ query: String) -> Set<Int> {
+        guard !query.isEmpty else { return [] }
+        var count: Int32 = 0
+        let ptr = query.withCString { cQuery in
+            clipboard_search_ids(cQuery, &count)
+        }
+        guard let ptr, count > 0 else { return [] }
+        defer { clipboard_free_u64_array(ptr, count) }
+        return (0..<Int(count)).reduce(into: Set<Int>()) { $0.insert(Int(ptr[$1])) }
     }
 
     func getSourceName(at index: Int) -> String {
@@ -427,8 +441,8 @@ class ClipboardBackend: ObservableObject {
 
         switch type {
         case 0:
-            let fullText: String = {
-                guard let cStr = clipboard_snapshot_item_text(snap, i) else { return label }
+            let preview: String = {
+                guard let cStr = clipboard_snapshot_item_preview(snap, i) else { return label }
                 let s = String(cString: cStr)
                 clipboard_free_string(cStr)
                 return s
@@ -436,7 +450,7 @@ class ClipboardBackend: ObservableObject {
             return .text(
                 entryId: id, text: label, timestamp: timestamp,
                 label: label, sourceName: sourceName,
-                sourceBundleId: sourceBundleId, fullText: fullText
+                sourceBundleId: sourceBundleId, preview: preview
             )
         case 1:
             let dbId = Int(clipboard_snapshot_get_image_db_id(snap, i))

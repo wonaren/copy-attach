@@ -102,4 +102,33 @@ impl ClipboardEntry {
             _ => panic!("text() called on a non-Text ClipboardEntry"),
         }
     }
+
+    /// Bounded preview for the list row (first 256 Unicode scalars). The popup
+    /// renders at most ~200 chars, so the snapshot carries this prefix instead
+    /// of cloning the full text into the frontend.
+    pub(crate) fn preview(&self) -> String {
+        match self {
+            ClipboardEntry::Text { text, .. } => text.chars().take(256).collect(),
+            ClipboardEntry::Image { .. } => String::new(),
+        }
+    }
+
+    /// Case-insensitive substring match over the searchable fields: source
+    /// name, label, and full text. Mirrors the popup's previous Swift-side
+    /// `localizedCaseInsensitiveContains` semantics.
+    pub(crate) fn matches_search(&self, query: &str) -> bool {
+        let q = query.to_lowercase();
+        if self.source_name().to_lowercase().contains(&q) {
+            return true;
+        }
+        if self.label().to_lowercase().contains(&q) {
+            return true;
+        }
+        if let ClipboardEntry::Text { text, .. } = self {
+            if text.to_lowercase().contains(&q) {
+                return true;
+            }
+        }
+        false
+    }
 }

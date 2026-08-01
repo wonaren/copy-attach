@@ -41,13 +41,19 @@ int32_t clipboard_snapshot_item_type(void* snap, int32_t index);
 int64_t clipboard_snapshot_item_id(void* snap, int32_t index);
 int64_t clipboard_snapshot_item_timestamp(void* snap, int32_t index);
 char* clipboard_snapshot_item_label(void* snap, int32_t index);
-char* clipboard_snapshot_item_text(void* snap, int32_t index);
+char* clipboard_snapshot_item_preview(void* snap, int32_t index);
 char* clipboard_snapshot_item_source_name(void* snap, int32_t index);
 char* clipboard_snapshot_item_source_bundle_id(void* snap, int32_t index);
 int64_t clipboard_snapshot_get_image_db_id(void* snap, int32_t index);
 int32_t clipboard_snapshot_get_image_width(void* snap, int32_t index);
 int32_t clipboard_snapshot_get_image_height(void* snap, int32_t index);
 void clipboard_snapshot_release(void* snap);
+
+// ─── Search (case-insensitive substring over label/source/full text) ───
+// Returns a malloc'd array of matching entry_ids; caller must free with
+// clipboard_free_u64_array. Null + 0 count when no matches.
+uint64_t* clipboard_search_ids(const char* query, int32_t* out_count);
+void clipboard_free_u64_array(uint64_t* ptr, int32_t len);
 
 // ─── Image by DB row id (no history lock) ───
 uint8_t* clipboard_get_image_thumb_by_db_id(int64_t db_id, int32_t* out_len);

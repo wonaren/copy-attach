@@ -333,13 +333,13 @@ struct HistoryPopupContent: View {
                 try? await Task.sleep(nanoseconds: debounceNs)
                 guard !Task.isCancelled else { return }
 
-                // localizeCaseInsensitiveContains for CJK is 10-50× slower
-                // than ASCII — compute off the main thread.
-                let filtered = await Task.detached(priority: .userInitiated) { [items] in
-                    items.filter {
-                        $0.label.localizedCaseInsensitiveContains(newValue) ||
-                        $0.sourceName.localizedCaseInsensitiveContains(newValue) ||
-                        $0.fullText.localizedCaseInsensitiveContains(newValue) ||
+                // Full-text/label/source matching runs in Rust — Swift no
+                // longer holds the text. Date-label matching stays here (the
+                // DayGroup label is UI-derived and unavailable to the backend).
+                let filtered = await Task.detached(priority: .userInitiated) { [items, backend] in
+                    let matchIds = backend.searchIds(newValue)
+                    return items.filter {
+                        matchIds.contains($0.id) ||
                         DayGroup.label(for: $0.timestamp)
                             .localizedCaseInsensitiveContains(newValue)
                     }
@@ -568,7 +568,7 @@ struct HistoryPopupContent: View {
                 return nil
             }
             return .text(entryId: entryId, text: full, timestamp: timestamp,
-                         label: label, sourceName: sourceName, sourceBundleId: sourceBundleId, fullText: full)
+                         label: label, sourceName: sourceName, sourceBundleId: sourceBundleId, preview: full)
         default:
             return item
         }

@@ -1,7 +1,7 @@
 import Foundation
 
 enum ClipboardItem: Identifiable {
-    case text(entryId: Int, text: String, timestamp: UInt64, label: String, sourceName: String, sourceBundleId: String, fullText: String)
+    case text(entryId: Int, text: String, timestamp: UInt64, label: String, sourceName: String, sourceBundleId: String, preview: String)
     case image(entryId: Int, dbId: Int, width: Int, height: Int, timestamp: UInt64, label: String, sourceName: String, sourceBundleId: String)
 
     var id: Int {
@@ -39,9 +39,11 @@ enum ClipboardItem: Identifiable {
         }
     }
 
-    var fullText: String {
+    /// Bounded preview (first ~200 chars) for the list row. The full text is
+    /// fetched on demand via `clipboard_get_text_by_id` for preview/drag.
+    var preview: String {
         switch self {
-        case .text(_, _, _, _, _, _, let ft): return ft
+        case .text(_, _, _, _, _, _, let preview): return preview
         case .image: return ""
         }
     }

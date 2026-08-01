@@ -6,7 +6,7 @@ use crate::types::ClipboardEntry;
 use crate::image::{encode_png, decode_png, create_thumbnail, image_hash};
 use crate::history::add_to_history;
 use crate::backend::new_entry_id;
-use crate::ffi::clipboard_free_string;
+use crate::ffi::{clipboard_free_string, SnapshotRow};
 use rusqlite::Connection;
 
 fn make_text(text: &str, ts: u64) -> ClipboardEntry {
@@ -213,6 +213,95 @@ fn test_label_multibyte() {
     let label = t.label();
     assert!(label.chars().count() <= 61);
     assert!(label.contains("这是一个"));
+}
+
+#[test]
+fn test_preview_text() {
+    let short = make_text("short", 100);
+    assert_eq!(short.preview(), "short");
+
+    // Bounded to 256 Unicode scalars — CJK counts per scalar, not per byte.
+    let long: String = (0..300).map(|_| '汉').collect();
+    let t = make_text(&long, 100);
+    assert_eq!(t.preview().chars().count(), 256);
+    assert!(t.preview().starts_with('汉'));
+
+    // Multi-byte scalar (emoji) also bounded by scalar count.
+    let emoji = make_text(&"😀".repeat(300), 100);
+    assert_eq!(emoji.preview().chars().count(), 256);
+}
+
+#[test]
+fn test_preview_image() {
+    let img_data = make_test_image_rgba(1920, 1080, 128);
+    let i = make_image(&img_data, 1920, 1080, 100);
+    assert!(i.preview().is_empty());
+}
+
+#[test]
+fn test_matches_search() {
+    let t = make_text("Hello World, 剪贴板历史", 100);
+    // Full-text substring match, case-insensitive (query case does not matter).
+    assert!(t.matches_search("world"));
+    assert!(t.matches_search("WORLD"));
+    assert!(t.matches_search("剪贴板"));
+    // No match.
+    assert!(!t.matches_search("nope"));
+
+    // source_name match.
+    let entry = ClipboardEntry::Text {
+        id: new_entry_id(),
+        text: "content".to_string(),
+        timestamp: 100,
+        source_name: "Chrome".to_string(),
+        source_bundle_id: String::new(),
+        db_id: 0,
+    };
+    assert!(entry.matches_search("chrome"));
+    assert!(entry.matches_search("CHROME"));
+
+    // Image entries match via the generated label (dimensions) and source name.
+    let img_data = make_test_image_rgba(1920, 1080, 128);
+    let i = make_image(&img_data, 1920, 1080, 100);
+    assert!(i.matches_search("1920"));
+    assert!(i.matches_search("Image"));
+}
+
+#[test]
+fn test_snapshot_row_text() {
+    let t = make_text("第一行\n第二行很长很长的内容", 100);
+    let row = SnapshotRow::from_entry(&t);
+    assert_eq!(row.entry_type, 0);
+    assert_eq!(row.id, t.entry_id() as i64);
+    assert_eq!(row.timestamp, 100);
+    assert_eq!(row.label, "第一行");
+    assert_eq!(row.preview, "第一行\n第二行很长很长的内容");
+    assert_eq!(row.source_name, "");
+    assert_eq!(row.db_id, 0);
+}
+
+#[test]
+fn test_snapshot_row_text_bounded_preview() {
+    // Multi-KB text must not leak into the snapshot: preview is capped at 256
+    // scalars and label at the truncated first line.
+    let long = make_text(&"x".repeat(1000), 200);
+    let row = SnapshotRow::from_entry(&long);
+    assert_eq!(row.preview.chars().count(), 256);
+    assert!(row.label.chars().count() <= 61);
+}
+
+#[test]
+fn test_snapshot_row_image() {
+    let img_data = make_test_image_rgba(1920, 1080, 128);
+    let i = make_image(&img_data, 1920, 1080, 300);
+    let row = SnapshotRow::from_entry(&i);
+    assert_eq!(row.entry_type, 1);
+    assert_eq!(row.id, i.entry_id() as i64);
+    assert_eq!(row.timestamp, 300);
+    assert_eq!(row.label, "Image (1920×1080)");
+    assert!(row.preview.is_empty());
+    assert_eq!(row.width, 1920);
+    assert_eq!(row.height, 1080);
 }
 
 #[test]

@@ -27,8 +27,8 @@ struct ItemRowView: View {
             appIcon
             VStack(alignment: .leading, spacing: 0) {
                 switch item {
-                case .text(_, _, _, _, _, _, let fullText):
-                    textContent(fullText)
+                case .text(_, _, _, _, _, _, let preview):
+                    textContent(preview)
                 case .image(_, let dbId, let width, let height, _, _, _, _):
                     imageContent(dbId: dbId, width: width, height: height)
                 }

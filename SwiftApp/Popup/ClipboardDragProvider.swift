@@ -11,8 +11,15 @@ import UniformTypeIdentifiers
 enum ClipboardDragProvider {
     static func provider(for item: ClipboardItem) -> NSItemProvider {
         switch item {
-        case .text(_, _, _, _, _, _, let fullText):
-            return NSItemProvider(object: fullText as NSString)
+        case .text(let entryId, _, _, _, _, _, _):
+            // Full text is no longer held in the snapshot; load it on demand
+            // only for the item actually being dragged. A failed load yields an
+            // empty drop (logged), never a silently truncated label.
+            guard let full = ClipboardBackend.shared.getTextByEntryId(entryId) else {
+                debugLog("Drag: failed to load full text for entry \(entryId)")
+                return NSItemProvider(object: "" as NSString)
+            }
+            return NSItemProvider(object: full as NSString)
 
         case .image(_, let dbId, _, _, _, _, _, _):
             precondition(dbId > 0, "An image without a persisted database ID must not be draggable")
