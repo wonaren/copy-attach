@@ -122,9 +122,19 @@ class ClipboardBackend: ObservableObject {
         clipboard_set_paste_image_with_ctrl_v(useCtrl ? 1 : 0)
     }
 
-    /// Detect the current frontmost app and tell Rust about it
+    /// Detect the current frontmost app and tell Rust about it. The pid is
+    /// also the paste target for CGEventPostToPid, so it must stay the app
+    /// the user was using before the popup opened — never this app itself.
     private func updateSourceApp() {
         if let app = NSWorkspace.shared.frontmostApplication {
+            // When the preview window activates this agent app (so pinch
+            // gestures are delivered), the frontmost app IS CopyAttach.
+            // Overwriting the stored pid with our own would redirect paste
+            // into this app, which has no paste target — keep the user's
+            // previous app as the source/paste target instead.
+            if app.processIdentifier == ProcessInfo.processInfo.processIdentifier {
+                return
+            }
             let name = app.localizedName ?? "Unknown"
             let bundleId = app.bundleIdentifier ?? "unknown"
             let pid = Int32(app.processIdentifier)

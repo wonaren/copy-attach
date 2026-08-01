@@ -543,6 +543,16 @@ struct HistoryPopupContent: View {
         let preview = PreviewWindow(item: previewItem, centerAt: popupCenter)
         popup.previewPanel = preview
         preview.orderFront(nil)
+        // Trackpad pinch (magnify) events are delivered only to the truly
+        // frontmost application. This LSUIElement agent app never receives
+        // applicationDidBecomeActive while its nonactivating panels are up —
+        // NSApp.isActive reports true, but the window server keeps routing
+        // magnify gestures to the previous app, so ZoomableImageNSView's
+        // magnify monitor never fires. Real activation makes gesture delivery
+        // work for the preview. Deactivation is automatic when the
+        // popup/preview closes or another app is clicked; the paste target
+        // pid is protected in ClipboardBackend.updateSourceApp.
+        NSApp.activate(ignoringOtherApps: true)
         showPreview = true
     }
 
