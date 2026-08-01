@@ -57,6 +57,10 @@ struct HistoryPopupContent: View {
 
     @State private var filterMode: FilterMode = .all
 
+    // Namespace for the sliding selection highlight (Spotlight-style glide
+    // between rows when the selection moves with ↑/↓ keys or a click).
+    @Namespace private var selectionNamespace
+
     // Spotlight opening animation: start slightly larger, spring in
     @State private var openingScale: CGFloat = 1.10
 
@@ -666,7 +670,8 @@ struct HistoryPopupContent: View {
                             isSelected: selectedIndex == index + 1,
                             isDeleteModifierPressed: isControlPressed,
                             shortcutHint: shortcut,
-                            isFavorite: backend.favoriteIds.contains(item.id)
+                            isFavorite: backend.favoriteIds.contains(item.id),
+                            selectionNamespace: selectionNamespace
                         )
                         // Rows exclusively own drag gestures. PopupHostingView
                         // exposes only its outer 3 pt border for moving the
@@ -691,6 +696,13 @@ struct HistoryPopupContent: View {
                 }
             }
             .padding(.all, 2)
+            // Slide the selection highlight between rows when the selection
+            // moves. Applied to the rows container (not the ScrollView) so
+            // scrolling stays instant while only the highlight glides.
+            // Fast spring: low response = snappy; text color is decoupled in
+            // ItemRowView so it doesn't ride this spring's settle tail.
+            .animation(.spring(response: 0.18, dampingFraction: 0.82, blendDuration: 0),
+                       value: selectedIndex)
         }
         .background(theme.popupRowDefault)
         .overlay(

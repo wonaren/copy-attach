@@ -9,6 +9,7 @@ struct ItemRowView: View {
     let isDeleteModifierPressed: Bool
     let shortcutHint: String?
     let isFavorite: Bool
+    let selectionNamespace: Namespace.ID
     @State private var isHovering = false
     @Environment(\.appTheme) private var theme
 
@@ -68,27 +69,38 @@ struct ItemRowView: View {
         }
         .padding(.horizontal, 2)
         .padding(.vertical, 3)
-        .background(rowBackground)
-        .overlay(
-            Group {
-                if isSelected {
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .strokeBorder(isDeleteModifierPressed ? Color(nsColor: .systemRed) : Color(nsColor: .keyboardFocusIndicatorColor).opacity(0.8), lineWidth: 1)
-                }
-            }
-        )
-        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        // Content flips its selection color quickly instead of riding the
+        // container's spring — a springing text crossfade reads as slow/floaty.
+        .animation(.easeOut(duration: 0.1), value: isSelected)
+        .background(selectionBackground)
         .onHover { hovering in
             isHovering = hovering
         }
     }
 
-    private var rowBackground: some View {
-        Group {
-            if isSelected && isDeleteModifierPressed { Color(nsColor: .systemRed) }
-            else if isSelected { Color(nsColor: .controlAccentColor) }
-            else if isHovering { theme.popupRowHover }
-            else { theme.popupRowDefault }
+    /// Selection/hover backdrop. The selected row hosts a matched-geometry
+    /// RoundedRectangle so the highlight glides to the next row as the
+    /// selection moves (Spotlight-style). Hover stays a static fill.
+    @ViewBuilder
+    private var selectionBackground: some View {
+        if isSelected {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(isDeleteModifierPressed ? Color(nsColor: .systemRed) : Color(nsColor: .controlAccentColor))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .strokeBorder(
+                            isDeleteModifierPressed
+                                ? Color(nsColor: .systemRed)
+                                : Color(nsColor: .keyboardFocusIndicatorColor).opacity(0.8),
+                            lineWidth: 1
+                        )
+                )
+                .matchedGeometryEffect(id: "itemSelectionHighlight",
+                                       in: selectionNamespace,
+                                       properties: .frame)
+        } else if isHovering {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(theme.popupRowHover)
         }
     }
 
