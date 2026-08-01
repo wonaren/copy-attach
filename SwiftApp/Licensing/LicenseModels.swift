@@ -25,6 +25,7 @@ enum EntitlementState: Equatable {
     case deviceLimitReached
     case revoked
     case suspended
+    case needsUpdate
     case invalidLease(String)
     case error(String)
 

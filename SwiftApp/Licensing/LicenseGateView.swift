@@ -167,6 +167,7 @@ struct LicenseGateView: View {
         case .deviceLimitReached: return "许可证设备数量已达上限"
         case .revoked: return "许可证已停用"
         case .suspended: return "许可证已暂停"
+        case .needsUpdate: return "请升级 CopyAttach"
         case .needsOnlineVerification: return "需要验证许可证"
         case .invalidLease: return "许可证凭证无效"
         case .error: return "无法验证许可证"
@@ -183,6 +184,7 @@ struct LicenseGateView: View {
         case .deviceLimitReached: return "此密钥已绑定 3 台设备，请先解绑旧设备，或使用其他许可证密钥。"
         case .revoked: return "当前许可证已撤销、退款或停用，无法继续运行 CopyAttach。"
         case .suspended: return "当前许可证已被暂停使用，无法继续运行 CopyAttach。请联系管理员恢复。"
+        case .needsUpdate: return "当前版本过旧，服务端已不再支持。请升级到最新版 CopyAttach 后重新验证许可证。"
         case .needsOnlineVerification: return "本地授权凭证已到期。请连接 License Server 完成验证后继续使用。"
         case .invalidLease(let message), .error(let message): return message
         case .trialActive(let endsAt, _):

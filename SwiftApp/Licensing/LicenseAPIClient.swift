@@ -29,7 +29,7 @@ struct LicenseAPIClient {
         let challenge = try await challenge(activationID: activationID, deviceID: deviceID)
         guard let nonce = Data(base64URL: challenge.nonce) else { throw LicenseClientError.invalidResponse }
         let signature = try device.sign(nonce).base64URLEncodedString()
-        let body = ["challenge_id": challenge.challengeId, "activation_id": activationID, "device_id": deviceID, "signature": signature]
+        let body = ["challenge_id": challenge.challengeId, "activation_id": activationID, "device_id": deviceID, "signature": signature, "app_version": Self.appVersion]
         return try await post("v1/licenses/refresh", body: body, as: SignedLease.self)
     }
 
@@ -37,7 +37,7 @@ struct LicenseAPIClient {
         let deviceID = try device.deviceID
         let challenge = try await challenge(activationID: activationID, deviceID: deviceID)
         guard let nonce = Data(base64URL: challenge.nonce) else { throw LicenseClientError.invalidResponse }
-        let body = ["challenge_id": challenge.challengeId, "activation_id": activationID, "device_id": deviceID, "signature": try device.sign(nonce).base64URLEncodedString()]
+        let body = ["challenge_id": challenge.challengeId, "activation_id": activationID, "device_id": deviceID, "signature": try device.sign(nonce).base64URLEncodedString(), "app_version": Self.appVersion]
         let _: StatusResponse = try await post("v1/licenses/deactivate", body: body, as: StatusResponse.self)
     }
 
@@ -58,9 +58,13 @@ struct LicenseAPIClient {
             "device_public_key": try device.publicKeyData.base64URLEncodedString(),
             "hardware_anchor": try device.hardwareAnchor(),
             "device_name": Host.current().localizedName ?? "Mac",
-            "app_version": Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0",
+            "app_version": Self.appVersion,
             "os_version": ProcessInfo.processInfo.operatingSystemVersionString
         ]
+    }
+
+    private static var appVersion: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
     }
 
     private func post<Response: Decodable>(_ path: String, body: [String: String], as: Response.Type) async throws -> Response {

@@ -352,6 +352,7 @@ final class LicenseManager: ObservableObject {
             if code == "LICENSE_EXPIRED" { return .subscriptionExpired }
             if code == "TRIAL_ALREADY_USED" { return .error("这台 Mac 已经领取过免费试用，删除钥匙串或重装应用不会重置试用。请输入许可证密钥继续。") }
             if code == "LICENSE_NOT_ACTIVE" { return .revoked }
+            if code == "APP_VERSION_TOO_OLD" { return .needsUpdate }
         }
         return .error(error.localizedDescription)
     }

@@ -121,6 +121,7 @@ struct LicenseSettingsView: View {
         case .deviceLimitReached: return "已达到 3 台设备上限"
         case .revoked: return "许可证已停用"
         case .suspended: return "许可证已暂停"
+        case .needsUpdate: return "请升级 CopyAttach"
         case .invalidLease: return "本地许可证无效"
         case .error: return "许可证操作失败"
         }
@@ -136,6 +137,7 @@ struct LicenseSettingsView: View {
         case .deviceLimitReached: return "请先在已激活设备上解绑，再重新激活"
         case .trialExpired: return "历史数据仍保留在本机，输入许可证密钥后继续使用"
         case .suspended: return "许可证已被暂停，无法继续使用 CopyAttach"
+        case .needsUpdate: return "当前版本过旧，请升级到最新版后重新验证许可证"
         case .needsOnlineVerification: return "启动 License Server 后重新打开 App"
         default: return "当前不会监控或保存剪贴板内容"
         }
