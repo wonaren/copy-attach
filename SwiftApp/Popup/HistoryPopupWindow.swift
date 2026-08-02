@@ -21,6 +21,9 @@ class HistoryPopupWindow: NSPanel {
     /// common and event-tracking modes observes the button release reliably.
     private var mouseUpWatcher: Timer?
     private var postDragClickMonitor: Any?
+    /// closeWithAnimation's 0.4s force-close backstop. Stored so show()/close()
+    /// can cancel a pending guarantee when the window is re-shown before it fires.
+    private var closeGuaranteeTimer: Timer?
 
     /// UserDefaults key for the "拖拽后自动关闭弹窗" preference (default ON).
     static let closePopupAfterDragDefaultsKey = "ClosePopupAfterDrag"
@@ -31,14 +34,20 @@ class HistoryPopupWindow: NSPanel {
         UserDefaults.standard.object(forKey: closePopupAfterDragDefaultsKey) as? Bool ?? true
     }
 
+    /// Duration of the popup open fade-in (window alpha 0 → 1).
+    private static let fadeInDuration: TimeInterval = 0.3
+
     private init() {
         // Match show() — use visibleFrame so first-open position matches
         // subsequent repositioning. Using frame.size (full screen) would
         // place the popup at a different y (menu bar not accounted for),
         // misaligning it with the preview window which uses visibleFrame.
         let screenFrame = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 800, height: 600)
-        let popupWidth: CGFloat = 520
-        let popupHeight: CGFloat = 744
+        // Match HistoryPopupContent.popupWidth/popupHeight (500×720). The window
+        // must equal the content size so the hosting view's content-driven resize
+        // is a no-op and the popup never shifts off-center after placement.
+        let popupWidth: CGFloat = 500
+        let popupHeight: CGFloat = 720
         let x = screenFrame.origin.x + (screenFrame.size.width - popupWidth) / 2
         let y = screenFrame.origin.y + (screenFrame.size.height - popupHeight) / 2
 
@@ -65,6 +74,17 @@ class HistoryPopupWindow: NSPanel {
 
     override var canBecomeKey: Bool { return true }
 
+    /// Re-centers the window on the visible frame of the main screen.
+    private func centerOnScreen() {
+        if let screen = NSScreen.main {
+            let screenFrame = screen.visibleFrame
+            let windowFrame = self.frame
+            let x = screenFrame.origin.x + (screenFrame.size.width - windowFrame.size.width) / 2
+            let y = screenFrame.origin.y + (screenFrame.size.height - windowFrame.size.height) / 2
+            self.setFrameOrigin(NSPoint(x: x, y: y))
+        }
+    }
+
     func beginItemDrag() {
         itemDragInProgress = true
         awaitingPostDragInteraction = false
@@ -74,6 +94,17 @@ class HistoryPopupWindow: NSPanel {
 
     func show() {
         debugLog("HistoryPopupWindow.show() called")
+
+        // Cancel a pending close-guarantee from a prior closeWithAnimation: if
+        // the user re-opens before its 0.4s deadline, the stale timer must not
+        // force-close the freshly re-shown window.
+        closeGuaranteeTimer?.invalidate()
+        closeGuaranteeTimer = nil
+
+        // Start invisible before the window is ordered on screen, so the fade-in
+        // below always animates from 0 no matter when the content view installs
+        // or renders.
+        self.alphaValue = 0
 
         let contentView = AnyView(HistoryPopupContent(onClose: { [weak self] in
             debugLog("HistoryPopupContent onClose callback")
@@ -90,23 +121,29 @@ class HistoryPopupWindow: NSPanel {
 
         self.contentView = hosting
 
-        // Position at center of screen
-        if let screen = NSScreen.main {
-            let screenFrame = screen.visibleFrame
-            let windowFrame = self.frame
-            let x = screenFrame.origin.x + (screenFrame.size.width - windowFrame.size.width) / 2
-            let y = screenFrame.origin.y + (screenFrame.size.height - windowFrame.size.height) / 2
-            self.setFrameOrigin(NSPoint(x: x, y: y))
-        }
+        // Position at center of screen. The window frame already equals the
+        // content size, so no content-driven resize can shift it off-center.
+        centerOnScreen()
 
         self.level = .floating
 
-        // Start invisible: window alpha handles the entire fade (including shadow),
-        // while SwiftUI handles the scale pop. Together they match Spotlight's
-        // unified window + content appearance.
-        self.alphaValue = 0
         self.orderFrontRegardless()
         self.makeKey()
+
+        // Fade in deterministically AFTER the window is on screen, decoupled
+        // from SwiftUI onAppear (which can fire while the content view is being
+        // installed, before the window is ordered on screen, dropping the
+        // animation). Animating from `self` here always runs on screen.
+        DispatchQueue.main.async {
+            // A close (or close-then-reopen) may land before this block drains;
+            // skip the fade for a window that is no longer on screen.
+            guard self.isVisible else { return }
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = Self.fadeInDuration
+                ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                self.animator().alphaValue = 1
+            }
+        }
 
         // Give the hosting view keyboard focus
         DispatchQueue.main.async {
@@ -243,10 +280,13 @@ class HistoryPopupWindow: NSPanel {
         }
 
         // Guarantee: if the fades above never complete (e.g. their
-        // transactions were never serviced), close anyway.
+        // transactions were never serviced), close anyway. Stored so a re-show
+        // within the deadline cancels it (see show()).
+        closeGuaranteeTimer?.invalidate()
         let guarantee = Timer(timeInterval: 0.4, repeats: false) { [weak self] _ in
             guard let self = self else { return }
             MainActor.assumeIsolated {
+                self.closeGuaranteeTimer = nil
                 if self.isVisible {
                     debugLog("closeWithAnimation: forcing close (animation stalled)")
                     self.close()
@@ -256,6 +296,7 @@ class HistoryPopupWindow: NSPanel {
                 }
             }
         }
+        closeGuaranteeTimer = guarantee
         RunLoop.main.add(guarantee, forMode: .common)
         RunLoop.main.add(guarantee, forMode: .eventTracking)
     }
@@ -267,6 +308,8 @@ class HistoryPopupWindow: NSPanel {
         awaitingPostDragInteraction = false
         stopMouseUpWatcher()
         removePostDragClickMonitor()
+        closeGuaranteeTimer?.invalidate()
+        closeGuaranteeTimer = nil
         previewPanel?.close()
         previewPanel = nil
         super.close()

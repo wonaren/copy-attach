@@ -226,16 +226,6 @@ struct HistoryPopupContent: View {
                 openingScale = 1.0
             }
 
-            // Sync window alpha fade with the SwiftUI scale animation,
-            // so the entire window (including shadow) appears as one unit.
-            if let w = popupWindow {
-                NSAnimationContext.runAnimationGroup { ctx in
-                    ctx.duration = animDuration
-                    ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
-                    w.animator().alphaValue = 1
-                }
-            }
-
             // Focus first item (or search bar if empty) after animation
             DispatchQueue.main.asyncAfter(deadline: .now() + animDuration + 0.05) {
                 if self.backend.items.isEmpty {
