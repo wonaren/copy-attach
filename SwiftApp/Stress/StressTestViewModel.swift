@@ -87,12 +87,13 @@ struct StressReport: Codable {
 // MARK: - View Model
 
 @MainActor
-class StressTestViewModel: ObservableObject {
-    @Published var report: StressReport?
-    @Published var isRunning = false
-    @Published var progress: String = ""
-    @Published var progressPercent: Double = 0
-    @Published var logLines: [String] = ["应力测试面板已就绪"]
+@Observable
+class StressTestViewModel {
+    var report: StressReport?
+    var isRunning = false
+    var progress: String = ""
+    var progressPercent: Double = 0
+    var logLines: [String] = ["应力测试面板已就绪"]
 
     // MARK: - Data Injection (via FFI — fast for moderate sizes)
 

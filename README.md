@@ -10,8 +10,8 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/Rust-1.75%2B-dea584?style=flat&logo=rust&logoColor=white" alt="Rust 1.75+">
-  <img src="https://img.shields.io/badge/Swift-5.9%2B-f05138?style=flat&logo=swift&logoColor=white" alt="Swift 5.9+">
-  <img src="https://img.shields.io/badge/macOS-14.0%2B-000000?style=flat&logo=apple&logoColor=white" alt="macOS 14.0+">
+  <img src="https://img.shields.io/badge/Swift-6%2B-f05138?style=flat&logo=swift&logoColor=white" alt="Swift 6+">
+  <img src="https://img.shields.io/badge/macOS-15.0%2B-000000?style=flat&logo=apple&logoColor=white" alt="macOS 15.0+">
   <img src="https://img.shields.io/badge/license-Apache%202.0-3da639?style=flat" alt="License Apache 2.0">
 </p>
 
@@ -39,6 +39,11 @@ CopyAttach 是一个 macOS 剪贴板管理器。它默默记录你复制的一�
 2. **不重复捕获**——粘贴时不会把自己刚写回的内容又读进来，形成死循环。
 3. **不丢数据**——每条历史实时写入 SQLite，重启还在。
 4. **不阻塞 UI**——读历史走无锁快照，Swift 随时拿到完整数据。
+
+## 技术栈
+
+- **Rust 后端**（`cdylib`）——剪贴板监控、去重、图片编解码、SQLite 持久化，经 C FFI 暴露给 Swift
+- **Swift 6 前端**（AppKit/SwiftUI）——启用 Swift 6 严格并发（`@MainActor` 隔离 + `@Observable` 状态管理），无锁快照驱动渲染
 
 ## 无负担的设计
 
@@ -112,8 +117,8 @@ CopyAttach 是一个 macOS 剪贴板管理器。它默默记录你复制的一�
 
 ## 构建依赖
 
-- macOS 14.0+（Sonoma）
-- Xcode 16+
+- macOS 15.0+（Sequoia）
+- Xcode 16+（Swift 6 语言模式）
 - Rust 1.75+
 
 ## 许可证

@@ -4,7 +4,7 @@ import SwiftUI
 // MARK: - Stress Test Panel
 
 struct StressTestPanel: View {
-    @StateObject private var vm = StressTestViewModel()
+    @State private var vm = StressTestViewModel()
 
     var body: some View {
         ScrollView {

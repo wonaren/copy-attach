@@ -3,6 +3,7 @@ import SwiftUI
 
 // MARK: - App Delegate
 
+@MainActor
 class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     static var shared: AppDelegate?
     private var settingsWindow: NSWindow?

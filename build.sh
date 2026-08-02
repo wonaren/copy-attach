@@ -105,6 +105,7 @@ fi
 # Compile with explicit args
 "$SWIFTC" $SDK \
     -target arm64-apple-macosx15.0 \
+    -swift-version 6 \
     -framework CryptoKit \
     -framework IOKit \
     -framework Security \

@@ -1,16 +1,18 @@
 import Foundation
+import Observation
 
 @MainActor
-final class LicenseManager: ObservableObject {
+@Observable
+final class LicenseManager {
     static let shared = LicenseManager()
     /// 激活密钥购买页面。
     static let purchaseURL = URL(string: "https://pay.ldxp.cn/shop/F5T5GUPN")!
 
-    @Published private(set) var state: EntitlementState = .loading
-    @Published private(set) var isWorking = false
-    @Published private(set) var lastError: String?
+    private(set) var state: EntitlementState = .loading
+    private(set) var isWorking = false
+    private(set) var lastError: String?
     /// Non-nil while the in-window activation celebration is playing.
-    @Published private(set) var celebration: CelebrationInfo?
+    private(set) var celebration: CelebrationInfo?
 
     private let leaseAccount = "signed-license-lease-v1"
     private let identity = DeviceIdentity()

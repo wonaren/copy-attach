@@ -1,13 +1,16 @@
 import AppKit
 import Foundation
+import Observation
 
 /// Swift wrapper around the Rust copy_attach C FFI.
-class ClipboardBackend: ObservableObject {
+@MainActor
+@Observable
+class ClipboardBackend {
     static let shared = ClipboardBackend()
 
-    @Published var count: Int = 0
-    @Published var items: [ClipboardItem] = []
-    @Published var permissionGranted: Bool = false
+    var count: Int = 0
+    var items: [ClipboardItem] = []
+    var permissionGranted: Bool = false
 
     private var timer: Timer?
     private var sourceAppTimer: Timer?
@@ -21,7 +24,7 @@ class ClipboardBackend: ObservableObject {
         return c
     }()
 
-    @Published var favoriteIds: Set<Int> = []
+    var favoriteIds: Set<Int> = []
 
     private let favoritesKey = "FavoriteIds"
 
@@ -72,12 +75,14 @@ class ClipboardBackend: ObservableObject {
         syncImagePasteModifier()
 
         timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
-            self?.refresh()
+            guard let self = self else { return }
+            MainActor.assumeIsolated { self.refresh() }
         }
 
         // Periodically update the frontmost app info for Rust's clipboard monitor
         sourceAppTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { [weak self] _ in
-            self?.updateSourceApp()
+            guard let self = self else { return }
+            MainActor.assumeIsolated { self.updateSourceApp() }
         }
 
         // Trigger an immediate refresh so the UI isn't stale for 0.5s
@@ -231,16 +236,19 @@ class ClipboardBackend: ObservableObject {
                     break
                 }
             }
-            DispatchQueue.main.async { [gen] in
-                guard gen == self.reloadGeneration else { return }
-                self.items = newItems
+            DispatchQueue.main.async { [gen, weak self] in
+                guard let self = self else { return }
+                MainActor.assumeIsolated {
+                    guard gen == self.reloadGeneration else { return }
+                    self.items = newItems
+                }
             }
         }
     }
 
     // MARK: - Getters
 
-    func getTextByEntryId(_ entryId: Int) -> String? {
+    nonisolated static func getTextByEntryId(_ entryId: Int) -> String? {
         guard let cStr = clipboard_get_text_by_id(UInt64(entryId)) else { return nil }
         let str = String(cString: cStr)
         clipboard_free_string(cStr)
@@ -250,7 +258,8 @@ class ClipboardBackend: ObservableObject {
     /// Case-insensitive substring search over label, source name, and full text
     /// (fields Swift no longer keeps for text entries). Returns the matched
     /// entry_ids; the caller unions these with its own date-label matches.
-    func searchIds(_ query: String) -> Set<Int> {
+    /// Pure FFI, so the offline search thread can call it directly.
+    nonisolated func searchIds(_ query: String) -> Set<Int> {
         guard !query.isEmpty else { return [] }
         var count: Int32 = 0
         let ptr = query.withCString { cQuery in
@@ -261,7 +270,9 @@ class ClipboardBackend: ObservableObject {
         return (0..<Int(count)).reduce(into: Set<Int>()) { $0.insert(Int(ptr[$1])) }
     }
 
-    func getImageFullByDbId(_ dbId: Int) -> Data? {
+    /// Pure FFI fetch (no instance or main-actor state), so preview windows can
+    /// load full images off the main thread via `Task.detached`.
+    nonisolated static func getImageFullByDbId(_ dbId: Int) -> Data? {
         var len: Int32 = 0
         guard let ptr = clipboard_get_image_full_by_db_id(Int64(dbId), &len) else { return nil }
         let data = Data(bytes: ptr, count: Int(len))

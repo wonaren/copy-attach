@@ -6,8 +6,8 @@ import UniformTypeIdentifiers
 // MARK: - Inline Settings View
 
 struct InlineSettingsView: View {
-    @StateObject private var backend = ClipboardBackend.shared
-    @StateObject private var hotkeyManager = HotkeyManager.shared
+    @State private var backend = ClipboardBackend.shared
+    @State private var hotkeyManager = HotkeyManager.shared
     @State private var selectedTab: Int
     @State private var launchAtLogin = UserDefaults.standard.bool(forKey: "LaunchAtLogin")
     @State private var runInBackground = UserDefaults.standard.bool(forKey: "RunInBackground") != false

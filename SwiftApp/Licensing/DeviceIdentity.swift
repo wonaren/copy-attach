@@ -3,7 +3,11 @@ import Foundation
 import IOKit
 import Security
 
-final class DeviceIdentity {
+/// `@unchecked Sendable`: the key is set exactly once by `loadOrCreate()`
+/// before any concurrent use; every later read (`deviceID`, `sign`, …) only
+/// observes that fixed value. It crosses async boundaries into the license
+/// API client, so Swift 6 must be told the reference is safe to share.
+final class DeviceIdentity: @unchecked Sendable {
     private let keyAccount = "device-secure-enclave-p256-v1"
     // This is a namespace, not a secret. Trial abuse prevention is enforced by
     // the server's persistent record keyed by this hashed platform UUID.

@@ -4,7 +4,7 @@ import SwiftUI
 /// Mandatory startup/expiry gate. This is deliberately separate from Settings:
 /// closing it without a valid entitlement terminates the application.
 struct LicenseGateView: View {
-    @ObservedObject private var manager = LicenseManager.shared
+    @State private var manager = LicenseManager.shared
     @State private var licenseKey = ""
     @Environment(\.appTheme) private var theme
 

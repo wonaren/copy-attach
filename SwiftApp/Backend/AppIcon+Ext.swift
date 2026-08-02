@@ -20,8 +20,9 @@ extension NSImage {
 }
 
 /// Cache app icons by bundle ID to avoid repeated lookups
-private var appIconCache: [String: NSImage] = [:]
+@MainActor private var appIconCache: [String: NSImage] = [:]
 
+@MainActor
 func getAppIcon(for bundleId: String) -> NSImage? {
     if bundleId.isEmpty { return nil }
     if let cached = appIconCache[bundleId] { return cached }

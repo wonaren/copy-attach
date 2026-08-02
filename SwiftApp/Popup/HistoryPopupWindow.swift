@@ -167,7 +167,7 @@ class HistoryPopupWindow: NSPanel {
             guard let self = self else { return }
             // Left button still down → drag still in progress.
             guard NSEvent.pressedMouseButtons & 1 == 0 else { return }
-            self.completeItemDrag()
+            MainActor.assumeIsolated { self.completeItemDrag() }
         }
         RunLoop.main.add(timer, forMode: .common)
         RunLoop.main.add(timer, forMode: .eventTracking)
@@ -230,7 +230,7 @@ class HistoryPopupWindow: NSPanel {
             ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
             self.animator().alphaValue = 0
         }, completionHandler: { [weak self] in
-            self?.close()
+            MainActor.assumeIsolated { self?.close() }
         })
 
         if let pv = preview {
@@ -238,7 +238,7 @@ class HistoryPopupWindow: NSPanel {
                 ctx.duration = 0.1
                 pv.animator().alphaValue = 0
             }, completionHandler: {
-                pv.close()
+                MainActor.assumeIsolated { pv.close() }
             })
         }
 
@@ -246,12 +246,14 @@ class HistoryPopupWindow: NSPanel {
         // transactions were never serviced), close anyway.
         let guarantee = Timer(timeInterval: 0.4, repeats: false) { [weak self] _ in
             guard let self = self else { return }
-            if self.isVisible {
-                debugLog("closeWithAnimation: forcing close (animation stalled)")
-                self.close()
-            }
-            if let pv = preview, pv.isVisible {
-                pv.close()
+            MainActor.assumeIsolated {
+                if self.isVisible {
+                    debugLog("closeWithAnimation: forcing close (animation stalled)")
+                    self.close()
+                }
+                if let pv = preview, pv.isVisible {
+                    pv.close()
+                }
             }
         }
         RunLoop.main.add(guarantee, forMode: .common)

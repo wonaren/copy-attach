@@ -74,7 +74,7 @@ struct PreviewContent: View {
         guard dbId != 0 else { return }
         isLoadingImage = true
         let data = await Task.detached(priority: .userInitiated) {
-            ClipboardBackend.shared.getImageFullByDbId(dbId)
+            ClipboardBackend.getImageFullByDbId(dbId)
         }.value
         // Only apply if we're still showing the same item
         if currentDbId == dbId {

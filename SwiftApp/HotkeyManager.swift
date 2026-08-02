@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import Carbon
+import Observation
 
 // MARK: - Global Hotkey Manager
 //
@@ -11,19 +12,21 @@ import Carbon
 // Both require Accessibility permissions on modern macOS. If neither works,
 // the app will prompt the user to grant permissions.
 
-class HotkeyManager: ObservableObject {
+@MainActor
+@Observable
+class HotkeyManager {
     static let shared = HotkeyManager()
 
     private let defaultsKey = "CustomHotkey"
 
-    @Published var config: HotkeyConfig {
+    var config: HotkeyConfig {
         didSet {
             saveConfig()
             reregisterHotkeys()
         }
     }
 
-    @Published var isRecording: Bool = false
+    var isRecording: Bool = false
 
     /// Callback triggered when the hotkey is pressed
     var onHotkeyPressed: (() -> Void)?
@@ -61,8 +64,10 @@ class HotkeyManager: ObservableObject {
     }
 
     deinit {
-        unregisterBoth()
-        removeLocalMonitor()
+        MainActor.assumeIsolated {
+            unregisterBoth()
+            removeLocalMonitor()
+        }
     }
 
     // MARK: - Persistence
@@ -110,7 +115,9 @@ class HotkeyManager: ObservableObject {
                 debugLog("Carbon hotkey pressed!")
                 DispatchQueue.main.async {
                     debugLog("Carbon hotkey callback fired on main queue")
-                    HotkeyManager.shared.onHotkeyPressed?()
+                    MainActor.assumeIsolated {
+                        HotkeyManager.shared.onHotkeyPressed?()
+                    }
                 }
                 return noErr
             }
@@ -188,8 +195,10 @@ class HotkeyManager: ObservableObject {
 
             if keyCode == self.config.keyCode && pressedFlags == configFlags {
                 debugLog("NSEvent hotkey match! keyCode=\(keyCode) flags=\(pressedFlags.rawValue)")
-                DispatchQueue.main.async {
-                    self.onHotkeyPressed?()
+                DispatchQueue.main.async { [weak self] in
+                    MainActor.assumeIsolated {
+                        self?.onHotkeyPressed?()
+                    }
                 }
             } else if keyCode == self.config.keyCode {
                 debugLog("NSEvent keyCode matched but flags differed: eventFlags=\(pressedFlags.rawValue) configFlags=\(configFlags.rawValue)")

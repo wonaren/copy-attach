@@ -53,14 +53,14 @@ enum ClipboardItem: Identifiable {
     /// through this single path. nil when the load fails.
     var fullText: String? {
         guard case .text(let entryId, _, _, _, _, _, _) = self else { return nil }
-        return ClipboardBackend.shared.getTextByEntryId(entryId)
+        return ClipboardBackend.getTextByEntryId(entryId)
     }
 
     /// Load the entry's full PNG data on demand. nil while the image is still
     /// encoding (no persisted db_id yet) or when the load fails.
     var imageData: Data? {
         guard case .image(_, let dbId, _, _, _, _, _, _) = self, dbId != 0 else { return nil }
-        return ClipboardBackend.shared.getImageFullByDbId(dbId)
+        return ClipboardBackend.getImageFullByDbId(dbId)
     }
 
     var isText: Bool {

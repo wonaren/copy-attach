@@ -84,7 +84,9 @@ final class ZoomableImageNSView: NSView {
     }
 
     deinit {
-        removeGestureMonitor()
+        MainActor.assumeIsolated {
+            removeGestureMonitor()
+        }
     }
 
     override func layout() {

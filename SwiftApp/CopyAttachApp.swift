@@ -34,8 +34,8 @@ private func menuBarIcon() -> NSImage? {
 
 /// Menu bar content that dynamically observes hotkey changes
 struct AppMenuBarContent: View {
-    @ObservedObject private var hotkeyManager = HotkeyManager.shared
-    @ObservedObject private var licenseManager = LicenseManager.shared
+    @State private var hotkeyManager = HotkeyManager.shared
+    @State private var licenseManager = LicenseManager.shared
 
     var body: some View {
         if licenseManager.state.permitsCoreFeatures {

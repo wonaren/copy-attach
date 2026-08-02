@@ -4,6 +4,7 @@ import AppKit
 /// Both the height measurement in PreviewWindow and the rendering in
 /// LargeTextView must use the same metrics so the window height matches
 /// the actual text layout.
+@MainActor
 enum PreviewTextLayout {
     static let font: NSFont = .monospacedSystemFont(ofSize: 14, weight: .regular)
     static let lineSpacing: CGFloat = 5

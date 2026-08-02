@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 struct LicenseSettingsView: View {
-    @ObservedObject private var manager = LicenseManager.shared
+    @State private var manager = LicenseManager.shared
     @State private var licenseKey = ""
     @Environment(\.appTheme) private var theme
 

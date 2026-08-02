@@ -45,13 +45,14 @@ private enum PopupRow: Identifiable {
 /// coordinates), published by each row via `RowFramePreferenceKey`.
 /// `PopupHostingView.rightMouseDown` uses this store to map a right-click to
 /// the row under the cursor. All access happens on the main thread.
+@MainActor
 final class PopupRowFrameStore {
     static let shared = PopupRowFrameStore()
     var frames: [Int: CGRect] = [:]
 }
 
 private struct RowFramePreferenceKey: PreferenceKey {
-    static var defaultValue: [Int: CGRect] = [:]
+    static let defaultValue: [Int: CGRect] = [:]
     static func reduce(value: inout [Int: CGRect], nextValue: () -> [Int: CGRect]) {
         value.merge(nextValue()) { $1 }
     }
@@ -76,7 +77,7 @@ private final class ContextMenuItemTarget: NSObject {
 struct HistoryPopupContent: View {
     let onClose: () -> Void
 
-    @StateObject private var backend = ClipboardBackend.shared
+    @State private var backend = ClipboardBackend.shared
     @State private var selectedIndex: Int = 0  // 0 = search bar, 1+ = items
     @State private var showPreview: Bool = false
     @State private var isControlPressed: Bool = false
@@ -384,6 +385,11 @@ struct HistoryPopupContent: View {
                             .localizedCaseInsensitiveContains(newValue)
                     }
                 }.value
+
+                // Task.detached is not auto-cancelled with this task — if the
+                // query changed while the search ran, discard the stale result
+                // instead of overwriting the newer search's output.
+                guard !Task.isCancelled else { return }
 
                 await MainActor.run {
                     withAnimation(.easeInOut(duration: 0.25)) {

@@ -102,10 +102,14 @@ class PopupHostingView: NSHostingView<AnyView> {
         removeMenuTrackingObservers()
         menuTrackingObservers.append(NotificationCenter.default.addObserver(
             forName: NSMenu.didBeginTrackingNotification, object: nil, queue: .main
-        ) { [weak self] _ in self?.isMenuTracking = true })
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.isMenuTracking = true }
+        })
         menuTrackingObservers.append(NotificationCenter.default.addObserver(
             forName: NSMenu.didEndTrackingNotification, object: nil, queue: .main
-        ) { [weak self] _ in self?.isMenuTracking = false })
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.isMenuTracking = false }
+        })
     }
 
     private func removeMenuTrackingObservers() {
@@ -161,9 +165,11 @@ class PopupHostingView: NSHostingView<AnyView> {
     }
 
     deinit {
-        removeArrowMonitor()
-        removeEscapeMonitor()
-        removeMenuTrackingObservers()
+        MainActor.assumeIsolated {
+            removeArrowMonitor()
+            removeEscapeMonitor()
+            removeMenuTrackingObservers()
+        }
     }
 
     /// Intercept ⌘Z before the search field's NSTextView swallows it for text undo.
