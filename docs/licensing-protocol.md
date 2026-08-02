@@ -11,6 +11,10 @@
 
 正式 Lease 续租使用一次性 5 分钟 challenge。客户端以 P-256 ECDSA（DER signature）签名 nonce。challenge 使用一次后失效。
 
+### 永久许可证的离线策略
+
+永久权益（`license_expires_at` 为空）的 Lease 即使超过 `expires_at`（服务端按 `LICENSE_LEASE_SECONDS` 签发，仅为续租节奏，不代表权益边界）仍视为有效：客户端校验 Ed25519 签名 + 设备绑定后即离线可用，不安排 Lease 中点续租，也不做周期性的在线状态轮询。后台的暂停/撤销对已激活的永久设备不强制生效，只影响该密钥的新设备激活与座位管理。试用/订阅的 Lease 到期、权益到期与在线状态检查照常执行。
+
 接口：
 
 - `GET /v1/health`

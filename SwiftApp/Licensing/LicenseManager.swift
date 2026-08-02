@@ -88,6 +88,10 @@ final class LicenseManager {
     @discardableResult
     func maintainEntitlement(now: Date = Date()) async -> Bool {
         guard state.permitsCoreFeatures, let payload = currentPayload else { return false }
+        // 永久许可证无到期时间：不做任何周期性有效性检查（在线状态轮询、Lease
+        // 中点续租、Lease 过期刷新）。签名即权威，永远离线可用。后台的暂停/撤销
+        // 只影响该密钥的新设备激活与座位管理，不强制作用于已激活设备。
+        if payload.entitlement == "perpetual" { return false }
         let nowSeconds = Int64(now.timeIntervalSince1970)
 
         if payload.entitlement == "trial", let end = payload.trialEndsAt, end <= nowSeconds {
@@ -295,10 +299,16 @@ final class LicenseManager {
     private func apply(_ payload: LeasePayload) {
         currentPayload = payload
         stateEpoch += 1
-        nextRefreshAt = LicenseRefreshSchedule.refreshDate(for: payload)
-        // 应用新 Lease 后尽快做一次在线状态检查（如刚启动/刚激活），
-        // 避免后台已被暂停/撤销的凭证继续使用一个检查周期。
-        nextStatusCheckAt = Date()
+        if payload.entitlement == "perpetual" {
+            // 永久许可证不安排 Lease 续租，也不做周期性在线状态检查，完全离线可用。
+            nextRefreshAt = nil
+            nextStatusCheckAt = nil
+        } else {
+            nextRefreshAt = LicenseRefreshSchedule.refreshDate(for: payload)
+            // 应用新 Lease 后尽快做一次在线状态检查（如刚启动/刚激活），
+            // 避免后台已被暂停/撤销的凭证继续使用一个检查周期。
+            nextStatusCheckAt = Date()
+        }
         if payload.entitlement == "trial" {
             guard let ends = payload.trialEndsAt else { state = .invalidLease("试用凭证缺少到期时间"); return }
             state = .trialActive(endsAt: Date(timeIntervalSince1970: TimeInterval(ends)), leaseExpiresAt: Date(timeIntervalSince1970: TimeInterval(payload.expiresAt)))
