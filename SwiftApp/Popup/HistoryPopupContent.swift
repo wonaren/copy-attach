@@ -39,6 +39,38 @@ private enum PopupRow: Identifiable {
     }
 }
 
+// MARK: - Right-Click Context Menu Support
+
+/// Screen-space frames of the laid-out item rows (entryId → CGRect in global
+/// coordinates), published by each row via `RowFramePreferenceKey`.
+/// `PopupHostingView.rightMouseDown` uses this store to map a right-click to
+/// the row under the cursor. All access happens on the main thread.
+final class PopupRowFrameStore {
+    static let shared = PopupRowFrameStore()
+    var frames: [Int: CGRect] = [:]
+}
+
+private struct RowFramePreferenceKey: PreferenceKey {
+    static var defaultValue: [Int: CGRect] = [:]
+    static func reduce(value: inout [Int: CGRect], nextValue: () -> [Int: CGRect]) {
+        value.merge(nextValue()) { $1 }
+    }
+}
+
+/// Retains a closure for the lifetime of an NSMenuItem. `NSMenuItem.target`
+/// is weak, so the menu keeps the handler alive through `representedObject`
+/// (strong) — the local scope of `showContextMenu` additionally holds it while
+/// the synchronous `popUp` tracking loop runs.
+private final class ContextMenuItemTarget: NSObject {
+    private let action: () -> Void
+    init(_ action: @escaping () -> Void) { self.action = action }
+    // Explicit @objc name: Swift's `perform(_:)` would bridge to
+    // `performSelector:`, which collides with NSObject's own method of that
+    // name — NSMenu's action dispatch then resolves the selector to garbage
+    // and crashes. `invoke:` is collision-free.
+    @objc(invoke:) func invoke(_ sender: Any?) { action() }
+}
+
 // MARK: - SwiftUI Content for Popup — Native HUD Aesthetic
 
 struct HistoryPopupContent: View {
@@ -114,13 +146,13 @@ struct HistoryPopupContent: View {
                         .padding(.horizontal, 5)
 
                     if displayItems.isEmpty && !effectiveSearchText.isEmpty {
-                        noResultsView
+                        emptyMessageView(icon: "magnifyingglass", title: "无匹配结果")
                     } else if displayItems.isEmpty && filterMode == .favorites {
-                        emptyFavoritesView
+                        emptyMessageView(icon: "star.slash", title: "暂无收藏")
                     } else if displayItems.isEmpty && filterMode == .image {
-                        emptyImageView
+                        emptyMessageView(icon: "photo", title: "暂无图片")
                     } else if displayItems.isEmpty && filterMode == .text {
-                        emptyTextView
+                        emptyMessageView(icon: "doc.text", title: "暂无文本")
                     } else {
                         itemsList
                         bottomBar
@@ -284,6 +316,10 @@ struct HistoryPopupContent: View {
         .onReceive(NotificationCenter.default.publisher(for: undoKeyNotification)) { _ in
             performUndo()
         }
+        .onReceive(NotificationCenter.default.publisher(for: popupContextMenuNotification)) { note in
+            guard let request = note.object as? PopupContextMenuRequest else { return }
+            showContextMenu(for: request)
+        }
         .onReceive(NotificationCenter.default.publisher(for: favoriteToggleNotification)) { _ in
             if selectedIndex > 0 {
                 let itemIdx = selectedIndex - 1
@@ -422,13 +458,13 @@ struct HistoryPopupContent: View {
         }
     }
 
-    private var noResultsView: some View {
+    private func emptyMessageView(icon: String, title: String) -> some View {
         VStack(spacing: 12) {
             Spacer()
-            Image(systemName: "magnifyingglass")
+            Image(systemName: icon)
                 .font(.system(size: 28))
                 .foregroundColor(theme.popupDimText)
-            Text("无匹配结果")
+            Text(title)
                 .font(.system(size: 14))
                 .foregroundColor(theme.popupDimText)
             Spacer()
@@ -475,48 +511,6 @@ struct HistoryPopupContent: View {
             Spacer()
         }
         .padding(.vertical, 2)
-    }
-
-    private var emptyFavoritesView: some View {
-        VStack(spacing: 12) {
-            Spacer()
-            Image(systemName: "star.slash")
-                .font(.system(size: 28))
-                .foregroundColor(theme.popupDimText)
-            Text("暂无收藏")
-                .font(.system(size: 14))
-                .foregroundColor(theme.popupDimText)
-            Spacer()
-        }
-        .transition(.opacity)
-    }
-
-    private var emptyImageView: some View {
-        VStack(spacing: 12) {
-            Spacer()
-            Image(systemName: "photo")
-                .font(.system(size: 28))
-                .foregroundColor(theme.popupDimText)
-            Text("暂无图片")
-                .font(.system(size: 14))
-                .foregroundColor(theme.popupDimText)
-            Spacer()
-        }
-        .transition(.opacity)
-    }
-
-    private var emptyTextView: some View {
-        VStack(spacing: 12) {
-            Spacer()
-            Image(systemName: "doc.text")
-                .font(.system(size: 28))
-                .foregroundColor(theme.popupDimText)
-            Text("暂无文本")
-                .font(.system(size: 14))
-                .foregroundColor(theme.popupDimText)
-            Spacer()
-        }
-        .transition(.opacity)
     }
 
     // MARK: - Preview Management
@@ -577,7 +571,7 @@ struct HistoryPopupContent: View {
     private func fullTextItem(_ item: ClipboardItem) -> ClipboardItem? {
         switch item {
         case .text(let entryId, _, let timestamp, let label, let sourceName, let sourceBundleId, _):
-            guard let full = ClipboardBackend.shared.getTextByEntryId(entryId) else {
+            guard let full = item.fullText else {
                 debugLog("fullTextItem: failed to load full text for entry \(entryId)")
                 return nil
             }
@@ -622,6 +616,7 @@ struct HistoryPopupContent: View {
             shortcutHint(key: "⌃⌫", label: "删除")
             shortcutHint(key: "⌘Z", label: "撤销")
             shortcutHint(key: "⌘1~9", label: "快速选择")
+            shortcutHint(key: "右键", label: "菜单")
         }
         .padding(.horizontal, 6)
         .padding(.vertical, 3)
@@ -700,6 +695,16 @@ struct HistoryPopupContent: View {
                                 selectedIndex = itemIdx
                             }
                         }
+                        // Report the row's screen-space frame so PopupHostingView
+                        // can map a right-click to this row (context menu).
+                        .background(
+                            GeometryReader { geo in
+                                Color.clear.preference(
+                                    key: RowFramePreferenceKey.self,
+                                    value: [item.id: geo.frame(in: .global)]
+                                )
+                            }
+                        )
                         .id(item.id)
                         .transition(.opacity)
                     }
@@ -713,6 +718,11 @@ struct HistoryPopupContent: View {
             // ItemRowView so it doesn't ride this spring's settle tail.
             .animation(.spring(response: 0.18, dampingFraction: 0.82, blendDuration: 0),
                        value: selectedIndex)
+        }
+        .onPreferenceChange(RowFramePreferenceKey.self) { frames in
+            // Wholesale replace: LazyVStack only lays out visible rows, so a
+            // fresh pass contains exactly the rows that can be right-clicked.
+            PopupRowFrameStore.shared.frames = frames
         }
         .background(theme.popupRowDefault)
         .overlay(
@@ -798,6 +808,134 @@ struct HistoryPopupContent: View {
             searchText = ""
         } else if selectedIndex > maxIndex {
             selectedIndex = max(0, maxIndex)
+        }
+    }
+
+    // MARK: - Right-Click Context Menu
+
+    /// The current displayItems index of the entry, or nil if it no longer
+    /// exists (deleted, filtered out, or the list changed while the menu was
+    /// open). Actions re-resolve by stable entry id instead of trusting the
+    /// index captured when the menu was built.
+    private func currentIndex(of entryId: Int) -> Int? {
+        displayItems.firstIndex(where: { $0.id == entryId })
+    }
+
+    /// Presented by `PopupHostingView.rightMouseDown` via notification.
+    /// Selects the right-clicked row, then shows a native NSMenu at the cursor.
+    private func showContextMenu(for request: PopupContextMenuRequest) {
+        guard let index = currentIndex(of: request.entryId) else { return }
+        let item = displayItems[index]
+        selectedIndex = min(index + 1, maxIndex)
+
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+
+        addContextMenuItem(to: menu, title: "插入", symbol: "arrow.down.to.line") {
+            guard let idx = self.currentIndex(of: item.id) else { return }
+            self.selectedIndex = idx + 1
+            self.selectItem(at: idx)
+        }
+        addContextMenuItem(to: menu, title: "预览", symbol: "eye") {
+            guard let idx = self.currentIndex(of: item.id) else { return }
+            self.selectedIndex = idx + 1
+            if self.showPreview {
+                self.updatePreviewContent()
+            } else {
+                self.openPreview()
+            }
+        }
+        menu.addItem(.separator())
+        addContextMenuItem(to: menu,
+                           title: item.isImage ? "复制图片" : "复制内容",
+                           symbol: item.isImage ? "photo" : "doc.on.doc") {
+            self.copyItemContent(item)
+        }
+        if item.isImage {
+            addContextMenuItem(to: menu, title: "另存为…", symbol: "square.and.arrow.down") {
+                self.saveImageItem(item)
+            }
+        }
+        menu.addItem(.separator())
+        let isFavorite = backend.favoriteIds.contains(item.id)
+        addContextMenuItem(to: menu,
+                           title: isFavorite ? "取消收藏" : "收藏",
+                           symbol: isFavorite ? "star.slash" : "star") {
+            self.backend.toggleFavorite(item.id)
+            // Favorites may shrink displayItems; keep the selection valid.
+            if self.selectedIndex > self.maxIndex {
+                self.selectedIndex = max(0, self.maxIndex)
+            }
+        }
+        addContextMenuItem(to: menu, title: "删除", symbol: "trash", destructive: true) {
+            guard let idx = self.currentIndex(of: item.id) else { return }
+            self.deleteItem(at: idx)
+        }
+
+        guard let popup = popupWindow, let contentView = popup.contentView else { return }
+        let point = contentView.convert(request.windowPoint, from: nil)
+        menu.popUp(positioning: nil, at: point, in: contentView)
+    }
+
+    private func addContextMenuItem(to menu: NSMenu, title: String, symbol: String,
+                                    destructive: Bool = false, action: @escaping () -> Void) {
+        let handler = ContextMenuItemTarget(action)
+        let item = NSMenuItem(title: title,
+                              action: #selector(ContextMenuItemTarget.invoke(_:)),
+                              keyEquivalent: "")
+        item.target = handler
+        // NSMenuItem.target is weak; representedObject (strong) keeps the
+        // handler alive for as long as the menu owns the item.
+        item.representedObject = handler
+        item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)
+        if destructive {
+            item.attributedTitle = NSAttributedString(
+                string: title,
+                attributes: [.foregroundColor: NSColor.systemRed]
+            )
+        }
+        menu.addItem(item)
+    }
+
+    /// Copy the entry's full content to the system pasteboard without pasting.
+    /// The monitor re-captures it as a normal clipboard write: dedup keeps the
+    /// same entry id and moves it to the top of history (natural "re-copy"
+    /// semantics).
+    private func copyItemContent(_ item: ClipboardItem) {
+        switch item {
+        case .text:
+            guard let full = item.fullText else {
+                debugLog("copyItemContent: failed to load full text for entry \(item.id)")
+                return
+            }
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(full, forType: .string)
+        case .image:
+            guard let data = item.imageData else {
+                debugLog("copyItemContent: image not ready (entry \(item.id))")
+                return
+            }
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setData(data, forType: .png)
+        }
+    }
+
+    /// Save an image entry to a user-chosen location as a PNG file.
+    private func saveImageItem(_ item: ClipboardItem) {
+        guard case .image(_, _, _, _, let timestamp, _, _, _) = item,
+              let data = item.imageData else { return }
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.png]
+        panel.canCreateDirectories = true
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd-HHmmss"
+        let date = Date(timeIntervalSince1970: TimeInterval(timestamp))
+        panel.nameFieldStringValue = "CopyAttach-\(formatter.string(from: date)).png"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try data.write(to: url)
+        } catch {
+            debugLog("saveImageItem: failed to write \(url.path): \(error)")
         }
     }
 

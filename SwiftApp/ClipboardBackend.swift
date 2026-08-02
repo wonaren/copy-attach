@@ -47,10 +47,6 @@ class ClipboardBackend: ObservableObject {
         saveFavorites()
     }
 
-    func isFavorite(_ entryId: Int) -> Bool {
-        favoriteIds.contains(entryId)
-    }
-
     private init() {
         permissionGranted = checkPermission()
         loadFavorites()
@@ -244,20 +240,6 @@ class ClipboardBackend: ObservableObject {
 
     // MARK: - Getters
 
-    func getLabel(at index: Int) -> String {
-        guard let cStr = clipboard_get_item_label(Int32(index)) else { return "" }
-        let str = String(cString: cStr)
-        clipboard_free_string(cStr)
-        return str
-    }
-
-    func getText(at index: Int) -> String? {
-        guard let cStr = clipboard_get_item_text(Int32(index)) else { return nil }
-        let str = String(cString: cStr)
-        clipboard_free_string(cStr)
-        return str
-    }
-
     func getTextByEntryId(_ entryId: Int) -> String? {
         guard let cStr = clipboard_get_text_by_id(UInt64(entryId)) else { return nil }
         let str = String(cString: cStr)
@@ -277,20 +259,6 @@ class ClipboardBackend: ObservableObject {
         guard let ptr, count > 0 else { return [] }
         defer { clipboard_free_u64_array(ptr, count) }
         return (0..<Int(count)).reduce(into: Set<Int>()) { $0.insert(Int(ptr[$1])) }
-    }
-
-    func getSourceName(at index: Int) -> String {
-        guard let cStr = clipboard_get_item_source_name(Int32(index)) else { return "" }
-        let str = String(cString: cStr)
-        clipboard_free_string(cStr)
-        return str
-    }
-
-    func getSourceBundleId(at index: Int) -> String {
-        guard let cStr = clipboard_get_item_source_bundle_id(Int32(index)) else { return "" }
-        let str = String(cString: cStr)
-        clipboard_free_string(cStr)
-        return str
     }
 
     func getImageFullByDbId(_ dbId: Int) -> Data? {
@@ -321,28 +289,6 @@ class ClipboardBackend: ObservableObject {
     /// Immediately release all cached thumbnails.
     func clearThumbnailCache() {
         thumbnailCache.removeAllObjects()
-    }
-
-    func getImageThumb(at index: Int) -> Data? {
-        var len: Int32 = 0
-        guard let ptr = clipboard_get_image_thumb(Int32(index), &len) else { return nil }
-        let data = Data(bytes: ptr, count: Int(len))
-        clipboard_free_bytes(ptr, len)
-        return data
-    }
-
-    func getImageFull(at index: Int) -> Data? {
-        var len: Int32 = 0
-        guard let ptr = clipboard_get_image_full(Int32(index), &len) else { return nil }
-        let data = Data(bytes: ptr, count: Int(len))
-        clipboard_free_bytes(ptr, len)
-        return data
-    }
-
-    func getImageSize(at index: Int) -> (Int, Int) {
-        var w: Int32 = 0, h: Int32 = 0
-        clipboard_get_image_size(Int32(index), &w, &h)
-        return (Int(w), Int(h))
     }
 
     func deleteEntry(at index: Int) -> Bool {

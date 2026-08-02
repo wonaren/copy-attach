@@ -48,6 +48,21 @@ enum ClipboardItem: Identifiable {
         }
     }
 
+    /// Load the entry's full text on demand. The snapshot only carries a
+    /// bounded preview, so paste/drag/copy/preview all fetch the real content
+    /// through this single path. nil when the load fails.
+    var fullText: String? {
+        guard case .text(let entryId, _, _, _, _, _, _) = self else { return nil }
+        return ClipboardBackend.shared.getTextByEntryId(entryId)
+    }
+
+    /// Load the entry's full PNG data on demand. nil while the image is still
+    /// encoding (no persisted db_id yet) or when the load fails.
+    var imageData: Data? {
+        guard case .image(_, let dbId, _, _, _, _, _, _) = self, dbId != 0 else { return nil }
+        return ClipboardBackend.shared.getImageFullByDbId(dbId)
+    }
+
     var isText: Bool {
         if case .text = self { return true }
         return false

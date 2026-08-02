@@ -13,6 +13,15 @@ let favoriteToggleNotification = Notification.Name("PopupFavoriteToggle")
 let arrowKeyFromSearchNotification = Notification.Name("PopupArrowKeyFromSearch")
 let focusSearchAndBackspaceNotification = Notification.Name("PopupFocusSearchAndBackspace")
 let escapeKeyNotification = Notification.Name("PopupEscapeKeyPressed")
+let popupContextMenuNotification = Notification.Name("PopupContextMenuRequested")
+
+/// Payload for `popupContextMenuNotification`: which history row was
+/// right-clicked and where (window base coordinates). The receiver uses the
+/// entry id to re-resolve the row and the point to position the NSMenu.
+struct PopupContextMenuRequest {
+    let entryId: Int
+    let windowPoint: NSPoint
+}
 
 // MARK: - Popup Hosting View
 
@@ -43,16 +52,65 @@ class PopupHostingView: NSHostingView<AnyView> {
     /// SwiftUI container's focus alone.
     private var escapeMonitor: Any?
 
+    /// True while any NSMenu (including this app's context menus) is tracking.
+    /// Menu navigation must not leak into popup shortcuts: Esc should dismiss
+    /// only the menu, and ←/→ must not move the list selection underneath it.
+    /// Set via `NSMenu.didBegin/EndTrackingNotification` — guaranteed for the
+    /// explicit `NSMenu.popUp` used by the right-click context menu.
+    private var isMenuTracking = false
+    private var menuTrackingObservers: [NSObjectProtocol] = []
+
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         if window != nil {
             window?.makeFirstResponder(self)
             installArrowMonitor()
             installEscapeMonitor()
+            installMenuTrackingObservers()
         } else {
             removeArrowMonitor()
             removeEscapeMonitor()
+            removeMenuTrackingObservers()
         }
+    }
+
+    /// Right-click on a history row: select the row under the cursor and ask
+    /// the content view to present its context menu at the click location.
+    /// Row frames come from `PopupRowFrameStore` (reported by SwiftUI rows via
+    /// a preference key in global/screen coordinates). Right-clicks elsewhere
+    /// (search field, separators, empty space) fall through untouched — the
+    /// search NSTextField handles its own editing menu as a subview.
+    override func rightMouseDown(with event: NSEvent) {
+        super.rightMouseDown(with: event)
+        guard self.window != nil else { return }
+        // Row frames are reported in SwiftUI's root coordinate space
+        // (`geo.frame(in: .global)`): origin at the hosting view's top-left,
+        // y pointing DOWN. NSHostingView is flipped (`isFlipped == true`), so
+        // `convert(_:from: nil)` yields the click in exactly that same space —
+        // matching frames against it needs no further conversion.
+        let viewPoint = convert(event.locationInWindow, from: nil)
+        guard let (entryId, _) = PopupRowFrameStore.shared.frames
+            .first(where: { $0.value.contains(viewPoint) }) else { return }
+        NotificationCenter.default.post(
+            name: popupContextMenuNotification,
+            object: PopupContextMenuRequest(entryId: entryId,
+                                            windowPoint: event.locationInWindow)
+        )
+    }
+
+    private func installMenuTrackingObservers() {
+        removeMenuTrackingObservers()
+        menuTrackingObservers.append(NotificationCenter.default.addObserver(
+            forName: NSMenu.didBeginTrackingNotification, object: nil, queue: .main
+        ) { [weak self] _ in self?.isMenuTracking = true })
+        menuTrackingObservers.append(NotificationCenter.default.addObserver(
+            forName: NSMenu.didEndTrackingNotification, object: nil, queue: .main
+        ) { [weak self] _ in self?.isMenuTracking = false })
+    }
+
+    private func removeMenuTrackingObservers() {
+        menuTrackingObservers.forEach { NotificationCenter.default.removeObserver($0) }
+        menuTrackingObservers.removeAll()
     }
 
     private func installArrowMonitor() {
@@ -61,7 +119,10 @@ class PopupHostingView: NSHostingView<AnyView> {
             guard event.keyCode == 123 || event.keyCode == 124 else { return event }
             // Only intercept when the search field (editable NSTextView) is
             // first responder and its string is empty — no cursor to move.
+            // Skip entirely while a context menu is tracking: ←/→ belong to
+            // menu navigation then, not list selection.
             guard let self = self,
+                  !self.isMenuTracking,
                   let textView = self.window?.firstResponder as? NSTextView,
                   textView.isEditable,
                   textView.string.isEmpty else { return event }
@@ -81,7 +142,12 @@ class PopupHostingView: NSHostingView<AnyView> {
     private func installEscapeMonitor() {
         removeEscapeMonitor()
         escapeMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard event.keyCode == 53, self?.window?.isKeyWindow == true else { return event }
+            // While a context menu tracks, Esc belongs to the menu (dismisses
+            // only the menu) — never close the popup underneath it.
+            guard event.keyCode == 53,
+                  let self = self,
+                  self.window?.isKeyWindow == true,
+                  !self.isMenuTracking else { return event }
             NotificationCenter.default.post(name: escapeKeyNotification, object: nil)
             return nil
         }
@@ -97,11 +163,15 @@ class PopupHostingView: NSHostingView<AnyView> {
     deinit {
         removeArrowMonitor()
         removeEscapeMonitor()
+        removeMenuTrackingObservers()
     }
 
     /// Intercept ⌘Z before the search field's NSTextView swallows it for text undo.
     /// This catches the key-equivalent event regardless of which responder is first.
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if isMenuTracking {
+            return super.performKeyEquivalent(with: event)
+        }
         if event.keyCode == 6 && event.modifierFlags.contains(.command) &&
             !event.modifierFlags.contains(.option) &&
             !event.modifierFlags.contains(.control) &&
@@ -113,6 +183,11 @@ class PopupHostingView: NSHostingView<AnyView> {
     }
 
     override func keyDown(with event: NSEvent) {
+        // A tracking menu owns keyboard input; do not reinterpret its keys.
+        if isMenuTracking {
+            super.keyDown(with: event)
+            return
+        }
         // Option + P: toggle favorite (must intercept before text input
         // system converts it to π character)
         if event.keyCode == 35 && event.modifierFlags.contains(.option) &&
