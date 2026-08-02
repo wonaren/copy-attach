@@ -132,7 +132,7 @@ vmmap --summary CopyAttach 2>&1 | head -30 >> "$REPORT"
 echo "" >> "$REPORT"
 
 log "=== ps (RSS/CPU) ===" >> "$REPORT"
-ps -o pid,rss,cpu,mem -p "$PID" >> "$REPORT" 2>&1
+ps -o pid,rss,cpu -p "$PID" >> "$REPORT" 2>&1
 echo "" >> "$REPORT"
 
 # Parse RSS from ps (in KB)
