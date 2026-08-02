@@ -16,12 +16,6 @@
 	<string>0.91.0</string>
 	<key>CFBundleVersion</key>
 	<string>0.1</string>
-	<key>CopyAttachLicenseServerURL</key>
-	<string>https://api.abovepast.shop</string>
-	<key>CopyAttachLicenseSigningKeyID</key>
-	<string>production-2026-08</string>
-	<key>CopyAttachLicenseSigningPublicKey</key>
-	<string>efsKYx9a7urNlr-UXR7b0-Fl9w0mJNKe3RME-OeseOs</string>
 	<key>LSUIElement</key>
 	<true/>
 	<key>NSHighResolutionCapable</key>
