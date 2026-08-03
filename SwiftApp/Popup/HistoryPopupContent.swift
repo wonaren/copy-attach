@@ -124,6 +124,46 @@ struct HistoryPopupContent: View {
     private let popupWidth: CGFloat = 500
     private let popupHeight: CGFloat = 720
 
+    /// Base duration for the smallest filter change.
+    private let filterSwitchBaseDuration: TimeInterval = 0.15
+    /// Extra seconds per unit of visible change (rows entering or leaving),
+    /// saturating once the change exceeds what fits on screen.
+    private let filterSwitchPerChange: TimeInterval = 0.011
+    /// Per-direction cap on counted change: past ~6 rows the extra rows are
+    /// offscreen and contribute no visible motion.
+    private let filterSwitchChangeCap = 6
+    /// Hard ceiling: the control (tab pill) already snaps instantly, so the
+    /// content animation never needs more than this.
+    private let filterSwitchMaxDuration: TimeInterval = 0.28
+
+    /// Adaptive filter-switch motion: the duration scales with how much of the
+    /// list actually changes. A near-identical refilter stays snappy (0.15s);
+    /// a big one — many rows dissolving and/or materializing — gets up to
+    /// 0.28s. The control feedback (tab pill) snaps instantly and the swipe
+    /// commits mid-gesture, so the content animation reads as readable, not
+    /// as lag — a fixed short duration makes fade-heavy switches (e.g. 图片 →
+    /// 文本, where rows materialize into mostly-empty space and there is
+    /// little collapse motion to anchor perception) read as instant.
+    private func filterSwitchAnimation(removed: Int, added: Int) -> Animation {
+        let visibleChange = min(removed, filterSwitchChangeCap) + min(added, filterSwitchChangeCap)
+        let duration = min(filterSwitchMaxDuration,
+                           filterSwitchBaseDuration + filterSwitchPerChange * Double(visibleChange))
+        return .easeOut(duration: duration)
+    }
+
+    /// Row-level enter/exit for filter changes: fade + a slight scale in place.
+    /// No directional offset — filtering the same data pool is not navigation.
+    /// Survivors (rows whose entry_id survives the new filter) have no
+    /// transition at all: they stay pinned and only shift as the list collapses
+    /// around them, which is what visually says "same data, new filter" instead
+    /// of "another page".
+    private var filterRowTransition: AnyTransition {
+        .asymmetric(
+            insertion: .opacity.combined(with: .scale(scale: 0.96)),
+            removal: .opacity.combined(with: .scale(scale: 0.96))
+        )
+    }
+
     private var popupWindow: HistoryPopupWindow? {
         NSApp.windows.first(where: { $0 is HistoryPopupWindow }) as? HistoryPopupWindow
     }
@@ -146,18 +186,11 @@ struct HistoryPopupContent: View {
                     filterModeTabs
                         .padding(.horizontal, 5)
 
-                    if displayItems.isEmpty && !effectiveSearchText.isEmpty {
-                        emptyMessageView(icon: "magnifyingglass", title: "无匹配结果")
-                    } else if displayItems.isEmpty && filterMode == .favorites {
-                        emptyMessageView(icon: "star.slash", title: "暂无收藏")
-                    } else if displayItems.isEmpty && filterMode == .image {
-                        emptyMessageView(icon: "photo", title: "暂无图片")
-                    } else if displayItems.isEmpty && filterMode == .text {
-                        emptyMessageView(icon: "doc.text", title: "暂无文本")
-                    } else {
-                        itemsList
-                        bottomBar
-                    }
+                    // Filter tabs re-filter the SAME data pool: rows keep their
+                    // entry_id identity, survivors stay pinned, removed rows
+                    // dissolve in place (`filterRowTransition`) and the list
+                    // collapses. No page slide — filtering is not navigation.
+                    filterPageContent
                 }
                 .padding(.all, 3)
             }
@@ -196,20 +229,12 @@ struct HistoryPopupContent: View {
         }
         .onKeyPress(.leftArrow) {
             guard selectedIndex > 0 else { return .ignored }
-            let modes = FilterMode.allCases
-            if let idx = modes.firstIndex(of: filterMode), idx > 0 {
-                filterMode = modes[idx - 1]
-                selectedIndex = min(selectedIndex, maxIndex)
-            }
+            switchFilterTab(direction: "left", animated: true)
             return .handled
         }
         .onKeyPress(.rightArrow) {
             guard selectedIndex > 0 else { return .ignored }
-            let modes = FilterMode.allCases
-            if let idx = modes.firstIndex(of: filterMode), idx < modes.count - 1 {
-                filterMode = modes[idx + 1]
-                selectedIndex = min(selectedIndex, maxIndex)
-            }
+            switchFilterTab(direction: "right", animated: true)
             return .handled
         }
         .onAppear {
@@ -326,21 +351,22 @@ struct HistoryPopupContent: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: arrowKeyFromSearchNotification)) { note in
             guard let direction = note.object as? String else { return }
-            let modes = FilterMode.allCases
-            if let idx = modes.firstIndex(of: filterMode) {
-                if direction == "left" && idx > 0 {
-                    filterMode = modes[idx - 1]
-                } else if direction == "right" && idx < modes.count - 1 {
-                    filterMode = modes[idx + 1]
-                }
-            }
+            switchFilterTab(direction: direction, animated: true)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: popupSwipeNotification)) { note in
+            guard let direction = note.object as? String else { return }
+            switchFilterTab(direction: direction, animated: true)
         }
         .onChange(of: filterMode) { _, _ in
             closePreview()
             if selectedIndex > maxIndex {
                 selectedIndex = max(0, maxIndex)
             }
-            scrollTarget = scrollTargetForItem(at: 0)
+            // Same data pool, re-filtered: keep the viewport (no page swap, no
+            // forced scroll-to-top). Drop any target that no longer survives
+            // the new filter so the scroll never chases a vanished row — the
+            // layout collapse re-flows the survivors naturally.
+            scrollTarget = nil
         }
         .onChange(of: searchText) { _, newValue in
             selectedIndex = 0
@@ -474,9 +500,7 @@ struct HistoryPopupContent: View {
         HStack(spacing: 8) {
             ForEach(FilterMode.allCases, id: \.self) { mode in
                 Button(action: {
-                    withAnimation(.easeInOut(duration: 0.15)) {
-                        filterMode = mode
-                    }
+                    switchToFilterTab(mode, animated: true)
                 }) {
                     Image(systemName: mode.icon)
                         .font(.system(size: 13, weight: .medium))
@@ -507,6 +531,62 @@ struct HistoryPopupContent: View {
             Spacer()
         }
         .padding(.vertical, 2)
+        // The pill is the CONTROL: it snaps instantly (0.08s) so the operation
+        // feels acknowledged the moment it is issued, while the list content
+        // below animates at its own adaptive, readable pace.
+        .animation(.easeOut(duration: 0.08), value: filterMode)
+    }
+
+    // MARK: - Tab Switching
+
+    /// Switch to a specific filter tab. The tabs re-filter the same data pool,
+    /// so this is a simple identity-preserving diff: `withAnimation` animates
+    /// row removals/insertions (`filterRowTransition`) and the layout collapse,
+    /// while surviving rows never leave their identity. The duration adapts to
+    /// the measured change (see `filterSwitchAnimation(removed:added:)`).
+    private func switchToFilterTab(_ target: FilterMode, animated: Bool) {
+        guard target != filterMode else { return }
+        if animated {
+            let currentIds = filteredItemIds(for: filterMode)
+            let targetIds = filteredItemIds(for: target)
+            let removed = currentIds.subtracting(targetIds).count
+            let added = targetIds.subtracting(currentIds).count
+            withAnimation(filterSwitchAnimation(removed: removed, added: added)) {
+                filterMode = target
+            }
+        } else {
+            filterMode = target
+        }
+    }
+
+    /// Entry ids that `displayItems` would contain under a given filter mode —
+    /// used to measure how much a tab switch changes before it happens.
+    private func filteredItemIds(for mode: FilterMode) -> Set<Int> {
+        let base = effectiveSearchText.isEmpty ? backend.items : searchResults
+        let filtered = switch mode {
+        case .all: base
+        case .favorites: base.filter { backend.favoriteIds.contains($0.id) }
+        case .image: base.filter { $0.isImage }
+        case .text: base.filter { $0.isText }
+        }
+        return Set(filtered.map(\.id))
+    }
+
+    /// Shared tab switch used by the trackpad swipe and the ←/→ shortcuts:
+    /// direction "left" = previous tab, "right" = next tab (same convention as
+    /// the arrow keys).
+    private func switchFilterTab(direction: String, animated: Bool) {
+        let modes = FilterMode.allCases
+        guard let idx = modes.firstIndex(of: filterMode) else { return }
+        let target: FilterMode
+        if direction == "left" {
+            guard idx > 0 else { return }
+            target = modes[idx - 1]
+        } else {
+            guard idx < modes.count - 1 else { return }
+            target = modes[idx + 1]
+        }
+        switchToFilterTab(target, animated: animated)
     }
 
     // MARK: - Preview Management
@@ -587,6 +667,7 @@ struct HistoryPopupContent: View {
             Text("\(items.count) 项")
                 .font(.system(size: 10, weight: .medium))
                 .foregroundColor(theme.popupSecondaryText)
+                .contentTransition(.numericText())
             if !effectiveSearchText.isEmpty {
                 Text("/ \(backend.items.count) 项")
                     .font(.system(size: 10))
@@ -632,6 +713,28 @@ struct HistoryPopupContent: View {
 
     // MARK: - Items List
 
+    /// The region that reacts to the filter mode: the item list + bottom bar,
+    /// or the per-tab empty state. Rows keep their `entry_id` identity across
+    /// filter changes — survivors stay put, changed rows dissolve in place and
+    /// the list collapses (`filterRowTransition`).
+    @ViewBuilder
+    private var filterPageContent: some View {
+        if displayItems.isEmpty && !effectiveSearchText.isEmpty {
+            emptyMessageView(icon: "magnifyingglass", title: "无匹配结果")
+        } else if displayItems.isEmpty && filterMode == .favorites {
+            emptyMessageView(icon: "star.slash", title: "暂无收藏")
+        } else if displayItems.isEmpty && filterMode == .image {
+            emptyMessageView(icon: "photo", title: "暂无图片")
+        } else if displayItems.isEmpty && filterMode == .text {
+            emptyMessageView(icon: "doc.text", title: "暂无文本")
+        } else {
+            VStack(spacing: 4) {
+                itemsList
+                bottomBar
+            }
+        }
+    }
+
     @ViewBuilder
     private var itemsList: some View {
         itemsListScrollView
@@ -662,7 +765,7 @@ struct HistoryPopupContent: View {
                         DateSeparatorView(timestamp: timestamp)
                             .padding(.top, isFirst ? 2 : 8)
                             .padding(.bottom, 1)
-                            .transition(.opacity)
+                            .transition(filterRowTransition)
                             .id(row.id)
                     case .item(let index, let item):
                         let shortcut: String? = isCommandPressed && index < 9 ? "⌘\(index + 1)" : nil
@@ -702,7 +805,7 @@ struct HistoryPopupContent: View {
                             }
                         )
                         .id(item.id)
-                        .transition(.opacity)
+                        .transition(filterRowTransition)
                     }
                 }
             }

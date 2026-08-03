@@ -14,6 +14,7 @@ let arrowKeyFromSearchNotification = Notification.Name("PopupArrowKeyFromSearch"
 let focusSearchAndBackspaceNotification = Notification.Name("PopupFocusSearchAndBackspace")
 let escapeKeyNotification = Notification.Name("PopupEscapeKeyPressed")
 let popupContextMenuNotification = Notification.Name("PopupContextMenuRequested")
+let popupSwipeNotification = Notification.Name("PopupSwipe")
 
 /// Payload for `popupContextMenuNotification`: which history row was
 /// right-clicked and where (window base coordinates). The receiver uses the
@@ -60,6 +61,20 @@ class PopupHostingView: NSHostingView<AnyView> {
     private var isMenuTracking = false
     private var menuTrackingObservers: [NSObjectProtocol] = []
 
+    /// Trackpad two-finger swipe → tab switching (see `handleScrollWheel`).
+    private var swipeMonitor: Any?
+    private var swipeAccumX: CGFloat = 0
+    private var swipeAccumY: CGFloat = 0
+    private var swipeTracking = false
+    private var swipeActive = false
+    private var swipeCommitted = false
+    /// Horizontal distance (points) a two-finger swipe must cross to commit a
+    /// tab switch.
+    private static let swipeActivationThreshold: CGFloat = 50
+    /// Minimum |horizontal|:|vertical| ratio to treat a gesture as a swipe
+    /// instead of vertical list scrolling.
+    private static let swipeAxisRatio: CGFloat = 1.5
+
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         if window != nil {
@@ -67,10 +82,12 @@ class PopupHostingView: NSHostingView<AnyView> {
             installArrowMonitor()
             installEscapeMonitor()
             installMenuTrackingObservers()
+            installSwipeMonitor()
         } else {
             removeArrowMonitor()
             removeEscapeMonitor()
             removeMenuTrackingObservers()
+            removeSwipeMonitor()
         }
     }
 
@@ -164,11 +181,119 @@ class PopupHostingView: NSHostingView<AnyView> {
         }
     }
 
+    private func installSwipeMonitor() {
+        removeSwipeMonitor()
+        swipeMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+            guard let self = self, !self.isMenuTracking else { return event }
+            return self.handleScrollWheel(event)
+        }
+    }
+
+    private func removeSwipeMonitor() {
+        if let monitor = swipeMonitor {
+            NSEvent.removeMonitor(monitor)
+            swipeMonitor = nil
+        }
+        resetSwipeTracking()
+    }
+
+    /// Two-finger swipe recognition on the scroll wheel stream. NSEvent
+    /// scrollWheel events deliver both trackpad finger gestures (with a
+    /// `phase`) and mouse-wheel/inertial momentum (phase == []); only the
+    /// former can be a tab swipe. While a swipe is active the events are
+    /// swallowed so the vertical component cannot drift the history list.
+    /// The tab switch is committed MID-GESTURE once the distance crosses the
+    /// threshold — the content starts reacting while the fingers are still
+    /// moving, so the interaction never waits for the release to begin.
+    private func handleScrollWheel(_ event: NSEvent) -> NSEvent? {
+        // Mouse wheels and inertial momentum never carry a phase — never a swipe.
+        guard event.phase != [] else {
+            if swipeTracking { resetSwipeTracking() }
+            return event
+        }
+
+        switch event.phase {
+        case .mayBegin, .stationary:
+            // Fingers down but not yet moving; wait for the real `.began`.
+            resetSwipeTracking()
+            return event
+        case .began:
+            swipeTracking = true
+            swipeActive = false
+            swipeCommitted = false
+            swipeAccumX = 0
+            swipeAccumY = 0
+            accumulateSwipeDelta(event)
+            return event
+        case .changed:
+            guard swipeTracking else { return event }
+            accumulateSwipeDelta(event)
+            if !swipeActive {
+                if abs(swipeAccumX) >= Self.swipeActivationThreshold * 0.5,
+                   abs(swipeAccumX) >= Self.swipeAxisRatio * abs(swipeAccumY) {
+                    // Horizontal axis clearly dominates → commit to the swipe
+                    // and swallow the rest so the list cannot scroll mid-gesture.
+                    swipeActive = true
+                } else if abs(swipeAccumY) >= Self.swipeAxisRatio * abs(swipeAccumX) {
+                    // Vertical axis dominates → ordinary list scrolling; stop
+                    // tracking and let the ScrollView handle the rest.
+                    resetSwipeTracking()
+                    return event
+                }
+            }
+            if swipeActive, !swipeCommitted,
+               abs(swipeAccumX) >= Self.swipeActivationThreshold,
+               abs(swipeAccumX) >= Self.swipeAxisRatio * abs(swipeAccumY) {
+                // Commit the switch MID-GESTURE, while the fingers are still
+                // moving — the content reacts under the hand instead of only
+                // after release, which is what makes the swipe feel 跟手.
+                // The page travels with the fingers: a left swipe advances to
+                // the next tab, a right swipe steps back (the posted direction
+                // keeps the ←/→ key convention: "left" = previous, "right" =
+                // next).
+                swipeCommitted = true
+                NotificationCenter.default.post(
+                    name: popupSwipeNotification,
+                    object: swipeAccumX < 0 ? "right" : "left"
+                )
+            }
+            return swipeActive ? nil : event
+        case .ended, .cancelled:
+            // The switch, if any, was already committed mid-gesture in
+            // `.changed`; this phase only cleans up and swallows the final
+            // event when the gesture was ours, so its residual delta cannot
+            // nudge the history list.
+            let wasActive = swipeActive
+            resetSwipeTracking()
+            return wasActive ? nil : event
+        default:
+            return event
+        }
+    }
+
+    private func accumulateSwipeDelta(_ event: NSEvent) {
+        // `scrollingDeltaX/Y` are inverted per the macOS natural-scrolling
+        // setting; undo that so the accumulated sign tracks the FINGER
+        // movement — the direction the user perceives the swipe in.
+        let fingerSign: CGFloat = event.isDirectionInvertedFromDevice ? 1 : -1
+        swipeAccumX += event.scrollingDeltaX * fingerSign
+        swipeAccumY += event.scrollingDeltaY * fingerSign
+    }
+
+    private func resetSwipeTracking() {
+        swipeTracking = false
+        swipeActive = false
+        swipeCommitted = false
+        swipeAccumX = 0
+        swipeAccumY = 0
+    }
+
     deinit {
         MainActor.assumeIsolated {
             removeArrowMonitor()
             removeEscapeMonitor()
             removeMenuTrackingObservers()
+            removeSwipeMonitor()
         }
     }
 
