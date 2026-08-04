@@ -107,14 +107,7 @@ struct HistoryPopupContent: View {
     /// Items to display: full history when idle, cached results when searching.
     /// Sorted by timestamp descending so day separators receive a monotonic stream.
     private var displayItems: [ClipboardItem] {
-        let base = effectiveSearchText.isEmpty ? backend.items : searchResults
-        let filtered = switch filterMode {
-        case .all: base
-        case .favorites: base.filter { backend.favoriteIds.contains($0.id) }
-        case .image: base.filter { $0.isImage }
-        case .text: base.filter { $0.isText }
-        }
-        return filtered.sorted { $0.timestamp > $1.timestamp }
+        filteredItems(for: filterMode).sorted { $0.timestamp > $1.timestamp }
     }
 
     /// The highest valid selectedIndex (search bar + item count).
@@ -362,11 +355,14 @@ struct HistoryPopupContent: View {
             if selectedIndex > maxIndex {
                 selectedIndex = max(0, maxIndex)
             }
-            // Same data pool, re-filtered: keep the viewport (no page swap, no
-            // forced scroll-to-top). Drop any target that no longer survives
-            // the new filter so the scroll never chases a vanished row — the
-            // layout collapse re-flows the survivors naturally.
-            scrollTarget = nil
+            // Re-anchor the selection after a re-filter: the collapse may have
+            // slid the selected row out of the viewport (rows above it
+            // dissolved) and a clamp moved the selection to the new end.
+            // `scrollPosition(id:)` scrolls minimally to bring the target into
+            // view — a still-visible selection keeps the viewport, an off-
+            // screen one is pulled back. That is both no-jump and never a
+            // stranded, invisible highlight.
+            scrollTarget = selectedIndex > 0 ? scrollTargetForItem(at: selectedIndex - 1) : nil
         }
         .onChange(of: searchText) { _, newValue in
             selectedIndex = 0
@@ -547,10 +543,7 @@ struct HistoryPopupContent: View {
     private func switchToFilterTab(_ target: FilterMode, animated: Bool) {
         guard target != filterMode else { return }
         if animated {
-            let currentIds = filteredItemIds(for: filterMode)
-            let targetIds = filteredItemIds(for: target)
-            let removed = currentIds.subtracting(targetIds).count
-            let added = targetIds.subtracting(currentIds).count
+            let (removed, added) = countFilterChange(to: target)
             withAnimation(filterSwitchAnimation(removed: removed, added: added)) {
                 filterMode = target
             }
@@ -559,17 +552,49 @@ struct HistoryPopupContent: View {
         }
     }
 
-    /// Entry ids that `displayItems` would contain under a given filter mode —
-    /// used to measure how much a tab switch changes before it happens.
-    private func filteredItemIds(for mode: FilterMode) -> Set<Int> {
+    /// The entries a filter tab shows, unsorted. `.all` passes the base through
+    /// unchanged (no copy); the other modes filter through `matches`, the
+    /// single source of the favorites/image/text predicates.
+    private func filteredItems(for mode: FilterMode) -> [ClipboardItem] {
         let base = effectiveSearchText.isEmpty ? backend.items : searchResults
-        let filtered = switch mode {
-        case .all: base
-        case .favorites: base.filter { backend.favoriteIds.contains($0.id) }
-        case .image: base.filter { $0.isImage }
-        case .text: base.filter { $0.isText }
+        switch mode {
+        case .all:
+            return base
+        case .favorites, .image, .text:
+            return base.filter { matches($0, filterMode: mode) }
         }
-        return Set(filtered.map(\.id))
+    }
+
+    /// Whether an entry satisfies a filter tab's predicate. Single source of
+    /// truth for the filter definitions — `displayItems` and the tab-switch
+    /// measurement both derive from it, so they can't drift apart.
+    private func matches(_ item: ClipboardItem, filterMode mode: FilterMode) -> Bool {
+        switch mode {
+        case .all: true
+        case .favorites: backend.favoriteIds.contains(item.id)
+        case .image: item.isImage
+        case .text: item.isText
+        }
+    }
+
+    /// Rows that leave (removed) and enter (added) the list when switching to
+    /// `target`, counted in a single pass over the base with early exit once
+    /// both saturate at `filterSwitchChangeCap` (the animation caps both
+    /// counts anyway). Replaces the previous two full `Set` builds per switch,
+    /// which ran synchronously on the swipe/key/tap path.
+    private func countFilterChange(to target: FilterMode) -> (removed: Int, added: Int) {
+        let base = effectiveSearchText.isEmpty ? backend.items : searchResults
+        var removed = 0
+        var added = 0
+        for item in base {
+            let inCurrent = matches(item, filterMode: filterMode)
+            let inTarget = matches(item, filterMode: target)
+            if inCurrent != inTarget {
+                if inCurrent { removed += 1 } else { added += 1 }
+                if removed >= filterSwitchChangeCap, added >= filterSwitchChangeCap { break }
+            }
+        }
+        return (removed, added)
     }
 
     /// Shared tab switch used by the trackpad swipe and the ←/→ shortcuts:

@@ -66,7 +66,6 @@ class PopupHostingView: NSHostingView<AnyView> {
     private var swipeAccumX: CGFloat = 0
     private var swipeAccumY: CGFloat = 0
     private var swipeTracking = false
-    private var swipeActive = false
     private var swipeCommitted = false
     /// Horizontal distance (points) a two-finger swipe must cross to commit a
     /// tab switch.
@@ -200,12 +199,22 @@ class PopupHostingView: NSHostingView<AnyView> {
     /// Two-finger swipe recognition on the scroll wheel stream. NSEvent
     /// scrollWheel events deliver both trackpad finger gestures (with a
     /// `phase`) and mouse-wheel/inertial momentum (phase == []); only the
-    /// former can be a tab swipe. While a swipe is active the events are
-    /// swallowed so the vertical component cannot drift the history list.
-    /// The tab switch is committed MID-GESTURE once the distance crosses the
-    /// threshold — the content starts reacting while the fingers are still
-    /// moving, so the interaction never waits for the release to begin.
+    /// former can be a tab swipe. The tab switch is committed MID-GESTURE
+    /// once the accumulated horizontal distance crosses the threshold — the
+    /// content starts reacting while the fingers are still moving, so the
+    /// interaction never waits for the release to begin. Events are swallowed
+    /// only AFTER a commit, so a sub-threshold flick or a diagonal gesture
+    /// that never qualifies passes through and the list just scrolls — there
+    /// is no frozen dead-zone between "activated" and "committed".
     private func handleScrollWheel(_ event: NSEvent) -> NSEvent? {
+        // Local monitors observe every window of the app — popup, preview
+        // panel, settings. Only events aimed at the popup can be a tab swipe;
+        // a swipe over a sibling window (e.g. the preview) must pass through
+        // untouched so that window scrolls normally.
+        guard event.window === self.window else {
+            return event
+        }
+
         // Mouse wheels and inertial momentum never carry a phase — never a swipe.
         guard event.phase != [] else {
             if swipeTracking { resetSwipeTracking() }
@@ -213,13 +222,18 @@ class PopupHostingView: NSHostingView<AnyView> {
         }
 
         switch event.phase {
-        case .mayBegin, .stationary:
+        case .mayBegin:
             // Fingers down but not yet moving; wait for the real `.began`.
             resetSwipeTracking()
             return event
+        case .stationary:
+            // Fingers paused mid-gesture. Keep the accumulated state — a
+            // momentary pause must not discard progress (`.began` arrives once
+            // per gesture), or a near-threshold swipe would never commit and
+            // the resumed motion would leak into the ScrollView.
+            return event
         case .began:
             swipeTracking = true
-            swipeActive = false
             swipeCommitted = false
             swipeAccumX = 0
             swipeAccumY = 0
@@ -227,21 +241,28 @@ class PopupHostingView: NSHostingView<AnyView> {
             return event
         case .changed:
             guard swipeTracking else { return event }
-            accumulateSwipeDelta(event)
-            if !swipeActive {
-                if abs(swipeAccumX) >= Self.swipeActivationThreshold * 0.5,
-                   abs(swipeAccumX) >= Self.swipeAxisRatio * abs(swipeAccumY) {
-                    // Horizontal axis clearly dominates → commit to the swipe
-                    // and swallow the rest so the list cannot scroll mid-gesture.
-                    swipeActive = true
-                } else if abs(swipeAccumY) >= Self.swipeAxisRatio * abs(swipeAccumX) {
-                    // Vertical axis dominates → ordinary list scrolling; stop
-                    // tracking and let the ScrollView handle the rest.
-                    resetSwipeTracking()
-                    return event
-                }
+
+            // A decisive mid-gesture reversal re-targets the swipe. Once the
+            // current event's horizontal motion opposes the accumulated run
+            // beyond a jitter floor, discard the stale net and measure the
+            // new run — otherwise a gesture that reverses before committing
+            // locks the tab to the direction it first travelled (net
+            // displacement), or nets below the threshold entirely even though
+            // it moved decisively one way.
+            let sign = fingerSign(for: event)
+            let fingerDx = event.scrollingDeltaX * sign
+            let fingerDy = event.scrollingDeltaY * sign
+            if !swipeCommitted,
+               swipeAccumX != 0,
+               abs(fingerDx) >= abs(fingerDy),
+               (fingerDx < 0) != (swipeAccumX < 0),
+               abs(fingerDx) >= 0.5 * abs(swipeAccumX) {
+                swipeAccumX = 0
+                swipeAccumY = 0
             }
-            if swipeActive, !swipeCommitted,
+            accumulateSwipeDelta(event)
+
+            if !swipeCommitted,
                abs(swipeAccumX) >= Self.swipeActivationThreshold,
                abs(swipeAccumX) >= Self.swipeAxisRatio * abs(swipeAccumY) {
                 // Commit the switch MID-GESTURE, while the fingers are still
@@ -257,32 +278,39 @@ class PopupHostingView: NSHostingView<AnyView> {
                     object: swipeAccumX < 0 ? "right" : "left"
                 )
             }
-            return swipeActive ? nil : event
+            // Swallow only after the commit: the switch already happened, so
+            // the residual deltas must not nudge the newly shown tab. Before
+            // the commit every event passes through — a vertical or diagonal
+            // gesture that never qualifies simply scrolls the list.
+            return swipeCommitted ? nil : event
         case .ended, .cancelled:
             // The switch, if any, was already committed mid-gesture in
             // `.changed`; this phase only cleans up and swallows the final
-            // event when the gesture was ours, so its residual delta cannot
+            // event when the gesture committed, so its residual delta cannot
             // nudge the history list.
-            let wasActive = swipeActive
+            let wasCommitted = swipeCommitted
             resetSwipeTracking()
-            return wasActive ? nil : event
+            return wasCommitted ? nil : event
         default:
             return event
         }
     }
 
+    /// Sign factor that converts `scrollingDeltaX/Y` (inverted per the
+    /// natural-scrolling setting) into the direction of the FINGER movement —
+    /// the direction the user perceives the swipe in.
+    private func fingerSign(for event: NSEvent) -> CGFloat {
+        event.isDirectionInvertedFromDevice ? 1 : -1
+    }
+
     private func accumulateSwipeDelta(_ event: NSEvent) {
-        // `scrollingDeltaX/Y` are inverted per the macOS natural-scrolling
-        // setting; undo that so the accumulated sign tracks the FINGER
-        // movement — the direction the user perceives the swipe in.
-        let fingerSign: CGFloat = event.isDirectionInvertedFromDevice ? 1 : -1
-        swipeAccumX += event.scrollingDeltaX * fingerSign
-        swipeAccumY += event.scrollingDeltaY * fingerSign
+        let sign = fingerSign(for: event)
+        swipeAccumX += event.scrollingDeltaX * sign
+        swipeAccumY += event.scrollingDeltaY * sign
     }
 
     private func resetSwipeTracking() {
         swipeTracking = false
-        swipeActive = false
         swipeCommitted = false
         swipeAccumX = 0
         swipeAccumY = 0
