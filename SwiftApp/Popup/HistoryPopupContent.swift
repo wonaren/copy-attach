@@ -352,17 +352,20 @@ struct HistoryPopupContent: View {
         }
         .onChange(of: filterMode) { _, _ in
             closePreview()
-            if selectedIndex > maxIndex {
-                selectedIndex = max(0, maxIndex)
+            // A tab switch re-anchors the selection to the new list's first
+            // row: the new tab is a different filter of the same data pool, so
+            // the old row number has no meaning there. An empty new list falls
+            // back to the search bar; a search-bar-focused switch (selectedIndex
+            // == 0) keeps the search focus.
+            if selectedIndex != 0 {
+                selectedIndex = displayItems.isEmpty ? 0 : 1
             }
-            // Re-anchor the selection after a re-filter: the collapse may have
-            // slid the selected row out of the viewport (rows above it
-            // dissolved) and a clamp moved the selection to the new end.
-            // `scrollPosition(id:)` scrolls minimally to bring the target into
-            // view — a still-visible selection keeps the viewport, an off-
-            // screen one is pulled back. That is both no-jump and never a
-            // stranded, invisible highlight.
-            scrollTarget = selectedIndex > 0 ? scrollTargetForItem(at: selectedIndex - 1) : nil
+            // The first row is the new selection — anchor the viewport to it
+            // so the highlight is never stranded off-screen. `scrollPosition(id:)`
+            // scrolls minimally: if the list top is already visible (the common
+            // case), the viewport stays put; scrolled down, it glides back to
+            // the top edge where the first row now sits.
+            scrollTarget = selectedIndex > 0 ? scrollTargetForItem(at: 0) : nil
         }
         .onChange(of: searchText) { _, newValue in
             selectedIndex = 0
