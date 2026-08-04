@@ -87,6 +87,16 @@ struct HistoryPopupContent: View {
     @State private var effectiveSearchText: String = ""
     @State private var searchTask: Task<Void, Never>?
     @State private var scrollTarget: Int?
+    /// Pin anchor for the tab-switch scroll-to-top: set to `.top` while the
+    /// delayed pin scrolls, nil otherwise (arrow-key navigation keeps its
+    /// minimal-scroll semantics). The anchor alone never re-scrolls.
+    @State private var scrollAnchor: UnitPoint?
+    /// True while a tab-switch scroll-to-top is pending (the filter collapse
+    /// is still animating). During this window `onChange(of: selectedIndex)`
+    /// yields its own scrollTarget writes so the delayed pin is the only
+    /// scroll — an early scroll races the moving layout and the offset clamp.
+    @State private var pendingScrollToTop: Bool = false
+    @State private var scrollToTopTask: Task<Void, Never>?
 
     @State private var filterMode: FilterMode = .all
 
@@ -137,11 +147,14 @@ struct HistoryPopupContent: View {
     /// as lag — a fixed short duration makes fade-heavy switches (e.g. 图片 →
     /// 文本, where rows materialize into mostly-empty space and there is
     /// little collapse motion to anchor perception) read as instant.
-    private func filterSwitchAnimation(removed: Int, added: Int) -> Animation {
+    private func filterSwitchDuration(removed: Int, added: Int) -> TimeInterval {
         let visibleChange = min(removed, filterSwitchChangeCap) + min(added, filterSwitchChangeCap)
-        let duration = min(filterSwitchMaxDuration,
-                           filterSwitchBaseDuration + filterSwitchPerChange * Double(visibleChange))
-        return .easeOut(duration: duration)
+        return min(filterSwitchMaxDuration,
+                   filterSwitchBaseDuration + filterSwitchPerChange * Double(visibleChange))
+    }
+
+    private func filterSwitchAnimation(removed: Int, added: Int) -> Animation {
+        .easeOut(duration: filterSwitchDuration(removed: removed, added: added))
     }
 
     /// Row-level enter/exit for filter changes: fade + a slight scale in place.
@@ -258,6 +271,10 @@ struct HistoryPopupContent: View {
             }
         }
         .onDisappear {
+            scrollToTopTask?.cancel()
+            scrollToTopTask = nil
+            pendingScrollToTop = false
+            scrollAnchor = nil
             closePreview()
         }
         .onReceive(NotificationCenter.default.publisher(for: escapeKeyNotification)) { _ in
@@ -350,7 +367,7 @@ struct HistoryPopupContent: View {
             guard let direction = note.object as? String else { return }
             switchFilterTab(direction: direction, animated: true)
         }
-        .onChange(of: filterMode) { _, _ in
+        .onChange(of: filterMode) { oldMode, newMode in
             closePreview()
             // A tab switch re-anchors the selection to the new list's first
             // row: the new tab is a different filter of the same data pool, so
@@ -360,12 +377,14 @@ struct HistoryPopupContent: View {
             if selectedIndex != 0 {
                 selectedIndex = displayItems.isEmpty ? 0 : 1
             }
-            // The first row is the new selection — anchor the viewport to it
-            // so the highlight is never stranded off-screen. `scrollPosition(id:)`
-            // scrolls minimally: if the list top is already visible (the common
-            // case), the viewport stays put; scrolled down, it glides back to
-            // the top edge where the first row now sits.
-            scrollTarget = selectedIndex > 0 ? scrollTargetForItem(at: 0) : nil
+            // The scroll-to-top is deferred until the filter transition (and
+            // the offset clamp when the new list is shorter than the viewport)
+            // settles: an immediate scroll races the moving layout and can be
+            // lost entirely, stranding the first-row selection off-screen.
+            if selectedIndex > 0 {
+                let (removed, added) = countFilterChange(from: oldMode, to: newMode)
+                scheduleScrollToTop(duration: filterSwitchDuration(removed: removed, added: added))
+            }
         }
         .onChange(of: searchText) { _, newValue in
             selectedIndex = 0
@@ -546,7 +565,7 @@ struct HistoryPopupContent: View {
     private func switchToFilterTab(_ target: FilterMode, animated: Bool) {
         guard target != filterMode else { return }
         if animated {
-            let (removed, added) = countFilterChange(to: target)
+            let (removed, added) = countFilterChange(from: filterMode, to: target)
             withAnimation(filterSwitchAnimation(removed: removed, added: added)) {
                 filterMode = target
             }
@@ -580,20 +599,20 @@ struct HistoryPopupContent: View {
         }
     }
 
-    /// Rows that leave (removed) and enter (added) the list when switching to
-    /// `target`, counted in a single pass over the base with early exit once
-    /// both saturate at `filterSwitchChangeCap` (the animation caps both
-    /// counts anyway). Replaces the previous two full `Set` builds per switch,
-    /// which ran synchronously on the swipe/key/tap path.
-    private func countFilterChange(to target: FilterMode) -> (removed: Int, added: Int) {
+    /// Rows that leave (removed) and enter (added) the list when switching
+    /// from `source` to `target`, counted in a single pass over the base with
+    /// early exit once both saturate at `filterSwitchChangeCap` (the animation
+    /// caps both counts anyway). Replaces the previous two full `Set` builds
+    /// per switch, which ran synchronously on the swipe/key/tap path.
+    private func countFilterChange(from source: FilterMode, to target: FilterMode) -> (removed: Int, added: Int) {
         let base = effectiveSearchText.isEmpty ? backend.items : searchResults
         var removed = 0
         var added = 0
         for item in base {
-            let inCurrent = matches(item, filterMode: filterMode)
+            let inSource = matches(item, filterMode: source)
             let inTarget = matches(item, filterMode: target)
-            if inCurrent != inTarget {
-                if inCurrent { removed += 1 } else { added += 1 }
+            if inSource != inTarget {
+                if inSource { removed += 1 } else { added += 1 }
                 if removed >= filterSwitchChangeCap, added >= filterSwitchChangeCap { break }
             }
         }
@@ -615,6 +634,48 @@ struct HistoryPopupContent: View {
             target = modes[idx + 1]
         }
         switchToFilterTab(target, animated: animated)
+    }
+
+    /// Wait for the filter switch's collapse animation (plus a small buffer)
+    /// to settle, then pin the list's first row to the top edge. Scrolling
+    /// immediately after the switch races the moving layout — the dissolving
+    /// rows still occupy space and, when the new list is shorter than the
+    /// viewport, the offset clamp mid-transition can swallow the scroll
+    /// entirely, stranding the new first-row selection off-screen. The `.top`
+    /// anchor makes the pin exact even when the target row is far above the
+    /// viewport and not yet materialized by the LazyVStack.
+    private func scheduleScrollToTop(duration: TimeInterval) {
+        scrollToTopTask?.cancel()
+        pendingScrollToTop = true
+        scrollToTopTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: UInt64((duration + 0.05) * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            defer {
+                pendingScrollToTop = false
+                scrollToTopTask = nil
+                scrollAnchor = nil
+            }
+            if selectedIndex == 1 {
+                // Selection still on the first row: pin it. nil-first forces
+                // a re-scroll when the target id is already current (same
+                // value alone never re-triggers scrollPosition).
+                withAnimation(.easeOut(duration: 0.25)) {
+                    scrollAnchor = .top
+                    scrollTarget = nil
+                    scrollTarget = scrollTargetForItem(at: 0)
+                }
+                // Hold the anchor until the scroll lands, so arrow-key
+                // navigation afterwards keeps its minimal-scroll semantics.
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                guard !Task.isCancelled else { return }
+            } else if selectedIndex > 1 {
+                // The user navigated (or clicked) while the collapse ran:
+                // yield the pin and scroll minimally to the moved selection.
+                scrollTarget = scrollTargetForItem(at: selectedIndex - 1)
+            }
+            // selectedIndex == 0 (search bar): leave the search flow's own
+            // scrollTarget alone.
+        }
     }
 
     // MARK: - Preview Management
@@ -766,7 +827,7 @@ struct HistoryPopupContent: View {
     @ViewBuilder
     private var itemsList: some View {
         itemsListScrollView
-            .scrollPosition(id: $scrollTarget)
+            .scrollPosition(id: $scrollTarget, anchor: scrollAnchor)
             .onChange(of: selectedIndex) { _, newValue in
                 if newValue == 0 {
                     if showPreview { closePreview() }
@@ -776,6 +837,11 @@ struct HistoryPopupContent: View {
                     // then correct 80ms later, causing visible flicker.
                     return
                 }
+                // While a tab-switch scroll-to-top is pending, the tab reset
+                // owns the scroll: writing a target here would race the delayed
+                // pin with a mid-collapse scroll (the pin yields if the user
+                // navigates instead).
+                guard !pendingScrollToTop else { return }
                 let itemIndex = newValue - 1
                 if itemIndex < displayItems.count {
                     scrollTarget = scrollTargetForItem(at: itemIndex)
