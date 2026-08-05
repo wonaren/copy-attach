@@ -835,21 +835,32 @@ fn select_and_paste_impl(mut item: ClipboardEntry) -> c_int {
         ClipboardEntry::Image { db_id, .. } if *db_id != 0 => {
             let mut loaded = item.clone();
             if let ClipboardEntry::Image { ref mut png_data, ref mut thumb_data, ref mut thumb_width, ref mut thumb_height, .. } = loaded {
-                if let Ok(conn) = backend().db.lock() {
-                    if let Ok((png, thumb, tw, th)) = conn.query_row(
-                        "SELECT png_data, thumb_data, thumb_width, thumb_height FROM clipboard_history WHERE id = ?",
-                        rusqlite::params![*db_id],
-                        |row| Ok((
-                            row.get::<_, Vec<u8>>(0)?,
-                            row.get::<_, Vec<u8>>(1)?,
-                            row.get::<_, i64>(2)?,
-                            row.get::<_, i64>(3)?,
-                        )),
-                    ) {
+                let conn = match backend().db.lock() {
+                    Ok(c) => c,
+                    Err(e) => {
+                        eprintln!("CopyAttach: DB mutex poisoned in select_and_paste image load: {e}");
+                        return 0;
+                    }
+                };
+                match conn.query_row(
+                    "SELECT png_data, thumb_data, thumb_width, thumb_height FROM clipboard_history WHERE id = ?",
+                    rusqlite::params![*db_id],
+                    |row| Ok((
+                        row.get::<_, Vec<u8>>(0)?,
+                        row.get::<_, Vec<u8>>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                    )),
+                ) {
+                    Ok((png, thumb, tw, th)) => {
                         *png_data = png;
                         *thumb_data = thumb;
                         *thumb_width = tw as u32;
                         *thumb_height = th as u32;
+                    }
+                    Err(e) => {
+                        eprintln!("CopyAttach: select_and_paste DB load failed for image entry {} (db_id={}): {e} — paste aborted", item.entry_id(), *db_id);
+                        return 0;
                     }
                 }
             }
@@ -858,10 +869,9 @@ fn select_and_paste_impl(mut item: ClipboardEntry) -> c_int {
         _ => item.clone(),
     };
 
-    let mut cb = match Clipboard::new() { Ok(c) => c, Err(_) => return 0 };
-
-    // The monitor consumes pasteboard events under this same lock. Register
-    // the resulting changeCount before it can observe our write.
+    // Text paste needs the arboard clipboard handle; image paste writes the
+    // pasteboard directly via NSPasteboard (set_pasteboard_file_url) and must
+    // not fail on an arboard handle it never uses.
     let b = backend();
     let _event_guard = b.pasteboard_event_lock.lock().unwrap();
     // Image paste always uses drag-style file-path mode — the single,
@@ -871,6 +881,7 @@ fn select_and_paste_impl(mut item: ClipboardEntry) -> c_int {
     // Code consume exactly this form); chat/notes apps attach the file.
     match &db_item {
         ClipboardEntry::Text { text, .. } => {
+            let mut cb = match Clipboard::new() { Ok(c) => c, Err(_) => return 0 };
             if cb.set_text(text).is_err() { return 0; }
             *b.last_seen_text.lock().unwrap() = Some(text.clone());
             *b.last_seen_image_hash.lock().unwrap() = None;
