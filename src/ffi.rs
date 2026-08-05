@@ -16,7 +16,7 @@ use arboard::Clipboard;
 use crate::backend::{backend, set_backend, Backend, DEFAULT_CLEANUP_THRESHOLD};
 use crate::types::ClipboardEntry;
 use crate::ignore::IgnoreRules;
-use crate::image::{decode_png, image_hash};
+use crate::image::image_hash;
 use crate::history::add_to_history;
 use crate::db::{open_db, ensure_history_table, load_history_from_db,
                 insert_entry_to_db, delete_matching_entry, trim_db_history,
@@ -780,27 +780,6 @@ pub extern "C" fn clipboard_free_bytes(data: *mut u8, len: c_int) {
 // Select & Paste
 // ═══════════════════════════════════════════
 
-/// Known terminal emulator bundle IDs. Image pastes into these apps switch
-/// to drag-style file-path mode (temp PNG + `public.file-url`), so the
-/// terminal inserts the path text instead of image data.
-const TERMINAL_BUNDLE_IDS: &[&str] = &[
-    "com.mitchellh.ghostty",      // Ghostty
-    "com.googlecode.iterm2",      // iTerm2
-    "net.kovidgoyal.kitty",       // Kitty
-    "com.apple.Terminal",         // Terminal.app
-    "dev.warp.Warp-Stable",       // Warp
-    "org.alacritty",              // Alacritty
-    "co.zeit.hyper",              // Hyper
-    "com.github.wez.wezterm",     // WezTerm
-];
-
-fn is_terminal_app(bundle_id: &str) -> bool {
-    if bundle_id.is_empty() {
-        return false;
-    }
-    TERMINAL_BUNDLE_IDS.contains(&bundle_id)
-}
-
 /// Materialize a clipboard image as a PNG file under the per-user temp
 /// directory, mirroring the drag provider's convention (separate `Paste`
 /// subdir so drag cleanup never races with a paste in flight). Stale files
@@ -885,37 +864,24 @@ fn select_and_paste_impl(mut item: ClipboardEntry) -> c_int {
     // the resulting changeCount before it can observe our write.
     let b = backend();
     let _event_guard = b.pasteboard_event_lock.lock().unwrap();
-    // Terminal image paste always uses drag-style file-path mode: the image
-    // is materialized as a temp PNG and only its file URL goes on the
-    // pasteboard, so the terminal inserts the path text (TUI agents like
-    // Claude Code consume exactly this form). Non-terminal targets keep
-    // image-data semantics untouched.
-    let paste_as_file = {
-        let src = b.source_app.lock().unwrap();
-        is_terminal_app(&src.bundle_id)
-    };
+    // Image paste always uses drag-style file-path mode — the single,
+    // universal convention: the image is materialized as a temp PNG and only
+    // its file URL goes on the pasteboard (Finder "copy file" semantics).
+    // Terminals translate the URL into the path text (TUI agents like Claude
+    // Code consume exactly this form); chat/notes apps attach the file.
     match &db_item {
         ClipboardEntry::Text { text, .. } => {
             if cb.set_text(text).is_err() { return 0; }
             *b.last_seen_text.lock().unwrap() = Some(text.clone());
             *b.last_seen_image_hash.lock().unwrap() = None;
         }
-        ClipboardEntry::Image { png_data, width, height, id, .. } => {
+        ClipboardEntry::Image { png_data, id, .. } => {
             if png_data.is_empty() { return 0; }
-            if paste_as_file {
-                let path = match write_paste_image_file(png_data, *id) {
-                    Some(p) => p,
-                    None => return 0,
-                };
-                if !macos::set_pasteboard_file_url(&path) { return 0; }
-            } else if let Some((rgba, _, _)) = decode_png(png_data) {
-                let img = arboard::ImageData {
-                    width: *width as usize,
-                    height: *height as usize,
-                    bytes: rgba.into(),
-                };
-                if cb.set_image(img).is_err() { return 0; }
-            } else { return 0; }
+            let path = match write_paste_image_file(png_data, *id) {
+                Some(p) => p,
+                None => return 0,
+            };
+            if !macos::set_pasteboard_file_url(&path) { return 0; }
             *b.last_seen_text.lock().unwrap() = None;
             *b.last_seen_image_hash.lock().unwrap() = None;
         }
