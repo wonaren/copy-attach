@@ -339,7 +339,7 @@ pub extern "C" fn clipboard_init() -> c_int {
     let ignore_rules = Arc::new(Mutex::new(IgnoreRules::default()));
     let deleted_stack: Arc<Mutex<Vec<ClipboardEntry>>> = Arc::new(Mutex::new(Vec::new()));
     let last_restored_id = Arc::new(AtomicU64::new(0));
-    let image_paste_use_ctrl_v = Arc::new(AtomicBool::new(false));
+    let image_paste_as_file = Arc::new(AtomicBool::new(true));
 
     let backend = Backend {
         history: Arc::clone(&history),
@@ -355,7 +355,7 @@ pub extern "C" fn clipboard_init() -> c_int {
         ignore_rules: Arc::clone(&ignore_rules),
         deleted_stack: Arc::clone(&deleted_stack),
         last_restored_id: Arc::clone(&last_restored_id),
-        image_paste_use_ctrl_v: Arc::clone(&image_paste_use_ctrl_v),
+        image_paste_as_file: Arc::clone(&image_paste_as_file),
     };
 
     if set_backend(backend).is_err() {
@@ -802,6 +802,39 @@ fn is_terminal_app(bundle_id: &str) -> bool {
     TERMINAL_BUNDLE_IDS.contains(&bundle_id)
 }
 
+/// Materialize a clipboard image as a PNG file under the per-user temp
+/// directory, mirroring the drag provider's convention (separate `Paste`
+/// subdir so drag cleanup never races with a paste in flight). Stale files
+/// from earlier pastes are removed first — the paste target consumes the
+/// file right after the simulated Cmd+V, so durability beyond the next paste
+/// is not needed.
+///
+/// Returns the absolute file path, or `None` (with a log) on failure.
+fn write_paste_image_file(png_data: &[u8], entry_id: u64) -> Option<String> {
+    let mut dir = std::env::temp_dir();
+    dir.push("CopyAttach");
+    dir.push("Paste");
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        eprintln!("CopyAttach: cannot create paste image dir {}: {e}", dir.display());
+        return None;
+    }
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+    let now_micros = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros();
+    let path = dir.join(format!("clipboard-{entry_id}-{now_micros}.png"));
+    if let Err(e) = std::fs::write(&path, png_data) {
+        eprintln!("CopyAttach: cannot write paste image {}: {e}", path.display());
+        return None;
+    }
+    Some(path.to_string_lossy().into_owned())
+}
+
 /// Shared implementation for select-and-paste.
 /// Loads full image data from DB if needed, writes to system clipboard,
 /// write-through DB, moves item to top of history, then simulates paste.
@@ -853,24 +886,39 @@ fn select_and_paste_impl(mut item: ClipboardEntry) -> c_int {
     // the resulting changeCount before it can observe our write.
     let b = backend();
     let _event_guard = b.pasteboard_event_lock.lock().unwrap();
+    // Terminal image paste switches to drag-style file-path mode: the image
+    // is materialized as a temp PNG and only its file URL goes on the
+    // pasteboard, so the terminal inserts the path text (TUI agents like
+    // Claude Code consume exactly this form). Non-terminal targets keep
+    // image-data semantics untouched.
+    let paste_as_file = {
+        let src = b.source_app.lock().unwrap();
+        is_terminal_app(&src.bundle_id) && b.image_paste_as_file.load(Ordering::Relaxed)
+    };
     match &db_item {
         ClipboardEntry::Text { text, .. } => {
             if cb.set_text(text).is_err() { return 0; }
             *b.last_seen_text.lock().unwrap() = Some(text.clone());
             *b.last_seen_image_hash.lock().unwrap() = None;
         }
-        ClipboardEntry::Image { png_data, width, height, hash, .. } => {
+        ClipboardEntry::Image { png_data, width, height, id, .. } => {
             if png_data.is_empty() { return 0; }
-            if let Some((rgba, _, _)) = decode_png(png_data) {
+            if paste_as_file {
+                let path = match write_paste_image_file(png_data, *id) {
+                    Some(p) => p,
+                    None => return 0,
+                };
+                if !macos::set_pasteboard_file_url(&path) { return 0; }
+            } else if let Some((rgba, _, _)) = decode_png(png_data) {
                 let img = arboard::ImageData {
                     width: *width as usize,
                     height: *height as usize,
                     bytes: rgba.into(),
                 };
                 if cb.set_image(img).is_err() { return 0; }
-                *b.last_seen_text.lock().unwrap() = None;
-                *b.last_seen_image_hash.lock().unwrap() = Some(*hash);
             } else { return 0; }
+            *b.last_seen_text.lock().unwrap() = None;
+            *b.last_seen_image_hash.lock().unwrap() = None;
         }
     }
     let change_count = macos::pasteboard_change_count()
@@ -931,20 +979,12 @@ fn select_and_paste_impl(mut item: ClipboardEntry) -> c_int {
         .and_then(|b| b.source_app.lock().ok())
         .map_or(0, |src| src.pid);
 
-    let is_image = matches!(db_item, ClipboardEntry::Image { .. });
-    let is_terminal = crate::backend::try_backend()
-        .and_then(|b| b.source_app.lock().ok())
-        .is_some_and(|src| is_terminal_app(&src.bundle_id));
-    let use_ctrl = is_image
-        && is_terminal
-        && b.image_paste_use_ctrl_v.load(Ordering::Relaxed);
-
     thread::sleep(Duration::from_millis(50));
     #[cfg(target_os = "macos")]
     {
         if macos::check_permission() {
-            if !macos::simulate_paste_v(front_pid, use_ctrl) {
-                eprintln!("CopyAttach: simulate_paste_v failed");
+            if !macos::simulate_cmd_v(front_pid) {
+                eprintln!("CopyAttach: simulate_cmd_v failed");
                 return 0;
             }
         } else {
@@ -1337,15 +1377,17 @@ pub extern "C" fn clipboard_set_cleanup_threshold(threshold: i32) {
 }
 
 // ═══════════════════════════════════════════
-// Paste Modifier for Images
+// Image Paste Mode (terminals)
 // ═══════════════════════════════════════════
 
-/// When `use_ctrl` is non-zero, pasting images uses Ctrl+V instead of Cmd+V.
-/// Useful for terminal applications (e.g. Ghostty) where images require Ctrl+V.
+/// When `enable` is non-zero, image pastes into terminal emulators write the
+/// image to a temp PNG and paste its file URL (drag-style file path) instead
+/// of image data — terminals insert the path text, TUI agents (Claude Code
+/// et al.) consume it directly. Non-terminal targets always keep image data.
 #[no_mangle]
-pub extern "C" fn clipboard_set_paste_image_with_ctrl_v(use_ctrl: c_int) {
+pub extern "C" fn clipboard_set_image_paste_as_file(enable: c_int) {
     if let Some(b) = crate::backend::try_backend() {
-        b.image_paste_use_ctrl_v.store(use_ctrl != 0, Ordering::Relaxed);
+        b.image_paste_as_file.store(enable != 0, Ordering::Relaxed);
     }
 }
 

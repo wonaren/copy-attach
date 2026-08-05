@@ -827,7 +827,7 @@ fn test_clipboard_delete_by_id_returns_zero_on_failure() {
             ignore_rules: Arc::new(Mutex::new(IgnoreRules::default())),
             deleted_stack: Arc::new(Mutex::new(Vec::new())),
             last_restored_id: Arc::new(AtomicU64::new(0)),
-            image_paste_use_ctrl_v: Arc::new(AtomicBool::new(false)),
+            image_paste_as_file: Arc::new(AtomicBool::new(true)),
         };
         set_backend(backend)
             .expect("Backend singleton must not be set before this test");

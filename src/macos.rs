@@ -176,6 +176,67 @@ unsafe fn pasteboard_file_url_strings() -> Vec<String> {
     results
 }
 
+/// Put a single file URL on the general pasteboard — the Finder "copy file"
+/// convention. Terminal emulators translate `public.file-url` into the
+/// absolute path when the user pastes, so TUI agents (Claude Code et al.)
+/// receive the path text; the paste target consumes the file immediately
+/// after the simulated Cmd+V.
+///
+/// Returns `false` (with nothing written) if the pasteboard is inaccessible
+/// or the URL cannot be built.
+pub(crate) fn set_pasteboard_file_url(path: &str) -> bool {
+    unsafe {
+        let pasteboard_cls = match objc2::runtime::AnyClass::get(c"NSPasteboard") {
+            Some(c) => c,
+            None => return false,
+        };
+        let pasteboard: *mut objc2::runtime::NSObject = msg_send![pasteboard_cls, generalPasteboard];
+        if pasteboard.is_null() {
+            return false;
+        }
+
+        let nsstr_cls = match objc2::runtime::AnyClass::get(c"NSString") {
+            Some(c) => c,
+            None => return false,
+        };
+        let c_path = match std::ffi::CString::new(path) {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+        let path_obj: *mut objc2::runtime::NSObject =
+            msg_send![nsstr_cls, stringWithUTF8String: c_path.as_ptr()];
+        if path_obj.is_null() {
+            return false;
+        }
+
+        let nsurl_cls = match objc2::runtime::AnyClass::get(c"NSURL") {
+            Some(c) => c,
+            None => return false,
+        };
+        let url_obj: *mut objc2::runtime::NSObject = msg_send![nsurl_cls, fileURLWithPath: path_obj];
+        if url_obj.is_null() {
+            return false;
+        }
+
+        let url_str: *mut objc2::runtime::NSObject = msg_send![url_obj, absoluteString];
+        if url_str.is_null() {
+            return false;
+        }
+
+        // NSPasteboardTypeFileURL == "public.file-url"
+        let type_bytes = b"public.file-url\0";
+        let file_url_type: *mut objc2::runtime::NSObject =
+            msg_send![nsstr_cls, stringWithUTF8String: type_bytes.as_ptr().cast::<i8>()];
+        if file_url_type.is_null() {
+            return false;
+        }
+
+        let _: isize = msg_send![pasteboard, clearContents];
+        let ok: bool = msg_send![pasteboard, setString: url_str, forType: file_url_type];
+        ok
+    }
+}
+
 /// Simulate Cmd+V key press via `CGEventPostToPid`.
 /// `pid` must be the frontmost application's process identifier (> 0).
 /// Returns `false` if pid is 0 or event creation fails.
@@ -211,5 +272,41 @@ pub(crate) fn simulate_paste_v(pid: i32, use_ctrl: bool) -> bool {
     } else {
         eprintln!("CopyAttach: failed to create CGEvent for paste simulation");
         false
+    }
+}
+
+#[cfg(test)]
+mod paste_tests {
+    use super::*;
+    use arboard::Clipboard;
+
+    /// Roundtrip check for the drag-style file-URL pasteboard write:
+    /// set a file URL, read it back as a path, then restore the previous
+    /// text/image clipboard content (this test briefly touches the user's
+    /// real pasteboard).
+    #[test]
+    fn test_set_pasteboard_file_url_roundtrip() {
+        let mut cb = Clipboard::new().unwrap();
+        let saved_text = cb.get_text().ok();
+        let saved_image = cb.get_image().ok();
+
+        let path = "/tmp/copyattach-paste-check.png";
+        // Run the actual write/read, restore the user's clipboard first, then
+        // assert — a failed assertion must never leave the pasteboard clobbered.
+        let ok_set = set_pasteboard_file_url(path);
+        let paths = pasteboard_file_paths();
+
+        if let Some(img) = saved_image {
+            cb.set_image(img).unwrap();
+        } else if let Some(text) = saved_text {
+            cb.set_text(text).unwrap();
+        }
+
+        assert!(ok_set, "set_pasteboard_file_url must succeed");
+        assert_eq!(
+            paths,
+            vec![path.to_string()],
+            "pasteboard must expose exactly the written path"
+        );
     }
 }

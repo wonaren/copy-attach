@@ -72,7 +72,7 @@ class ClipboardBackend {
             clipboard_set_cleanup_threshold(Int32(saved))
         }
         syncIgnoreRules()
-        syncImagePasteModifier()
+        syncImagePasteAsFile()
 
         timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             guard let self = self else { return }
@@ -99,6 +99,23 @@ class ClipboardBackend {
         clipboard_cleanup()
     }
 
+    /// Pushes the terminal image-paste mode to Rust: images pasted into
+    /// terminals are materialized as temp PNG files and pasted as file paths
+    /// (drag-style), instead of image data.
+    func syncImagePasteAsFile() {
+        let value: Bool
+        if let v = UserDefaults.standard.object(forKey: "ImagePasteAsFile") as? Bool {
+            value = v
+        } else if UserDefaults.standard.object(forKey: "ImagePasteUseCtrlV") != nil {
+            // Legacy key migration (old Ctrl+V toggle).
+            value = UserDefaults.standard.bool(forKey: "ImagePasteUseCtrlV")
+        } else {
+            // Default on: terminals get file paths out of the box.
+            value = true
+        }
+        clipboard_set_image_paste_as_file(value ? 1 : 0)
+    }
+
     /// Pushes the persisted capture policy to Rust. The monitor evaluates it
     /// before creating history entries or reading image payloads.
     func syncIgnoreRules() {
@@ -115,12 +132,6 @@ class ClipboardBackend {
         if result == 0 {
             debugLog("Failed to apply clipboard ignore rules")
         }
-    }
-
-    /// Push the image paste modifier preference to Rust.
-    func syncImagePasteModifier() {
-        let useCtrl = UserDefaults.standard.bool(forKey: "ImagePasteUseCtrlV")
-        clipboard_set_paste_image_with_ctrl_v(useCtrl ? 1 : 0)
     }
 
     /// Detect the current frontmost app and tell Rust about it. The pid is

@@ -98,7 +98,7 @@ COPYATTACH_LICENSE_PUBLIC_KEY='efsKYx9a7urNlr-UXR7b0-Fl9w0mJNKe3RME-OeseOs' \
 | `types.rs` | `ClipboardEntry` 枚举（Text/Image），`SourceApp` 元数据，label 生成 |
 | `image.rs` | PNG/JPEG/GIF/WebP/BMP/TIFF 编解码，CatmullRom 缩略图（最长边 300px），`DefaultHasher` 内容哈希 |
 | `backend.rs` | `OnceLock<Backend>` 单例，entry_id（`AtomicU64`），常量（3000 阈值、300ms 轮询间隔），`HISTORY_REVISION`/`IMAGE_ENCODING_COUNTER` 原子计数器，`PendingSelfWrite` 自写抑制，`reload_history_from_db` |
-| `macos.rs` | NSPasteboard `changeCount`，CGEventPost Cmd+V / Ctrl+V，AXIsProcessTrusted，文件复制检测。cfg-gated，非 macOS 用空桩 |
+| `macos.rs` | NSPasteboard `changeCount` + 文件 URL 读写（`set_pasteboard_file_url`），CGEventPost Cmd+V / Ctrl+V，AXIsProcessTrusted，文件复制检测。cfg-gated，非 macOS 用空桩 |
 | `history.rs` | `add_to_history()` — 去重 + 头部插入，纯函数式（返回新 Vec） |
 | `bench_tests.rs` | 性能基准测试（cfg-gated on `test` + `stress-test`），覆盖：历史阈值扩展性、图片捕获/编码/缩略图性能、DB 存储规模测试 |
 | `lib.rs` | 仅模块声明，`#![allow(dead_code)]` 全局开启 |
@@ -183,7 +183,7 @@ SwiftApp/
 - **稳定 ID**：`entry_id`（u64，AtomicU64 单调递增），用于 `select_and_paste_by_id`，避免数组索引竞争。
 - **所有权规则**：`*_free_string` 释放 Rust 分配的 `*mut c_char`；`*_free_bytes` 释放 `*mut u8` 缓冲区（含长度）。
 - **图片加载**：缩略图走 `clipboard_get_image_thumb_by_db_id`（仅 SQLite 读，不碰 history 锁）；大图走 `clipboard_get_image_full_by_db_id`（优先内存缓存，后备 DB）。
-- **select_and_paste 流程**：查 history（by entry_id）→ DB 加载 png_data → 写系统剪贴板（设 pending_self_write）→ DB write-through（insert/delete/trim，更新 db_id）→ move entry to top → sleep 50ms → Cmd+V（图片可配置 Ctrl+V）。
+- **select_and_paste 流程**：查 history（by entry_id）→ DB 加载 png_data → 写系统剪贴板（设 pending_self_write）→ DB write-through（insert/delete/trim，更新 db_id）→ move entry to top → sleep 50ms → Cmd+V。**终端图片走拖拽同款文件路径模式**：当 `source_app` 是终端模拟器（`TERMINAL_BUNDLE_IDS`）且开关「终端图片以文件路径粘贴」开启（默认开，Rust 端 `image_paste_as_file`，Swift 侧 `syncImagePasteAsFile()`，UserDefaults key `ImagePasteAsFile`，旧 key `ImagePasteUseCtrlV` 迁移）时，图片先写入 `$TMPDIR/CopyAttach/Paste/` 临时 PNG，剪贴板只放 `public.file-url`（Finder「复制文件」同款约定，`macos::set_pasteboard_file_url`）再 Cmd+V——终端将其翻译为路径文本，Claude Code 等 TUI Agent 直接消费；非终端目标保持图片数据粘贴，不受影响。旧 Ctrl+V 方案已移除。
 - **粘贴目标 pid 不变式**：Cmd+V 用 `CGEventPostToPid` 投递给 `source_app.pid`（`clipboard_set_source_app` 每 0.3s 由 Swift 轮询更新）。该 pid 必须是用户打开弹窗前的 app，**绝不能是 CopyAttach 自身**（agent 应用没有粘贴目标）。预览窗口通过 `NSApp.activate(ignoringOtherApps:)` 真实激活才能收到捏合手势（LSUIElement agent 在 nonactivating panel 上浮期间从不收到 applicationDidBecomeActive，`NSApp.isActive` 误报 true），这会让 agent 成为前台应用——`updateSourceApp()` 检测到自 pid 时直接跳过覆盖，保留上一应用为粘贴目标。
 - **image_encoding_counter**：Swift 轮询此计数器检测 Phase 2 编码完成，及时刷新缩略图。
 

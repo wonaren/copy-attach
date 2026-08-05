@@ -23,7 +23,16 @@ struct InlineSettingsView: View {
     @State private var shortTextThreshold = UserDefaults.standard.integer(forKey: "ShortTextThreshold") != 0 ? UserDefaults.standard.integer(forKey: "ShortTextThreshold") : 3
     @State private var pendingThreshold: Int? = nil
     @State private var thresholdBeforeEdit: Double = 3000
-    @State private var imagePasteUseCtrlV = UserDefaults.standard.bool(forKey: "ImagePasteUseCtrlV")
+    @State private var imagePasteAsFile = {
+        if let v = UserDefaults.standard.object(forKey: "ImagePasteAsFile") as? Bool {
+            return v
+        }
+        if UserDefaults.standard.object(forKey: "ImagePasteUseCtrlV") != nil {
+            // Legacy key migration (old Ctrl+V toggle).
+            return UserDefaults.standard.bool(forKey: "ImagePasteUseCtrlV")
+        }
+        return true
+    }()
     @State private var closePopupAfterDrag = HistoryPopupWindow.closePopupAfterDragEnabled
     @State private var showDragGuide = false
     @State private var isHoveringDragIcon = false
@@ -362,14 +371,14 @@ struct InlineSettingsView: View {
             sectionDivider().padding(.vertical, 4)
             settingToggleRow(
                 icon: "arrow.up.doc",
-                iconColor: imagePasteUseCtrlV ? .orange : .secondary,
-                title: "终端图片使用 Ctrl+V 粘贴(适配ClaudeCode)",
-                desc: "在 Ghostty、iTerm2、Kitty 等终端中粘贴图片时发送 Ctrl+V（对其他应用无影响）。",
-                isOn: $imagePasteUseCtrlV
+                iconColor: imagePasteAsFile ? .orange : .secondary,
+                title: "终端图片以文件路径粘贴(适配ClaudeCode/TUI)",
+                desc: "在 Ghostty、iTerm2、Kitty 等终端中插入图片时，先保存为临时文件再粘贴文件路径（与拖拽行为一致，Claude Code 等 TUI Agent 可直接使用）；其他应用仍粘贴图片数据。",
+                isOn: $imagePasteAsFile
             )
-            .onChange(of: imagePasteUseCtrlV) { _, newValue in
-                UserDefaults.standard.set(newValue, forKey: "ImagePasteUseCtrlV")
-                backend.syncImagePasteModifier()
+            .onChange(of: imagePasteAsFile) { _, newValue in
+                UserDefaults.standard.set(newValue, forKey: "ImagePasteAsFile")
+                backend.syncImagePasteAsFile()
             }
             sectionDivider().padding(.vertical, 4)
             settingToggleRow(
