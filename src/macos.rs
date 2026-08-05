@@ -182,8 +182,13 @@ unsafe fn pasteboard_file_url_strings() -> Vec<String> {
 /// receive the path text; the paste target consumes the file immediately
 /// after the simulated Cmd+V.
 ///
-/// Returns `false` (with nothing written) if the pasteboard is inaccessible
-/// or the URL cannot be built.
+/// The pasteboard is cleared first (NSPasteboard offers no atomic replace), so
+/// on a failed write the previous clipboard contents are already gone and the
+/// pasteboard is left empty. The caller must treat `false` as an *aborted*
+/// paste — the target receives nothing — never as a harmless no-op.
+///
+/// Returns `false` if the pasteboard is inaccessible or the URL cannot be
+/// written (the pasteboard has been cleared regardless).
 pub(crate) fn set_pasteboard_file_url(path: &str) -> bool {
     unsafe {
         let pasteboard_cls = match objc2::runtime::AnyClass::get(c"NSPasteboard") {

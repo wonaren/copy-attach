@@ -194,6 +194,14 @@ fn try_ingest_image_files(
         return false;
     }
     for path in paths {
+        // Files under CopyAttach's own temp tree (paste/drag materializations)
+        // must never re-enter history: after an image paste the temp file-url
+        // can linger on the pasteboard until the next paste, and a later
+        // non-self-write changeCount would otherwise re-ingest it as a "Finder
+        // file copy" — re-stamping the entry and jumping it to the top.
+        if crate::backend::is_copyattach_temp_path(path) {
+            continue;
+        }
         // image::open checks magic bytes, not extension — reliable format detection
         let img = match image::open(path) {
             Ok(img) => img,

@@ -1,5 +1,6 @@
 //! Global backend state: singleton, constants, and entry-id generator.
 
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
@@ -14,6 +15,24 @@ use crate::ignore::IgnoreRules;
 
 pub(crate) const DEFAULT_CLEANUP_THRESHOLD: usize = 3000;
 pub(crate) const POLL_INTERVAL_MS: u64 = 300;
+
+// ═══════════════════════════════════════════
+// CopyAttach temp-file convention
+// ═══════════════════════════════════════════
+
+/// Absolute path to CopyAttach's own temp root (`$TMPDIR/CopyAttach`), shared
+/// by the Rust paste-file writer (`Paste/` subdir) and the Swift drag provider
+/// (`Drag/` subdir). Everything under this tree is a CopyAttach artifact and
+/// must never re-enter the clipboard history.
+pub(crate) fn copyattach_temp_root() -> std::path::PathBuf {
+    std::env::temp_dir().join("CopyAttach")
+}
+
+/// Whether `path` lives under CopyAttach's temp tree. Component-wise, so a
+/// sibling directory like `$TMPDIR/CopyAttachFoo` is not matched.
+pub(crate) fn is_copyattach_temp_path(path: &str) -> bool {
+    Path::new(path).starts_with(copyattach_temp_root())
+}
 
 /// Process-local entitlement gate set by the Swift license verifier before the
 /// clipboard core starts. 0 = denied/unknown, 1 = trial, 2 = perpetual.
@@ -125,4 +144,25 @@ pub(crate) fn reload_history_from_db(b: &Backend) -> usize {
     crate::backend::HISTORY_REVISION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
     count
+}
+
+#[cfg(test)]
+mod temp_path_tests {
+    use super::*;
+
+    #[test]
+    fn test_is_copyattach_temp_path() {
+        let root = copyattach_temp_root();
+        let root_str = root.to_string_lossy().into_owned();
+
+        // Anything under the temp root belongs to CopyAttach.
+        assert!(is_copyattach_temp_path(&root.join("Paste/clipboard-1-2.png").to_string_lossy()));
+        assert!(is_copyattach_temp_path(&root.join("Drag/clipboard-1-2.png").to_string_lossy()));
+        assert!(is_copyattach_temp_path(&root_str));
+
+        // Component-wise match: a sibling with a shared prefix is not ours.
+        let sibling = format!("{root_str}Foo/x.png");
+        assert!(!is_copyattach_temp_path(&sibling));
+        assert!(!is_copyattach_temp_path("/tmp/unrelated.png"));
+    }
 }

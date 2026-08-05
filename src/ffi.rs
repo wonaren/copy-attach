@@ -780,32 +780,43 @@ pub extern "C" fn clipboard_free_bytes(data: *mut u8, len: c_int) {
 // Select & Paste
 // ═══════════════════════════════════════════
 
+/// Maximum age for a materialized paste PNG. Cmd+V is delivered asynchronously
+/// (`CGEventPostToPid`), so a busy target may read the *previous* paste's file
+/// after the next paste begins; the file must outlive that window. Anything
+/// older than this can no longer be in flight and is safe to purge.
+const PASTE_IMAGE_TTL: Duration = Duration::from_secs(60);
+
 /// Materialize a clipboard image as a PNG file under the per-user temp
 /// directory, mirroring the drag provider's convention (separate `Paste`
-/// subdir so drag cleanup never races with a paste in flight). Stale files
-/// from earlier pastes are removed first — the paste target consumes the
-/// file right after the simulated Cmd+V, so durability beyond the next paste
-/// is not needed.
+/// subdir so drag cleanup never races with a paste in flight). Files older
+/// than [`PASTE_IMAGE_TTL`] are purged first — never delete everything, since
+/// the previous paste's target may still be reading its file.
 ///
 /// Returns the absolute file path, or `None` (with a log) on failure.
 fn write_paste_image_file(png_data: &[u8], entry_id: u64) -> Option<String> {
-    let mut dir = std::env::temp_dir();
-    dir.push("CopyAttach");
+    let mut dir = crate::backend::copyattach_temp_root();
     dir.push("Paste");
     if let Err(e) = std::fs::create_dir_all(&dir) {
         eprintln!("CopyAttach: cannot create paste image dir {}: {e}", dir.display());
         return None;
     }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
     if let Ok(entries) = std::fs::read_dir(&dir) {
         for entry in entries.flatten() {
-            let _ = std::fs::remove_file(entry.path());
+            if let Ok(meta) = entry.metadata() {
+                if let Ok(modified) = meta.modified() {
+                    if let Ok(mtime) = modified.duration_since(std::time::UNIX_EPOCH) {
+                        if now.saturating_sub(mtime) >= PASTE_IMAGE_TTL {
+                            let _ = std::fs::remove_file(entry.path());
+                        }
+                    }
+                }
+            }
         }
     }
-    let now_micros = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_micros();
-    let path = dir.join(format!("clipboard-{entry_id}-{now_micros}.png"));
+    let path = dir.join(format!("clipboard-{entry_id}-{}.png", now.as_micros()));
     if let Err(e) = std::fs::write(&path, png_data) {
         eprintln!("CopyAttach: cannot write paste image {}: {e}", path.display());
         return None;
