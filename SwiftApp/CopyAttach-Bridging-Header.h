@@ -80,7 +80,6 @@ int32_t clipboard_delete_by_id(uint64_t entry_id);
 int32_t clipboard_undo_delete(void);
 int32_t clipboard_can_undo(void);
 uint64_t clipboard_last_restored_id(void);
-void clipboard_set_image_paste_as_file(int32_t enable);
 
 // ─── History Reload (for stress testing) ───
 int32_t clipboard_reload_history(void);

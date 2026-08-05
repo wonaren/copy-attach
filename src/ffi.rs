@@ -339,7 +339,6 @@ pub extern "C" fn clipboard_init() -> c_int {
     let ignore_rules = Arc::new(Mutex::new(IgnoreRules::default()));
     let deleted_stack: Arc<Mutex<Vec<ClipboardEntry>>> = Arc::new(Mutex::new(Vec::new()));
     let last_restored_id = Arc::new(AtomicU64::new(0));
-    let image_paste_as_file = Arc::new(AtomicBool::new(true));
 
     let backend = Backend {
         history: Arc::clone(&history),
@@ -355,7 +354,6 @@ pub extern "C" fn clipboard_init() -> c_int {
         ignore_rules: Arc::clone(&ignore_rules),
         deleted_stack: Arc::clone(&deleted_stack),
         last_restored_id: Arc::clone(&last_restored_id),
-        image_paste_as_file: Arc::clone(&image_paste_as_file),
     };
 
     if set_backend(backend).is_err() {
@@ -782,8 +780,9 @@ pub extern "C" fn clipboard_free_bytes(data: *mut u8, len: c_int) {
 // Select & Paste
 // ═══════════════════════════════════════════
 
-/// Known terminal emulator bundle IDs. When the user enables Ctrl+V for image
-/// paste, it only activates when the frontmost app matches one of these.
+/// Known terminal emulator bundle IDs. Image pastes into these apps switch
+/// to drag-style file-path mode (temp PNG + `public.file-url`), so the
+/// terminal inserts the path text instead of image data.
 const TERMINAL_BUNDLE_IDS: &[&str] = &[
     "com.mitchellh.ghostty",      // Ghostty
     "com.googlecode.iterm2",      // iTerm2
@@ -886,14 +885,14 @@ fn select_and_paste_impl(mut item: ClipboardEntry) -> c_int {
     // the resulting changeCount before it can observe our write.
     let b = backend();
     let _event_guard = b.pasteboard_event_lock.lock().unwrap();
-    // Terminal image paste switches to drag-style file-path mode: the image
+    // Terminal image paste always uses drag-style file-path mode: the image
     // is materialized as a temp PNG and only its file URL goes on the
     // pasteboard, so the terminal inserts the path text (TUI agents like
     // Claude Code consume exactly this form). Non-terminal targets keep
     // image-data semantics untouched.
     let paste_as_file = {
         let src = b.source_app.lock().unwrap();
-        is_terminal_app(&src.bundle_id) && b.image_paste_as_file.load(Ordering::Relaxed)
+        is_terminal_app(&src.bundle_id)
     };
     match &db_item {
         ClipboardEntry::Text { text, .. } => {
@@ -1373,21 +1372,6 @@ pub extern "C" fn clipboard_set_cleanup_threshold(threshold: i32) {
         if let Ok(conn) = b.db.lock() {
             trim_db_history(&conn, t);
         }
-    }
-}
-
-// ═══════════════════════════════════════════
-// Image Paste Mode (terminals)
-// ═══════════════════════════════════════════
-
-/// When `enable` is non-zero, image pastes into terminal emulators write the
-/// image to a temp PNG and paste its file URL (drag-style file path) instead
-/// of image data — terminals insert the path text, TUI agents (Claude Code
-/// et al.) consume it directly. Non-terminal targets always keep image data.
-#[no_mangle]
-pub extern "C" fn clipboard_set_image_paste_as_file(enable: c_int) {
-    if let Some(b) = crate::backend::try_backend() {
-        b.image_paste_as_file.store(enable != 0, Ordering::Relaxed);
     }
 }
 

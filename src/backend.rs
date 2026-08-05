@@ -86,10 +86,6 @@ pub(crate) struct Backend {
     /// Used by Swift to find the restored entry in a snapshot despite
     /// monitor-thread insert races.
     pub(crate) last_restored_id: Arc<AtomicU64>,
-    /// When true, image pastes into terminal emulators materialize the image
-    /// as a temp PNG and paste its file URL (drag-style file path) instead of
-    /// image data. Non-terminal targets always keep image data.
-    pub(crate) image_paste_as_file: Arc<AtomicBool>,
 }
 
 static BACKEND: OnceLock<Backend> = OnceLock::new();
