@@ -113,7 +113,7 @@ COPYATTACH_LICENSE_PUBLIC_KEY='efsKYx9a7urNlr-UXR7b0-Fl9w0mJNKe3RME-OeseOs' \
 - **HISTORY_REVISION**：去重时条目数不变但顺序变了——UI 通过此计数器感知"需要刷新列表"而不仅仅是 count 变化。
 - **Ignore rules**：捕获时求值，在条目分配/插入/持久化之前过滤。App 匹配使用 bundle identifier（显示名可变，不可靠）。
 - **undo 删除**：通过 `clipboard_last_restored_id()` 精确定位恢复项，避免监控线程插入竞争。
-- **原生拖拽**：历史条目支持拖到其他应用。文本→`NSItemProvider(object:)`，图片→临时 PNG 文件 (`public.file-url`)。窗口拖动区限制为 PopupHostingView 外 3pt 边框，避免行拖拽误触窗口移动。拖拽结束检测用 **`NSEvent.pressedMouseButtons` 轮询**（40ms Timer，注册 `.common` + `.eventTracking` 双 run loop 模式）——拖拽期间 run loop 处于 `NSEventTrackingRunLoopMode`，global/local monitor 收不到 mouse-up（官方文档确认该模式限制事件投递），Timer 是可靠信号。开关「拖拽后自动关闭弹窗」（`ClosePopupAfterDrag`，默认开，`object(forKey:) as? Bool ?? true`）开启时，拖拽结束（松手或弹窗失 key）**直接 `close()`——与按 Esc 相同的关闭路径**，无动画、无 completion 依赖；关闭时保持弹窗开启可连续拖拽，下一次外部点击（global click monitor）正常关闭。
+- **原生拖拽**：历史条目支持拖到其他应用。文本→`NSItemProvider(object:)`，图片→临时 PNG 文件 (`public.file-url`)。窗口拖动区限制为 PopupHostingView 外 3pt 边框，避免行拖拽误触窗口移动。拖拽结束检测用 **`NSEvent.pressedMouseButtons` 轮询**（40ms Timer，注册 `.common` + `.eventTracking` 双 run loop 模式）——拖拽期间 run loop 处于 `NSEventTrackingRunLoopMode`，global/local monitor 收不到 mouse-up（官方文档确认该模式限制事件投递），Timer 是可靠信号。**拖拽在途时弹窗智能防遮挡停车**（`tickDragParking`，与松手检测共用同一个 40ms watcher tick）：每 tick 累积鼠标横向位移，累计 ≥`dragOcclusionThreshold`(40pt) 即停靠到拖拽方向对侧的屏幕边缘（右拖停左、左拖停右），绝不遮挡落点；方向在每 tick 连续重估，停靠后反向位移 ≥40pt 即翻转到另一侧边缘（停靠后同向漂移用 min/max 钳制、不计入反向累积——否则长同向行程后的部分反向需超过整段行程才能翻转，弹窗会停在正好盖住新落点的旧边缘）。`park(at:)` 用 `animator().setFrame` 驱动滑动（无边框 NSPanel 上 `setFrameOrigin` 静默不动画，`setFrame` 才真正滑动）；`tickParkingSlide` 侦测 CA 事务停顿（事件跟踪模式下帧动画可能卡死，3 tick 无位移即 `setFrameOrigin` 直接落位）。拖拽结束时开关关闭（保持弹窗开启）走 `restoreFromParking()` 滑回居中；开启走下面「拖拽后自动关闭」的 `close()` 路径。`show()`/`close()`/`completeItemDrag` 均 `resetDragParking()`，防停靠状态跨开闭循环残留。开关「拖拽后自动关闭弹窗」（`ClosePopupAfterDrag`，默认开，`object(forKey:) as? Bool ?? true`）开启时，拖拽结束（松手或弹窗失 key）**直接 `close()`——与按 Esc 相同的关闭路径**，无动画、无 completion 依赖；关闭时保持弹窗开启可连续拖拽，下一次外部点击（global click monitor）正常关闭。
 - **Cargo 特性**：`migration`（默认开启）启用 serde/base64 依赖，提供旧版 history.json → SQLite 迁移。`stress-test` 启用应力测试面板和 CLI。
 
 ### Swift 前端（`SwiftApp/`，LSUIElement agent app——无 Dock 图标）
@@ -183,7 +183,7 @@ SwiftApp/
 - **稳定 ID**：`entry_id`（u64，AtomicU64 单调递增），用于 `select_and_paste_by_id`，避免数组索引竞争。
 - **所有权规则**：`*_free_string` 释放 Rust 分配的 `*mut c_char`；`*_free_bytes` 释放 `*mut u8` 缓冲区（含长度）。
 - **图片加载**：缩略图走 `clipboard_get_image_thumb_by_db_id`（仅 SQLite 读，不碰 history 锁）；大图走 `clipboard_get_image_full_by_db_id`（优先内存缓存，后备 DB）。
-- **select_and_paste 流程**：查 history（by entry_id）→ DB 加载 png_data（**加载失败显式 return 0 + 日志，不用内存副本兜底**——内存条目不持 PNG blob，静默降级只会掩盖 DB 故障）→ 写系统剪贴板（设 pending_self_write）→ DB write-through（insert/delete/trim，更新 db_id）→ move entry to top → sleep 50ms → Cmd+V。**图片粘贴走唯一的拖拽同款文件路径模式**：图片一律先写入 `$TMPDIR/CopyAttach/Paste/` 临时 PNG，剪贴板只放 `public.file-url`（Finder「复制文件」同款约定，`macos::set_pasteboard_file_url`）再 Cmd+V——终端将其翻译为路径文本，Claude Code 等 TUI Agent 直接消费，聊天/笔记类 app 粘贴为文件；不再区分终端与非终端，无开关。
+- **select_and_paste 流程**：先查 accessibility 权限（`macos::check_permission`），未授权直接 return 0 且**不动剪贴板**——Cmd+V 无权限必然失败，先覆盖用户剪贴板只会毁掉其内容（临时 PNG 60s 后被 TTL 清理成死路径），且旧逻辑 fall-through 返回 1 被 Swift 误判为粘贴成功并关闭弹窗 → 查 history（by entry_id）→ DB 加载 png_data（**加载失败显式 return 0 + 日志，不用内存副本兜底**——内存条目不持 PNG blob，静默降级只会掩盖 DB 故障）→ 写系统剪贴板（设 pending_self_write）→ DB write-through（insert/delete/trim，更新 db_id）→ move entry to top → sleep 50ms → Cmd+V。**图片粘贴走唯一的拖拽同款文件路径模式**：图片一律先写入 `$TMPDIR/CopyAttach/Paste/` 临时 PNG，剪贴板只放 `public.file-url`（Finder「复制文件」同款约定，`macos::set_pasteboard_file_url`）再 Cmd+V——终端将其翻译为路径文本，Claude Code 等 TUI Agent 直接消费，聊天/笔记类 app 粘贴为文件；不再区分终端与非终端，无开关。
 - **粘贴目标 pid 不变式**：Cmd+V 用 `CGEventPostToPid` 投递给 `source_app.pid`（`clipboard_set_source_app` 每 0.3s 由 Swift 轮询更新）。该 pid 必须是用户打开弹窗前的 app，**绝不能是 CopyAttach 自身**（agent 应用没有粘贴目标）。预览窗口通过 `NSApp.activate(ignoringOtherApps:)` 真实激活才能收到捏合手势（LSUIElement agent 在 nonactivating panel 上浮期间从不收到 applicationDidBecomeActive，`NSApp.isActive` 误报 true），这会让 agent 成为前台应用——`updateSourceApp()` 检测到自 pid 时直接跳过覆盖，保留上一应用为粘贴目标。
 - **image_encoding_counter**：Swift 轮询此计数器检测 Phase 2 编码完成，及时刷新缩略图。
 
@@ -245,7 +245,7 @@ CI 发布版（`.github/workflows/build.yml`）的签名步骤同样决定用户
 
 ## 测试覆盖
 
-所有 Rust 测试集中在 `src/tests.rs`（cfg-gated）。覆盖：基本添加与顺序、去重（文本/图片/混合）、图片编解码与缩略图、内容哈希一致性、SourceApp 元数据、label 生成（含多字节安全）、FFI 空指针安全、阈值清理（多个阈值 + 边界 + 百分比 trim + ceil 行为）、阈值变更、ignore rules（app/类型/长度）、应力测试数据生成。
+所有 Rust 测试集中在 `src/tests.rs`（cfg-gated）；`src/bench_tests.rs`（cfg-gated on `test` + `stress-test`）另含少量性能基准测试。覆盖：基本添加与顺序、去重（文本/图片/混合）、图片编解码与缩略图、内容哈希一致性、SourceApp 元数据、label 生成（含多字节安全）、FFI 空指针安全、阈值清理（多个阈值 + 边界 + 百分比 trim + ceil 行为）、阈值变更、ignore rules（app/类型/长度）、应力测试数据生成。
 
 ## .claude 配置
 
