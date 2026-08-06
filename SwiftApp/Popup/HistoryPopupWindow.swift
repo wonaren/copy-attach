@@ -69,7 +69,9 @@ class HistoryPopupWindow: NSPanel {
     }
 
     /// Duration of the popup open fade-in (window alpha 0 → 1).
-    private static let fadeInDuration: TimeInterval = 0.3
+    /// Matches Spotlight's ~0.2s open; the content scale spring settles in
+    /// the same window (see HistoryPopupContent), so the two stay in sync.
+    private static let fadeInDuration: TimeInterval = 0.2
 
     private init() {
         // Match show() — use visibleFrame so first-open position matches
@@ -172,19 +174,16 @@ class HistoryPopupWindow: NSPanel {
         self.orderFrontRegardless()
         self.makeKey()
 
-        // Fade in deterministically AFTER the window is on screen, decoupled
-        // from SwiftUI onAppear (which can fire while the content view is being
-        // installed, before the window is ordered on screen, dropping the
-        // animation). Animating from `self` here always runs on screen.
-        DispatchQueue.main.async {
-            // A close (or close-then-reopen) may land before this block drains;
-            // skip the fade for a window that is no longer on screen.
-            guard self.isVisible else { return }
-            NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = Self.fadeInDuration
-                ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
-                self.animator().alphaValue = 1
-            }
+        // Fade in immediately. orderFrontRegardless() completes the order-front
+        // synchronously, so the window is already on screen here and the alpha
+        // animation plays on its first frame — no need to defer past a runloop
+        // turn. (095b404's concern was onAppear firing before the window was
+        // ordered on screen, dropping the fade; animating from `self` after
+        // orderFront is always safe, and a close cannot interleave mid-call.)
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = Self.fadeInDuration
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            self.animator().alphaValue = 1
         }
 
         // Give the hosting view keyboard focus

@@ -241,16 +241,19 @@ struct HistoryPopupContent: View {
             isControlPressed = NSEvent.modifierFlags.contains(.control)
             isCommandPressed = NSEvent.modifierFlags.contains(.command)
 
-            // Spotlight opening: spring scale with slight overshoot
-            let animDuration = 0.3
-            withAnimation(.spring(response: animDuration * 0.7,
-                                  dampingFraction: 0.62,
+            // Spotlight opening: scale 1.10 → 1.0 with a spring that settles in
+            // the same ~0.2s window as the window alpha fade (see
+            // HistoryPopupWindow.fadeInDuration). Damping 0.85 keeps the scale
+            // from visibly overshooting — Spotlight settles smoothly, no bounce.
+            let openDuration = 0.2
+            withAnimation(.spring(response: openDuration,
+                                  dampingFraction: 0.85,
                                   blendDuration: 0)) {
                 openingScale = 1.0
             }
 
             // Focus first item (or search bar if empty) after animation
-            DispatchQueue.main.asyncAfter(deadline: .now() + animDuration + 0.05) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + openDuration + 0.05) {
                 if self.backend.items.isEmpty {
                     // Empty state: focus container so onKeyPress (e.g. Escape)
                     // works even without a search field or items.
