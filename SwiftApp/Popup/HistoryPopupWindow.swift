@@ -19,11 +19,45 @@ class HistoryPopupWindow: NSPanel {
     /// while dragging, the run loop runs in NSEventTrackingRunLoopMode, which
     /// restricts which sources deliver events. A timer registered for both
     /// common and event-tracking modes observes the button release reliably.
+    /// The same ticks also sample the mouse position for anti-occlusion
+    /// parking (see `tickDragParking`).
     private var mouseUpWatcher: Timer?
     private var postDragClickMonitor: Any?
     /// closeWithAnimation's 0.4s force-close backstop. Stored so show()/close()
     /// can cancel a pending guarantee when the window is re-shown before it fires.
     private var closeGuaranteeTimer: Timer?
+
+    // MARK: - Drag anti-occlusion parking (智能防遮挡)
+    //
+    // While an item drag is in flight the popup parks at the screen edge
+    // opposite the drag direction — dragging right parks it at the left edge,
+    // dragging left at the right edge — so the popup never covers the drop
+    // target. Direction is re-evaluated continuously on every watcher tick:
+    // reversing the drag by more than `dragOcclusionThreshold` flips the popup
+    // to the other edge, so one long drag that changes course keeps the popup
+    // out of the way the whole time (持续拖动).
+
+    /// Edge the popup is parked at during an item drag (nil = centered).
+    private enum ParkSide { case left, right }
+    private var parkedSide: ParkSide?
+    /// Net horizontal mouse travel since the last park decision (points).
+    private var dragDxAccum: CGFloat = 0
+    /// Mouse x at the previous parking tick.
+    private var lastDragMouseX: CGFloat?
+    /// Target x of the in-flight park slide (nil when no slide is pending).
+    private var pendingParkTargetX: CGFloat?
+    /// Frame x at the previous tick — progress check for the slide animation.
+    private var lastParkTickX: CGFloat?
+    private var parkSlideStallTicks = 0
+    /// Horizontal mouse travel that parks the popup at an edge, or flips it
+    /// to the opposite edge after a course reversal. Large enough that the
+    /// small jitter of picking up a drag never triggers anything; small
+    /// enough that the popup is out of the way well before the drop.
+    private static let dragOcclusionThreshold: CGFloat = 40
+    /// Distance from the visible frame edge when the popup is parked.
+    private static let dragParkMargin: CGFloat = 12
+    /// Duration of the park / restore slide.
+    private static let dragParkDuration: TimeInterval = 0.22
 
     /// UserDefaults key for the "拖拽后自动关闭弹窗" preference (default ON).
     static let closePopupAfterDragDefaultsKey = "ClosePopupAfterDrag"
@@ -90,6 +124,10 @@ class HistoryPopupWindow: NSPanel {
         awaitingPostDragInteraction = false
         removePostDragClickMonitor()
         startMouseUpWatcher()
+        // Anti-occlusion: measure the drag run from the moment the item is
+        // picked up.
+        dragDxAccum = 0
+        lastDragMouseX = NSEvent.mouseLocation.x
     }
 
     func show() {
@@ -123,6 +161,10 @@ class HistoryPopupWindow: NSPanel {
 
         // Position at center of screen. The window frame already equals the
         // content size, so no content-driven resize can shift it off-center.
+        // Anti-occlusion state must not survive a close/reopen cycle: show()
+        // re-centers the window, so a stale parkedSide would leave the popup
+        // centered while the parking logic believes it is parked.
+        resetDragParking()
         centerOnScreen()
 
         self.level = .floating
@@ -197,13 +239,22 @@ class HistoryPopupWindow: NSPanel {
 
     /// Drag end detection: while the left button stays pressed the drag is in
     /// progress; the tick that observes the release ends it. The 40 ms cadence
-    /// keeps the dismissal feeling immediate.
+    /// keeps the dismissal feeling immediate. The same cadence drives the
+    /// anti-occlusion parking: each tick the park slide progress is checked
+    /// first, then the mouse travel is accumulated and may park/flip the popup.
     private func startMouseUpWatcher() {
         stopMouseUpWatcher()
         let timer = Timer(timeInterval: 0.04, repeats: true) { [weak self] _ in
             guard let self = self else { return }
-            // Left button still down → drag still in progress.
-            guard NSEvent.pressedMouseButtons & 1 == 0 else { return }
+            // Left button still down → drag still in progress; keep sampling
+            // the mouse for anti-occlusion parking.
+            guard NSEvent.pressedMouseButtons & 1 == 0 else {
+                MainActor.assumeIsolated {
+                    self.tickParkingSlide()
+                    self.tickDragParking()
+                }
+                return
+            }
             MainActor.assumeIsolated { self.completeItemDrag() }
         }
         RunLoop.main.add(timer, forMode: .common)
@@ -225,14 +276,158 @@ class HistoryPopupWindow: NSPanel {
             // 拖拽结束（已松手）→ 等同于按一次 Esc：直接关闭弹窗。
             awaitingPostDragInteraction = false
             removePostDragClickMonitor()
+            resetDragParking()
             debugLog("Drag ended; closing popup (same as Esc)")
             close()
         } else {
             // 开关关闭：保持弹窗开启，可连续拖拽多个条目；
             // 下一次外部点击正常关闭。
+            if parkedSide != nil {
+                // The popup parked out of the way during the drag; slide it
+                // back to its centered position now that the drag is over.
+                debugLog("Drag ended; restoring popup to center")
+                restoreFromParking()
+            }
             awaitingPostDragInteraction = true
             installPostDragClickMonitor()
         }
+    }
+
+    // MARK: - Anti-occlusion parking mechanics
+
+    /// Continuous direction tracking during a drag. Each watcher tick adds the
+    /// horizontal mouse travel to an accumulator; once the accumulated travel
+    /// crosses `dragOcclusionThreshold` the popup parks at the edge opposite
+    /// the drag direction and the accumulator restarts. Reversing beyond the
+    /// same threshold flips the popup to the other edge. Jitter below the
+    /// threshold never triggers anything, and because the accumulator is
+    /// zeroed on every flip, wiggling in place cannot oscillate the popup.
+    private func tickDragParking() {
+        let mouseX = NSEvent.mouseLocation.x
+        defer { lastDragMouseX = mouseX }
+        guard let lastX = lastDragMouseX else { return }
+        let dx = mouseX - lastX
+        // A jump this large is a coordinate-space discontinuity (e.g. a screen
+        // configuration change mid-drag), not mouse travel; restart the run.
+        guard abs(dx) < 400 else {
+            dragDxAccum = 0
+            return
+        }
+        dragDxAccum += dx
+
+        let threshold = Self.dragOcclusionThreshold
+        switch parkedSide {
+        case nil:
+            if dragDxAccum >= threshold {
+                park(at: .left)          // heading right → get out of the way left
+            } else if dragDxAccum <= -threshold {
+                park(at: .right)         // heading left → get out of the way right
+            }
+        case .left:
+            // Reversed course: accumulated leftward travel beyond the
+            // threshold flips the popup to the right edge. Same-direction
+            // (rightward) drift must not tax that accumulation — after a long
+            // same-direction run, a partial reversal would otherwise need to
+            // out-travel the whole run before flipping, leaving the popup
+            // parked exactly over the new drop target.
+            dragDxAccum = min(dragDxAccum, 0)
+            if dragDxAccum <= -threshold { park(at: .right) }
+        case .right:
+            dragDxAccum = max(dragDxAccum, 0)
+            if dragDxAccum >= threshold { park(at: .left) }
+        }
+    }
+
+    /// Animates the popup to the fixed position at the given edge of its
+    /// screen (same y — the popup only slides sideways, never jumps
+    /// vertically).
+    private func park(at side: ParkSide) {
+        parkedSide = side
+        dragDxAccum = 0
+        guard let screen = self.screen ?? NSScreen.main else { return }
+        let visible = screen.visibleFrame
+        let targetX: CGFloat
+        switch side {
+        case .left:
+            targetX = visible.minX + Self.dragParkMargin
+        case .right:
+            targetX = visible.maxX - self.frame.width - Self.dragParkMargin
+        }
+        let clampedX = min(max(targetX, visible.minX), visible.maxX - self.frame.width)
+        let origin = self.frame.origin
+        guard abs(origin.x - clampedX) > 1 else { return }
+        pendingParkTargetX = clampedX
+        lastParkTickX = origin.x
+        parkSlideStallTicks = 0
+        debugLog("Drag parking: \(side == .left ? "left" : "right") edge")
+        // NB: `animator().setFrameOrigin` does not animate (silently no-ops on
+        // borderless panels); `animator().setFrame(_:display:)` is the API that
+        // actually slides the window.
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = Self.dragParkDuration
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            self.animator().setFrame(
+                NSRect(x: clampedX, y: origin.y, width: self.frame.width, height: self.frame.height),
+                display: true
+            )
+        }
+    }
+
+    /// Watches the park slide make progress. Window frame animations are CA
+    /// transactions, which can stall while the run loop is in event tracking
+    /// mode (the same constraint that motivates closeWithAnimation's
+    /// guarantee timer); a stalled slide would leave the popup blocking the
+    /// drag path. If the frame has not moved for three consecutive ticks,
+    /// land the window directly.
+    private func tickParkingSlide() {
+        guard let target = pendingParkTargetX else { return }
+        let x = self.frame.origin.x
+        if abs(x - target) < 1 {
+            pendingParkTargetX = nil
+            parkSlideStallTicks = 0
+            return
+        }
+        if let lastX = lastParkTickX, abs(x - lastX) < 0.5 {
+            parkSlideStallTicks += 1
+            if parkSlideStallTicks >= 3 {
+                debugLog("Drag parking: slide stalled, snapping to edge")
+                self.setFrameOrigin(NSPoint(x: target, y: self.frame.origin.y))
+                pendingParkTargetX = nil
+                parkSlideStallTicks = 0
+            }
+        } else {
+            parkSlideStallTicks = 0
+        }
+        lastParkTickX = x
+    }
+
+    /// Slides the popup back to its centered position when a drag ends with
+    /// the popup still open (close-after-drag disabled) — the popup only
+    /// parks while a drag is actually in flight.
+    private func restoreFromParking() {
+        resetDragParking()
+        guard let screen = self.screen ?? NSScreen.main else { return }
+        let visible = screen.visibleFrame
+        let centeredX = visible.minX + (visible.size.width - self.frame.width) / 2
+        let origin = self.frame.origin
+        guard abs(origin.x - centeredX) > 1 else { return }
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = Self.dragParkDuration
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            self.animator().setFrame(
+                NSRect(x: centeredX, y: origin.y, width: self.frame.width, height: self.frame.height),
+                display: true
+            )
+        }
+    }
+
+    private func resetDragParking() {
+        parkedSide = nil
+        dragDxAccum = 0
+        lastDragMouseX = nil
+        pendingParkTargetX = nil
+        lastParkTickX = nil
+        parkSlideStallTicks = 0
     }
 
     private func installPostDragClickMonitor() {
@@ -308,6 +503,7 @@ class HistoryPopupWindow: NSPanel {
         awaitingPostDragInteraction = false
         stopMouseUpWatcher()
         removePostDragClickMonitor()
+        resetDragParking()
         closeGuaranteeTimer?.invalidate()
         closeGuaranteeTimer = nil
         previewPanel?.close()

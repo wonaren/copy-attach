@@ -788,9 +788,12 @@ const PASTE_IMAGE_TTL: Duration = Duration::from_secs(60);
 
 /// Materialize a clipboard image as a PNG file under the per-user temp
 /// directory, mirroring the drag provider's convention (separate `Paste`
-/// subdir so drag cleanup never races with a paste in flight). Files older
-/// than [`PASTE_IMAGE_TTL`] are purged first — never delete everything, since
-/// the previous paste's target may still be reading its file.
+/// subdir so drag cleanup never races with a paste in flight). The new file
+/// is written first; only once it is safely on disk are files older than
+/// [`PASTE_IMAGE_TTL`] purged — a failed write must never delete the file the
+/// pasteboard still references (the clipboard keeps the previous paste's URL
+/// until this paste's `set_pasteboard_file_url` replaces it). Never delete
+/// everything, since the previous paste's target may still be reading its file.
 ///
 /// Returns the absolute file path, or `None` (with a log) on failure.
 fn write_paste_image_file(png_data: &[u8], entry_id: u64) -> Option<String> {
@@ -803,6 +806,11 @@ fn write_paste_image_file(png_data: &[u8], entry_id: u64) -> Option<String> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
+    let path = dir.join(format!("clipboard-{entry_id}-{}.png", now.as_micros()));
+    if let Err(e) = std::fs::write(&path, png_data) {
+        eprintln!("CopyAttach: cannot write paste image {}: {e}", path.display());
+        return None;
+    }
     if let Ok(entries) = std::fs::read_dir(&dir) {
         for entry in entries.flatten() {
             if let Ok(meta) = entry.metadata() {
@@ -816,11 +824,6 @@ fn write_paste_image_file(png_data: &[u8], entry_id: u64) -> Option<String> {
             }
         }
     }
-    let path = dir.join(format!("clipboard-{entry_id}-{}.png", now.as_micros()));
-    if let Err(e) = std::fs::write(&path, png_data) {
-        eprintln!("CopyAttach: cannot write paste image {}: {e}", path.display());
-        return None;
-    }
     Some(path.to_string_lossy().into_owned())
 }
 
@@ -828,6 +831,19 @@ fn write_paste_image_file(png_data: &[u8], entry_id: u64) -> Option<String> {
 /// Loads full image data from DB if needed, writes to system clipboard,
 /// write-through DB, moves item to top of history, then simulates paste.
 fn select_and_paste_impl(mut item: ClipboardEntry) -> c_int {
+    #[cfg(target_os = "macos")]
+    {
+        // Cmd+V simulation needs accessibility permission. Gate BEFORE any
+        // pasteboard write: the write replaces the user's clipboard, so
+        // proceeding without permission would destroy their content on a paste
+        // that can never happen — and the old fall-through still reported
+        // success (1). No permission → explicit failure, clipboard untouched.
+        if !macos::check_permission() {
+            eprintln!("CopyAttach: accessibility permission not granted — paste aborted, clipboard untouched");
+            return 0;
+        }
+    }
+
     // The entry is moved to the top of history below. Stamp it with the current
     // time so the list order (most-recently-used) stays consistent with the
     // entry's timestamp — the day separator groups rely on this invariant.
@@ -969,13 +985,11 @@ fn select_and_paste_impl(mut item: ClipboardEntry) -> c_int {
     thread::sleep(Duration::from_millis(50));
     #[cfg(target_os = "macos")]
     {
-        if macos::check_permission() {
-            if !macos::simulate_cmd_v(front_pid) {
-                eprintln!("CopyAttach: simulate_cmd_v failed");
-                return 0;
-            }
-        } else {
-            eprintln!("CopyAttach: accessibility permission not granted — clipboard copied but paste skipped");
+        // Permission was already verified up front; here only the key event
+        // can fail.
+        if !macos::simulate_cmd_v(front_pid) {
+            eprintln!("CopyAttach: simulate_cmd_v failed");
+            return 0;
         }
     }
     1
