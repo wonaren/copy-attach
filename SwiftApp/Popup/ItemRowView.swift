@@ -118,14 +118,10 @@ struct ItemRowView: View {
     }
 
     private func textContent(_ text: String) -> some View {
-        // Early truncation: process at most 200 chars from the full text.
-        // The display text after filtering is at most ~60 visual chars (30 CJK).
-        // 200 is a safe upper bound that avoids O(n) processing of multi-KB text.
-        let displayText = String(text.prefix(200))
-            .components(separatedBy: .newlines)
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
-            .joined(separator: "⏎")
+        // `text` is the backend preview, already bounded to 256 scalars; long
+        // entries arrive elided to head……tail, so the cut below always sees the
+        // real ending. Collapsing the bounded preview is cheap — no local cap.
+        let displayText = text.collapsedPreview()
         let display: String
         let visualLen = visualWidth(displayText)
         if visualLen > 50 {
@@ -269,5 +265,16 @@ struct ItemRowView: View {
                 .frame(maxWidth: .infinity)
             }
         }
+    }
+}
+
+private extension String {
+    /// Single-line preview: split on newlines, trim each line, drop empties,
+    /// join with ⏎. Applied to bounded head/tail windows in `textContent`.
+    func collapsedPreview() -> String {
+        components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "⏎")
     }
 }

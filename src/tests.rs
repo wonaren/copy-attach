@@ -232,6 +232,25 @@ fn test_preview_text() {
 }
 
 #[test]
+fn test_preview_text_elides_with_real_tail() {
+    // Long text elides to head……tail; the tail must be the REAL ending of the
+    // text, not a middle chunk of the truncated prefix.
+    let text = format!("{}START{}", "中".repeat(500), "-THE-REAL-END");
+    let t = make_text(&text, 100);
+    let p = t.preview();
+    assert_eq!(p.chars().count(), 256);
+    assert!(p.starts_with('中'));
+    assert!(p.ends_with("-THE-REAL-END"));
+    assert_eq!(p.matches("……").count(), 1);
+
+    // Text that just fits the budget stays whole — no elision.
+    let fits = "a".repeat(256);
+    assert_eq!(make_text(&fits, 100).preview(), fits);
+    let just_over = "a".repeat(257);
+    assert_ne!(make_text(&just_over, 100).preview(), just_over);
+}
+
+#[test]
 fn test_preview_image() {
     let img_data = make_test_image_rgba(1920, 1080, 128);
     let i = make_image(&img_data, 1920, 1080, 100);

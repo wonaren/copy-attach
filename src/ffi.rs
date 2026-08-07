@@ -126,9 +126,10 @@ pub extern "C" fn clipboard_snapshot_item_label(snap: *const Snapshot, index: c_
     }
 }
 
-/// Bounded preview text for a text item (first 256 Unicode scalars). The list
-/// row only renders the first ~200 chars, so the snapshot carries this bounded
-/// prefix instead of cloning the full text into the frontend. Caller must free
+/// Bounded preview text for a text item (≤ 256 Unicode scalars; long entries
+/// elided to head……tail so the row shows the real ending). The list row only
+/// renders ~50 visual chars, so the snapshot carries this bounded preview
+/// instead of cloning the full text into the frontend. Caller must free
 /// with `clipboard_free_string()`. Image items return null.
 #[no_mangle]
 pub extern "C" fn clipboard_snapshot_item_preview(snap: *const Snapshot, index: c_int) -> *mut c_char {

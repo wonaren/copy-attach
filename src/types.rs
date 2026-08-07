@@ -103,12 +103,13 @@ impl ClipboardEntry {
         }
     }
 
-    /// Bounded preview for the list row (first 256 Unicode scalars). The popup
-    /// renders at most ~200 chars, so the snapshot carries this prefix instead
-    /// of cloning the full text into the frontend.
+    /// Bounded preview for the list row (≤ 256 Unicode scalars). Short text is
+    /// carried whole; longer text is elided to `head……tail` so the row can show
+    /// the real ending instead of a middle chunk of a truncated prefix. The
+    /// snapshot still never carries full multi-KB text into the frontend.
     pub(crate) fn preview(&self) -> String {
         match self {
-            ClipboardEntry::Text { text, .. } => text.chars().take(256).collect(),
+            ClipboardEntry::Text { text, .. } => bounded_preview(text),
             ClipboardEntry::Image { .. } => String::new(),
         }
     }
@@ -131,4 +132,34 @@ impl ClipboardEntry {
         }
         false
     }
+}
+
+/// Preview budget in Unicode scalars carried by the snapshot for one row.
+/// Small enough that a refresh of a large history stays light.
+const PREVIEW_SCALARS: usize = 256;
+/// Head window of an elided preview; the tail gets the budget that remains
+/// after the elision marker.
+const PREVIEW_HEAD: usize = 180;
+const PREVIEW_ELISION: &str = "……";
+
+/// Single-line bounded preview for a text entry: the whole text when it fits
+/// the budget, else `head……tail`. O(budget) regardless of text length — head is
+/// taken from the front, tail from the back, and the "longer than budget" probe
+/// only reads one scalar past the limit.
+fn bounded_preview(text: &str) -> String {
+    let over_budget = text.chars().take(PREVIEW_SCALARS + 1).count() > PREVIEW_SCALARS;
+    if !over_budget {
+        return text.to_string();
+    }
+    let tail_budget = PREVIEW_SCALARS - PREVIEW_HEAD - PREVIEW_ELISION.chars().count();
+    let head: String = text.chars().take(PREVIEW_HEAD).collect();
+    let tail: String = text
+        .chars()
+        .rev()
+        .take(tail_budget)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("{head}{PREVIEW_ELISION}{tail}")
 }

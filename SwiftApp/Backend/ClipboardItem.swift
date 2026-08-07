@@ -39,8 +39,9 @@ enum ClipboardItem: Identifiable {
         }
     }
 
-    /// Bounded preview (first ~200 chars) for the list row. The full text is
-    /// fetched on demand via `clipboard_get_text_by_id` for preview/drag.
+    /// Bounded single-line preview for the list row (≤ 256 scalars; long entries
+    /// arrive elided to head……tail). The full text is fetched on demand via
+    /// `clipboard_get_text_by_id` for preview/drag.
     var preview: String {
         switch self {
         case .text(_, _, _, _, _, _, let preview): return preview
