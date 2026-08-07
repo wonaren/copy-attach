@@ -1271,13 +1271,11 @@ pub extern "C" fn clipboard_delete_by_id(entry_id: u64) -> c_int {
         });
     }
 
-    // Step 5: Push to undo stack with fully captured data.
+    // Step 5: Push to undo stack with fully captured data, under the entry
+    // count and total-bytes caps (see `backend::push_deleted`).
     {
         let mut stack = b.deleted_stack.lock().unwrap();
-        stack.push((entry.clone(), undo_text));
-        if stack.len() > 10 {
-            stack.remove(0);
-        }
+        crate::backend::push_deleted(&mut stack, entry.clone(), undo_text);
     }
 
     1

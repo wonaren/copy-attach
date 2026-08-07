@@ -15,6 +15,39 @@ use crate::ignore::IgnoreRules;
 /// entry itself and store `None`.
 pub(crate) type DeletedStackEntry = (ClipboardEntry, Option<String>);
 
+/// Max undo slots kept on the stack (newest N deletions).
+pub(crate) const DELETE_STACK_LIMIT: usize = 10;
+
+/// Total bytes of text bodies the undo stack may retain. Normal entries are
+/// far below this; only very large pastes shed the oldest undo slots early.
+pub(crate) const MAX_UNDO_BYTES: usize = 16 * 1024 * 1024;
+
+/// Push an entry onto the undo stack, keeping the newest `DELETE_STACK_LIMIT`
+/// entries AND bounding the total retained text bodies (`MAX_UNDO_BYTES`):
+/// deleting a very large paste must not pin tens of MB in memory (the
+/// in-memory history no longer holds bodies, so the undo stack is the only
+/// place full text can accumulate). Oldest slots are shed until both caps
+/// hold.
+pub(crate) fn push_deleted(
+    stack: &mut Vec<DeletedStackEntry>,
+    entry: ClipboardEntry,
+    undo_text: Option<String>,
+) {
+    stack.push((entry, undo_text));
+    let mut bytes: usize = stack
+        .iter()
+        .filter_map(|(_, t)| t.as_ref().map(|s| s.len()))
+        .sum();
+    while stack.len() > DELETE_STACK_LIMIT || bytes > MAX_UNDO_BYTES {
+        if let Some((_, t)) = stack.first() {
+            if let Some(s) = t {
+                bytes = bytes.saturating_sub(s.len());
+            }
+        }
+        stack.remove(0);
+    }
+}
+
 // ═══════════════════════════════════════════
 // Constants
 // ═══════════════════════════════════════════

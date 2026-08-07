@@ -186,6 +186,19 @@ class HistoryPopupWindow: NSPanel {
             self.animator().alphaValue = 1
         }
 
+        // Watchdog for the fade-in (same pattern as closeWithAnimation's
+        // force-close backstop): the animator animation is a CA transaction
+        // that is silently dropped if the window's first-frame transaction has
+        // not committed when the group runs — the window would then stay on
+        // screen at alpha 0 (invisible). Verify the fade landed after its
+        // duration and snap the window visible if it did not.
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.fadeInDuration + 0.1) { [weak self] in
+            guard let self, self.isVisible, self.closeGuaranteeTimer == nil,
+                  self.alphaValue < 0.5 else { return }
+            debugLog("show(): fade-in dropped; snapping window visible")
+            self.alphaValue = 1
+        }
+
         // Give the hosting view keyboard focus
         DispatchQueue.main.async {
             _ = self.makeFirstResponder(hosting)

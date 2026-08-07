@@ -41,16 +41,10 @@ private enum PopupRow: Identifiable {
 
 // MARK: - Right-Click Context Menu Support
 
-/// Screen-space frames of the laid-out item rows (entryId → CGRect in global
-/// coordinates), published by each row via `RowFramePreferenceKey`.
-/// `PopupHostingView.rightMouseDown` uses this store to map a right-click to
-/// the row under the cursor. All access happens on the main thread.
-@MainActor
-final class PopupRowFrameStore {
-    static let shared = PopupRowFrameStore()
-    var frames: [Int: CGRect] = [:]
-}
-
+/// One-shot preference key: rows report their screen-space frames only while
+/// a right-click is being resolved (`contextMenuArmed`). The snapshot is
+/// measured on the layout pass right after arming, then the rows stop
+/// reporting — no per-row geometry work while scrolling.
 private struct RowFramePreferenceKey: PreferenceKey {
     static let defaultValue: [Int: CGRect] = [:]
     static func reduce(value: inout [Int: CGRect], nextValue: () -> [Int: CGRect]) {
@@ -94,6 +88,13 @@ struct HistoryPopupContent: View {
     private let listTopAnchorID = 0
 
     @State private var filterMode: FilterMode = .all
+
+    /// True while a right-click is waiting for the one-shot row-frame
+    /// snapshot (see `RowFramePreferenceKey`). Rows report frames only during
+    /// this window; the snapshot is resolved and disarmed on the next layout
+    /// pass.
+    @State private var contextMenuArmed = false
+    @State private var pendingContextMenuRequest: PopupContextMenuRequest?
 
     // Namespace for the sliding selection highlight (Spotlight-style glide
     // between rows when the selection moves with ↑/↓ keys or a click).
@@ -335,7 +336,13 @@ struct HistoryPopupContent: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: popupContextMenuNotification)) { note in
             guard let request = note.object as? PopupContextMenuRequest else { return }
-            showContextMenu(for: request)
+            // Arm the one-shot frame snapshot: rows report their frames on the
+            // next layout pass, and the preference callback resolves the row
+            // under the cursor. Frames are measured on demand (right-click
+            // only) instead of continuously, so scrolling never pays per-row
+            // geometry reporting.
+            pendingContextMenuRequest = request
+            contextMenuArmed = true
         }
         .onReceive(NotificationCenter.default.publisher(for: favoriteToggleNotification)) { _ in
             if selectedIndex > 0 {
@@ -850,16 +857,20 @@ struct HistoryPopupContent: View {
                                 selectedIndex = itemIdx
                             }
                         }
-                        // Report the row's screen-space frame so PopupHostingView
-                        // can map a right-click to this row (context menu).
-                        .background(
-                            GeometryReader { geo in
-                                Color.clear.preference(
-                                    key: RowFramePreferenceKey.self,
-                                    value: [item.id: geo.frame(in: .global)]
-                                )
+                        // Report the row's frame ONLY while a right-click is
+                        // being resolved (one-shot snapshot). Normally the row
+                        // carries no geometry observer — scrolling never pays
+                        // per-row GeometryReader/preference work.
+                        .background {
+                            if contextMenuArmed {
+                                GeometryReader { geo in
+                                    Color.clear.preference(
+                                        key: RowFramePreferenceKey.self,
+                                        value: [item.id: geo.frame(in: .global)]
+                                    )
+                                }
                             }
-                        )
+                        }
                         .id(item.id)
                         .transition(filterRowTransition)
                     }
@@ -877,9 +888,12 @@ struct HistoryPopupContent: View {
                        value: selectedIndex)
         }
         .onPreferenceChange(RowFramePreferenceKey.self) { frames in
-            // Wholesale replace: LazyVStack only lays out visible rows, so a
-            // fresh pass contains exactly the rows that can be right-clicked.
-            PopupRowFrameStore.shared.frames = frames
+            // Resolve the armed right-click against the fresh snapshot, then
+            // disarm — rows stop reporting until the next right-click.
+            guard contextMenuArmed, let request = pendingContextMenuRequest else { return }
+            contextMenuArmed = false
+            pendingContextMenuRequest = nil
+            resolveContextMenu(frames: frames, request: request)
         }
         .background(theme.popupRowDefault)
         .overlay(
@@ -978,10 +992,31 @@ struct HistoryPopupContent: View {
         displayItems.firstIndex(where: { $0.id == entryId })
     }
 
+    /// Resolve an armed right-click against the one-shot row-frame snapshot.
+    /// Disarms unconditionally (the snapshot is single-use); presents the
+    /// menu only when the click landed on a row. Presentation hops to the
+    /// next runloop tick — the preference callback runs inside a SwiftUI
+    /// layout pass, and NSMenu.popUp must not start mid-update.
+    private func resolveContextMenu(frames: [Int: CGRect], request: PopupContextMenuRequest) {
+        guard let (entryId, _) = frames.first(where: { $0.value.contains(request.viewPoint) }) else {
+            return
+        }
+        let resolved = PopupContextMenuRequest(entryId: entryId,
+                                               viewPoint: request.viewPoint,
+                                               windowPoint: request.windowPoint)
+        DispatchQueue.main.async { [self] in
+            // The popup may have closed or the row may have been filtered out
+            // during the async gap — re-resolve by stable id before presenting.
+            guard currentIndex(of: entryId) != nil else { return }
+            showContextMenu(for: resolved)
+        }
+    }
+
     /// Presented by `PopupHostingView.rightMouseDown` via notification.
     /// Selects the right-clicked row, then shows a native NSMenu at the cursor.
     private func showContextMenu(for request: PopupContextMenuRequest) {
-        guard let index = currentIndex(of: request.entryId) else { return }
+        guard let entryId = request.entryId,
+              let index = currentIndex(of: entryId) else { return }
         let item = displayItems[index]
         selectedIndex = min(index + 1, maxIndex)
 

@@ -19,7 +19,10 @@ extension NSImage {
     }
 }
 
-/// Cache app icons by bundle ID to avoid repeated lookups
+/// Cache app icons by bundle ID to avoid repeated lookups. Icons are stored
+/// as a single 36 pt representation (2× the 18 pt row size) — NSWorkspace
+/// icons carry every size up to 512 pt, and caching the full multi-rep image
+/// would pin hundreds of KB per app for an 18 pt row.
 @MainActor private var appIconCache: [String: NSImage] = [:]
 
 @MainActor
@@ -28,18 +31,27 @@ func getAppIcon(for bundleId: String) -> NSImage? {
     if let cached = appIconCache[bundleId] { return cached }
 
     // Try to get icon from the running application
-    if let app = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == bundleId }),
-       let icon = app.icon {
-        appIconCache[bundleId] = icon
-        return icon
-    }
+    let icon: NSImage? = {
+        if let app = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == bundleId }),
+           let icon = app.icon {
+            return icon
+        }
+        // Fallback: try to get icon from the app bundle path
+        if let path = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleId) {
+            return NSWorkspace.shared.icon(forFile: path.path)
+        }
+        return nil
+    }()
+    guard let icon else { return nil }
 
-    // Fallback: try to get icon from the app bundle path
-    if let path = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleId) {
-        let icon = NSWorkspace.shared.icon(forFile: path.path)
-        appIconCache[bundleId] = icon
-        return icon
-    }
-
-    return nil
+    // Downscale to the row display size (36 pt = 18 pt @2x Retina), so the
+    // cache holds one small bitmap per app instead of the full multi-size
+    // icon. 18 pt rows cannot use anything larger, so this is lossless for
+    // rendering.
+    let scaled = NSImage(size: NSSize(width: 36, height: 36))
+    scaled.lockFocus()
+    icon.draw(in: NSRect(x: 0, y: 0, width: 36, height: 36))
+    scaled.unlockFocus()
+    appIconCache[bundleId] = scaled
+    return scaled
 }

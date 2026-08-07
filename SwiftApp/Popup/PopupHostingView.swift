@@ -16,11 +16,17 @@ let escapeKeyNotification = Notification.Name("PopupEscapeKeyPressed")
 let popupContextMenuNotification = Notification.Name("PopupContextMenuRequested")
 let popupSwipeNotification = Notification.Name("PopupSwipe")
 
-/// Payload for `popupContextMenuNotification`: which history row was
-/// right-clicked and where (window base coordinates). The receiver uses the
-/// entry id to re-resolve the row and the point to position the NSMenu.
+/// Payload for `popupContextMenuNotification`: where the user right-clicked
+/// and where to position the NSMenu. `entryId` is nil on the raw click — the
+/// content view resolves the row under the cursor from a one-shot frame
+/// snapshot (measured on demand, see `HistoryPopupContent`) and fills it in
+/// before presenting the menu. The receiver re-resolves the row by entry id
+/// and uses `windowPoint` to position the NSMenu.
 struct PopupContextMenuRequest {
-    let entryId: Int
+    let entryId: Int?
+    /// Click location in the SwiftUI root coordinate space (hosting view
+    /// top-left origin, y down) — matches `geo.frame(in: .global)` frames.
+    let viewPoint: NSPoint
     let windowPoint: NSPoint
 }
 
@@ -90,26 +96,27 @@ class PopupHostingView: NSHostingView<AnyView> {
         }
     }
 
-    /// Right-click on a history row: select the row under the cursor and ask
-    /// the content view to present its context menu at the click location.
-    /// Row frames come from `PopupRowFrameStore` (reported by SwiftUI rows via
-    /// a preference key in global/screen coordinates). Right-clicks elsewhere
-    /// (search field, separators, empty space) fall through untouched — the
-    /// search NSTextField handles its own editing menu as a subview.
+    /// Right-click on a history row: ask the content view to present its
+    /// context menu at the click location. Row frames are NOT tracked
+    /// continuously — the content view measures them on demand (one-shot
+    /// snapshot on the next layout pass) and resolves the row under the
+    /// cursor, so scrolling never pays per-row geometry reporting. Right-
+    /// clicks elsewhere (search field, separators, empty space) resolve to no
+    /// row and fall through untouched — the search NSTextField handles its
+    /// own editing menu as a subview.
     override func rightMouseDown(with event: NSEvent) {
         super.rightMouseDown(with: event)
         guard self.window != nil else { return }
-        // Row frames are reported in SwiftUI's root coordinate space
+        // Row frames live in SwiftUI's root coordinate space
         // (`geo.frame(in: .global)`): origin at the hosting view's top-left,
         // y pointing DOWN. NSHostingView is flipped (`isFlipped == true`), so
         // `convert(_:from: nil)` yields the click in exactly that same space —
         // matching frames against it needs no further conversion.
         let viewPoint = convert(event.locationInWindow, from: nil)
-        guard let (entryId, _) = PopupRowFrameStore.shared.frames
-            .first(where: { $0.value.contains(viewPoint) }) else { return }
         NotificationCenter.default.post(
             name: popupContextMenuNotification,
-            object: PopupContextMenuRequest(entryId: entryId,
+            object: PopupContextMenuRequest(entryId: nil,
+                                            viewPoint: viewPoint,
                                             windowPoint: event.locationInWindow)
         )
     }
