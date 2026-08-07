@@ -39,10 +39,8 @@ pub(crate) fn push_deleted(
         .filter_map(|(_, t)| t.as_ref().map(|s| s.len()))
         .sum();
     while stack.len() > DELETE_STACK_LIMIT || bytes > MAX_UNDO_BYTES {
-        if let Some((_, t)) = stack.first() {
-            if let Some(s) = t {
-                bytes = bytes.saturating_sub(s.len());
-            }
+        if let Some((_, Some(s))) = stack.first() {
+            bytes = bytes.saturating_sub(s.len());
         }
         stack.remove(0);
     }
