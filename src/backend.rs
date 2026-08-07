@@ -9,6 +9,12 @@ use rusqlite::Connection;
 use crate::types::{ClipboardEntry, SourceApp};
 use crate::ignore::IgnoreRules;
 
+/// One slot in the undo stack: the deleted entry plus its full text body.
+/// Text entries no longer hold their body in memory, so it is loaded from DB
+/// at delete time and stashed here for undo; images carry their blobs on the
+/// entry itself and store `None`.
+pub(crate) type DeletedStackEntry = (ClipboardEntry, Option<String>);
+
 // ═══════════════════════════════════════════
 // Constants
 // ═══════════════════════════════════════════
@@ -100,7 +106,7 @@ pub(crate) struct Backend {
     /// metadata; clipboard payloads are never retained here.
     pub(crate) ignore_rules: Arc<Mutex<IgnoreRules>>,
     /// Stack of deleted entries for undo (Cmd+Z). Max 10 items.
-    pub(crate) deleted_stack: Arc<Mutex<Vec<ClipboardEntry>>>,
+    pub(crate) deleted_stack: Arc<Mutex<Vec<DeletedStackEntry>>>,
     /// Entry ID of the most recently undo-restored entry (0 if none).
     /// Used by Swift to find the restored entry in a snapshot despite
     /// monitor-thread insert races.

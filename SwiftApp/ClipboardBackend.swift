@@ -20,7 +20,11 @@ class ClipboardBackend {
     private var lastHistoryRevision: UInt64 = 0
     private let thumbnailCache: NSCache<NSNumber, NSImage> = {
         let c = NSCache<NSNumber, NSImage>()
-        c.totalCostLimit = 30 * 1024 * 1024  // 30 MB
+        // Decoded thumbnails are ~360 KB each (300px RGBA). 10 MB keeps ~2-3
+        // screens of rows cached for smooth scrolling without letting a large
+        // image history pin tens of MB of decoded bitmaps; a re-decode on
+        // scroll-back is a <300px PNG read + fast decode.
+        c.totalCostLimit = 10 * 1024 * 1024  // 10 MB
         return c
     }()
 

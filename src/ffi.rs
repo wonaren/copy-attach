@@ -201,10 +201,12 @@ pub extern "C" fn clipboard_snapshot_release(snap: *mut Snapshot) {
 // Text search (case-insensitive substring)
 // ═══════════════════════════════════════════
 
-/// Search all history entries for a case-insensitive substring over label,
-/// source name, and full text. Returns a malloc'd array of matching entry_ids
+/// Search all history entries for a case-insensitive substring over the stored
+/// full text (FTS5 trigram index for ≥3-char queries, LIKE for shorter ones —
+/// see `db::search_history`). Returns a malloc'd array of matching entry_ids
 /// (`out_count` = number of ids), or null when there are no matches. Caller
-/// must free with `clipboard_free_u64_array()`.
+/// must free with `clipboard_free_u64_array()`. Label/source-name matching is
+/// done on the Swift side, which already holds those fields.
 #[no_mangle]
 pub extern "C" fn clipboard_search_ids(query: *const c_char, out_count: *mut c_int) -> *mut u64 {
     if !out_count.is_null() {
@@ -217,14 +219,12 @@ pub extern "C" fn clipboard_search_ids(query: *const c_char, out_count: *mut c_i
     if q.is_empty() {
         return std::ptr::null_mut();
     }
-    let hist = match crate::backend::try_backend() {
-        Some(b) => b.history.lock().unwrap(),
-        None => return std::ptr::null_mut(),
+    // Search reads the DB (full text lives there, not in the history Vec).
+    let conn = match crate::backend::try_backend().map(|b| b.db.lock()) {
+        Some(Ok(c)) => c,
+        _ => return std::ptr::null_mut(),
     };
-    let mut ids: Vec<u64> = hist.iter()
-        .filter(|item| item.matches_search(&q))
-        .map(ClipboardEntry::entry_id)
-        .collect();
+    let mut ids = crate::db::search_history(&conn, &q);
     let len = ids.len();
     if len == 0 {
         return std::ptr::null_mut();
@@ -338,7 +338,7 @@ pub extern "C" fn clipboard_init() -> c_int {
     let db = Arc::new(Mutex::new(conn));
     let cleanup_threshold = Arc::new(AtomicUsize::new(DEFAULT_CLEANUP_THRESHOLD));
     let ignore_rules = Arc::new(Mutex::new(IgnoreRules::default()));
-    let deleted_stack: Arc<Mutex<Vec<ClipboardEntry>>> = Arc::new(Mutex::new(Vec::new()));
+    let deleted_stack: Arc<Mutex<Vec<crate::backend::DeletedStackEntry>>> = Arc::new(Mutex::new(Vec::new()));
     let last_restored_id = Arc::new(AtomicU64::new(0));
 
     let backend = Backend {
@@ -534,15 +534,31 @@ pub extern "C" fn clipboard_get_item_label(index: c_int) -> *mut c_char {
     to_ffi_cstring(&label)
 }
 
-/// Get text content. Caller must free with `clipboard_free_string()`.
+/// Get text content by array index. Full text lives in SQLite, not the history
+/// Vec — resolve the entry's db_id in memory, then load the body from DB.
+/// Caller must free with `clipboard_free_string()`.
 #[no_mangle]
 pub extern "C" fn clipboard_get_item_text(index: c_int) -> *mut c_char {
-    let hist = backend().history.lock().unwrap();
-    match hist.get(index as usize) {
-        Some(ClipboardEntry::Text { text, .. }) => {
-            to_ffi_cstring(text.as_str())
+    let b = crate::backend::backend();
+    let db_id = {
+        let hist = b.history.lock().unwrap();
+        match hist.get(index as usize) {
+            Some(ClipboardEntry::Text { db_id, .. }) => *db_id,
+            _ => return std::ptr::null_mut(),
         }
-        _ => std::ptr::null_mut(),
+    };
+    if db_id == 0 {
+        return std::ptr::null_mut();
+    }
+    match b.db.lock() {
+        Ok(conn) => match crate::db::load_text_by_db_id(&conn, db_id) {
+            Some(t) => to_ffi_cstring(&t),
+            None => std::ptr::null_mut(),
+        },
+        Err(e) => {
+            eprintln!("CopyAttach: DB mutex poisoned loading text at index {index}: {e}");
+            std::ptr::null_mut()
+        }
     }
 }
 
@@ -859,6 +875,33 @@ fn select_and_paste_impl(mut item: ClipboardEntry) -> c_int {
         }
     }
 
+    // Text paste needs the full body, which lives in SQLite — the in-memory
+    // entry only carries preview/label/hash. A text entry with db_id=0 was
+    // never persisted (DB write failed) and cannot be pasted: explicit
+    // failure, clipboard untouched, mirroring the image load failure below.
+    let full_text: Option<String> = match &item {
+        ClipboardEntry::Text { db_id, .. } => {
+            if *db_id == 0 {
+                eprintln!("CopyAttach: select_and_paste aborted for text entry {}: db_id=0 (entry not persisted)", item.entry_id());
+                return 0;
+            }
+            match backend().db.lock() {
+                Ok(conn) => match crate::db::load_text_by_db_id(&conn, *db_id) {
+                    Some(t) => Some(t),
+                    None => {
+                        eprintln!("CopyAttach: select_and_paste DB text load failed for entry {} (db_id={}) — paste aborted", item.entry_id(), *db_id);
+                        return 0;
+                    }
+                },
+                Err(e) => {
+                    eprintln!("CopyAttach: DB mutex poisoned in select_and_paste text load: {e}");
+                    return 0;
+                }
+            }
+        }
+        _ => None,
+    };
+
     let db_item = match &item {
         ClipboardEntry::Image { db_id, .. } if *db_id != 0 => {
             let mut loaded = item.clone();
@@ -908,7 +951,14 @@ fn select_and_paste_impl(mut item: ClipboardEntry) -> c_int {
     // Terminals translate the URL into the path text (TUI agents like Claude
     // Code consume exactly this form); chat/notes apps attach the file.
     match &db_item {
-        ClipboardEntry::Text { text, .. } => {
+        ClipboardEntry::Text { .. } => {
+            let text = match &full_text {
+                Some(t) => t,
+                None => {
+                    eprintln!("CopyAttach: select_and_paste text body missing — paste aborted");
+                    return 0;
+                }
+            };
             let mut cb = match Clipboard::new() { Ok(c) => c, Err(_) => return 0 };
             if cb.set_text(text).is_err() { return 0; }
             *b.last_seen_text.lock().unwrap() = Some(text.clone());
@@ -948,8 +998,8 @@ fn select_and_paste_impl(mut item: ClipboardEntry) -> c_int {
                     _ => None,
                 };
 
-                if insert_entry_to_db(&conn, &db_item, png_for_db, thumb_for_db).is_ok() {
-                    delete_matching_entry(&conn, &db_item);
+                if insert_entry_to_db(&conn, &db_item, full_text.as_deref(), png_for_db, thumb_for_db).is_ok() {
+                    delete_matching_entry(&conn, &db_item, full_text.as_deref());
                     let new_row_id = conn.last_insert_rowid();
                     trim_db_history(&conn, b.cleanup_threshold.load(Ordering::Relaxed));
 
@@ -1025,8 +1075,10 @@ pub extern "C" fn clipboard_select_and_paste_by_id(entry_id: u64) -> c_int {
     select_and_paste_impl(item)
 }
 
-/// Load full text by entry ID (for on-demand preview loading).
-/// Returns null if `entry_id` is not found or is not a text entry.
+/// Load full text by entry ID (for on-demand preview loading). The body lives
+/// in SQLite, so the entry's db_id is resolved in memory, then loaded from DB.
+/// Returns null if `entry_id` is not found, is not a text entry, or the body
+/// is not persisted (db_id=0 — DB write pending/failed).
 /// Caller must free with `clipboard_free_string()`.
 #[no_mangle]
 pub extern "C" fn clipboard_get_text_by_id(entry_id: u64) -> *mut c_char {
@@ -1034,16 +1086,37 @@ pub extern "C" fn clipboard_get_text_by_id(entry_id: u64) -> *mut c_char {
         Some(b) => b,
         None => return std::ptr::null_mut(),
     };
-    let hist = b.history.lock().unwrap();
-    for entry in hist.iter() {
-        match entry {
-            ClipboardEntry::Text { id, text, .. } if *id == entry_id => {
-                return to_ffi_cstring(text.as_str());
+    let db_id = {
+        let hist = b.history.lock().unwrap();
+        let mut found = None;
+        for entry in hist.iter() {
+            if let ClipboardEntry::Text { id, db_id, .. } = entry {
+                if *id == entry_id {
+                    found = Some(*db_id);
+                    break;
+                }
             }
-            _ => {}
         }
+        match found {
+            Some(d) => d,
+            None => return std::ptr::null_mut(),
+        }
+    };
+    if db_id == 0 {
+        eprintln!("CopyAttach: get_text_by_id for entry {entry_id}: db_id=0 (entry not persisted)");
+        return std::ptr::null_mut();
     }
-    std::ptr::null_mut()
+    let text = match b.db.lock() {
+        Ok(conn) => match crate::db::load_text_by_db_id(&conn, db_id) {
+            Some(t) => t,
+            None => return std::ptr::null_mut(),
+        },
+        Err(e) => {
+            eprintln!("CopyAttach: DB mutex poisoned loading text for entry {entry_id}: {e}");
+            return std::ptr::null_mut();
+        }
+    };
+    to_ffi_cstring(&text)
 }
 
 // ═══════════════════════════════════════════
@@ -1086,7 +1159,34 @@ pub extern "C" fn clipboard_delete_by_id(entry_id: u64) -> c_int {
         None => return 0,
     };
 
-    // Step 2: For image entries, load full data from DB before removal.
+    // Step 2: Load full content for undo BEFORE the DB delete removes it.
+    // Text bodies live only in SQLite (the in-memory entry carries just a
+    // preview), so they are loaded here and stashed for the undo stack. A text
+    // entry with db_id=0 was never persisted and has no restorable body —
+    // reject deletion explicitly, matching the image Phase 2 guard below.
+    let mut undo_text: Option<String> = None;
+    if let ClipboardEntry::Text { db_id, .. } = &entry {
+        if *db_id == 0 {
+            eprintln!("CopyAttach: cannot delete text entry {entry_id}: db_id=0 (entry not persisted)");
+            return 0;
+        }
+        let conn = match b.db.lock() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("CopyAttach: DB lock poisoned loading text for undo of entry {entry_id}: {e}");
+                return 0;
+            }
+        };
+        match crate::db::load_text_by_db_id(&conn, *db_id) {
+            Some(t) => undo_text = Some(t),
+            None => {
+                eprintln!("CopyAttach: failed to load text for undo of entry {entry_id} — delete aborted");
+                return 0;
+            }
+        }
+    }
+
+    // For image entries, load full data from DB before removal.
     // If loading fails (Phase 2 not done, DB error), reject deletion entirely.
     if let ClipboardEntry::Image { db_id, png_data, thumb_data, thumb_width, thumb_height, .. } = &mut entry {
         if png_data.is_empty() && *db_id != 0 {
@@ -1133,21 +1233,13 @@ pub extern "C" fn clipboard_delete_by_id(entry_id: u64) -> c_int {
             }
         };
         if let Err(e) = match &entry {
-            ClipboardEntry::Text { db_id, text, .. } => {
-                if *db_id != 0 {
-                    conn.execute(
-                        "DELETE FROM clipboard_history WHERE id = ?1",
-                        rusqlite::params![*db_id],
-                    )
-                } else {
-                    // db_id not yet set (e.g. monitor DB write still in
-                    // progress). Fall back to content-based deletion so the
-                    // row doesn't survive a restart.
-                    conn.execute(
-                        "DELETE FROM clipboard_history WHERE entry_type = 0 AND text = ?1",
-                        rusqlite::params![text],
-                    )
-                }
+            ClipboardEntry::Text { db_id, .. } => {
+                // Step 2 rejected unpersisted text (db_id=0) up front, so this
+                // is always the rowid delete.
+                conn.execute(
+                    "DELETE FROM clipboard_history WHERE id = ?1",
+                    rusqlite::params![*db_id],
+                )
             }
             ClipboardEntry::Image { db_id, hash, .. } => {
                 if *db_id != 0 {
@@ -1182,7 +1274,7 @@ pub extern "C" fn clipboard_delete_by_id(entry_id: u64) -> c_int {
     // Step 5: Push to undo stack with fully captured data.
     {
         let mut stack = b.deleted_stack.lock().unwrap();
-        stack.push(entry.clone());
+        stack.push((entry.clone(), undo_text));
         if stack.len() > 10 {
             stack.remove(0);
         }
@@ -1201,7 +1293,7 @@ pub extern "C" fn clipboard_undo_delete() -> c_int {
         None => return 0,
     };
 
-    let entry = {
+    let (mut entry, undo_text) = {
         let mut stack = b.deleted_stack.lock().unwrap();
         match stack.pop() {
             Some(e) => e,
@@ -1216,7 +1308,6 @@ pub extern "C" fn clipboard_undo_delete() -> c_int {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let mut entry = entry;
     match &mut entry {
         ClipboardEntry::Text { ref mut timestamp, .. }
         | ClipboardEntry::Image { ref mut timestamp, .. } => {
@@ -1246,9 +1337,9 @@ pub extern "C" fn clipboard_undo_delete() -> c_int {
 
     // Must succeed: without DB write, image entries can't store their data
     // and text entries would lack db_id. Re-push to stack so user can retry.
-    if insert_entry_to_db(&conn, &entry, png_for_db, thumb_for_db).is_err() {
+    if insert_entry_to_db(&conn, &entry, undo_text.as_deref(), png_for_db, thumb_for_db).is_err() {
         let mut stack = b.deleted_stack.lock().unwrap();
-        stack.push(entry);
+        stack.push((entry, undo_text));
         return 0;
     }
     let new_row_id = conn.last_insert_rowid();
@@ -1264,11 +1355,14 @@ pub extern "C" fn clipboard_undo_delete() -> c_int {
     // Use add_to_history for dedup: if the same content was re-captured
     // by the monitor between deletion and undo, remove the existing copy
     // before inserting the restored one at head.
-    let restored_id = entry.entry_id();
     *hist = add_to_history(std::mem::take(&mut *hist), entry);
     while hist.len() > b.cleanup_threshold.load(Ordering::Relaxed) {
         hist.pop();
     }
+    // add_to_history may have rewritten the restored entry's id on dedup
+    // (preserving the re-captured duplicate's id); read the final id from the
+    // head so Swift's last_restored_id points at the entry actually restored.
+    let restored_id = hist.first().map_or(0, ClipboardEntry::entry_id);
     drop(hist);
 
     // Record the restored entry ID so Swift can find it in the snapshot

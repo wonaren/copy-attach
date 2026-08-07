@@ -22,8 +22,8 @@ fn estimate_vec_heap(hist: &[ClipboardEntry]) -> usize {
     let string_heap: usize = hist
         .iter()
         .map(|entry| match entry {
-            ClipboardEntry::Text { text, source_name, source_bundle_id, .. } => {
-                text.capacity() + source_name.capacity() + source_bundle_id.capacity()
+            ClipboardEntry::Text { preview, label, source_name, source_bundle_id, .. } => {
+                preview.capacity() + label.capacity() + source_name.capacity() + source_bundle_id.capacity()
             }
             ClipboardEntry::Image {
                 png_data, thumb_data, source_name, source_bundle_id, ..
@@ -48,55 +48,30 @@ fn format_bytes(bytes: usize) -> String {
     }
 }
 
-/// Create the clipboard_history table schema (mirrors db.rs exactly).
+/// Create the full app schema — including the FTS5 index and its sync triggers —
+/// so the benchmark's DB write measurements include index maintenance, exactly
+/// as they happen in the real backend.
 fn create_bench_table(conn: &Connection) {
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS clipboard_history (
-            id              INTEGER PRIMARY KEY AUTOINCREMENT,
-            entry_type      INTEGER NOT NULL,
-            text            TEXT,
-            png_data        BLOB,
-            width           INTEGER,
-            height          INTEGER,
-            thumb_data      BLOB,
-            thumb_width     INTEGER,
-            thumb_height    INTEGER,
-            hash            INTEGER,
-            timestamp       INTEGER NOT NULL,
-            source_name     TEXT NOT NULL DEFAULT '',
-            source_bundle_id TEXT NOT NULL DEFAULT ''
-        );",
-    )
-    .expect("bench: failed to create table");
+    crate::db::ensure_history_table(conn).expect("bench: failed to create table");
 }
 
 /// Generate a text entry with realistic content (~60-80 chars) for benchmarking.
-fn bench_text(index: u64) -> ClipboardEntry {
+/// Returns the entry (which derives preview/label/hash and holds no full text)
+/// plus the full body separately — the benchmark's raw DB inserts need it.
+fn bench_text(index: u64) -> (ClipboardEntry, String) {
     let text = format!(
         "benchmark-item-{:06}: The quick brown fox jumps over the lazy dog #{}",
         index, index
     );
-    ClipboardEntry::Text {
-        id: new_entry_id(),
-        text,
-        timestamp: index,
-        source_name: String::from("Benchmark"),
-        source_bundle_id: String::from("com.benchmark"),
-        db_id: 0,
-    }
-}
-
-/// Helper trait to access text content from ClipboardEntry for DB queries.
-trait TextContent {
-    fn text(&self) -> &str;
-}
-impl TextContent for ClipboardEntry {
-    fn text(&self) -> &str {
-        match self {
-            ClipboardEntry::Text { text, .. } => text,
-            _ => panic!("bench: expected Text entry"),
-        }
-    }
+    let entry = ClipboardEntry::text_entry(
+        new_entry_id(),
+        &text,
+        index,
+        String::from("Benchmark"),
+        String::from("com.benchmark"),
+        0,
+    );
+    (entry, text)
 }
 
 /// Generate a RGBA buffer simulating a screenshot with mixed content.
@@ -193,7 +168,7 @@ fn benchmark_thresholds() {
         let mut last_db_id: i64 = 0;
 
         for i in 0..threshold {
-            let item = bench_text(i as u64);
+            let (item, text) = bench_text(i as u64);
 
             // DB write-through (mirrors monitor.rs / ffi.rs):
             let db_start = std::time::Instant::now();
@@ -201,7 +176,7 @@ fn benchmark_thresholds() {
                 "INSERT INTO clipboard_history (entry_type, text, timestamp, source_name, source_bundle_id)
                  VALUES (0, ?1, ?2, ?3, ?4)",
                 rusqlite::params![
-                    &item.text(),
+                    &text,
                     item.timestamp() as i64,
                     item.source_name(),
                     item.source_bundle_id(),
@@ -214,7 +189,7 @@ fn benchmark_thresholds() {
                    AND id != (SELECT id FROM clipboard_history
                               WHERE entry_type = 0 AND text = ?1
                               ORDER BY id DESC LIMIT 1)",
-                rusqlite::params![item.text()],
+                rusqlite::params![text],
             )
             .expect("bench: DB dedup failed");
             conn.execute(
@@ -250,14 +225,14 @@ fn benchmark_thresholds() {
         let mut db_times = Vec::with_capacity(STEADY_STATE_SAMPLES);
 
         for j in 0..STEADY_STATE_SAMPLES {
-            let item = bench_text((threshold + j) as u64);
+            let (item, text) = bench_text((threshold + j) as u64);
 
             let db_start = std::time::Instant::now();
             conn.execute(
                 "INSERT INTO clipboard_history (entry_type, text, timestamp, source_name, source_bundle_id)
                  VALUES (0, ?1, ?2, ?3, ?4)",
                 rusqlite::params![
-                    &item.text(),
+                    &text,
                     item.timestamp() as i64,
                     item.source_name(),
                     item.source_bundle_id(),
@@ -270,7 +245,7 @@ fn benchmark_thresholds() {
                    AND id != (SELECT id FROM clipboard_history
                               WHERE entry_type = 0 AND text = ?1
                               ORDER BY id DESC LIMIT 1)",
-                rusqlite::params![item.text()],
+                rusqlite::params![text],
             )
             .expect("bench: steady DB dedup failed");
             conn.execute(
@@ -674,4 +649,154 @@ fn benchmark_images() {
 
     println!();
     println!("══════════════════════════════════════════════════════════════════════════════════════");
+}
+
+// ═══════════════════════════════════════════
+// Memory probes — isolate the FTS index's resident-memory cost
+// ═══════════════════════════════════════════
+//
+// The trigram FTS index lives in the same mmap'd DB file as the base table
+// (open_db: mmap_size = 32MB). Index pages become resident as they are read
+// (searches, and the triggers' insert/delete on every capture), so a large
+// index can inflate process RSS. These probes insert an identical corpus into
+// a DB WITH the FTS index and one WITHOUT, and print the RSS at each stage.
+// Run them separately (each must be a fresh process):
+//   cargo test --features stress-test memory_probe_fts_index -- --nocapture
+//   cargo test --features stress-test memory_probe_no_fts_index -- --nocapture
+
+/// Current process RSS in KB (macOS `ps -o rss=`; KB on darwin).
+fn probe_rss_kb() -> u64 {
+    let out = std::process::Command::new("ps")
+        .args(["-o", "rss=", "-p"])
+        .arg(std::process::id().to_string())
+        .output()
+        .expect("memory probe: ps failed");
+    String::from_utf8_lossy(&out.stdout).trim().parse().expect("memory probe: parse rss")
+}
+
+/// Deterministic mixed-size corpus (3000 texts, ~1.3KB avg → ~4MB total):
+/// mimics a real history small enough that the trigram index (~3.5× text) still
+/// leaves the whole DB file under the 32MB mmap cap — the regime where index
+/// pages are mmap'd into the process and become resident memory.
+fn probe_corpus() -> Vec<String> {
+    (0..3000)
+        .map(|i| {
+            let size = match i % 4 {
+                0 => 150,
+                1 => 600,
+                2 => 1_500,
+                _ => 3_000,
+            };
+            let head = format!("clipboard item number {i}: ");
+            let filler = "Lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor ".repeat(size / 66);
+            format!("{head}{filler}")
+        })
+        .collect()
+}
+
+/// Open the real app connection settings (no mmap + 4MB LRU page cache).
+fn probe_open_db(path: &std::path::Path) -> Connection {
+    let conn = Connection::open(path).expect("memory probe: open db");
+    conn.execute_batch(
+        "PRAGMA mmap_size = 0;
+         PRAGMA cache_size = -4096;",
+    )
+    .expect("memory probe: pragma");
+    conn
+}
+
+#[test]
+fn memory_probe_fts_index() {
+    let dir = std::env::temp_dir().join(format!("copyattach_memprobe_fts_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let db_path = dir.join("history.db");
+    let _ = std::fs::remove_file(&db_path);
+
+    let rss0 = probe_rss_kb();
+    let conn = probe_open_db(&db_path);
+    crate::db::ensure_history_table(&conn).expect("memory probe: schema");
+    let rss1 = probe_rss_kb();
+
+    for (i, text) in probe_corpus().iter().enumerate() {
+        let entry = ClipboardEntry::text_entry(new_entry_id(), text, i as u64, String::new(), String::new(), 0);
+        crate::db::insert_entry_to_db(&conn, &entry, Some(text), None, None).ok();
+    }
+    let rss2 = probe_rss_kb();
+
+    let loaded = crate::db::load_history_from_db(&conn, 3000);
+    assert_eq!(loaded.len(), 3000);
+    let rss3 = probe_rss_kb();
+
+    for q in ["lorem", "ipsum", "clipboard", "adipiscing", "consectetur", "amet", "dolor", "elit", "tempor", "1234"] {
+        let _ = crate::db::search_history(&conn, q);
+    }
+    let rss4 = probe_rss_kb();
+
+    let db_size = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
+    println!(
+        "[FTS]   file={}B  rss(KB): start={} schema={} insert={} load={} search={}",
+        db_size, rss0, rss1, rss2, rss3, rss4
+    );
+    drop(conn);
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_dir(&dir);
+}
+
+#[test]
+fn memory_probe_no_fts_index() {
+    let dir = std::env::temp_dir().join(format!("copyattach_memprobe_nofts_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let db_path = dir.join("history.db");
+    let _ = std::fs::remove_file(&db_path);
+
+    let rss0 = probe_rss_kb();
+    let conn = probe_open_db(&db_path);
+    // Base table only — no FTS index. Same schema as the app minus the FTS.
+    conn.execute_batch(
+        "CREATE TABLE clipboard_history (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            entry_id        INTEGER NOT NULL DEFAULT 0,
+            entry_type      INTEGER NOT NULL,
+            text            TEXT,
+            png_data        BLOB,
+            width           INTEGER,
+            height          INTEGER,
+            thumb_data      BLOB,
+            thumb_width     INTEGER,
+            thumb_height    INTEGER,
+            hash            INTEGER,
+            timestamp       INTEGER NOT NULL DEFAULT 0,
+            source_name     TEXT NOT NULL DEFAULT '',
+            source_bundle_id TEXT NOT NULL DEFAULT ''
+        );",
+    )
+    .expect("memory probe: schema");
+    let rss1 = probe_rss_kb();
+
+    for (i, text) in probe_corpus().iter().enumerate() {
+        conn.execute(
+            "INSERT INTO clipboard_history (entry_type, text, timestamp) VALUES (0, ?1, ?2)",
+            rusqlite::params![text, i as i64],
+        )
+        .expect("memory probe: insert");
+    }
+    let rss2 = probe_rss_kb();
+
+    let loaded = crate::db::load_history_from_db(&conn, 3000);
+    assert_eq!(loaded.len(), 3000);
+    let rss3 = probe_rss_kb();
+
+    for q in ["lorem", "ipsum", "clipboard", "adipiscing", "consectetur", "amet", "dolor", "elit", "tempor", "1234"] {
+        let _ = crate::db::search_history(&conn, q);
+    }
+    let rss4 = probe_rss_kb();
+
+    let db_size = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
+    println!(
+        "[NOFTS] file={}B  rss(KB): start={} schema={} insert={} load={} search={}",
+        db_size, rss0, rss1, rss2, rss3, rss4
+    );
+    drop(conn);
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_dir(&dir);
 }

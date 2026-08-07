@@ -10,14 +10,14 @@ use crate::ffi::{clipboard_free_string, SnapshotRow};
 use rusqlite::Connection;
 
 fn make_text(text: &str, ts: u64) -> ClipboardEntry {
-    ClipboardEntry::Text {
-        id: new_entry_id(),
-        text: text.to_string(),
-        timestamp: ts,
-        source_name: String::new(),
-        source_bundle_id: String::new(),
-        db_id: 0,
-    }
+    ClipboardEntry::text_entry(
+        new_entry_id(),
+        text,
+        ts,
+        String::new(),
+        String::new(),
+        0,
+    )
 }
 
 fn make_image(data: &[u8], w: u32, h: u32, ts: u64) -> ClipboardEntry {
@@ -54,9 +54,7 @@ fn test_add_text_item() {
     let item = make_text("hello world", 100);
     let result = add_to_history(history, item);
     assert_eq!(result.len(), 1);
-    if let ClipboardEntry::Text { text, .. } = &result[0] {
-        assert_eq!(text, "hello world");
-    } else { panic!("Expected Text entry"); }
+    assert_eq!(result[0].label(), "hello world");
 }
 
 #[test]
@@ -105,9 +103,7 @@ fn test_add_multiple_items_order() {
         history = add_to_history(history, make_text(s, i as u64));
     }
     assert_eq!(history.len(), 3);
-    if let ClipboardEntry::Text { text, .. } = &history[0] {
-        assert_eq!(text, "a");
-    }
+    assert_eq!(history[0].label(), "a");
 }
 
 // ═══════════════════════════════════════════
@@ -257,33 +253,101 @@ fn test_preview_image() {
     assert!(i.preview().is_empty());
 }
 
+// ═══════════════════════════════════════════
+// Full-Text Search Tests (FTS5 trigram + LIKE fallback)
+// ═══════════════════════════════════════════
+
 #[test]
-fn test_matches_search() {
-    let t = make_text("Hello World, 剪贴板历史", 100);
-    // Full-text substring match, case-insensitive (query case does not matter).
-    assert!(t.matches_search("world"));
-    assert!(t.matches_search("WORLD"));
-    assert!(t.matches_search("剪贴板"));
-    // No match.
-    assert!(!t.matches_search("nope"));
+fn test_search_fts_case_insensitive_substring() {
+    let conn = test_db();
+    insert_text(&conn, "Hello World, 剪贴板历史", 100);
+    insert_text(&conn, "The quick brown fox jumps", 200);
 
-    // source_name match.
-    let entry = ClipboardEntry::Text {
-        id: new_entry_id(),
-        text: "content".to_string(),
-        timestamp: 100,
-        source_name: "Chrome".to_string(),
-        source_bundle_id: String::new(),
-        db_id: 0,
-    };
-    assert!(entry.matches_search("chrome"));
-    assert!(entry.matches_search("CHROME"));
+    // ≥3-char queries go through the trigram index: substring match, ASCII fold.
+    assert_eq!(crate::db::search_history(&conn, "world").len(), 1);
+    assert_eq!(crate::db::search_history(&conn, "WORLD").len(), 1, "trigram folds ASCII case");
+    assert_eq!(crate::db::search_history(&conn, "剪贴板").len(), 1, "CJK substring match");
+    assert!(crate::db::search_history(&conn, "不存在").is_empty());
+}
 
-    // Image entries match via the generated label (dimensions) and source name.
-    let img_data = make_test_image_rgba(1920, 1080, 128);
-    let i = make_image(&img_data, 1920, 1080, 100);
-    assert!(i.matches_search("1920"));
-    assert!(i.matches_search("Image"));
+#[test]
+fn test_search_short_query_like_fallback() {
+    let conn = test_db();
+    insert_text(&conn, "apple pie", 100);
+    insert_text(&conn, "cherry tart", 200);
+
+    // <3-char queries cannot form a trigram — LIKE fallback, still substring.
+    assert_eq!(crate::db::search_history(&conn, "ap").len(), 1);
+    assert_eq!(crate::db::search_history(&conn, "a").len(), 2);
+    assert_eq!(crate::db::search_history(&conn, "x").len(), 0);
+}
+
+#[test]
+fn test_search_like_wildcards_escaped() {
+    let conn = test_db();
+    insert_text(&conn, "100% complete", 100);
+    insert_text(&conn, "100X complete", 200);
+
+    // '%' in the query is a literal percent, not a LIKE wildcard.
+    assert_eq!(crate::db::search_history(&conn, "%").len(), 1);
+}
+
+#[test]
+fn test_search_reflects_delete() {
+    let conn = test_db();
+    let db_id = insert_text(&conn, "needle in haystack", 100);
+    assert_eq!(crate::db::search_history(&conn, "needle").len(), 1);
+
+    // The AFTER DELETE trigger must remove the row from the FTS index too.
+    conn.execute("DELETE FROM clipboard_history WHERE id = ?1", rusqlite::params![db_id]).unwrap();
+    assert!(crate::db::search_history(&conn, "needle").is_empty());
+}
+
+#[test]
+fn test_search_reflects_bulk_trim() {
+    // trim_db_history deletes many rows in one statement; the AFTER DELETE
+    // trigger fires per row, so the FTS index must shrink to the kept set.
+    let conn = test_db();
+    for i in 0..100 {
+        insert_text(&conn, &format!("bulk entry number {i:03}"), i as u64);
+    }
+    assert_eq!(crate::db::search_history(&conn, "bulk").len(), 100);
+
+    crate::db::trim_db_history(&conn, 10);
+    assert_eq!(crate::db::search_history(&conn, "bulk").len(), 10, "FTS follows bulk trim");
+}
+
+#[test]
+fn test_search_backfills_preexisting_rows() {
+    // Rows inserted before the FTS table existed must be searchable after
+    // ensure_history_table runs (the guarded one-time backfill).
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE clipboard_history (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            entry_type      INTEGER NOT NULL,
+            text            TEXT,
+            png_data        BLOB,
+            width           INTEGER,
+            height          INTEGER,
+            thumb_data      BLOB,
+            thumb_width     INTEGER,
+            thumb_height    INTEGER,
+            hash            INTEGER,
+            timestamp       INTEGER NOT NULL DEFAULT 0,
+            source_name     TEXT NOT NULL DEFAULT '',
+            source_bundle_id TEXT NOT NULL DEFAULT ''
+        );"
+    ).unwrap();
+    conn.execute(
+        "INSERT INTO clipboard_history (entry_type, text, timestamp)
+         VALUES (0, 'legacy content worth finding', 100)",
+        [],
+    ).unwrap();
+
+    crate::db::ensure_history_table(&conn).unwrap();
+
+    assert_eq!(crate::db::search_history(&conn, "finding").len(), 1);
 }
 
 #[test]
@@ -384,21 +448,13 @@ fn test_auto_cleanup_at_threshold_5000() {
 fn test_auto_cleanup_keeps_newest() {
     let hist = fill_and_trim_to(10, 50);
     assert_eq!(hist.len(), 10);
-    if let ClipboardEntry::Text { text, .. } = &hist[0] {
-        assert_eq!(text, "item-0049");
-    } else {
-        panic!("Expected Text entry at head");
-    }
+    assert_eq!(hist[0].label(), "item-0049");
 }
 
 #[test]
 fn test_auto_cleanup_removes_oldest() {
     let hist = fill_and_trim_to(10, 50);
-    if let ClipboardEntry::Text { text, .. } = &hist[9] {
-        assert_eq!(text, "item-0040");
-    } else {
-        panic!("Expected Text entry at tail");
-    }
+    assert_eq!(hist[9].label(), "item-0040");
 }
 
 #[test]
@@ -463,12 +519,8 @@ fn test_trim_percent_40() {
     let (kept, removed) = simulate_trim_oldest_percent(hist, 40);
     assert_eq!(kept.len(), 60);
     assert_eq!(removed.len(), 40);
-    if let ClipboardEntry::Text { text, .. } = &kept[0] {
-        assert_eq!(text, "t-099");
-    }
-    if let ClipboardEntry::Text { text, .. } = &removed[0] {
-        assert_eq!(text, "t-039");
-    }
+    assert_eq!(kept[0].label(), "t-099");
+    assert_eq!(removed[0].label(), "t-039");
 }
 
 #[test]
@@ -531,12 +583,8 @@ fn test_threshold_reduction_trims_history() {
     }
     assert_eq!(hist.len(), 100);
 
-    if let ClipboardEntry::Text { text, .. } = &hist[0] {
-        assert_eq!(text, "t-199");
-    }
-    if let ClipboardEntry::Text { text, .. } = &hist[99] {
-        assert_eq!(text, "t-100");
-    }
+    assert_eq!(hist[0].label(), "t-199");
+    assert_eq!(hist[99].label(), "t-100");
 }
 
 #[test]
@@ -572,12 +620,8 @@ fn test_in_memory_order_newest_first() {
         hist = add_to_history(hist, make_text(&format!("item-{}", i), i as u64));
     }
     assert_eq!(hist.len(), 5);
-    if let ClipboardEntry::Text { text, .. } = &hist[0] {
-        assert_eq!(text, "item-4");
-    }
-    if let ClipboardEntry::Text { text, .. } = &hist[4] {
-        assert_eq!(text, "item-0");
-    }
+    assert_eq!(hist[0].label(), "item-4");
+    assert_eq!(hist[4].label(), "item-0");
 }
 
 
@@ -598,15 +642,15 @@ fn test_db() -> Connection {
 
 /// Helper: insert a text entry with known content and return its db_id.
 fn insert_text(conn: &Connection, text: &str, ts: u64) -> i64 {
-    let entry = ClipboardEntry::Text {
-        id: new_entry_id(),
-        text: text.to_string(),
-        timestamp: ts,
-        source_name: String::new(),
-        source_bundle_id: String::new(),
-        db_id: 0,
-    };
-    insert_entry_to_db(conn, &entry, None, None).expect("insert failed");
+    let entry = ClipboardEntry::text_entry(
+        new_entry_id(),
+        text,
+        ts,
+        String::new(),
+        String::new(),
+        0,
+    );
+    insert_entry_to_db(conn, &entry, Some(text), None, None).expect("insert failed");
     conn.last_insert_rowid()
 }
 
@@ -628,9 +672,9 @@ fn test_entry_id_persistence_and_restore() {
     let loaded = load_history_from_db(&conn, crate::backend::DEFAULT_CLEANUP_THRESHOLD);
     assert_eq!(loaded.len(), 3, "should load all 3 entries");
 
-    assert_eq!(loaded[0].text(), "gamma", "newest first");
-    assert_eq!(loaded[1].text(), "beta");
-    assert_eq!(loaded[2].text(), "alpha");
+    assert_eq!(loaded[0].label(), "gamma", "newest first");
+    assert_eq!(loaded[1].label(), "beta");
+    assert_eq!(loaded[2].label(), "alpha");
 
     let ids: Vec<u64> = loaded.iter().map(|e| match e {
         ClipboardEntry::Text { id, .. } | ClipboardEntry::Image { id, .. } => *id,
@@ -690,8 +734,8 @@ fn test_entry_id_stable_after_delete() {
     // "c" (index 0) and "a" (index 1) must retain their original IDs.
     assert_eq!(ids_after[0], ids_before[0], "newest entry ID stable after delete");
     assert_eq!(ids_after[1], ids_before[2], "oldest entry ID stable after delete");
-    assert_eq!(after[0].text(), "c", "newest preserved");
-    assert_eq!(after[1].text(), "a", "oldest preserved");
+    assert_eq!(after[0].label(), "c", "newest preserved");
+    assert_eq!(after[1].label(), "a", "oldest preserved");
 }
 
 #[test]
@@ -717,15 +761,15 @@ fn test_entry_id_monotonic_after_reload() {
     assert!(new_id > max_loaded,
         "new entry_id {} must be > max loaded ID {}", new_id, max_loaded);
 
-    let entry_new = ClipboardEntry::Text {
-        id: new_id,
-        text: "post-restart".to_string(),
-        timestamp: 999,
-        source_name: String::new(),
-        source_bundle_id: String::new(),
-        db_id: 0,
-    };
-    insert_entry_to_db(&conn, &entry_new, None, None).unwrap();
+    let entry_new = ClipboardEntry::text_entry(
+        new_id,
+        "post-restart",
+        999,
+        String::new(),
+        String::new(),
+        0,
+    );
+    insert_entry_to_db(&conn, &entry_new, Some("post-restart"), None, None).unwrap();
 
     // Reload again — all 4 entries must have stable IDs.
     let reloaded = load_history_from_db(&conn, crate::backend::DEFAULT_CLEANUP_THRESHOLD);

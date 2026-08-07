@@ -17,7 +17,16 @@ pub(crate) enum ClipboardEntry {
     Text {
         /// Stable, unique entry identifier (monotonic, survives reordering).
         id: u64,
-        text: String,
+        /// Bounded single-line preview for the list row (≤256 Unicode scalars;
+        /// long entries elided to `head……tail`). The full text lives only in
+        /// SQLite (FTS5-indexed) and is loaded on demand by `db_id` — the
+        /// in-memory entry never holds it, so memory stays flat regardless of
+        /// how large pasted documents are.
+        preview: String,
+        /// First non-empty line of the original text, ≤60 scalars (list title).
+        label: String,
+        /// Content hash for in-memory dedup (DB dedup stays exact-text).
+        text_hash: u64,
         timestamp: u64,
         source_name: String,
         source_bundle_id: String,
@@ -76,61 +85,77 @@ impl ClipboardEntry {
 
     pub(crate) fn label(&self) -> String {
         match self {
-            ClipboardEntry::Text { text, .. } => {
-                let first = text
-                    .lines()
-                    .find(|l| !l.trim().is_empty())
-                    .unwrap_or(text);
-                let char_count: usize = first.chars().count();
-                if char_count > 60 {
-                    let truncated: String = first.chars().take(59).collect();
-                    format!("{truncated}…")
-                } else {
-                    first.to_string()
-                }
-            }
+            ClipboardEntry::Text { label, .. } => label.clone(),
             ClipboardEntry::Image { width, height, .. } => {
                 format!("Image ({width}×{height})")
             }
         }
     }
 
-    /// Accessor for Text variant content. Panics for Image entries.
-    pub(crate) fn text(&self) -> &str {
-        match self {
-            ClipboardEntry::Text { text, .. } => text,
-            _ => panic!("text() called on a non-Text ClipboardEntry"),
-        }
-    }
-
-    /// Bounded preview for the list row (≤ 256 Unicode scalars). Short text is
-    /// carried whole; longer text is elided to `head……tail` so the row can show
-    /// the real ending instead of a middle chunk of a truncated prefix. The
-    /// snapshot still never carries full multi-KB text into the frontend.
+    /// Bounded preview for the list row (≤ 256 Unicode scalars), precomputed at
+    /// capture/load time from the full text. The snapshot carries this instead
+    /// of the full multi-KB text.
     pub(crate) fn preview(&self) -> String {
         match self {
-            ClipboardEntry::Text { text, .. } => bounded_preview(text),
+            ClipboardEntry::Text { preview, .. } => preview.clone(),
             ClipboardEntry::Image { .. } => String::new(),
         }
     }
+}
 
-    /// Case-insensitive substring match over the searchable fields: source
-    /// name, label, and full text. Mirrors the popup's previous Swift-side
-    /// `localizedCaseInsensitiveContains` semantics.
-    pub(crate) fn matches_search(&self, query: &str) -> bool {
-        let q = query.to_lowercase();
-        if self.source_name().to_lowercase().contains(&q) {
-            return true;
+/// Content hash for in-memory text dedup. DB-side dedup stays exact-text
+/// (`delete_matching_entry`), so a 64-bit hash only ever gates the in-memory
+/// duplicate removal — collision is ~2⁻⁶⁴ and self-heals on next DB pass.
+pub(crate) fn text_hash(text: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// True if `line` is all whitespace, short-circuiting at the first non-
+/// whitespace char — O(1) for any non-blank line, however long.
+fn is_blank_line(line: &str) -> bool {
+    line.chars().all(|c| c.is_whitespace())
+}
+
+/// First non-empty line of `text`, ≤60 Unicode scalars (else truncated with
+/// `…`). O(60) for a non-blank line regardless of length: the blank check
+/// short-circuits at the first non-whitespace char and the truncation only
+/// reads 61 scalars — a multi-MB single-line paste is not scanned in full.
+pub(crate) fn label_from_text(text: &str) -> String {
+    let first = text.lines().find(|l| !is_blank_line(l)).unwrap_or(text);
+    let char_count: usize = first.chars().take(61).count();
+    if char_count > 60 {
+        let truncated: String = first.chars().take(59).collect();
+        format!("{truncated}…")
+    } else {
+        first.to_string()
+    }
+}
+
+impl ClipboardEntry {
+    /// Build a Text entry from the full captured text, deriving the bounded
+    /// preview, row label, and dedup hash. The full text is written through to
+    /// SQLite by the caller (which still holds it) but is not retained here.
+    pub(crate) fn text_entry(
+        id: u64,
+        full_text: &str,
+        timestamp: u64,
+        source_name: String,
+        source_bundle_id: String,
+        db_id: i64,
+    ) -> ClipboardEntry {
+        ClipboardEntry::Text {
+            id,
+            preview: bounded_preview(full_text),
+            label: label_from_text(full_text),
+            text_hash: text_hash(full_text),
+            timestamp,
+            source_name,
+            source_bundle_id,
+            db_id,
         }
-        if self.label().to_lowercase().contains(&q) {
-            return true;
-        }
-        if let ClipboardEntry::Text { text, .. } = self {
-            if text.to_lowercase().contains(&q) {
-                return true;
-            }
-        }
-        false
     }
 }
 
@@ -146,7 +171,7 @@ const PREVIEW_ELISION: &str = "……";
 /// the budget, else `head……tail`. O(budget) regardless of text length — head is
 /// taken from the front, tail from the back, and the "longer than budget" probe
 /// only reads one scalar past the limit.
-fn bounded_preview(text: &str) -> String {
+pub(crate) fn bounded_preview(text: &str) -> String {
     let over_budget = text.chars().take(PREVIEW_SCALARS + 1).count() > PREVIEW_SCALARS;
     if !over_budget {
         return text.to_string();

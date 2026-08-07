@@ -141,13 +141,14 @@ fn ingest_rgba_image(
                 };
                 if insert_entry_to_db(
                     &conn, &db_item,
+                    None,
                     Some(&full_png),
                     Some((&thumb_async, thumb_w, thumb_h)),
                 ).is_err() {
                     eprintln!("CopyAttach: Phase 2 DB insert failed for image {width}x{height} — entry stays with db_id=0");
                     return;
                 }
-                delete_matching_entry(&conn, &db_item);
+                delete_matching_entry(&conn, &db_item, None);
                 let row_id = conn.last_insert_rowid();
                 trim_db_history(&conn, threshold);
 
@@ -345,14 +346,17 @@ pub(crate) fn clipboard_monitor(
                 if !text.is_empty() {
                     let trimmed = text.trim();
                     if trimmed.len() >= 2 && !ignore_rules.lock().unwrap().ignores_text(&text) {
-                        let item = ClipboardEntry::Text {
-                            id: crate::backend::new_entry_id(),
-                            text: text.clone(),
-                            timestamp: now,
-                            source_name: src.name,
-                            source_bundle_id: src.bundle_id,
-                            db_id: 0,
-                        };
+                        // The full text is still live here (`text`); the entry
+                        // derives preview/label/hash and hands the body to the
+                        // DB write-through below without retaining it.
+                        let item = ClipboardEntry::text_entry(
+                            crate::backend::new_entry_id(),
+                            &text,
+                            now,
+                            src.name,
+                            src.bundle_id,
+                            0,
+                        );
 
                         // Scope 1: in-memory history update (history lock only)
                         let item_for_db = {
@@ -365,11 +369,18 @@ pub(crate) fn clipboard_monitor(
                             hist[0].clone()
                         }; // history lock released
 
-                        // Scope 2: DB write-through (db lock only — no history lock held)
+                        // Scope 2: DB write-through (db lock only — no history lock held).
+                        // The captured text's hash identifies the just-added memory entry so
+                        // a failed persist can roll it back below (the entry's body exists
+                        // only in SQLite, so unpersisted text would be an inert ghost).
+                        let failed_hash = match &item_for_db {
+                            ClipboardEntry::Text { text_hash, .. } => *text_hash,
+                            _ => unreachable!("text capture produced a non-text entry"),
+                        };
                         match db.lock() {
                             Ok(conn) => {
-                                if insert_entry_to_db(&conn, &item_for_db, None, None).is_ok() {
-                                    delete_matching_entry(&conn, &item_for_db);
+                                if insert_entry_to_db(&conn, &item_for_db, Some(&text), None, None).is_ok() {
+                                    delete_matching_entry(&conn, &item_for_db, Some(&text));
                                     let row_id = conn.last_insert_rowid();
                                     trim_db_history(&conn, cleanup_threshold.load(Ordering::Relaxed));
 
@@ -379,13 +390,27 @@ pub(crate) fn clipboard_monitor(
                                         *db_id = row_id;
                                     }
                                 } else {
-                                    eprintln!("CopyAttach: failed to insert text entry to DB — entry stays with db_id=0");
+                                    // Persist failed (I/O error, SQLITE_BUSY, or the FTS
+                                    // trigger failing). The entry can never be pasted or
+                                    // deleted — roll it out of memory so it doesn't linger
+                                    // as a ghost. Match by content hash, not index, so a
+                                    // concurrent select-and-paste moving another entry to the
+                                    // head can't be disturbed.
+                                    eprintln!("CopyAttach: failed to insert text entry to DB — removing it from history");
+                                    let mut hist = history.lock().unwrap();
+                                    hist.retain(|e| match e {
+                                        ClipboardEntry::Text { text_hash: h, .. } => *h != failed_hash,
+                                        _ => true,
+                                    });
                                 }
                             }
                             Err(e) => {
                                 eprintln!("CopyAttach: DB mutex poisoned in text capture persist: {e}");
-                                // Entry already in in-memory history. DB persistence
-                                // skipped; entry stays with db_id=0 until DB recovers.
+                                let mut hist = history.lock().unwrap();
+                                hist.retain(|e| match e {
+                                    ClipboardEntry::Text { text_hash: h, .. } => *h != failed_hash,
+                                    _ => true,
+                                });
                             }
                         }
                     }

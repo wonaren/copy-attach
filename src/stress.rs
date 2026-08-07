@@ -397,17 +397,17 @@ pub fn inject_into_db(
         for _i in 0..*n {
             let s = seed.wrapping_add(idx).wrapping_mul(6364136223846793005);
             let text = generate_text_content(*cat, s);
-            let entry = ClipboardEntry::Text {
-                id: new_entry_id(),
-                text,
-                timestamp: idx,
-                source_name: String::from("StressTest"),
-                source_bundle_id: String::from("com.stresstest"),
-                db_id: 0,
-            };
+            let entry = ClipboardEntry::text_entry(
+                new_entry_id(),
+                &text,
+                idx,
+                String::from("StressTest"),
+                String::from("com.stresstest"),
+                0,
+            );
             // Insert: no png, no thumb. Dedup is unnecessary here —
             // every generated entry has unique content (unique seed per entry).
-            insert_entry_to_db(&conn, &entry, None, None).ok();
+            insert_entry_to_db(&conn, &entry, Some(&text), None, None).ok();
             idx += 1;
 
             // Track category
@@ -479,7 +479,7 @@ pub fn inject_into_db(
                 source_bundle_id: String::from("com.stresstest"),
                 db_id: 0,
             };
-            insert_entry_to_db(&conn, &entry, Some(&png), Some((&thumb_data, thumb_w, thumb_h))).ok();
+            insert_entry_to_db(&conn, &entry, None, Some(&png), Some((&thumb_data, thumb_w, thumb_h))).ok();
             idx += 1;
 
             let ci = match cat {

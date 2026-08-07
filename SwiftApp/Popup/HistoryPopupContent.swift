@@ -391,13 +391,17 @@ struct HistoryPopupContent: View {
                 try? await Task.sleep(nanoseconds: debounceNs)
                 guard !Task.isCancelled else { return }
 
-                // Full-text/label/source matching runs in Rust — Swift no
-                // longer holds the text. Date-label matching stays here (the
-                // DayGroup label is UI-derived and unavailable to the backend).
+                // Full-text matching runs in Rust against the FTS5 index (the
+                // in-memory history no longer holds full text). Label and
+                // source-name matching stay here — the backend never had them
+                // for the list row, and images are findable only via their
+                // generated label ("Image (WxH)") / source name.
                 let filtered = await Task.detached(priority: .userInitiated) { [items, backend] in
                     let matchIds = backend.searchIds(newValue)
                     return items.filter {
                         matchIds.contains($0.id) ||
+                        $0.label.localizedCaseInsensitiveContains(newValue) ||
+                        $0.sourceName.localizedCaseInsensitiveContains(newValue) ||
                         DayGroup.label(for: $0.timestamp)
                             .localizedCaseInsensitiveContains(newValue)
                     }

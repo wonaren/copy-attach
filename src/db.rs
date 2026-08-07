@@ -23,10 +23,15 @@ pub(crate) fn open_db() -> Option<Connection> {
     let conn = Connection::open(&db_path).map_err(|e| {
         eprintln!("CopyAttach: failed to open database: {e}");
     }).ok()?;
-    // Use mmap for BLOB reads + minimal SQLite page cache (512KB)
+    // No mmap: the FTS5 trigram index (several× the text size) would be mapped
+    // into the process and count as resident memory — confirmed ~1:1 RSS growth
+    // with the index when the DB file stays under the old 32MB cap. Serving it
+    // from the LRU page cache keeps DB-related resident memory bounded at the
+    // cache size while still covering the same on-demand BLOB reads mmap used
+    // to serve (thumbnails/full images are loaded one at a time, per click).
     let _ = conn.execute_batch(
-        "PRAGMA mmap_size = 33554432;    -- 32 MB (ample for clipboard history, was 256 MB)
-         PRAGMA cache_size = -512;"
+        "PRAGMA mmap_size = 0;
+         PRAGMA cache_size = -4096;    -- 4 MB LRU page cache"
     );
     Some(conn)
 }
@@ -75,6 +80,37 @@ pub(crate) fn ensure_history_table(conn: &Connection) -> Result<(), rusqlite::Er
     // propagate the error rather than silently falling back.
     conn.execute_batch(
         "UPDATE clipboard_history SET entry_id = id WHERE entry_id = 0;"
+    )?;
+
+    // FTS5 full-text index over the text column (trigram tokenizer = substring
+    // matching for ≥3-char queries). Keeping full text out of the in-memory
+    // history Vec is what bounds memory; the index makes search fast on disk.
+    //
+    // Sync is automatic via AFTER INSERT/DELETE triggers (triggers are per-DB,
+    // so they persist across restarts; `IF NOT EXISTS` keeps init idempotent).
+    // Image rows have text = NULL and are skipped by the WHEN clauses. The FTS
+    // rowid is the base-table rowid, so the AFTER DELETE trigger removes the
+    // indexed row directly (the `'delete'` special command is for external
+    // content tables and is not needed here). The backfill populates the index
+    // for rows that predate this virtual table, guarded so it only runs once
+    // (an already-populated index is left untouched).
+    conn.execute_batch(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS clipboard_fts USING fts5(
+             text,
+             tokenize = 'trigram'
+         );
+         INSERT INTO clipboard_fts(rowid, text)
+             SELECT id, text FROM clipboard_history
+             WHERE text IS NOT NULL
+               AND NOT EXISTS (SELECT 1 FROM clipboard_fts LIMIT 1);
+         CREATE TRIGGER IF NOT EXISTS clipboard_fts_ai AFTER INSERT ON clipboard_history
+         WHEN new.text IS NOT NULL BEGIN
+             INSERT INTO clipboard_fts(rowid, text) VALUES (new.id, new.text);
+         END;
+         CREATE TRIGGER IF NOT EXISTS clipboard_fts_ad AFTER DELETE ON clipboard_history
+         WHEN old.text IS NOT NULL BEGIN
+             DELETE FROM clipboard_fts WHERE rowid = old.id;
+         END;"
     )?;
     Ok(())
 }
@@ -136,14 +172,20 @@ pub(crate) fn load_history_from_db(conn: &Connection, threshold: usize) -> Vec<C
         // Use the persisted entry_id, or assign a fresh one for legacy rows.
         let id = if entry_id != 0 { entry_id as u64 } else { crate::backend::new_entry_id() };
         match entry_type {
-            0 => result.push(ClipboardEntry::Text {
-                id,
-                text: text.unwrap_or_default(),
-                timestamp: timestamp as u64,
-                source_name,
-                source_bundle_id,
-                db_id,
-            }),
+            0 => {
+                // Full text is only needed to derive the bounded preview, label,
+                // and dedup hash at load time — then it is dropped. The in-memory
+                // entry never retains the body; searches and paste read the DB.
+                let full_text = text.unwrap_or_default();
+                result.push(ClipboardEntry::text_entry(
+                    id,
+                    &full_text,
+                    timestamp as u64,
+                    source_name,
+                    source_bundle_id,
+                    db_id,
+                ));
+            }
             1 => result.push(ClipboardEntry::Image {
                 id,
                 png_data: Vec::new(),
@@ -172,21 +214,31 @@ pub(crate) fn load_history_from_db(conn: &Connection, threshold: usize) -> Vec<C
 
 /// Insert an entry into the DB. Image data (png, thumb) is provided as separate
 /// slices and stored inline; the in-memory `ClipboardEntry` keeps only metadata.
+/// For text entries the full body travels separately via `text` (the in-memory
+/// entry does not hold it) — mirrors the image split.
 pub(crate) fn insert_entry_to_db(
     conn: &Connection,
     entry: &ClipboardEntry,
+    text: Option<&str>,
     image_png: Option<&[u8]>,
     image_thumb: Option<(&[u8], u32, u32)>,
 ) -> Result<(), ()> {
     let result = match entry {
-        ClipboardEntry::Text { text, timestamp, source_name, source_bundle_id, id, .. } => {
+        ClipboardEntry::Text { timestamp, source_name, source_bundle_id, id, .. } => {
+            let full = match text {
+                Some(t) => t,
+                None => {
+                    eprintln!("CopyAttach: cannot insert text entry: full text not provided");
+                    return Err(());
+                }
+            };
             conn.execute(
                 "INSERT INTO clipboard_history
                     (entry_type, text, png_data, width, height,
                      thumb_data, thumb_width, thumb_height, hash,
                      timestamp, source_name, source_bundle_id, entry_id)
                  VALUES (0, ?1, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?2, ?3, ?4, ?5)",
-                rusqlite::params![text, *timestamp as i64, source_name, source_bundle_id, *id as i64],
+                rusqlite::params![full, *timestamp as i64, source_name, source_bundle_id, *id as i64],
             ).map(|_| ()).map_err(|e| { eprintln!("CopyAttach: failed to insert text entry: {e}"); })
         }
         ClipboardEntry::Image { width, height,
@@ -220,17 +272,25 @@ pub(crate) fn insert_entry_to_db(
 }
 
 /// Delete duplicate entries from the DB, keeping only the newest row for the
-/// given entry's content (text match or hash match).
-pub(crate) fn delete_matching_entry(conn: &Connection, entry: &ClipboardEntry) {
+/// given entry's content. Text entries dedup by exact text (full body passed
+/// separately, as the in-memory entry no longer holds it); images by hash.
+pub(crate) fn delete_matching_entry(conn: &Connection, entry: &ClipboardEntry, text: Option<&str>) {
     let result = match entry {
-        ClipboardEntry::Text { text, .. } => {
+        ClipboardEntry::Text { .. } => {
+            let full = match text {
+                Some(t) => t,
+                None => {
+                    eprintln!("CopyAttach: cannot dedup text entry: full text not provided");
+                    return;
+                }
+            };
             conn.execute(
                 "DELETE FROM clipboard_history
                  WHERE entry_type = 0 AND text = ?1
                    AND id != (SELECT id FROM clipboard_history
                               WHERE entry_type = 0 AND text = ?1
                               ORDER BY id DESC LIMIT 1)",
-                rusqlite::params![text],
+                rusqlite::params![full],
             ).map(|_| ())
         }
         ClipboardEntry::Image { hash, .. } => {
@@ -400,4 +460,102 @@ fn migrate_from_json_to_db_impl(_conn: &mut Connection) {}
 /// No-op if the `migration` feature is disabled or no JSON file is present.
 pub(crate) fn migrate_from_json_to_db(conn: &mut Connection) {
     migrate_from_json_to_db_impl(conn);
+}
+
+// ═══════════════════════════════════════════
+// Full-text search & on-demand text loading
+// ═══════════════════════════════════════════
+
+/// Case-insensitive substring search over the stored full text.
+///
+/// Queries of ≥3 Unicode scalars go through the FTS5 trigram index (substring
+/// semantics, full-Unicode case folding). Shorter queries cannot form a
+/// trigram, so they fall back to a LIKE scan — trigram's matching floor, not a
+/// failure path. Known limitation of that fallback: SQLite's LIKE folds ASCII
+/// case only, so a <3-char query that relies on non-ASCII case folding (e.g.
+/// `é` matching `É`, Greek case) misses those variants; ≥3-char queries are
+/// unaffected (trigram folds Unicode). Returns matching entry_ids (the stable
+/// Rust IDs, not SQLite rowids).
+pub(crate) fn search_history(conn: &Connection, query: &str) -> Vec<u64> {
+    let mut ids = Vec::new();
+    if query.chars().count() >= 3 {
+        let phrase = fts_phrase(query);
+        let mut stmt = match conn.prepare(
+            "SELECT clipboard_history.entry_id
+             FROM clipboard_fts
+             JOIN clipboard_history ON clipboard_history.id = clipboard_fts.rowid
+             WHERE clipboard_fts MATCH ?1",
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("CopyAttach: failed to prepare FTS search: {e}");
+                return ids;
+            }
+        };
+        let rows = match stmt.query_map(rusqlite::params![phrase], |row| row.get::<_, i64>(0)) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("CopyAttach: FTS search failed: {e}");
+                return ids;
+            }
+        };
+        for row in rows {
+            match row {
+                Ok(id) => ids.push(id as u64),
+                Err(e) => eprintln!("CopyAttach: FTS search row read error: {e}"),
+            }
+        }
+    } else {
+        let like = format!("%{}%", escape_like(query));
+        let mut stmt = match conn.prepare(
+            "SELECT entry_id FROM clipboard_history
+             WHERE entry_type = 0 AND text LIKE ?1 ESCAPE '\\'",
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("CopyAttach: failed to prepare LIKE search: {e}");
+                return ids;
+            }
+        };
+        let rows = match stmt.query_map(rusqlite::params![like], |row| row.get::<_, i64>(0)) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("CopyAttach: LIKE search failed: {e}");
+                return ids;
+            }
+        };
+        for row in rows {
+            match row {
+                Ok(id) => ids.push(id as u64),
+                Err(e) => eprintln!("CopyAttach: LIKE search row read error: {e}"),
+            }
+        }
+    }
+    ids
+}
+
+/// Wrap a user query as an FTS5 phrase, doubling embedded quotes so arbitrary
+/// input (including `*`, `-`, parens, quotes) is matched literally.
+fn fts_phrase(query: &str) -> String {
+    format!("\"{}\"", query.replace('"', "\"\""))
+}
+
+/// Escape `%`/`_`/`\` so a LIKE pattern matches the query literally, mirroring
+/// the substring semantics of the FTS path (and the pre-index `contains`).
+fn escape_like(query: &str) -> String {
+    query
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
+/// Load the full text body for a row by its SQLite rowid (== `db_id`).
+pub(crate) fn load_text_by_db_id(conn: &Connection, db_id: i64) -> Option<String> {
+    conn.query_row(
+        "SELECT text FROM clipboard_history WHERE id = ?1",
+        rusqlite::params![db_id],
+        |row| row.get(0),
+    )
+    .map_err(|e| eprintln!("CopyAttach: failed to load text for db_id={db_id}: {e}"))
+    .ok()
 }
