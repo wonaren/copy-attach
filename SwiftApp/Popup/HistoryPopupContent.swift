@@ -56,7 +56,7 @@ private struct RowFramePreferenceKey: PreferenceKey {
 /// is weak, so the menu keeps the handler alive through `representedObject`
 /// (strong) — the local scope of `showContextMenu` additionally holds it while
 /// the synchronous `popUp` tracking loop runs.
-private final class ContextMenuItemTarget: NSObject {
+final class ContextMenuItemTarget: NSObject {
     private let action: () -> Void
     init(_ action: @escaping () -> Void) { self.action = action }
     // Explicit @objc name: Swift's `perform(_:)` would bridge to
@@ -71,30 +71,30 @@ private final class ContextMenuItemTarget: NSObject {
 struct HistoryPopupContent: View {
     let onClose: () -> Void
 
-    @State private var backend = ClipboardBackend.shared
-    @State private var selectedIndex: Int = 0  // 0 = search bar, 1+ = items
-    @State private var showPreview: Bool = false
+    @State var backend = ClipboardBackend.shared
+    @State var selectedIndex: Int = 0  // 0 = search bar, 1+ = items
+    @State var showPreview: Bool = false
     @State private var isControlPressed: Bool = false
     @State private var isCommandPressed: Bool = false
-    @Environment(\.appTheme) private var theme
-    @State private var searchText: String = ""
-    @State private var effectiveSearchText: String = ""
+    @Environment(\.appTheme) var theme
+    @State var searchText: String = ""
+    @State var effectiveSearchText: String = ""
     @State private var searchTask: Task<Void, Never>?
-    @State private var scrollTarget: Int?
+    @State var scrollTarget: Int?
     /// Id of the always-laid-out zero-height anchor at the very top of the
     /// list content (outside the LazyVStack, so its position is exact and
     /// never depends on lazy row-height estimation). Scrolling to it returns
     /// the viewport to offset 0 reliably.
-    private let listTopAnchorID = 0
+    let listTopAnchorID = 0
 
-    @State private var filterMode: FilterMode = .all
+    @State var filterMode: FilterMode = .all
 
     /// True while a right-click is waiting for the one-shot row-frame
     /// snapshot (see `RowFramePreferenceKey`). Rows report frames only during
     /// this window; the snapshot is resolved and disarmed on the next layout
     /// pass.
-    @State private var contextMenuArmed = false
-    @State private var pendingContextMenuRequest: PopupContextMenuRequest?
+    @State var contextMenuArmed = false
+    @State var pendingContextMenuRequest: PopupContextMenuRequest?
 
     // Namespace for the sliding selection highlight (Spotlight-style glide
     // between rows when the selection moves with ↑/↓ keys or a click).
@@ -108,47 +108,32 @@ struct HistoryPopupContent: View {
 
     /// Cached search results, computed off the main thread in the debounce task.
     /// When effectiveSearchText is empty, the view uses backend.items directly.
-    @State private var searchResults: [ClipboardItem] = []
+    @State var searchResults: [ClipboardItem] = []
 
     /// Items to display: full history when idle, cached results when searching.
     /// Sorted by timestamp descending so day separators receive a monotonic stream.
-    private var displayItems: [ClipboardItem] {
+    var displayItems: [ClipboardItem] {
         filteredItems(for: filterMode).sorted { $0.timestamp > $1.timestamp }
     }
 
     /// The highest valid selectedIndex (search bar + item count).
-    private var maxIndex: Int { displayItems.count }
+    var maxIndex: Int { displayItems.count }
 
     // Design Tokens
     private let popupWidth: CGFloat = 500
     private let popupHeight: CGFloat = 720
 
     /// Base duration for the smallest filter change.
-    private let filterSwitchBaseDuration: TimeInterval = 0.15
+    let filterSwitchBaseDuration: TimeInterval = 0.15
     /// Extra seconds per unit of visible change (rows entering or leaving),
     /// saturating once the change exceeds what fits on screen.
-    private let filterSwitchPerChange: TimeInterval = 0.011
+    let filterSwitchPerChange: TimeInterval = 0.011
     /// Per-direction cap on counted change: past ~6 rows the extra rows are
     /// offscreen and contribute no visible motion.
-    private let filterSwitchChangeCap = 6
+    let filterSwitchChangeCap = 6
     /// Hard ceiling: the control (tab pill) already snaps instantly, so the
     /// content animation never needs more than this.
-    private let filterSwitchMaxDuration: TimeInterval = 0.28
-
-    /// Adaptive filter-switch motion: the duration scales with how much of the
-    /// list actually changes. A near-identical refilter stays snappy (0.15s);
-    /// a big one — many rows dissolving and/or materializing — gets up to
-    /// 0.28s. The control feedback (tab pill) snaps instantly and the swipe
-    /// commits mid-gesture, so the content animation reads as readable, not
-    /// as lag — a fixed short duration makes fade-heavy switches (e.g. 图片 →
-    /// 文本, where rows materialize into mostly-empty space and there is
-    /// little collapse motion to anchor perception) read as instant.
-    private func filterSwitchAnimation(removed: Int, added: Int) -> Animation {
-        let visibleChange = min(removed, filterSwitchChangeCap) + min(added, filterSwitchChangeCap)
-        let duration = min(filterSwitchMaxDuration,
-                           filterSwitchBaseDuration + filterSwitchPerChange * Double(visibleChange))
-        return .easeOut(duration: duration)
-    }
+    let filterSwitchMaxDuration: TimeInterval = 0.28
 
     /// Row-level enter/exit for filter changes: fade + a slight scale in place.
     /// No directional offset — filtering the same data pool is not navigation.
@@ -163,7 +148,7 @@ struct HistoryPopupContent: View {
         )
     }
 
-    private var popupWindow: HistoryPopupWindow? {
+    var popupWindow: HistoryPopupWindow? {
         NSApp.windows.first(where: { $0 is HistoryPopupWindow }) as? HistoryPopupWindow
     }
 
@@ -549,223 +534,6 @@ struct HistoryPopupContent: View {
         .animation(.easeOut(duration: 0.08), value: filterMode)
     }
 
-    // MARK: - Tab Switching
-
-    /// Switch to a specific filter tab. The tabs re-filter the same data pool,
-    /// so this is a simple identity-preserving diff: `withAnimation` animates
-    /// row removals/insertions (`filterRowTransition`) and the layout collapse,
-    /// while surviving rows never leave their identity. The duration adapts to
-    /// the measured change (see `filterSwitchAnimation(removed:added:)`).
-    private func switchToFilterTab(_ target: FilterMode, animated: Bool) {
-        guard target != filterMode else { return }
-        // Scroll to the top BEFORE switching the filter. A scroll issued in
-        // the same transaction as the content change races the LazyVStack's
-        // row-height estimation and the scroll view's offset-preservation
-        // (the list shrinks under a deep viewport), and can be lost or land
-        // off-target. The anchor is an always-laid-out view at offset 0, so
-        // this scroll is exact; once the viewport sits at the top, the
-        // filter change has no offset to preserve and lands clean.
-        if selectedIndex > 0 {
-            scrollTarget = listTopAnchorID
-        }
-        let (removed, added) = countFilterChange(from: filterMode, to: target)
-        // Switch on the next runloop turn so the scroll lands (a layout
-        // pass) before the content changes.
-        DispatchQueue.main.async {
-            if animated {
-                withAnimation(filterSwitchAnimation(removed: removed, added: added)) {
-                    filterMode = target
-                }
-            } else {
-                filterMode = target
-            }
-        }
-    }
-
-    /// The entries a filter tab shows, unsorted. `.all` passes the base through
-    /// unchanged (no copy); the other modes filter through `matches`, the
-    /// single source of the favorites/image/text predicates.
-    private func filteredItems(for mode: FilterMode) -> [ClipboardItem] {
-        let base = effectiveSearchText.isEmpty ? backend.items : searchResults
-        switch mode {
-        case .all:
-            return base
-        case .favorites, .image, .text:
-            return base.filter { matches($0, filterMode: mode) }
-        }
-    }
-
-    /// Whether an entry satisfies a filter tab's predicate. Single source of
-    /// truth for the filter definitions — `displayItems` and the tab-switch
-    /// measurement both derive from it, so they can't drift apart.
-    private func matches(_ item: ClipboardItem, filterMode mode: FilterMode) -> Bool {
-        switch mode {
-        case .all: true
-        case .favorites: backend.favoriteIds.contains(item.id)
-        case .image: item.isImage
-        case .text: item.isText
-        }
-    }
-
-    /// Rows that leave (removed) and enter (added) the list when switching
-    /// from `source` to `target`, counted in a single pass over the base with
-    /// early exit once both saturate at `filterSwitchChangeCap` (the animation
-    /// caps both counts anyway). Replaces the previous two full `Set` builds
-    /// per switch, which ran synchronously on the swipe/key/tap path.
-    private func countFilterChange(from source: FilterMode, to target: FilterMode) -> (removed: Int, added: Int) {
-        let base = effectiveSearchText.isEmpty ? backend.items : searchResults
-        var removed = 0
-        var added = 0
-        for item in base {
-            let inSource = matches(item, filterMode: source)
-            let inTarget = matches(item, filterMode: target)
-            if inSource != inTarget {
-                if inSource { removed += 1 } else { added += 1 }
-                if removed >= filterSwitchChangeCap, added >= filterSwitchChangeCap { break }
-            }
-        }
-        return (removed, added)
-    }
-
-    /// Shared tab switch used by the trackpad swipe and the ←/→ shortcuts:
-    /// direction "left" = previous tab, "right" = next tab (same convention as
-    /// the arrow keys).
-    private func switchFilterTab(direction: String, animated: Bool) {
-        let modes = FilterMode.allCases
-        guard let idx = modes.firstIndex(of: filterMode) else { return }
-        let target: FilterMode
-        if direction == "left" {
-            guard idx > 0 else { return }
-            target = modes[idx - 1]
-        } else {
-            guard idx < modes.count - 1 else { return }
-            target = modes[idx + 1]
-        }
-        switchToFilterTab(target, animated: animated)
-    }
-
-    // MARK: - Preview Management
-
-    private func handleEscape() {
-        if showPreview {
-            closePreview()
-        } else {
-            searchText = ""
-            onClose()
-        }
-    }
-
-    private func togglePreview() {
-        if showPreview { closePreview() } else { openPreview() }
-    }
-
-    private func openPreview() {
-        let itemIndex = selectedIndex - 1
-        guard itemIndex < displayItems.count, let popup = popupWindow else { return }
-        let item = displayItems[itemIndex]
-        let popupCenter = NSPoint(x: popup.frame.midX, y: popup.frame.midY)
-        guard let previewItem = fullTextItem(item) else { return }
-        let preview = PreviewWindow(item: previewItem, centerAt: popupCenter)
-        popup.previewPanel = preview
-        preview.orderFront(nil)
-        // Trackpad pinch (magnify) events are delivered only to the truly
-        // frontmost application. This LSUIElement agent app never receives
-        // applicationDidBecomeActive while its nonactivating panels are up —
-        // NSApp.isActive reports true, but the window server keeps routing
-        // magnify gestures to the previous app, so ZoomableImageNSView's
-        // magnify monitor never fires. Real activation makes gesture delivery
-        // work for the preview. Deactivation is automatic when the
-        // popup/preview closes or another app is clicked; the paste target
-        // pid is protected in ClipboardBackend.updateSourceApp.
-        NSApp.activate(ignoringOtherApps: true)
-        showPreview = true
-    }
-
-    private func closePreview() {
-        guard showPreview else { return }
-        showPreview = false
-        popupWindow?.previewPanel?.close()
-        popupWindow?.previewPanel = nil
-    }
-
-    private func updatePreviewContent() {
-        let itemIndex = selectedIndex - 1
-        guard showPreview, itemIndex >= 0, itemIndex < displayItems.count,
-              let preview = popupWindow?.previewPanel else { return }
-        guard let previewItem = fullTextItem(displayItems[itemIndex]) else {
-            closePreview()
-            return
-        }
-        preview.updateContent(item: previewItem)
-    }
-
-    private func fullTextItem(_ item: ClipboardItem) -> ClipboardItem? {
-        switch item {
-        case .text(let entryId, _, let timestamp, let label, let sourceName, let sourceBundleId, _):
-            guard let full = item.fullText else {
-                debugLog("fullTextItem: failed to load full text for entry \(entryId)")
-                return nil
-            }
-            return .text(entryId: entryId, text: full, timestamp: timestamp,
-                         label: label, sourceName: sourceName, sourceBundleId: sourceBundleId, preview: full)
-        default:
-            return item
-        }
-    }
-
-    // MARK: - Bottom Bar (item count + shortcuts, single row)
-
-    private var bottomBar: some View {
-        let items = displayItems
-        return HStack(spacing: 0) {
-            // --- Left: item count stats ---
-            Text("\(items.count) 项")
-                .font(.system(size: 10, weight: .medium))
-                .foregroundColor(theme.popupSecondaryText)
-                .contentTransition(.numericText())
-            if !effectiveSearchText.isEmpty {
-                Text("/ \(backend.items.count) 项")
-                    .font(.system(size: 10))
-                    .foregroundColor(theme.popupMutedText)
-            }
-            Text(" · ")
-                .font(.system(size: 10))
-                .foregroundColor(theme.popupDimText)
-            let textCount = items.filter { $0.isText }.count
-            let imageCount = items.filter { $0.isImage }.count
-            Text("\(textCount) 文本")
-                .font(.system(size: 10))
-                .foregroundColor(theme.popupMutedText)
-            Text("\(imageCount) 图片")
-                .font(.system(size: 10))
-                .foregroundColor(theme.popupMutedText)
-
-            Spacer()
-
-            // --- Right: shortcut hints ---
-            shortcutHint(key: "⌥P", label: "收藏/取消")
-            shortcutHint(key: "Space", label: "预览")
-            shortcutHint(key: "⌃⌫", label: "删除")
-            shortcutHint(key: "⌘Z", label: "撤销")
-            shortcutHint(key: "⌘1~9", label: "快速选择")
-            shortcutHint(key: "右键", label: "菜单")
-        }
-        .padding(.horizontal, 6)
-        .padding(.vertical, 3)
-    }
-
-    private func shortcutHint(key: String, label: String) -> some View {
-        HStack(spacing: 3) {
-            Text(key)
-                .font(.system(size: 9, weight: .semibold))
-                .foregroundColor(theme.popupMutedText)
-            Text(label)
-                .font(.system(size: 9))
-                .foregroundColor(theme.popupDimText)
-        }
-        .padding(.leading, 4)
-    }
-
     // MARK: - Items List
 
     /// The region that reacts to the filter mode: the item list + bottom bar,
@@ -923,7 +691,7 @@ struct HistoryPopupContent: View {
 
     /// Returns the id to target for `scrollPosition` so that both the item at
     /// `itemIndex` and any date separator above it are visible after the scroll.
-    private func scrollTargetForItem(at itemIndex: Int) -> Int? {
+    func scrollTargetForItem(at itemIndex: Int) -> Int? {
         let items = displayItems
         guard itemIndex >= 0, itemIndex < items.count else { return nil }
         let hasSeparator = itemIndex == 0
@@ -932,6 +700,59 @@ struct HistoryPopupContent: View {
             return -Int(Int64(bitPattern: items[itemIndex].timestamp)) - 1
         }
         return items[itemIndex].id
+    }
+
+    // MARK: - Bottom Bar (item count + shortcuts, single row)
+
+    private var bottomBar: some View {
+        let items = displayItems
+        return HStack(spacing: 0) {
+            // --- Left: item count stats ---
+            Text("\(items.count) 项")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundColor(theme.popupSecondaryText)
+                .contentTransition(.numericText())
+            if !effectiveSearchText.isEmpty {
+                Text("/ \(backend.items.count) 项")
+                    .font(.system(size: 10))
+                    .foregroundColor(theme.popupMutedText)
+            }
+            Text(" · ")
+                .font(.system(size: 10))
+                .foregroundColor(theme.popupDimText)
+            let textCount = items.filter { $0.isText }.count
+            let imageCount = items.filter { $0.isImage }.count
+            Text("\(textCount) 文本")
+                .font(.system(size: 10))
+                .foregroundColor(theme.popupMutedText)
+            Text("\(imageCount) 图片")
+                .font(.system(size: 10))
+                .foregroundColor(theme.popupMutedText)
+
+            Spacer()
+
+            // --- Right: shortcut hints ---
+            shortcutHint(key: "⌥P", label: "收藏/取消")
+            shortcutHint(key: "Space", label: "预览")
+            shortcutHint(key: "⌃⌫", label: "删除")
+            shortcutHint(key: "⌘Z", label: "撤销")
+            shortcutHint(key: "⌘1~9", label: "快速选择")
+            shortcutHint(key: "右键", label: "菜单")
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 3)
+    }
+
+    private func shortcutHint(key: String, label: String) -> some View {
+        HStack(spacing: 3) {
+            Text(key)
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundColor(theme.popupMutedText)
+            Text(label)
+                .font(.system(size: 9))
+                .foregroundColor(theme.popupDimText)
+        }
+        .padding(.leading, 4)
     }
 
     // MARK: - Empty State
@@ -951,232 +772,5 @@ struct HistoryPopupContent: View {
             Spacer()
         }
         .transition(.opacity)
-    }
-
-    // MARK: - Actions
-
-    private func deleteItem(at index: Int) {
-        let items = displayItems
-        guard index < items.count else { return }
-        let item = items[index]
-        guard let backendIdx = backend.items.firstIndex(where: { $0.id == item.id }) else { return }
-        closePreview()
-        var deleted = false
-        withAnimation(.easeInOut(duration: 0.2)) {
-            deleted = backend.deleteEntry(at: backendIdx)
-            // When search is active, displayItems draws from the cached
-            // searchResults snapshot. Mutate it inside the animation block
-            // so the item removal animates with the same transition.
-            // Only mutate searchResults when the delete actually succeeded,
-            // otherwise the in-memory cache desyncs from backend.items.
-            if deleted, !effectiveSearchText.isEmpty {
-                searchResults.removeAll { $0.id == item.id }
-            }
-        }
-        guard deleted else { return }
-        if backend.items.isEmpty {
-            selectedIndex = 0
-            searchText = ""
-        } else if selectedIndex > maxIndex {
-            selectedIndex = max(0, maxIndex)
-        }
-    }
-
-    // MARK: - Right-Click Context Menu
-
-    /// The current displayItems index of the entry, or nil if it no longer
-    /// exists (deleted, filtered out, or the list changed while the menu was
-    /// open). Actions re-resolve by stable entry id instead of trusting the
-    /// index captured when the menu was built.
-    private func currentIndex(of entryId: Int) -> Int? {
-        displayItems.firstIndex(where: { $0.id == entryId })
-    }
-
-    /// Resolve an armed right-click against the one-shot row-frame snapshot.
-    /// Disarms unconditionally (the snapshot is single-use); presents the
-    /// menu only when the click landed on a row. Presentation hops to the
-    /// next runloop tick — the preference callback runs inside a SwiftUI
-    /// layout pass, and NSMenu.popUp must not start mid-update.
-    private func resolveContextMenu(frames: [Int: CGRect], request: PopupContextMenuRequest) {
-        guard let (entryId, _) = frames.first(where: { $0.value.contains(request.viewPoint) }) else {
-            return
-        }
-        let resolved = PopupContextMenuRequest(entryId: entryId,
-                                               viewPoint: request.viewPoint,
-                                               windowPoint: request.windowPoint)
-        DispatchQueue.main.async { [self] in
-            // The popup may have closed or the row may have been filtered out
-            // during the async gap — re-resolve by stable id before presenting.
-            guard currentIndex(of: entryId) != nil else { return }
-            showContextMenu(for: resolved)
-        }
-    }
-
-    /// Presented by `PopupHostingView.rightMouseDown` via notification.
-    /// Selects the right-clicked row, then shows a native NSMenu at the cursor.
-    private func showContextMenu(for request: PopupContextMenuRequest) {
-        guard let entryId = request.entryId,
-              let index = currentIndex(of: entryId) else { return }
-        let item = displayItems[index]
-        selectedIndex = min(index + 1, maxIndex)
-
-        let menu = NSMenu()
-        menu.autoenablesItems = false
-
-        addContextMenuItem(to: menu, title: "插入", symbol: "arrow.down.to.line") {
-            guard let idx = self.currentIndex(of: item.id) else { return }
-            self.selectedIndex = idx + 1
-            self.selectItem(at: idx)
-        }
-        addContextMenuItem(to: menu, title: "预览", symbol: "eye") {
-            guard let idx = self.currentIndex(of: item.id) else { return }
-            self.selectedIndex = idx + 1
-            if self.showPreview {
-                self.updatePreviewContent()
-            } else {
-                self.openPreview()
-            }
-        }
-        menu.addItem(.separator())
-        addContextMenuItem(to: menu,
-                           title: item.isImage ? "复制图片" : "复制内容",
-                           symbol: item.isImage ? "photo" : "doc.on.doc") {
-            self.copyItemContent(item)
-        }
-        if item.isImage {
-            addContextMenuItem(to: menu, title: "另存为…", symbol: "square.and.arrow.down") {
-                self.saveImageItem(item)
-            }
-        }
-        menu.addItem(.separator())
-        let isFavorite = backend.favoriteIds.contains(item.id)
-        addContextMenuItem(to: menu,
-                           title: isFavorite ? "取消收藏" : "收藏",
-                           symbol: isFavorite ? "star.slash" : "star") {
-            self.backend.toggleFavorite(item.id)
-            // Favorites may shrink displayItems; keep the selection valid.
-            if self.selectedIndex > self.maxIndex {
-                self.selectedIndex = max(0, self.maxIndex)
-            }
-        }
-        addContextMenuItem(to: menu, title: "删除", symbol: "trash", destructive: true) {
-            guard let idx = self.currentIndex(of: item.id) else { return }
-            self.deleteItem(at: idx)
-        }
-
-        guard let popup = popupWindow, let contentView = popup.contentView else { return }
-        let point = contentView.convert(request.windowPoint, from: nil)
-        menu.popUp(positioning: nil, at: point, in: contentView)
-    }
-
-    private func addContextMenuItem(to menu: NSMenu, title: String, symbol: String,
-                                    destructive: Bool = false, action: @escaping () -> Void) {
-        let handler = ContextMenuItemTarget(action)
-        let item = NSMenuItem(title: title,
-                              action: #selector(ContextMenuItemTarget.invoke(_:)),
-                              keyEquivalent: "")
-        item.target = handler
-        // NSMenuItem.target is weak; representedObject (strong) keeps the
-        // handler alive for as long as the menu owns the item.
-        item.representedObject = handler
-        item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)
-        if destructive {
-            item.attributedTitle = NSAttributedString(
-                string: title,
-                attributes: [.foregroundColor: NSColor.systemRed]
-            )
-        }
-        menu.addItem(item)
-    }
-
-    /// Copy the entry's full content to the system pasteboard without pasting.
-    /// The monitor re-captures it as a normal clipboard write: dedup keeps the
-    /// same entry id and moves it to the top of history (natural "re-copy"
-    /// semantics).
-    private func copyItemContent(_ item: ClipboardItem) {
-        switch item {
-        case .text:
-            guard let full = item.fullText else {
-                debugLog("copyItemContent: failed to load full text for entry \(item.id)")
-                return
-            }
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(full, forType: .string)
-        case .image:
-            guard let data = item.imageData else {
-                debugLog("copyItemContent: image not ready (entry \(item.id))")
-                return
-            }
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setData(data, forType: .png)
-        }
-    }
-
-    /// Save an image entry to a user-chosen location as a PNG file.
-    private func saveImageItem(_ item: ClipboardItem) {
-        guard case .image(_, _, _, _, let timestamp, _, _, _) = item,
-              let data = item.imageData else { return }
-        let panel = NSSavePanel()
-        panel.allowedContentTypes = [.png]
-        panel.canCreateDirectories = true
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd-HHmmss"
-        let date = Date(timeIntervalSince1970: TimeInterval(timestamp))
-        panel.nameFieldStringValue = "CopyAttach-\(formatter.string(from: date)).png"
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        do {
-            try data.write(to: url)
-        } catch {
-            debugLog("saveImageItem: failed to write \(url.path): \(error)")
-        }
-    }
-
-    private func selectItem(at index: Int) {
-        let items = displayItems
-        guard index < items.count else { return }
-        let item = items[index]
-        guard let backendIdx = backend.items.firstIndex(where: { $0.id == item.id }) else { return }
-        if backend.selectAndPaste(at: backendIdx) {
-            closePreview()
-            onClose()
-        }
-    }
-
-    // MARK: - Undo
-
-    /// Undo the most recent deletion. SwiftUI naturally animates the insertion
-    /// via identity-based diffing on `\.element.id`.
-    private func performUndo() {
-        guard backend.canUndo() else { return }
-
-        let savedSearchText = searchText
-
-        let success = withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) {
-            backend.undoDelete()
-        }
-        guard success else {
-            // Undo failed (DB error, entry gone, etc.). CanUndo returned true but
-            // by the time we popped the stack something went wrong.
-            // Restore search text — don't leave the user in a changed state.
-            searchText = savedSearchText
-            return
-        }
-
-        // Clear search only on success so the user sees the restored item
-        if !searchText.isEmpty {
-            searchText = ""
-        }
-
-        // Set selection to first item. Must happen AFTER searchText is cleared
-        // so selectedIndex is not immediately overwritten by onChange(of: searchText)
-        // which sets selectedIndex = 0.
-        DispatchQueue.main.async {
-            if self.displayItems.isEmpty {
-                self.selectedIndex = 0
-            } else {
-                self.selectedIndex = 1
-                self.scrollTarget = self.scrollTargetForItem(at: 0)
-            }
-        }
     }
 }

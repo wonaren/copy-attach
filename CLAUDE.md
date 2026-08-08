@@ -89,18 +89,18 @@ COPYATTACH_LICENSE_PUBLIC_KEY='efsKYx9a7urNlr-UXR7b0-Fl9w0mJNKe3RME-OeseOs' \
 
 | 模块 | 职责 |
 |---|---|
-| `ffi.rs` | 所有 `#[no_mangle] extern "C"` 导出函数，Snapshot API（`clipboard_snapshot_acquire/release`），select_and_paste，删除/撤销，存储管理，ignore rules 同步 |
-| `tests.rs` | 单元测试（cfg-gated），覆盖：去重/顺序/图片编解码/FFI 安全/阈值清理/边界值/ignore rules |
-| `db.rs` | SQLite write-through（rusqlite bundled），**禁用 mmap + 4MB LRU page cache**（FTS5 trigram 索引若被 mmap 会整段计入驻留内存，实测 ~1:1 RSS 膨胀，故全部走有界页缓存），从 DB 加载/写入，legacy JSON 迁移 |
+| `ffi/` | 所有 `#[no_mangle] extern "C"` 导出函数（目录模块）：`snapshot.rs`(Snapshot API)、`search.rs`、`init.rs`(生命周期/ignore rules)、`accessors.rs`(索引访问/图片加载/存储权限)、`paste.rs`(select_and_paste)、`history.rs`(删除/撤销/trim)、`stress.rs`(cfg-gated)。`mod.rs` 持共享助手并 `pub(crate) use` 重导出保持 `crate::ffi::*` 路径 |
+| `tests/` | 单元测试（cfg-gated），按主题拆分子模块：history/image/search/cleanup/db/backend；共享 helpers 在 `mod.rs`。覆盖：去重/顺序/图片编解码/FFI 安全/阈值清理/边界值/ignore rules |
+| `db/` | SQLite write-through（rusqlite bundled），目录模块：`schema.rs`(连接/建表/FTS5 索引)、`crud.rs`(load/insert/dedup/trim)、`migration.rs`(legacy JSON)、`search.rs`(FTS/LIKE/text 加载)。**禁用 mmap + 4MB LRU page cache**（FTS5 trigram 索引若被 mmap 会整段计入驻留内存，实测 ~1:1 RSS 膨胀，故全部走有界页缓存） |
 | `monitor.rs` | 后台线程每 300ms 轮询 arboard，先 `changeCount` 轻量检测再读内容，write-through DB，ignore rules 过滤，Finder 文件复制支持 |
 | `ignore.rs` | 捕获时忽略规则：按 app bundle ID、文本/图片类型、短文本阈值（Unicode scalar count）过滤。规则在插入前求值 |
-| `stress.rs` | 应力测试数据生成与基准测试，feature-gated behind `stress-test`（不在 release 构建中发布）。生成 1 万条混合文本/图片数据 |
+| `stress/` | 应力测试数据生成与基准测试，feature-gated behind `stress-test`（不在 release 构建中发布）。目录模块：`text.rs`/`image.rs`(内容生成)、`inject.rs`(DB 注入 + FFI/bench 助手)。生成 1 万条混合文本/图片数据 |
 | `types.rs` | `ClipboardEntry` 枚举（Text/Image），`SourceApp` 元数据，label 生成 |
 | `image.rs` | PNG/JPEG/GIF/WebP/BMP/TIFF 编解码，CatmullRom 缩略图（最长边 300px），`DefaultHasher` 内容哈希 |
 | `backend.rs` | `OnceLock<Backend>` 单例，entry_id（`AtomicU64`），常量（3000 阈值、300ms 轮询间隔），`HISTORY_REVISION`/`IMAGE_ENCODING_COUNTER` 原子计数器，`PendingSelfWrite` 自写抑制，`reload_history_from_db` |
 | `macos.rs` | NSPasteboard `changeCount` + 文件 URL 读写（`set_pasteboard_file_url`），CGEventPost Cmd+V / Ctrl+V，AXIsProcessTrusted，文件复制检测。cfg-gated，非 macOS 用空桩 |
 | `history.rs` | `add_to_history()` — 去重 + 头部插入，纯函数式（返回新 Vec） |
-| `bench_tests.rs` | 性能基准测试（cfg-gated on `test` + `stress-test`），覆盖：历史阈值扩展性、图片捕获/编码/缩略图性能、DB 存储规模测试 |
+| `bench_tests/` | 性能基准测试（cfg-gated on `test` + `stress-test`），目录模块：`thresholds.rs`/`images.rs`/`memory_probe.rs`，共享测量助手在 `mod.rs`。覆盖：历史阈值扩展性、图片捕获/编码/缩略图性能、DB 存储规模测试 |
 | `lib.rs` | 仅模块声明，`#![allow(dead_code)]` 全局开启 |
 
 **`src/bin/stress_gen.rs`**：独立的 CLI 二进制，通过 Rust FFI 生成应力测试数据并写入 SQLite。需要 `stress-test` feature。
