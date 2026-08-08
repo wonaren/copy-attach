@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/icon.svg" alt="CopyAttach" width="96">
+  <img src="assets/icon_inner.svg" alt="CopyAttach" width="96">
 </p>
 
 <h1 align="center">CopyAttach</h1>
