@@ -13,7 +13,7 @@ class ClipboardBackend {
     var permissionGranted: Bool = false
 
     private var timer: Timer?
-    private var sourceAppTimer: Timer?
+    private var sourceAppObserver: NSObjectProtocol?
     private let reloadQueue = DispatchQueue(label: "com.copyattach.reload", qos: .userInitiated)
     private var reloadGeneration = 0
     private var lastImageEncodingCounter: UInt64 = 0
@@ -82,11 +82,24 @@ class ClipboardBackend {
             MainActor.assumeIsolated { self.refresh() }
         }
 
-        // Periodically update the frontmost app info for Rust's clipboard monitor
-        sourceAppTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { [weak self] _ in
+        // Frontmost-app info for Rust's clipboard monitor (source attribution
+        // + paste target pid). Event-driven via NSWorkspace activation
+        // notifications instead of a 0.3s poll: each NSRunningApplication
+        // property access goes through LaunchServices and a synchronous XPC
+        // round-trip to launchservicesd — polling it 3×/s for hours left a
+        // ~115 MB process-side LS cache accumulation (measured: 12万 XPC
+        // calls over 10h, ~2KB nodes × 51k). App switches are rare; the
+        // notification fires exactly when the source changes.
+        sourceAppObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
             guard let self = self else { return }
             MainActor.assumeIsolated { self.updateSourceApp() }
         }
+        // Seed with the current frontmost app (no notification on launch).
+        updateSourceApp()
 
         // Trigger an immediate refresh so the UI isn't stale for 0.5s
         refresh()
@@ -97,8 +110,10 @@ class ClipboardBackend {
     func stop() {
         timer?.invalidate()
         timer = nil
-        sourceAppTimer?.invalidate()
-        sourceAppTimer = nil
+        if let observer = sourceAppObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(observer)
+            sourceAppObserver = nil
+        }
         clipboard_cleanup()
     }
 
