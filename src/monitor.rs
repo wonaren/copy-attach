@@ -408,11 +408,20 @@ pub(crate) fn clipboard_monitor(
                                     let row_id = conn.last_insert_rowid();
                                     trim_db_history(&conn, cleanup_threshold.load(Ordering::Relaxed));
 
-                                    // Re-acquire history lock to set db_id on the head entry
+                                    // Re-acquire history lock to set db_id on the captured
+                                    // entry. Match by content hash, never by head position:
+                                    // a concurrent select-and-paste (or undo) may have
+                                    // moved another entry to position 0 between Scope 1
+                                    // and here, and writing our rowid into that entry would
+                                    // orphan this one (db_id=0 forever) while pointing the
+                                    // other at a row that a later delete would remove from
+                                    // under us — an unpasteable, undeletable ghost.
                                     let mut hist = history.lock().unwrap();
-                                    if let Some(ClipboardEntry::Text { db_id, .. }) = hist.get_mut(0) {
-                                        *db_id = row_id;
-                                    }
+                                    crate::history::assign_db_id_by_text_hash(
+                                        &mut hist,
+                                        failed_hash,
+                                        row_id,
+                                    );
                                 } else {
                                     // Persist failed (I/O error, SQLITE_BUSY, or the FTS
                                     // trigger failing). The entry can never be pasted or

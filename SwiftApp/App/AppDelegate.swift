@@ -20,6 +20,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         Self.shared = self
 
+        // Route the Rust backend's stderr (eprintln) into the debug log. The
+        // LSUIElement agent has no terminal — without this, every Rust-side
+        // failure (DB write errors, persistence rollbacks, ghost-entry guards)
+        // is silently discarded by launchd and diagnosing data issues becomes
+        // guesswork.
+        redirectStderrToDebugLog()
+
         debugLog("Starting initialization...")
 
         // Get HotkeyManager setup first (doesn't require Rust backend)
@@ -62,6 +69,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         entitlementTimer?.invalidate()
         if backendStarted { ClipboardBackend.shared.stop() }
+    }
+
+    /// dup2 the process's stderr onto the debug log file so Rust's eprintln
+    /// diagnostics (which bypass Swift's debugLog) land in the same log.
+    /// Must run before the Rust backend starts. debugLog no longer writes to
+    /// stderr itself — the redirected fd would duplicate every line.
+    private func redirectStderrToDebugLog() {
+        let path = "/tmp/copyattach_debug.log"
+        let fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0o644)
+        guard fd >= 0 else { return }
+        dup2(fd, STDERR_FILENO)
+        close(fd)
     }
 
     @MainActor

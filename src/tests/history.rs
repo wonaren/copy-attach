@@ -1,6 +1,6 @@
 // History ordering and dedup tests — `add_to_history` semantics.
 
-use crate::history::add_to_history;
+use crate::history::{add_to_history, assign_db_id_by_text_hash};
 use crate::types::ClipboardEntry;
 use super::{make_image, make_test_image_rgba, make_text};
 
@@ -71,4 +71,73 @@ fn test_in_memory_order_newest_first() {
     assert_eq!(hist.len(), 5);
     assert_eq!(hist[0].label(), "item-4");
     assert_eq!(hist[4].label(), "item-0");
+}
+
+/// Regression test for the ghost-entry bug: the monitor's text capture
+/// assigns the freshly inserted SQLite rowid by content hash, NEVER by head
+/// position. A concurrent select-and-paste may have moved another entry to
+/// position 0 between the in-memory insert and the DB write-through; writing
+/// the rowid into that head entry would orphan the captured one (db_id=0 —
+/// unpasteable, undeletable, still listed) and point the head entry at a
+/// row that a later delete would remove from under it.
+#[test]
+fn test_assign_db_id_by_text_hash_ignores_head_position() {
+    // Simulate: captured entry "功能验证文本" sits at index 1 (db_id=0, its
+    // DB write is in flight) while a concurrent paste moved "other" to the
+    // head. The DB insert completed with rowid 42.
+    let mut hist = Vec::new();
+    let pasted = make_text("other-content", 300);
+    let captured = make_text("功能验证文本", 200);
+    hist = add_to_history(hist, pasted);
+    hist = add_to_history(hist, captured);
+
+    let captured_hash = match &hist[1] {
+        ClipboardEntry::Text { text_hash, .. } => *text_hash,
+        _ => unreachable!(),
+    };
+
+    assign_db_id_by_text_hash(&mut hist, captured_hash, 42);
+
+    // The captured entry (index 1) gets the rowid; the head entry is untouched.
+    match &hist[0] {
+        ClipboardEntry::Text { db_id, .. } => assert_eq!(*db_id, 0, "head entry must not receive the rowid"),
+        _ => unreachable!(),
+    }
+    match &hist[1] {
+        ClipboardEntry::Text { db_id, .. } => assert_eq!(*db_id, 42, "captured entry must receive its rowid"),
+        _ => unreachable!(),
+    }
+}
+
+/// Same as above but the captured entry sits at the head (the common no-race
+/// case) — assignment must still work.
+#[test]
+fn test_assign_db_id_by_text_hash_at_head() {
+    let mut hist = Vec::new();
+    let captured = make_text("capture-race", 100);
+    hist = add_to_history(hist, captured);
+
+    let captured_hash = match &hist[0] {
+        ClipboardEntry::Text { text_hash, .. } => *text_hash,
+        _ => unreachable!(),
+    };
+
+    assign_db_id_by_text_hash(&mut hist, captured_hash, 7);
+    match &hist[0] {
+        ClipboardEntry::Text { db_id, .. } => assert_eq!(*db_id, 7),
+        _ => unreachable!(),
+    }
+}
+
+/// A stale rowid must not be assigned to an unrelated entry (defensive: hash
+/// never matches ⇒ nothing changes).
+#[test]
+fn test_assign_db_id_by_text_hash_no_match_is_noop() {
+    let mut hist = Vec::new();
+    hist = add_to_history(hist, make_text("unrelated", 100));
+    assign_db_id_by_text_hash(&mut hist, 0xDEADBEEF, 99);
+    match &hist[0] {
+        ClipboardEntry::Text { db_id, .. } => assert_eq!(*db_id, 0),
+        _ => unreachable!(),
+    }
 }

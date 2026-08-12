@@ -2,8 +2,9 @@ import Foundation
 
 func debugLog(_ message: String) {
     let logLine = "[ClipboardManager] \(Date()) \(message)\n"
-    fputs(logLine, stderr)
-
+    // stderr is dup2'd onto the debug log file by AppDelegate at launch, so
+    // Rust's eprintln interleaves here too; write to the file directly to
+    // stay independent of that redirect (debugLog may run before it).
     if let handle = try? FileHandle(forWritingTo: URL(fileURLWithPath: "/tmp/copyattach_debug.log")) {
         handle.seekToEndOfFile()
         if let data = logLine.data(using: .utf8) {

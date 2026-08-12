@@ -10,8 +10,7 @@ use crate::types::ClipboardEntry;
 pub(crate) fn add_to_history(
     mut history: Vec<ClipboardEntry>,
     mut item: ClipboardEntry,
-) -> Vec<ClipboardEntry> {
-    let preserved_id = match &item {
+) -> Vec<ClipboardEntry> {    let preserved_id = match &item {
         ClipboardEntry::Text { text_hash, .. } => {
             let old_id = history.iter().find_map(|e| match e {
                 ClipboardEntry::Text { text_hash: h, id, .. } if h == text_hash => Some(*id),
@@ -43,4 +42,29 @@ pub(crate) fn add_to_history(
     }
     history.insert(0, item);
     history
+}
+
+/// Assign a freshly inserted SQLite rowid to the text entry whose content
+/// hash matches, wherever it sits in the list. Never assigns by head
+/// position: a concurrent select-and-paste (or undo) may have moved another
+/// entry to the front between the in-memory insert and the DB write-through.
+/// Writing our rowid into that head entry would orphan the captured one
+/// (db_id=0 forever — unpasteable, undeletable) while pointing the other at
+/// a row that a later delete would remove from under it.
+///
+/// Mirrors the image Phase 2 assignment in the monitor, which matches by
+/// content hash; this is its text twin.
+pub(crate) fn assign_db_id_by_text_hash(
+    history: &mut [ClipboardEntry],
+    text_hash: u64,
+    row_id: i64,
+) {
+    for entry in history.iter_mut() {
+        if let ClipboardEntry::Text { text_hash: h, db_id, .. } = entry {
+            if *h == text_hash {
+                *db_id = row_id;
+                break;
+            }
+        }
+    }
 }
