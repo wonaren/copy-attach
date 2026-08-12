@@ -50,8 +50,9 @@ bash stress_test.sh --quick         # 1000 条快速测试
 bash stress_test.sh --generate-only # 仅生成数据到 /tmp/copyattach_stress.db
 bash stress_test.sh --measure-only  # 用现有 DB 仅采集指标
 
-# 调试日志
+# 调试日志（Swift debugLog + Rust eprintln 均落盘）
 tail -f /tmp/copyattach_debug.log
+# AppDelegate 启动时 dup2 stderr → 日志文件，Rust 侧任何 DB 失败/守卫拒绝可见
 
 # 打开应用
 open "CopyAttach.app"
@@ -92,7 +93,7 @@ COPYATTACH_LICENSE_PUBLIC_KEY='efsKYx9a7urNlr-UXR7b0-Fl9w0mJNKe3RME-OeseOs' \
 | `ffi/` | 所有 `#[no_mangle] extern "C"` 导出函数（目录模块）：`snapshot.rs`(Snapshot API)、`search.rs`、`init.rs`(生命周期/ignore rules)、`accessors.rs`(索引访问/图片加载/存储权限)、`paste.rs`(select_and_paste)、`history.rs`(删除/撤销/trim)、`stress.rs`(cfg-gated)。`mod.rs` 持共享助手并 `pub(crate) use` 重导出保持 `crate::ffi::*` 路径 |
 | `tests/` | 单元测试（cfg-gated），按主题拆分子模块：history/image/search/cleanup/db/backend；共享 helpers 在 `mod.rs`。覆盖：去重/顺序/图片编解码/FFI 安全/阈值清理/边界值/ignore rules |
 | `db/` | SQLite write-through（rusqlite bundled），目录模块：`schema.rs`(连接/建表/FTS5 索引)、`crud.rs`(load/insert/dedup/trim)、`migration.rs`(legacy JSON)、`search.rs`(FTS/LIKE/text 加载)。**禁用 mmap + 4MB LRU page cache**（FTS5 trigram 索引若被 mmap 会整段计入驻留内存，实测 ~1:1 RSS 膨胀，故全部走有界页缓存） |
-| `monitor.rs` | 后台线程每 300ms 轮询 arboard，先 `changeCount` 轻量检测再读内容，write-through DB，ignore rules 过滤，Finder 文件复制支持 |
+| `monitor.rs` | 后台线程每 300ms 轮询 arboard，先 `changeCount` 轻量检测再读内容，write-through DB，ignore rules 过滤，Finder 文件复制支持。文本捕获 db_id 赋值按**内容 hash 匹配**（`history::assign_db_id_by_text_hash`，与图片 Phase 2 对称，绝不按头部位置） |
 | `ignore.rs` | 捕获时忽略规则：按 app bundle ID、文本/图片类型、短文本阈值（Unicode scalar count）过滤。规则在插入前求值 |
 | `stress/` | 应力测试数据生成与基准测试，feature-gated behind `stress-test`（不在 release 构建中发布）。目录模块：`text.rs`/`image.rs`(内容生成)、`inject.rs`(DB 注入 + FFI/bench 助手)。生成 1 万条混合文本/图片数据 |
 | `types.rs` | `ClipboardEntry` 枚举（Text/Image），`SourceApp` 元数据，label 生成 |
@@ -114,6 +115,7 @@ COPYATTACH_LICENSE_PUBLIC_KEY='efsKYx9a7urNlr-UXR7b0-Fl9w0mJNKe3RME-OeseOs' \
 - **Ignore rules**：捕获时求值，在条目分配/插入/持久化之前过滤。App 匹配使用 bundle identifier（显示名可变，不可靠）。
 - **undo 删除**：通过 `clipboard_last_restored_id()` 精确定位恢复项，避免监控线程插入竞争。撤销栈 `push_deleted` 双上限：最多 `DELETE_STACK_LIMIT`(10) 条 + 全文总字节 `MAX_UNDO_BYTES`(16MB)——超大文本粘贴被删后不得在栈里钉住几十 MB（内存条目不持正文，撤销栈是唯一能累积全文的地方；正常条目远低于上限，只有超大粘贴提前淘汰最老槽位）。
 - **原生拖拽**：历史条目支持拖到其他应用。文本→`NSItemProvider(object:)`，图片→临时 PNG 文件 (`public.file-url`)。窗口拖动区限制为 PopupHostingView 外 3pt 边框，避免行拖拽误触窗口移动。拖拽结束检测用 **`NSEvent.pressedMouseButtons` 轮询**（40ms Timer，注册 `.common` + `.eventTracking` 双 run loop 模式）——拖拽期间 run loop 处于 `NSEventTrackingRunLoopMode`，global/local monitor 收不到 mouse-up（官方文档确认该模式限制事件投递），Timer 是可靠信号。**拖拽在途时弹窗智能防遮挡停车**（`tickDragParking`，与松手检测共用同一个 40ms watcher tick）：每 tick 累积鼠标横向位移，累计 ≥`dragOcclusionThreshold`(40pt) 即停靠到拖拽方向对侧的屏幕边缘（右拖停左、左拖停右），绝不遮挡落点；方向在每 tick 连续重估，停靠后反向位移 ≥40pt 即翻转到另一侧边缘（停靠后同向漂移用 min/max 钳制、不计入反向累积——否则长同向行程后的部分反向需超过整段行程才能翻转，弹窗会停在正好盖住新落点的旧边缘）。`park(at:)` 用 `animator().setFrame` 驱动滑动（无边框 NSPanel 上 `setFrameOrigin` 静默不动画，`setFrame` 才真正滑动）；`tickParkingSlide` 侦测 CA 事务停顿（事件跟踪模式下帧动画可能卡死，3 tick 无位移即 `setFrameOrigin` 直接落位）。拖拽结束时开关关闭（保持弹窗开启）走 `restoreFromParking()` 滑回居中；开启走下面「拖拽后自动关闭」的 `close()` 路径。`show()`/`close()`/`completeItemDrag` 均 `resetDragParking()`，防停靠状态跨开闭循环残留。开关「拖拽后自动关闭弹窗」（`ClosePopupAfterDrag`，默认开，`object(forKey:) as? Bool ?? true`）开启时，拖拽结束（松手或弹窗失 key）**直接 `close()`——与按 Esc 相同的关闭路径**，无动画、无 completion 依赖；关闭时保持弹窗开启可连续拖拽，下一次外部点击（global click monitor）正常关闭。
+- **db_id 不变量（幽灵条目根修，0.99.13）**：内存条目的 `db_id` 必须指向 DB 中该条目的行，且赋值必须**按内容身份匹配、绝不按头部位置**——文本捕获 Scope 2 曾用 `hist.get_mut(0)` 无条件写头部条目（图片 Phase 2 一直按 hash 匹配，不对称）：并发 select-and-paste/undo 在 Scope 1 释放 history 锁后把别的条目移到头部时，本次捕获条目 db_id 保持 0（列表可见但无法预览/粘贴/**删除被拒**——`clipboard_delete_by_id` 对 db_id=0 文本显式拒绝，幽灵删不掉，重启后才消失），头部条目被指向他人行，后续删除会**误删该条目的行**（实测 symptom：DB 主表+FTS 双查无此文本、entry_id 连续缺失）。修复：`history::assign_db_id_by_text_hash` 按 hash 匹配赋值（与图片对称），3 个回归测试覆盖头部竞争/头部正常/无匹配 no-op。交叉验证过全部交错路径：paste/undo 的 add_to_history 去重会移除同文本条目，修复后两条路径自洽，无需其他改动。**配套**：Rust eprintln 此前被 launchd 丢弃（DebugLog 只拦 Swift 侧），所有 DB 失败静默——AppDelegate 启动 `dup2` stderr → `/tmp/copyattach_debug.log`，Rust 侧失败从此可见（符合「失败显式暴露」哲学）。
 - **Cargo 特性**：`migration`（默认开启）启用 serde/base64 依赖，提供旧版 history.json → SQLite 迁移。`stress-test` 启用应力测试面板和 CLI。
 
 ### Swift 前端（`SwiftApp/`，LSUIElement agent app——无 Dock 图标）
@@ -140,7 +142,7 @@ SwiftApp/
   │   ├── DeviceIdentity.swift         ← Secure Enclave P-256 设备身份 + hardware_anchor
   │   └── KeychainStore.swift          ← keychain 读写（svce=com.example.copyattach.licensing）
   │
-  ├── App/AppDelegate.swift            ← 生命周期, 弹窗/设置窗口管理, entitlement 门控, 庆祝时序
+  ├── App/AppDelegate.swift            ← 生命周期, 弹窗/设置窗口管理, entitlement 门控, 庆祝时序, 启动时 dup2 stderr → 调试日志
   │
   ├── Settings/
   │   └── InlineSettingsView.swift     ← 5 标签页设置面板（通用/快捷键/存储/忽略/关于）
@@ -174,7 +176,7 @@ SwiftApp/
   ├── SyntaxHighlight/                 ← 语法高亮（预留，当前为空目录）
   │
   └── Utility/
-      ├── DebugLog.swift               ← stderr + /tmp/copyattach_debug.log
+      ├── DebugLog.swift               ← Swift debugLog 写 /tmp/copyattach_debug.log（stderr 已 dup2 到同一文件，Rust eprintln 也落盘）
       └── VisualWidth.swift            ← CJK=2/ASCII=1 视觉宽度，prefix/suffix 截断
 ```
 
@@ -246,7 +248,7 @@ CI 发布版（`.github/workflows/build.yml`）的签名步骤同样决定用户
 
 ## 测试覆盖
 
-所有 Rust 测试集中在 `src/tests.rs`（cfg-gated）；`src/bench_tests.rs`（cfg-gated on `test` + `stress-test`）另含少量性能基准测试。覆盖：基本添加与顺序、去重（文本/图片/混合）、图片编解码与缩略图、内容哈希一致性、SourceApp 元数据、label 生成（含多字节安全）、FFI 空指针安全、阈值清理（多个阈值 + 边界 + 百分比 trim + ceil 行为）、阈值变更、ignore rules（app/类型/长度）、应力测试数据生成。
+所有 Rust 测试集中在 `src/tests.rs`（cfg-gated）；`src/bench_tests.rs`（cfg-gated on `test` + `stress-test`）另含少量性能基准测试。覆盖：基本添加与顺序、去重（文本/图片/混合）、图片编解码与缩略图、内容哈希一致性、SourceApp 元数据、label 生成（含多字节安全）、FFI 空指针安全、阈值清理（多个阈值 + 边界 + 百分比 trim + ceil 行为）、阈值变更、ignore rules（app/类型/长度）、db_id 按内容身份赋值（头部竞争/头部正常/无匹配）、应力测试数据生成。
 
 ## .claude 配置
 
