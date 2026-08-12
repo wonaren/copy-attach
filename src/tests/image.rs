@@ -1,8 +1,28 @@
 // Image encode/decode, hashing, and metadata/label/preview tests.
 
-use crate::image::{create_thumbnail, decode_png, encode_png, image_hash};
+use crate::image::{create_thumbnail, decode_png, encode_png, encode_png_into, image_hash};
 use crate::types::ClipboardEntry;
 use super::{make_image, make_test_image_rgba, make_text};
+
+#[test]
+fn test_encode_png_into_reuses_buffer() {
+    let rgba = make_test_image_rgba(16, 16, 100);
+    let expected = encode_png(16, 16, &rgba).expect("encode should succeed");
+
+    // Stale content longer than the PNG output: a missing clear() would leave
+    // a poisoned tail and fail the equality check below.
+    let mut reused = Vec::with_capacity(64 * 1024);
+    reused.extend_from_slice(&[0xAB; 4096]);
+    assert!(encode_png_into(16, 16, &rgba, &mut reused).is_some());
+    assert_eq!(reused, expected, "encode_png_into must clear stale bytes");
+
+    // Second encode into the same buffer must not grow the allocation —
+    // capacity is retained between captures (the whole point of the scratch).
+    let cap = reused.capacity();
+    assert!(encode_png_into(16, 16, &rgba, &mut reused).is_some());
+    assert_eq!(reused.capacity(), cap, "scratch buffer must be reused, not reallocated");
+    assert_eq!(reused, expected);
+}
 
 #[test]
 fn test_encode_decode_png() {

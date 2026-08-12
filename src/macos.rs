@@ -29,6 +29,58 @@ pub(crate) fn open_preferences() {
         .spawn();
 }
 
+/// Read the raw bytes of the first supported image representation from the
+/// general pasteboard.
+///
+/// Representation preference order: PNG first (typically the smallest
+/// full-resolution encoding — a 2940×1912 screenshot is ~1 MB PNG vs ~22 MB
+/// TIFF), then TIFF, JPEG, GIF, WebP, BMP. The pasteboard daemon usually
+/// publishes several representations of the same content; decoding the
+/// smallest keeps the capture pipeline's large transient buffers small
+/// (pasteboard data is CFData, whose freed blocks are NOT returned to the
+/// OS promptly — measured: a 22.5 MB TIFF read lingers as a ~21.5 MB
+/// retained region per capture, while the ~1 MB PNG counterpart is
+/// negligible).
+///
+/// Returns `None` if the pasteboard is inaccessible or carries no supported
+/// image representation. Format detection happens in the caller (the image
+/// crate sniffs magic bytes).
+pub(crate) fn pasteboard_image_data() -> Option<Vec<u8>> {
+    use objc2::rc::autoreleasepool;
+    autoreleasepool(|_| unsafe {
+        let cls = objc2::runtime::AnyClass::get(c"NSPasteboard")?;
+        let pasteboard: *mut objc2::runtime::NSObject = msg_send![cls, generalPasteboard];
+        if pasteboard.is_null() {
+            return None;
+        }
+        let nsstr_cls = objc2::runtime::AnyClass::get(c"NSString")?;
+        // Smallest full-resolution representation first.
+        for uti in [c"public.png", c"public.tiff", c"public.jpeg",
+                    c"com.compuserve.gif", c"org.webmproject.webp", c"com.microsoft.bmp"] {
+            let ns_uti: *mut objc2::runtime::NSObject =
+                msg_send![nsstr_cls, stringWithUTF8String: uti.as_ptr()];
+            if ns_uti.is_null() {
+                continue;
+            }
+            let data: *mut objc2::runtime::NSObject = msg_send![pasteboard, dataForType: ns_uti];
+            if data.is_null() {
+                continue;
+            }
+            let len: usize = msg_send![data, length];
+            if len == 0 {
+                continue;
+            }
+            let ptr: *const core::ffi::c_void = msg_send![data, bytes];
+            if ptr.is_null() {
+                continue;
+            }
+            let bytes = std::slice::from_raw_parts(ptr as *const u8, len);
+            return Some(bytes.to_vec());
+        }
+        None
+    })
+}
+
 /// Lightweight check: returns the pasteboard change count without reading
 /// or converting any image data. Returns `None` if pasteboard is inaccessible.
 pub(crate) fn pasteboard_change_count() -> Option<i64> {

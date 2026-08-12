@@ -22,7 +22,7 @@ use arboard::Clipboard;
 
 use crate::backend::{PendingSelfWrite, POLL_INTERVAL_MS};
 use crate::types::ClipboardEntry;
-use crate::image::{encode_png, create_thumbnail_fast, image_hash};
+use crate::image::{create_thumbnail_fast, image_hash};
 use crate::history::add_to_history;
 use crate::db::{insert_entry_to_db, delete_matching_entry, trim_db_history};
 use crate::ignore::IgnoreRules;
@@ -33,12 +33,14 @@ const THUMBNAIL_MAX_DIM: u32 = 300;
 
 /// Shared image processing pipeline: Phase 1 (in-memory) + Phase 2 (async DB).
 ///
-/// Accepts raw RGBA pixel data as a slice (borrowed for Phase 1, cloned only
-/// for the async Phase 2 closure). This avoids an extra allocation on the
-/// clipboard path where `img_data.bytes` is already live.
+/// Accepts raw RGBA pixel data **by ownership**: Phase 1 borrows it, Phase 2
+/// moves it into the encoding thread — zero copies. Both the clipboard path
+/// (image-crate decode → `to_rgba8`) and the file path (`ImageBuffer`) hand
+/// over the buffer via `into_raw`, so no intermediate buffer is ever
+/// duplicated.
 #[allow(clippy::too_many_arguments)]
 fn ingest_rgba_image(
-    rgba: &[u8],
+    rgba: Vec<u8>,
     width: u32,
     height: u32,
     history: &Arc<Mutex<Vec<ClipboardEntry>>>,
@@ -53,13 +55,13 @@ fn ingest_rgba_image(
     if ignore_rules.lock().unwrap().ignores_image() {
         return;
     }
-    let hash = image_hash(rgba, width, height);
+    let hash = image_hash(&rgba, width, height);
 
     // The caller invokes us only for a new pasteboard changeCount. Equal image
     // content is therefore a genuine re-copy and must refresh its history use.
     if width > 0 && height > 0 {
         // ── Phase 1 (sync): fast thumbnail → in-memory history ──
-        let (thumb_data, thumb_w, thumb_h) = if let Some(t) = create_thumbnail_fast(width, height, rgba, THUMBNAIL_MAX_DIM) { t } else {
+        let (thumb_data, thumb_w, thumb_h) = if let Some(t) = create_thumbnail_fast(width, height, &rgba, THUMBNAIL_MAX_DIM) { t } else {
             // Thumbnail creation failed (likely corrupt pixel data). Create
             // the entry anyway — Phase 2 full encode will determine if the
             // image data is truly broken and remove the entry if so.
@@ -104,22 +106,29 @@ fn ingest_rgba_image(
         let db = db.clone();
         let history = history.clone();
         let threshold = cleanup_threshold.load(Ordering::Relaxed);
-        let rgba_owned = rgba.to_vec();
         let item_hash = hash;
         let thumb_async = thumb_data;
 
         thread::spawn(move || {
-            let full_png = if let Some(png) = encode_png(width, height, &rgba_owned) { png } else {
-                eprintln!("CopyAttach: failed to encode full-size PNG for image {width}x{height} — removing broken entry from history");
-                // Remove the entry created in Phase 1 — without PNG data it can
-                // never be pasted. The user sees the entry appear and disappear,
-                // which is better than a ghost entry that silently fails on paste.
-                let mut hist = history.lock().unwrap();
-                hist.retain(|e| match e {
-                    ClipboardEntry::Image { hash: h, .. } => *h != item_hash,
-                    _ => true,
-                });
-                return;
+            // Encode into the shared scratch buffer (reused across captures):
+            // a fresh multi-MB output Vec per capture would linger as a
+            // retained region after free (large freed blocks are not returned
+            // to the OS promptly in this process).
+            let mut scratch = crate::backend::image_encode_scratch().lock().unwrap();
+            let full_png = match crate::image::encode_png_into(width, height, &rgba, &mut scratch) {
+                Some(()) => scratch.as_slice(),
+                None => {
+                    eprintln!("CopyAttach: failed to encode full-size PNG for image {width}x{height} — removing broken entry from history");
+                    // Remove the entry created in Phase 1 — without PNG data it can
+                    // never be pasted. The user sees the entry appear and disappear,
+                    // which is better than a ghost entry that silently fails on paste.
+                    let mut hist = history.lock().unwrap();
+                    hist.retain(|e| match e {
+                        ClipboardEntry::Image { hash: h, .. } => *h != item_hash,
+                        _ => true,
+                    });
+                    return;
+                }
             };
 
             // Lock history FIRST to find and clone the item (consistent lock order)
@@ -142,7 +151,7 @@ fn ingest_rgba_image(
                 if insert_entry_to_db(
                     &conn, &db_item,
                     None,
-                    Some(&full_png),
+                    Some(full_png),
                     Some((&thumb_async, thumb_w, thumb_h)),
                 ).is_err() {
                     eprintln!("CopyAttach: Phase 2 DB insert failed for image {width}x{height} — entry stays with db_id=0");
@@ -216,7 +225,7 @@ fn try_ingest_image_files(
         eprintln!("CopyAttach: captured image file: {path} ({w}x{h})");
 
         ingest_rgba_image(
-            &pixels, w, h,
+            pixels, w, h,
             history, last_seen_image_hash, last_seen_text, db, src, now, cleanup_threshold, ignore_rules,
         );
         return true;
@@ -328,15 +337,30 @@ pub(crate) fn clipboard_monitor(
         let mut captured = false;
 
         if image_allowed {
-            if let Ok(img_data) = cb.get_image() {
-                ingest_rgba_image(
-                    &img_data.bytes,
-                    img_data.width as u32,
-                    img_data.height as u32,
-                    &history, &last_seen_image_hash, &last_seen_text,
-                    &db, &src, now, &cleanup_threshold, &ignore_rules,
-                );
-                captured = true;
+            if let Some(img_bytes) = macos::pasteboard_image_data() {
+                // Decode with the image crate (same codec path arboard used for
+                // TIFF, now extended to every pasteboard representation — PNG
+                // first, ~22× smaller than the TIFF for screenshots). Decoding
+                // here instead of via arboard keeps the largest transient (the
+                // CFData pasteboard copy) at ~1 MB instead of ~22 MB.
+                match image::load_from_memory(&img_bytes) {
+                    Ok(img) => {
+                        let rgba = img.to_rgba8();
+                        let (w, h) = rgba.dimensions();
+                        ingest_rgba_image(
+                            rgba.into_raw(),
+                            w, h,
+                            &history, &last_seen_image_hash, &last_seen_text,
+                            &db, &src, now, &cleanup_threshold, &ignore_rules,
+                        );
+                        captured = true;
+                    }
+                    Err(e) => {
+                        // Image data present but undecodable (exotic format).
+                        // Fail explicitly — do not fabricate a capture.
+                        eprintln!("CopyAttach: pasteboard image data ({} bytes) undecodable: {e}", img_bytes.len());
+                    }
+                }
             }
         }
 

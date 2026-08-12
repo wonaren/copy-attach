@@ -108,7 +108,7 @@ COPYATTACH_LICENSE_PUBLIC_KEY='efsKYx9a7urNlr-UXR7b0-Fl9w0mJNKe3RME-OeseOs' \
 **`src/bin/bench.rs`**：独立的性能基准 CLI，测试快照克隆、计数、图片编解码、CJK 搜索过滤。需要 `stress-test` feature。
 
 **关键机制**：
-- **两阶段图片捕获**：Phase 1 同步 hash + CatmullRom 缩略图（最长边 300px）→ 更新内存。Phase 2 异步完整 PNG 编码 → DB write-through → 更新 db_id。避免 4K 截图阻塞监控线程。
+- **两阶段图片捕获**：Phase 1 同步 hash + CatmullRom 缩略图（最长边 300px）→ 更新内存。Phase 2 异步完整 PNG 编码 → DB write-through → 更新 db_id。避免 4K 截图阻塞监控线程。**内存治理（0.99.10）**：① 启动不做基线剪贴板读取——monitor 的 changeCount seed 已防止重启重复捕获，删除该读取消除了每次启动解码当前剪贴板图片的 ~65MB 滞留（`clipboard_init` 曾用 arboard 解码，实测空剪贴板启动 15MB vs 截图在板 93MB）；② 图片捕获不走 arboard（其 macOS 实现只读 `public.tiff`，22.5MB/张），改由 `macos::pasteboard_image_data()` 按 PNG→TIFF→JPEG→GIF→WebP→BMP 顺序读最小全分辨率表示（截图 PNG 仅 ~1MB）+ `image` crate 解码（CFData 释放后大块滞留 OS 不回收——实测 `malloc_zone_pressure_relief` 对之无效，故无此调用）；③ rgba 以所有权移入 Phase 2（零拷贝，原 `to_vec()` 16MB/张）；④ Phase 2 编码输出复用全局 scratch（`backend::image_encode_scratch`，跨捕获保留容量，消灭每次 8MB 倍增 realloc 链）。
 - **Suppress re-capture**：select_and_paste 先通过 `pasteboard_event_lock` + `pending_self_write` 标记自身的粘贴板写入，监控线程发现匹配的 changeCount 时跳过。不再依赖内容比对。
 - **HISTORY_REVISION**：去重时条目数不变但顺序变了——UI 通过此计数器感知"需要刷新列表"而不仅仅是 count 变化。
 - **Ignore rules**：捕获时求值，在条目分配/插入/持久化之前过滤。App 匹配使用 bundle identifier（显示名可变，不可靠）。

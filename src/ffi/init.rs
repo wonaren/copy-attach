@@ -3,12 +3,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use arboard::Clipboard;
-
 use crate::backend::{set_backend, Backend, DEFAULT_CLEANUP_THRESHOLD};
 use crate::db::{ensure_history_table, load_history_from_db, migrate_from_json_to_db, open_db, trim_db_history};
 use crate::ignore::IgnoreRules;
-use crate::image::image_hash;
 use crate::monitor::clipboard_monitor;
 use crate::types::ClipboardEntry;
 
@@ -125,24 +122,15 @@ pub extern "C" fn clipboard_init() -> c_int {
         return 0; // Already initialized
     }
 
-    // Establish clipboard baseline: read current system clipboard content and
-    // initialize last_seen_* accordingly.
-    if let Ok(mut tmp_cb) = Clipboard::new() {
-        if let Ok(img) = tmp_cb.get_image() {
-            let hash = image_hash(&img.bytes, img.width as u32, img.height as u32);
-            *last_seen_image_hash.lock().unwrap() = Some(hash);
-            *last_seen_text.lock().unwrap() = None;
-        } else if let Ok(text) = tmp_cb.get_text() {
-            if !text.is_empty() {
-                *last_seen_text.lock().unwrap() = Some(text);
-                *last_seen_image_hash.lock().unwrap() = None;
-            }
-        } else {
-            eprintln!("CopyAttach: clipboard baseline read failed (empty pasteboard or unsupported content)");
-        }
-    } else {
-        eprintln!("CopyAttach: failed to open clipboard for baseline read");
-    }
+    // NOTE: no baseline clipboard read here. The monitor seeds
+    // `last_change_count` from the pasteboard changeCount at startup, so the
+    // first poll never treats the pre-existing clipboard state as a new
+    // capture — the baseline is the changeCount seed, not the payload.
+    // Decoding the current clipboard image here used to cost ~65MB of
+    // retained ImageIO decode buffers at every launch (measured: the
+    // buffers are vm_allocate'd outside the malloc zone, so neither
+    // `malloc_zone_pressure_relief` nor natural malloc reuse reclaims
+    // them promptly).
 
     let handle = thread::spawn(|| clipboard_monitor(
         history, running, source_app, db,

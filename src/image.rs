@@ -2,12 +2,22 @@
 
 use image::imageops::FilterType;
 
-/// Encode raw RGBA bytes into PNG format.
-pub(crate) fn encode_png(width: u32, height: u32, rgba_bytes: &[u8]) -> Option<Vec<u8>> {
+/// Encode raw RGBA bytes into PNG format, writing into `output`. The buffer
+/// is reused across captures: capacity is retained between calls, so repeated
+/// image copies don't allocate-and-free a fresh multi-MB Vec (and its
+/// doubling realloc chain) each time.
+pub(crate) fn encode_png_into(width: u32, height: u32, rgba_bytes: &[u8], output: &mut Vec<u8>) -> Option<()> {
     use image::{ImageBuffer, Rgba};
     let img = ImageBuffer::<Rgba<u8>, &[u8]>::from_raw(width, height, rgba_bytes)?;
+    output.clear();
+    img.write_to(&mut std::io::Cursor::new(output), image::ImageFormat::Png).ok()?;
+    Some(())
+}
+
+/// Encode raw RGBA bytes into PNG format.
+pub(crate) fn encode_png(width: u32, height: u32, rgba_bytes: &[u8]) -> Option<Vec<u8>> {
     let mut output = Vec::new();
-    img.write_to(&mut std::io::Cursor::new(&mut output), image::ImageFormat::Png).ok()?;
+    encode_png_into(width, height, rgba_bytes, &mut output)?;
     Some(output)
 }
 

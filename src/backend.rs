@@ -116,6 +116,24 @@ pub(crate) struct PendingSelfWrite {
 }
 
 // ═══════════════════════════════════════════
+// Image capture scratch pool
+// ═══════════════════════════════════════════
+
+/// Reusable full-PNG encode scratch buffer for the capture pipeline's Phase 2
+/// (see `monitor::ingest_rgba_image`). Captures are serialized by the monitor
+/// thread, so one pooled buffer serves them all — a fresh multi-MB Vec per
+/// capture would otherwise churn the malloc zone (large freed blocks are not
+/// returned to the OS promptly in this process — measured: CFData/pasteboard
+/// copies and multi-MB decode buffers linger as retained regions). The guard
+/// is held across the whole Phase 2 body (encode + DB bind), then the buffer
+/// returns to the pool.
+static IMAGE_ENCODE_SCRATCH: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+
+pub(crate) fn image_encode_scratch() -> &'static Mutex<Vec<u8>> {
+    &IMAGE_ENCODE_SCRATCH
+}
+
+// ═══════════════════════════════════════════
 // Backend Struct & Singleton
 // ═══════════════════════════════════════════
 
