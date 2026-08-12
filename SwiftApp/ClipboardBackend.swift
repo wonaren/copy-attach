@@ -77,10 +77,9 @@ class ClipboardBackend {
         }
         syncIgnoreRules()
 
-        timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
-            guard let self = self else { return }
-            MainActor.assumeIsolated { self.refresh() }
-        }
+        // UI polling is driven by the popup lifecycle (setPopupVisible) — the
+        // history list is only visible while the popup is open, so polling
+        // with it closed is pure waste. Nothing is scheduled here.
 
         // Frontmost-app info for Rust's clipboard monitor (source attribution
         // + paste target pid). Event-driven via NSWorkspace activation
@@ -101,7 +100,8 @@ class ClipboardBackend {
         // Seed with the current frontmost app (no notification on launch).
         updateSourceApp()
 
-        // Trigger an immediate refresh so the UI isn't stale for 0.5s
+        refreshPermission()
+        // One-time initial sync; live updates resume when the popup opens.
         refresh()
 
         return true
@@ -115,6 +115,26 @@ class ClipboardBackend {
             sourceAppObserver = nil
         }
         clipboard_cleanup()
+    }
+
+    /// Popup lifecycle hook: while the popup is visible its list must track
+    /// new captures (0.5s poll of pure FFI atomics); with it closed there is
+    /// nothing to refresh, so the poll is stopped entirely — the background
+    /// app performs no UI polling at all.
+    @MainActor
+    func setPopupVisible(_ visible: Bool) {
+        if visible {
+            refreshPermission()
+            refresh()
+            guard timer == nil else { return }
+            timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+                guard let self = self else { return }
+                MainActor.assumeIsolated { self.refresh() }
+            }
+        } else {
+            timer?.invalidate()
+            timer = nil
+        }
     }
 
     /// Pushes the persisted capture policy to Rust. The monitor evaluates it
@@ -155,6 +175,9 @@ class ClipboardBackend {
         }
     }
 
+    /// Data poll: three pure FFI atomic reads + revision-gated reload. No
+    /// system-framework calls, so the 0.5s popup-open poll is structurally
+    /// allocation-free and cannot accumulate anything over time.
     private func refresh() {
         let newCount = Int(clipboard_get_count())
         let newEncCounter = clipboard_get_image_encoding_counter()
@@ -167,6 +190,12 @@ class ClipboardBackend {
             lastHistoryRevision = newHistoryRevision
             reloadItems()
         }
+    }
+
+    /// Explicit accessibility-permission check point (startup, popup open,
+    /// settings open). Not polled in the background: AXIsProcessTrusted is a
+    /// system call, and permission changes are rare user actions.
+    func refreshPermission() {
         let wasGranted = permissionGranted
         permissionGranted = checkPermission()
         if !wasGranted && permissionGranted {

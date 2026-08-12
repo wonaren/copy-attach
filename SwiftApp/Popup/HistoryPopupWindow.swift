@@ -137,6 +137,10 @@ class HistoryPopupWindow: NSPanel {
     func show() {
         debugLog("HistoryPopupWindow.show() called")
 
+        // Start the popup-driven UI poll (0.5s refresh of pure FFI atomics)
+        // and refresh the accessibility-permission state while we're at it.
+        ClipboardBackend.shared.setPopupVisible(true)
+
         // Cancel a pending close-guarantee from a prior closeWithAnimation: if
         // the user re-opens before its 0.4s deadline, the stale timer must not
         // force-close the freshly re-shown window.
@@ -374,6 +378,9 @@ class HistoryPopupWindow: NSPanel {
     }
 
     override func close() {
+        // Stop the popup-driven UI poll: the list is no longer visible.
+        ClipboardBackend.shared.setPopupVisible(false)
+
         NotificationCenter.default.removeObserver(self, name: NSWindow.didResignKeyNotification, object: self)
         NotificationCenter.default.removeObserver(self, name: NSWindow.didBecomeKeyNotification, object: self)
         itemDragInProgress = false

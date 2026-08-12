@@ -280,6 +280,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private func openSettingsWindow(initialTab: Int = 0) {
+        // Settings shows the accessibility-permission state — refresh it now
+        // (explicit check point, no background polling).
+        ClipboardBackend.shared.refreshPermission()
+
         // If we already have a settings window, bring it to front
         if let existing = settingsWindow, existing.isVisible {
             debugLog("Reusing existing settings window")

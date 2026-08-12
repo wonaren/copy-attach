@@ -6,6 +6,7 @@
 
 use std::ffi::c_int;
 use std::process::Command;
+use std::sync::OnceLock;
 use objc2::msg_send;
 use objc2_core_graphics::{
     CGEvent, CGEventFlags, CGEventSource, CGEventSourceStateID,
@@ -48,7 +49,7 @@ pub(crate) fn open_preferences() {
 pub(crate) fn pasteboard_image_data() -> Option<Vec<u8>> {
     use objc2::rc::autoreleasepool;
     autoreleasepool(|_| unsafe {
-        let cls = objc2::runtime::AnyClass::get(c"NSPasteboard")?;
+        let cls = nspasteboard_class()?;
         let pasteboard: *mut objc2::runtime::NSObject = msg_send![cls, generalPasteboard];
         if pasteboard.is_null() {
             return None;
@@ -81,18 +82,37 @@ pub(crate) fn pasteboard_image_data() -> Option<Vec<u8>> {
     })
 }
 
+/// Cached `NSPasteboard` class reference.
+///
+/// The monitor thread resolves the class and reads `changeCount` every 300 ms
+/// for the app's entire lifetime — that is ~120k class lookups per day, each
+/// of which walks the dyld class registry. Caching makes the poll a pure
+/// message-send on a stable pointer: structurally allocation-free, so the
+/// hot poll path can never accumulate memory no matter how long it runs.
+static NSPASTEBOARD_CLASS: OnceLock<Option<&'static objc2::runtime::AnyClass>> = OnceLock::new();
+
+fn nspasteboard_class() -> Option<&'static objc2::runtime::AnyClass> {
+    *NSPASTEBOARD_CLASS.get_or_init(|| objc2::runtime::AnyClass::get(c"NSPasteboard"))
+}
+
 /// Lightweight check: returns the pasteboard change count without reading
 /// or converting any image data. Returns `None` if pasteboard is inaccessible.
+///
+/// Wrapped in an autorelease pool: this is the monitor thread's hot path
+/// (every 300 ms); a Rust thread has no implicit pool, and any autoreleased
+/// intermediate created by AppKit under the hood would otherwise linger
+/// until the thread exits.
 pub(crate) fn pasteboard_change_count() -> Option<i64> {
-    unsafe {
-        let cls = objc2::runtime::AnyClass::get(c"NSPasteboard")?;
+    use objc2::rc::autoreleasepool;
+    autoreleasepool(|_| unsafe {
+        let cls = nspasteboard_class()?;
         let pasteboard: *mut objc2::runtime::NSObject = msg_send![cls, generalPasteboard];
         if pasteboard.is_null() {
             return None;
         }
         let count: isize = msg_send![pasteboard, changeCount];
         Some(count as i64)
-    }
+    })
 }
 
 /// Check whether the general pasteboard contains file URLs.
@@ -173,7 +193,7 @@ pub(crate) fn pasteboard_file_paths() -> Vec<String> {
 
 /// Internal helper: extract raw `file://` URL strings from pasteboard items.
 unsafe fn pasteboard_file_url_strings() -> Vec<String> {
-    let cls = match objc2::runtime::AnyClass::get(c"NSPasteboard") {
+    let cls = match nspasteboard_class() {
         Some(c) => c,
         None => return vec![],
     };
@@ -243,7 +263,7 @@ unsafe fn pasteboard_file_url_strings() -> Vec<String> {
 /// written (the pasteboard has been cleared regardless).
 pub(crate) fn set_pasteboard_file_url(path: &str) -> bool {
     unsafe {
-        let pasteboard_cls = match objc2::runtime::AnyClass::get(c"NSPasteboard") {
+        let pasteboard_cls = match nspasteboard_class() {
             Some(c) => c,
             None => {
                 eprintln!("CopyAttach: NSPasteboard class not found in ObjC runtime");
