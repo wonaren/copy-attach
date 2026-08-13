@@ -41,14 +41,12 @@ pub extern "C" fn clipboard_init() -> c_int {
             let running = Arc::clone(&b.running);
             let source_app = Arc::clone(&b.source_app);
             let db = Arc::clone(&b.db);
-            let last_seen_text = Arc::clone(&b.last_seen_text);
-            let last_seen_image_hash = Arc::clone(&b.last_seen_image_hash);
             let pasteboard_event_lock = Arc::clone(&b.pasteboard_event_lock);
             let pending_self_write = Arc::clone(&b.pending_self_write);
             let cleanup_threshold = Arc::clone(&b.cleanup_threshold);
             let ignore_rules = Arc::clone(&b.ignore_rules);
-            move || clipboard_monitor(history, running, source_app, db, last_seen_text,
-                last_seen_image_hash, pasteboard_event_lock, pending_self_write,
+            move || clipboard_monitor(history, running, source_app, db,
+                pasteboard_event_lock, pending_self_write,
                 cleanup_threshold, ignore_rules)
         });
         *b.monitor_handle.lock().unwrap() = Some(handle);
@@ -92,8 +90,6 @@ pub extern "C" fn clipboard_init() -> c_int {
     let history: Arc<Mutex<Vec<ClipboardEntry>>> = Arc::new(Mutex::new(saved));
     let running = Arc::new(AtomicBool::new(true));
     let source_app = Arc::new(Mutex::new(crate::types::SourceApp::default()));
-    let last_seen_text: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-    let last_seen_image_hash: Arc<Mutex<Option<u64>>> = Arc::new(Mutex::new(None));
     let pasteboard_event_lock = Arc::new(Mutex::new(()));
     let pending_self_write = Arc::new(Mutex::new(None));
     let db = Arc::new(Mutex::new(conn));
@@ -107,8 +103,6 @@ pub extern "C" fn clipboard_init() -> c_int {
         running: Arc::clone(&running),
         monitor_handle: Mutex::new(None),
         source_app: Arc::clone(&source_app),
-        last_seen_text: Arc::clone(&last_seen_text),
-        last_seen_image_hash: Arc::clone(&last_seen_image_hash),
         pasteboard_event_lock: Arc::clone(&pasteboard_event_lock),
         pending_self_write: Arc::clone(&pending_self_write),
         db: Arc::clone(&db),
@@ -134,7 +128,7 @@ pub extern "C" fn clipboard_init() -> c_int {
 
     let handle = thread::spawn(|| clipboard_monitor(
         history, running, source_app, db,
-        last_seen_text, last_seen_image_hash, pasteboard_event_lock, pending_self_write,
+        pasteboard_event_lock, pending_self_write,
         cleanup_threshold, ignore_rules,
     ));
 

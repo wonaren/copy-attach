@@ -23,12 +23,23 @@ extension NSImage {
 /// as a single 36 pt representation (2× the 18 pt row size) — NSWorkspace
 /// icons carry every size up to 512 pt, and caching the full multi-rep image
 /// would pin hundreds of KB per app for an 18 pt row.
-@MainActor private var appIconCache: [String: NSImage] = [:]
+///
+/// Bounded by `countLimit`: a plain dictionary would keep one ~20 KB bitmap
+/// per distinct source app for the whole process lifetime (unbounded growth
+/// over months of use). NSCache evicts the least-recently-used entries past
+/// the cap and under system memory pressure; a re-decoded icon costs one
+/// NSWorkspace lookup on the next scroll.
+@MainActor private let appIconCache: NSCache<NSString, NSImage> = {
+    let cache = NSCache<NSString, NSImage>()
+    cache.countLimit = 128
+    return cache
+}()
 
 @MainActor
 func getAppIcon(for bundleId: String) -> NSImage? {
     if bundleId.isEmpty { return nil }
-    if let cached = appIconCache[bundleId] { return cached }
+    let key = bundleId as NSString
+    if let cached = appIconCache.object(forKey: key) { return cached }
 
     // Try to get icon from the running application
     let icon: NSImage? = {
@@ -52,6 +63,6 @@ func getAppIcon(for bundleId: String) -> NSImage? {
     scaled.lockFocus()
     icon.draw(in: NSRect(x: 0, y: 0, width: 36, height: 36))
     scaled.unlockFocus()
-    appIconCache[bundleId] = scaled
+    appIconCache.setObject(scaled, forKey: key)
     return scaled
 }

@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import Observation
+import os
 
 /// Swift wrapper around the Rust copy_attach C FFI.
 @MainActor
@@ -15,7 +16,10 @@ class ClipboardBackend {
     private var timer: Timer?
     private var sourceAppObserver: NSObjectProtocol?
     private let reloadQueue = DispatchQueue(label: "com.copyattach.reload", qos: .userInitiated)
-    private var reloadGeneration = 0
+    /// Monotonic generation of reload requests. Read on the background
+    /// reload queue (to skip stale snapshot builds) and bumped on the main
+    /// actor — a lock keeps the two sides race-free.
+    private let reloadGeneration = OSAllocatedUnfairLock(initialState: 0)
     private var lastImageEncodingCounter: UInt64 = 0
     private var lastHistoryRevision: UInt64 = 0
     private let thumbnailCache: NSCache<NSNumber, NSImage> = {
@@ -207,10 +211,22 @@ class ClipboardBackend {
     }
 
     private func reloadItems() {
-        let gen = reloadGeneration &+ 1
-        reloadGeneration = gen
-        reloadQueue.async { [gen] in
-            guard let snap = clipboard_snapshot_acquire() else { return }
+        let gen = reloadGeneration.withLock { generation in
+            generation &+= 1
+            return generation
+        }
+        // Local copy of the lock struct: it wraps a shared underlying lock,
+        // so the background queue can race the main actor without capturing
+        // `self` into the @Sendable closure.
+        let generationLock = reloadGeneration
+        reloadQueue.async { [gen, generationLock] in
+            // Several changes can queue reloads in a burst (e.g. consecutive
+            // image Phase-2 completions). Skip building a full snapshot —
+            // per-row CString allocs/frees for up to thousands of rows — when
+            // a newer request has already superseded this one; the result
+            // would be discarded anyway.
+            let stale = generationLock.withLock { $0 != gen }
+            guard !stale, let snap = clipboard_snapshot_acquire() else { return }
             defer { clipboard_snapshot_release(snap) }
 
             let c = Int(clipboard_snapshot_count(snap))
@@ -280,7 +296,7 @@ class ClipboardBackend {
             DispatchQueue.main.async { [gen, weak self] in
                 guard let self = self else { return }
                 MainActor.assumeIsolated {
-                    guard gen == self.reloadGeneration else { return }
+                    guard gen == self.reloadGeneration.withLock({ $0 }) else { return }
                     self.items = newItems
                 }
             }
@@ -354,7 +370,7 @@ class ClipboardBackend {
             count = items.count
             // Bump generation to discard any stale in-flight snapshot
             // that might still include the deleted item.
-            reloadGeneration &+= 1
+            reloadGeneration.withLock { $0 &+= 1 }
         }
         return result
     }
@@ -396,7 +412,7 @@ class ClipboardBackend {
             // Rust didn't record a restored ID — use first-snapshot fallback.
             guard let restoredItem = readFirstSnapshotItem(snap) else { return false }
             items.insert(restoredItem, at: 0)
-            reloadGeneration &+= 1
+            reloadGeneration.withLock { $0 &+= 1 }
             return true
         }
 
@@ -412,7 +428,7 @@ class ClipboardBackend {
             }
         }
 
-        reloadGeneration &+= 1
+        reloadGeneration.withLock { $0 &+= 1 }
         return true
     }
 

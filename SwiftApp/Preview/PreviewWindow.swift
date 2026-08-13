@@ -9,7 +9,12 @@ class PreviewWindow: NSPanel {
     private var currentItemId: Int = 0
 
     /// Cache text heights per entryId so arrow-key navigation doesn't re-layout.
+    /// Bounded: the static dictionary would otherwise keep an entry for every
+    /// item ever previewed across the whole process lifetime (including
+    /// deleted entries). 512 entries is far beyond any realistic preview
+    /// session; older entries are evicted and simply re-measured.
     private static var textHeightCache: [Int: CGFloat] = [:]
+    private static let textHeightCacheMaxEntries = 512
 
     override var canBecomeKey: Bool { false }
 
@@ -128,6 +133,10 @@ class PreviewWindow: NSPanel {
     private static func calculateTextHeight(_ text: String, width: CGFloat, entryId: Int) -> CGFloat {
         if let cached = textHeightCache[entryId] { return cached }
         let height = PreviewTextLayout.measureHeight(text, width: width) + 28
+        if textHeightCache.count >= textHeightCacheMaxEntries,
+           let key = textHeightCache.keys.first {
+            textHeightCache.removeValue(forKey: key)
+        }
         textHeightCache[entryId] = height
         return height
     }

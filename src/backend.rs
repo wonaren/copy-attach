@@ -11,36 +11,49 @@ use crate::ignore::IgnoreRules;
 
 /// One slot in the undo stack: the deleted entry plus its full text body.
 /// Text entries no longer hold their body in memory, so it is loaded from DB
-/// at delete time and stashed here for undo; images carry their blobs on the
-/// entry itself and store `None`.
+/// at delete time and stashed here for undo; image entries carry their PNG +
+/// thumbnail blobs on the entry itself and store `None`.
 pub(crate) type DeletedStackEntry = (ClipboardEntry, Option<String>);
 
 /// Max undo slots kept on the stack (newest N deletions).
 pub(crate) const DELETE_STACK_LIMIT: usize = 10;
 
-/// Total bytes of text bodies the undo stack may retain. Normal entries are
-/// far below this; only very large pastes shed the oldest undo slots early.
-pub(crate) const MAX_UNDO_BYTES: usize = 16 * 1024 * 1024;
+/// Total bytes the undo stack may retain, counting text bodies AND image
+/// blobs (png + thumb). The undo stack is the only place full payloads can
+/// accumulate (the in-memory history holds metadata only), so without a
+/// unified byte cap deleting a handful of large images would pin unbounded
+/// memory until process exit. 48 MB covers ~10 typical multi-MB deletions;
+/// oversized payloads shed oldest slots first — symmetric with the existing
+/// text behavior, where a single pasted body above the cap is already
+/// un-undoable.
+pub(crate) const MAX_UNDO_BYTES: usize = 48 * 1024 * 1024;
+
+/// Bytes a stack slot retains: full text body for text entries, PNG +
+/// thumbnail blobs for image entries.
+fn retained_bytes((entry, text): &DeletedStackEntry) -> usize {
+    match (entry, text) {
+        (_, Some(t)) => t.len(),
+        (ClipboardEntry::Image { png_data, thumb_data, .. }, None) => {
+            png_data.len() + thumb_data.len()
+        }
+        _ => 0,
+    }
+}
 
 /// Push an entry onto the undo stack, keeping the newest `DELETE_STACK_LIMIT`
-/// entries AND bounding the total retained text bodies (`MAX_UNDO_BYTES`):
-/// deleting a very large paste must not pin tens of MB in memory (the
-/// in-memory history no longer holds bodies, so the undo stack is the only
-/// place full text can accumulate). Oldest slots are shed until both caps
-/// hold.
+/// entries AND bounding the total retained payload bytes (`MAX_UNDO_BYTES`):
+/// deleting very large pastes or images must not pin tens of MB in memory.
+/// Oldest slots are shed until both caps hold.
 pub(crate) fn push_deleted(
     stack: &mut Vec<DeletedStackEntry>,
     entry: ClipboardEntry,
     undo_text: Option<String>,
 ) {
     stack.push((entry, undo_text));
-    let mut bytes: usize = stack
-        .iter()
-        .filter_map(|(_, t)| t.as_ref().map(|s| s.len()))
-        .sum();
+    let mut bytes: usize = stack.iter().map(retained_bytes).sum();
     while stack.len() > DELETE_STACK_LIMIT || bytes > MAX_UNDO_BYTES {
-        if let Some((_, Some(s))) = stack.first() {
-            bytes = bytes.saturating_sub(s.len());
+        if let Some(oldest) = stack.first() {
+            bytes = bytes.saturating_sub(retained_bytes(oldest));
         }
         stack.remove(0);
     }
@@ -129,8 +142,49 @@ pub(crate) struct PendingSelfWrite {
 /// returns to the pool.
 static IMAGE_ENCODE_SCRATCH: Mutex<Vec<u8>> = Mutex::new(Vec::new());
 
-pub(crate) fn image_encode_scratch() -> &'static Mutex<Vec<u8>> {
-    &IMAGE_ENCODE_SCRATCH
+/// The pooled Phase 2 encode buffer may retain capacity across captures, but
+/// one oversized encode must not pin its peak size for the process lifetime.
+/// Buffers below this cap keep their capacity (the point of the pool); on
+/// guard drop above the cap the pool is replaced with a fresh `Vec`, freeing
+/// the oversized allocation immediately.
+pub(crate) const IMAGE_ENCODE_SCRATCH_RETAIN_CAP: usize = 64 * 1024 * 1024;
+
+/// RAII guard over the Phase 2 encode scratch pool. Dropping it returns the
+/// buffer to the pool, trimming the pool to an empty `Vec` when the retained
+/// capacity exceeds [`IMAGE_ENCODE_SCRATCH_RETAIN_CAP`] — covering every exit
+/// path of the encode thread (success, encode failure, DB failure) without
+/// explicit cleanup at each `return`.
+pub(crate) struct ImageEncodeScratchGuard<'a> {
+    guard: std::sync::MutexGuard<'a, Vec<u8>>,
+}
+
+impl<'a> ImageEncodeScratchGuard<'a> {
+    pub(crate) fn acquire() -> Self {
+        ImageEncodeScratchGuard {
+            guard: IMAGE_ENCODE_SCRATCH.lock().unwrap(),
+        }
+    }
+}
+
+impl std::ops::Deref for ImageEncodeScratchGuard<'_> {
+    type Target = Vec<u8>;
+    fn deref(&self) -> &Vec<u8> {
+        &self.guard
+    }
+}
+
+impl std::ops::DerefMut for ImageEncodeScratchGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Vec<u8> {
+        &mut self.guard
+    }
+}
+
+impl Drop for ImageEncodeScratchGuard<'_> {
+    fn drop(&mut self) {
+        if self.guard.capacity() > IMAGE_ENCODE_SCRATCH_RETAIN_CAP {
+            *self.guard = Vec::new();
+        }
+    }
 }
 
 // ═══════════════════════════════════════════
@@ -142,8 +196,6 @@ pub(crate) struct Backend {
     pub(crate) running: Arc<AtomicBool>,
     pub(crate) monitor_handle: Mutex<Option<thread::JoinHandle<()>>>,
     pub(crate) source_app: Arc<Mutex<SourceApp>>,
-    pub(crate) last_seen_text: Arc<Mutex<Option<String>>>,
-    pub(crate) last_seen_image_hash: Arc<Mutex<Option<u64>>>,
     /// Serializes our pasteboard writes with monitor event consumption, making
     /// self-write suppression race-free without retaining clipboard payloads.
     pub(crate) pasteboard_event_lock: Arc<Mutex<()>>,

@@ -176,8 +176,6 @@ fn select_and_paste_impl(mut item: ClipboardEntry) -> c_int {
             };
             let mut cb = match Clipboard::new() { Ok(c) => c, Err(_) => return 0 };
             if cb.set_text(text).is_err() { return 0; }
-            *b.last_seen_text.lock().unwrap() = Some(text.clone());
-            *b.last_seen_image_hash.lock().unwrap() = None;
         }
         ClipboardEntry::Image { png_data, id, .. } => {
             if png_data.is_empty() { return 0; }
@@ -186,8 +184,6 @@ fn select_and_paste_impl(mut item: ClipboardEntry) -> c_int {
                 None => return 0,
             };
             if !macos::set_pasteboard_file_url(&path) { return 0; }
-            *b.last_seen_text.lock().unwrap() = None;
-            *b.last_seen_image_hash.lock().unwrap() = None;
         }
     }
     let change_count = macos::pasteboard_change_count()

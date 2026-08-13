@@ -32,8 +32,6 @@ fn test_clipboard_delete_by_id_returns_zero_on_failure() {
             running: Arc::new(AtomicBool::new(true)),
             monitor_handle: Mutex::new(None),
             source_app: Arc::new(Mutex::new(SourceApp::default())),
-            last_seen_text: Arc::new(Mutex::new(None)),
-            last_seen_image_hash: Arc::new(Mutex::new(None)),
             pasteboard_event_lock: Arc::new(Mutex::new(())),
             pending_self_write: Arc::new(Mutex::new(None)),
             db: Arc::new(Mutex::new(conn)),
@@ -86,14 +84,14 @@ fn test_undo_stack_caps() {
     };
     assert_eq!(oldest_id, 2, "the two oldest (0, 1) were shed");
 
-    // Byte cap: 8 entries × 3 MB = 24 MB exceeds MAX_UNDO_BYTES → shed oldest
-    // until the retained bodies fit (16 MB / 3 MB = 5 entries).
+    // Byte cap: 10 entries × 6 MB = 60 MB exceeds MAX_UNDO_BYTES → shed oldest
+    // until the retained bodies fit (48 MB / 6 MB = 8 entries).
     let mut stack = Vec::new();
-    for i in 0..8 {
-        let body = "y".repeat(3 * 1024 * 1024);
+    for i in 0..10 {
+        let body = "y".repeat(6 * 1024 * 1024);
         push_deleted(&mut stack, text_entry(i, &body), Some(body));
     }
-    assert_eq!(stack.len(), 5, "byte cap sheds oversized pastes");
+    assert_eq!(stack.len(), 8, "byte cap sheds oversized pastes");
     let retained: usize = stack
         .iter()
         .filter_map(|(_, t)| t.as_ref().map(|s| s.len()))
@@ -103,9 +101,46 @@ fn test_undo_stack_caps() {
         ClipboardEntry::Text { id, .. } => *id,
         _ => unreachable!(),
     };
-    assert_eq!(oldest_id, 3, "entries 0..=2 were shed, 3..=7 retained");
+    assert_eq!(oldest_id, 2, "entries 0..=1 were shed, 2..=9 retained");
 
-    // Mixed: image entries (no body) do not count toward the byte cap.
+    // Image blobs now count toward the same byte budget: a stack of deleted
+    // images cannot pin unbounded memory. 3 × 20 MB = 60 MB > 48 MB → the
+    // oldest is shed, keeping exactly 2.
+    let image_entry = |i: u64, png: Vec<u8>| ClipboardEntry::Image {
+        id: i,
+        png_data: png,
+        width: 1,
+        height: 1,
+        thumb_data: Vec::new(),
+        thumb_width: 0,
+        thumb_height: 0,
+        hash: i,
+        timestamp: 0,
+        source_name: String::new(),
+        source_bundle_id: String::new(),
+        db_id: i as i64,
+    };
+    let mut stack = Vec::new();
+    for i in 0..3 {
+        push_deleted(&mut stack, image_entry(i, vec![0u8; 20 * 1024 * 1024]), None);
+    }
+    assert_eq!(stack.len(), 2, "image blobs respect the byte cap");
+    let image_bytes: usize = stack
+        .iter()
+        .map(|(e, _)| match e {
+            ClipboardEntry::Image { png_data, thumb_data, .. } => png_data.len() + thumb_data.len(),
+            _ => 0,
+        })
+        .sum();
+    assert!(image_bytes <= MAX_UNDO_BYTES, "retained image bytes bounded");
+    let oldest_id = match &stack[0].0 {
+        ClipboardEntry::Image { id, .. } => *id,
+        _ => unreachable!(),
+    };
+    assert_eq!(oldest_id, 1, "the oldest image (0) was shed");
+
+    // Mixed: image entries with empty blobs carry no bytes and respect only
+    // the count cap.
     let mut stack = Vec::new();
     push_deleted(&mut stack, text_entry(0, "small"), Some("small".to_string()));
     for i in 1..=11 {

@@ -6,7 +6,7 @@
 //! ## Image capture pipeline (two-phase)
 //!
 //! **Phase 1 (sync — monitor thread)**:
-//!   hash → fast thumbnail (`CatmullRom`) → update in-memory history → set `last_seen`
+//!   hash → fast thumbnail (`CatmullRom`) → update in-memory history
 //!
 //! **Phase 2 (async — background thread)**:
 //!   full PNG encode (expensive) → write-through `SQLite` → update `db_id` in history
@@ -44,8 +44,6 @@ fn ingest_rgba_image(
     width: u32,
     height: u32,
     history: &Arc<Mutex<Vec<ClipboardEntry>>>,
-    last_seen_image_hash: &Arc<Mutex<Option<u64>>>,
-    last_seen_text: &Arc<Mutex<Option<String>>>,
     db: &Arc<Mutex<rusqlite::Connection>>,
     src: &crate::types::SourceApp,
     now: u64,
@@ -65,10 +63,7 @@ fn ingest_rgba_image(
             // Thumbnail creation failed (likely corrupt pixel data). Create
             // the entry anyway — Phase 2 full encode will determine if the
             // image data is truly broken and remove the entry if so.
-            // Set last_seen to avoid an infinite retry loop.
             eprintln!("CopyAttach: thumbnail creation failed for image {width}x{height} — capturing without thumbnail");
-            *last_seen_image_hash.lock().unwrap() = Some(hash);
-            *last_seen_text.lock().unwrap() = None;
             // Fall through: create entry with empty thumbnail, continue to Phase 2
             (Vec::new(), 0u32, 0u32)
         };
@@ -98,10 +93,6 @@ fn ingest_rgba_image(
             crate::backend::mark_history_changed();
         }
 
-        // Prevent re-capture before async phase completes
-        *last_seen_image_hash.lock().unwrap() = Some(hash);
-        *last_seen_text.lock().unwrap() = None;
-
         // ── Phase 2 (async): full PNG encode → DB write ────────
         let db = db.clone();
         let history = history.clone();
@@ -113,8 +104,10 @@ fn ingest_rgba_image(
             // Encode into the shared scratch buffer (reused across captures):
             // a fresh multi-MB output Vec per capture would linger as a
             // retained region after free (large freed blocks are not returned
-            // to the OS promptly in this process).
-            let mut scratch = crate::backend::image_encode_scratch().lock().unwrap();
+            // to the OS promptly in this process). The RAII guard trims the
+            // pool on drop when one oversized encode grew it past the
+            // retention cap (see backend::ImageEncodeScratchGuard).
+            let mut scratch = crate::backend::ImageEncodeScratchGuard::acquire();
             let full_png = match crate::image::encode_png_into(width, height, &rgba, &mut scratch) {
                 Some(()) => scratch.as_slice(),
                 None => {
@@ -176,9 +169,7 @@ fn ingest_rgba_image(
             }
         });
     } else {
-        // Zero-size image — record the observed payload but create no entry.
-        *last_seen_image_hash.lock().unwrap() = Some(hash);
-        *last_seen_text.lock().unwrap() = None;
+        // Zero-size image — observe the event but create no entry.
     }
 }
 
@@ -192,8 +183,6 @@ fn ingest_rgba_image(
 fn try_ingest_image_files(
     paths: &[String],
     history: &Arc<Mutex<Vec<ClipboardEntry>>>,
-    last_seen_image_hash: &Arc<Mutex<Option<u64>>>,
-    last_seen_text: &Arc<Mutex<Option<String>>>,
     db: &Arc<Mutex<rusqlite::Connection>>,
     src: &crate::types::SourceApp,
     now: u64,
@@ -226,7 +215,7 @@ fn try_ingest_image_files(
 
         ingest_rgba_image(
             pixels, w, h,
-            history, last_seen_image_hash, last_seen_text, db, src, now, cleanup_threshold, ignore_rules,
+            history, db, src, now, cleanup_threshold, ignore_rules,
         );
         return true;
     }
@@ -239,8 +228,6 @@ pub(crate) fn clipboard_monitor(
     running: Arc<AtomicBool>,
     source_app: Arc<Mutex<crate::types::SourceApp>>,
     db: Arc<Mutex<rusqlite::Connection>>,
-    last_seen_text: Arc<Mutex<Option<String>>>,
-    last_seen_image_hash: Arc<Mutex<Option<u64>>>,
     pasteboard_event_lock: Arc<Mutex<()>>,
     pending_self_write: Arc<Mutex<Option<PendingSelfWrite>>>,
     cleanup_threshold: Arc<AtomicUsize>,
@@ -326,7 +313,7 @@ pub(crate) fn clipboard_monitor(
             let paths = macos::pasteboard_file_paths();
             try_ingest_image_files(
                 &paths,
-                &history, &last_seen_image_hash, &last_seen_text,
+                &history,
                 &db, &src, now, &cleanup_threshold, &ignore_rules,
             );
             continue;
@@ -350,7 +337,7 @@ pub(crate) fn clipboard_monitor(
                         ingest_rgba_image(
                             rgba.into_raw(),
                             w, h,
-                            &history, &last_seen_image_hash, &last_seen_text,
+                            &history,
                             &db, &src, now, &cleanup_threshold, &ignore_rules,
                         );
                         captured = true;
@@ -447,8 +434,6 @@ pub(crate) fn clipboard_monitor(
                             }
                         }
                     }
-                    *last_seen_text.lock().unwrap() = Some(text);
-                    *last_seen_image_hash.lock().unwrap() = None;
                 }
             }
         }
