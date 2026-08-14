@@ -1,7 +1,8 @@
 // Memory probes — isolate the FTS index's resident-memory cost.
 //
-// The trigram FTS index lives in the same mmap'd DB file as the base table
-// (open_db: mmap_size = 32MB). Index pages become resident as they are read
+// The trigram FTS index lives in the same DB file as the base table. With the
+// app's real connection settings (mmap disabled + 4MB LRU page cache) index
+// pages become resident as they are read
 // (searches, and the triggers' insert/delete on every capture), so a large
 // index can inflate process RSS. These probes insert an identical corpus into
 // a DB WITH the FTS index and one WITHOUT, and print the RSS at each stage.
@@ -116,18 +117,17 @@ fn memory_probe_no_fts_index() {
             hash            INTEGER,
             timestamp       INTEGER NOT NULL DEFAULT 0,
             source_name     TEXT NOT NULL DEFAULT '',
-            source_bundle_id TEXT NOT NULL DEFAULT ''
+            source_bundle_id TEXT NOT NULL DEFAULT '',
+            preview         TEXT NOT NULL DEFAULT '',
+            label           TEXT NOT NULL DEFAULT ''
         );",
     )
     .expect("memory probe: schema");
     let rss1 = probe_rss_kb();
 
     for (i, text) in probe_corpus().iter().enumerate() {
-        conn.execute(
-            "INSERT INTO clipboard_history (entry_type, text, timestamp) VALUES (0, ?1, ?2)",
-            rusqlite::params![text, i as i64],
-        )
-        .expect("memory probe: insert");
+        let entry = ClipboardEntry::text_entry(new_entry_id(), text, i as u64, String::new(), String::new(), 0);
+        crate::db::insert_entry_to_db(&conn, &entry, Some(text), None, None).ok();
     }
     let rss2 = probe_rss_kb();
 

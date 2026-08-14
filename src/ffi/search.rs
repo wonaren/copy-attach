@@ -3,8 +3,10 @@ use std::ffi::{c_char, c_int, CStr};
 use crate::backend::try_backend;
 
 /// Search all history entries for a case-insensitive substring over the stored
-/// full text (FTS5 trigram index for ≥3-char queries, LIKE for shorter ones —
-/// see `db::search_history`). Returns a malloc'd array of matching entry_ids
+/// full text (FTS5 trigram index for ≥3-char queries, LIKE fallback for
+/// shorter ones — see `db::search_history`; the fallback is deliberate so
+/// 1-2 char queries keep matching the middle of long documents, not just the
+/// rendered previews). Returns a malloc'd array of matching entry_ids
 /// (`out_count` = number of ids), or null when there are no matches. Caller
 /// must free with `clipboard_free_u64_array()`. Label/source-name matching is
 /// done on the Swift side, which already holds those fields.

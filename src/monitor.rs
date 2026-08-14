@@ -24,7 +24,6 @@ use crate::backend::{PendingSelfWrite, POLL_INTERVAL_MS};
 use crate::types::ClipboardEntry;
 use crate::image::{create_thumbnail_fast, image_hash};
 use crate::history::add_to_history;
-use crate::db::{insert_entry_to_db, delete_matching_entry, trim_db_history};
 use crate::ignore::IgnoreRules;
 use crate::macos;
 
@@ -134,38 +133,39 @@ fn ingest_rgba_image(
             };
 
             if let Some(db_item) = db_item {
-                let conn = match db.lock() {
+                let mut conn = match db.lock() {
                     Ok(c) => c,
                     Err(e) => {
                         eprintln!("CopyAttach: DB mutex poisoned in Phase 2 image persist: {e}");
                         return;
                     }
                 };
-                if insert_entry_to_db(
-                    &conn, &db_item,
+                let persisted = crate::db::persist_entry_to_db(
+                    &mut conn, &db_item,
                     None,
                     Some(full_png),
                     Some((&thumb_async, thumb_w, thumb_h)),
-                ).is_err() {
-                    eprintln!("CopyAttach: Phase 2 DB insert failed for image {width}x{height} — entry stays with db_id=0");
-                    return;
-                }
-                delete_matching_entry(&conn, &db_item, None);
-                let row_id = conn.last_insert_rowid();
-                trim_db_history(&conn, threshold);
-
-                // Re-acquire history lock to update db_id in memory
-                let mut hist = history.lock().unwrap();
-                for entry in hist.iter_mut() {
-                    if let ClipboardEntry::Image { hash: h, db_id, .. } = entry {
-                        if *h == item_hash {
-                            *db_id = row_id;
-                            break;
+                    threshold,
+                );
+                match persisted {
+                    Ok(row_id) => {
+                        // Re-acquire history lock to update db_id in memory
+                        let mut hist = history.lock().unwrap();
+                        for entry in hist.iter_mut() {
+                            if let ClipboardEntry::Image { hash: h, db_id, .. } = entry {
+                                if *h == item_hash {
+                                    *db_id = row_id;
+                                    break;
+                                }
+                            }
                         }
+                        // Signal Swift that a thumbnail is now available via DB
+                        crate::backend::IMAGE_ENCODING_COUNTER.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Err(()) => {
+                        eprintln!("CopyAttach: Phase 2 DB insert failed for image {width}x{height} — entry stays with db_id=0");
                     }
                 }
-                // Signal Swift that a thumbnail is now available via DB
-                crate::backend::IMAGE_ENCODING_COUNTER.fetch_add(1, Ordering::Relaxed);
             }
         });
     } else {
@@ -389,39 +389,45 @@ pub(crate) fn clipboard_monitor(
                             _ => unreachable!("text capture produced a non-text entry"),
                         };
                         match db.lock() {
-                            Ok(conn) => {
-                                if insert_entry_to_db(&conn, &item_for_db, Some(&text), None, None).is_ok() {
-                                    delete_matching_entry(&conn, &item_for_db, Some(&text));
-                                    let row_id = conn.last_insert_rowid();
-                                    trim_db_history(&conn, cleanup_threshold.load(Ordering::Relaxed));
-
-                                    // Re-acquire history lock to set db_id on the captured
-                                    // entry. Match by content hash, never by head position:
-                                    // a concurrent select-and-paste (or undo) may have
-                                    // moved another entry to position 0 between Scope 1
-                                    // and here, and writing our rowid into that entry would
-                                    // orphan this one (db_id=0 forever) while pointing the
-                                    // other at a row that a later delete would remove from
-                                    // under us — an unpasteable, undeletable ghost.
-                                    let mut hist = history.lock().unwrap();
-                                    crate::history::assign_db_id_by_text_hash(
-                                        &mut hist,
-                                        failed_hash,
-                                        row_id,
-                                    );
-                                } else {
-                                    // Persist failed (I/O error, SQLITE_BUSY, or the FTS
-                                    // trigger failing). The entry can never be pasted or
-                                    // deleted — roll it out of memory so it doesn't linger
-                                    // as a ghost. Match by content hash, not index, so a
-                                    // concurrent select-and-paste moving another entry to the
-                                    // head can't be disturbed.
-                                    eprintln!("CopyAttach: failed to insert text entry to DB — removing it from history");
-                                    let mut hist = history.lock().unwrap();
-                                    hist.retain(|e| match e {
-                                        ClipboardEntry::Text { text_hash: h, .. } => *h != failed_hash,
-                                        _ => true,
-                                    });
+                            Ok(mut conn) => {
+                                match crate::db::persist_entry_to_db(
+                                    &mut conn,
+                                    &item_for_db,
+                                    Some(&text),
+                                    None,
+                                    None,
+                                    cleanup_threshold.load(Ordering::Relaxed),
+                                ) {
+                                    Ok(row_id) => {
+                                        // Re-acquire history lock to set db_id on the captured
+                                        // entry. Match by content hash, never by head position:
+                                        // a concurrent select-and-paste (or undo) may have
+                                        // moved another entry to position 0 between Scope 1
+                                        // and here, and writing our rowid into that entry would
+                                        // orphan this one (db_id=0 forever) while pointing the
+                                        // other at a row that a later delete would remove from
+                                        // under us — an unpasteable, undeletable ghost.
+                                        let mut hist = history.lock().unwrap();
+                                        crate::history::assign_db_id_by_text_hash(
+                                            &mut hist,
+                                            failed_hash,
+                                            row_id,
+                                        );
+                                    }
+                                    Err(()) => {
+                                        // Persist failed (I/O error, SQLITE_BUSY, or the FTS
+                                        // trigger failing). The entry can never be pasted or
+                                        // deleted — roll it out of memory so it doesn't linger
+                                        // as a ghost. Match by content hash, not index, so a
+                                        // concurrent select-and-paste moving another entry to the
+                                        // head can't be disturbed.
+                                        eprintln!("CopyAttach: failed to insert text entry to DB — removing it from history");
+                                        let mut hist = history.lock().unwrap();
+                                        hist.retain(|e| match e {
+                                            ClipboardEntry::Text { text_hash: h, .. } => *h != failed_hash,
+                                            _ => true,
+                                        });
+                                    }
                                 }
                             }
                             Err(e) => {

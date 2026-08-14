@@ -4,12 +4,16 @@ use rusqlite::Connection;
 ///
 /// Queries of ≥3 Unicode scalars go through the FTS5 trigram index (substring
 /// semantics, full-Unicode case folding). Shorter queries cannot form a
-/// trigram, so they fall back to a LIKE scan — trigram's matching floor, not a
-/// failure path. Known limitation of that fallback: SQLite's LIKE folds ASCII
-/// case only, so a <3-char query that relies on non-ASCII case folding (e.g.
-/// `é` matching `É`, Greek case) misses those variants; ≥3-char queries are
-/// unaffected (trigram folds Unicode). Returns matching entry_ids (the stable
-/// Rust IDs, not SQLite rowids).
+/// trigram, so they fall back to a LIKE scan over the full text column.
+///
+/// The LIKE fallback is DELIBERATE, not a leftover: matching only the bounded
+/// previews for 1-2 char queries would silently drop matches in the middle of
+/// long documents — a semantic regression for a latency gain. Known
+/// limitation, unchanged from before: SQLite's LIKE folds ASCII case only, so
+/// a <3-char query relying on non-ASCII case folding (e.g. `é` matching `É`)
+/// misses those variants; ≥3-char queries are unaffected (trigram folds
+/// Unicode). Returns matching entry_ids (the stable Rust IDs, not SQLite
+/// rowids).
 pub(crate) fn search_history(conn: &Connection, query: &str) -> Vec<u64> {
     let mut ids = Vec::new();
     if query.chars().count() >= 3 {

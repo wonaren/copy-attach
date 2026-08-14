@@ -141,3 +141,14 @@ fn test_assign_db_id_by_text_hash_no_match_is_noop() {
         _ => unreachable!(),
     }
 }
+
+/// Locks the persisted hash algorithm: FNV-1a 64-bit, fixed constants. The
+/// text_hash value is stored in SQLite (the `hash` column) — changing the
+/// algorithm would orphan every persisted hash in user DBs, so these are the
+/// published FNV-1a test vectors as a tripwire, not incidental assertions.
+#[test]
+fn test_text_hash_is_stable_fnv1a() {
+    assert_eq!(crate::types::text_hash(""), 0xcbf2_9ce4_8422_2325);
+    assert_eq!(crate::types::text_hash("a"), 0xaf63_dc4c_8601_ec8c);
+    assert_eq!(crate::types::text_hash("foobar"), 0x8594_4171_f739_67e8);
+}

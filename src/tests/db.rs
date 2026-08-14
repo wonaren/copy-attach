@@ -1,10 +1,10 @@
 // Entry-ID persistence tests — stable IDs across restarts and deletion.
 
 use crate::backend::{new_entry_id, prime_entry_id};
-use crate::db::{ensure_history_table, insert_entry_to_db, load_history_from_db};
+use crate::db::{ensure_history_table, insert_entry_to_db, load_history_from_db, persist_entry_to_db};
 use crate::types::ClipboardEntry;
 use rusqlite::Connection;
-use super::{insert_text, test_db};
+use super::{insert_text, make_image, make_test_image_rgba, test_db};
 
 #[test]
 fn test_entry_id_persistence_and_restore() {
@@ -202,4 +202,194 @@ fn test_entry_id_backfill_old_rows() {
         };
         assert_eq!(oid, rid, "legacy entry_id stable across restarts");
     }
+}
+
+#[test]
+fn test_load_skips_unbackfilled_text_rows() {
+    // A text row without persisted preview/label/hash means it was written
+    // before the metadata backfill and never got it. The cold-start load must
+    // skip it loudly (the load never reads the `text` column), not silently
+    // re-read full text — that fallback would reintroduce the cold-start cost.
+    let conn = test_db();
+    conn.execute(
+        "INSERT INTO clipboard_history (entry_type, text, timestamp)
+         VALUES (0, 'ghost-legacy', 100)",
+        [],
+    ).unwrap();
+
+    let loaded = load_history_from_db(&conn, crate::backend::DEFAULT_CLEANUP_THRESHOLD);
+    assert_eq!(loaded.len(), 0, "text row without persisted metadata must be skipped");
+}
+
+#[test]
+fn test_persist_entry_single_transaction() {
+    // The capture write-through is one transaction: insert + dedup + trim.
+    // A duplicate text capture must leave exactly one row (the newest) and
+    // the returned row id must point at it.
+    let mut conn = test_db();
+    let entry_a = ClipboardEntry::text_entry(new_entry_id(), "txn-dedup", 100, String::new(), String::new(), 0);
+    let entry_b = ClipboardEntry::text_entry(new_entry_id(), "txn-dedup", 200, String::new(), String::new(), 0);
+
+    let row_a = persist_entry_to_db(&mut conn, &entry_a, Some("txn-dedup"), None, None, 3000).unwrap();
+    let row_b = persist_entry_to_db(&mut conn, &entry_b, Some("txn-dedup"), None, None, 3000).unwrap();
+
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM clipboard_history WHERE entry_type = 0", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 1, "dedup inside the transaction must leave one row");
+    assert_ne!(row_a, row_b, "the duplicate capture must get a fresh row");
+    let old_rows: i64 = conn
+        .query_row("SELECT COUNT(*) FROM clipboard_history WHERE id = ?1", rusqlite::params![row_a], |r| r.get(0))
+        .unwrap();
+    assert_eq!(old_rows, 0, "the first capture's row must be removed by dedup");
+
+    // The surviving row carries the newest entry id (entry_b) and persisted metadata.
+    let loaded = load_history_from_db(&conn, 3000);
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(loaded[0].entry_id(), entry_b.entry_id());
+    assert_eq!(loaded[0].label(), "txn-dedup");
+}
+
+/// The range-delete trim must keep exactly the newest N rows even when
+/// rowids have gaps (deletions), and must be a no-op when the table holds
+/// fewer rows than the threshold (the cutoff subquery yields NULL).
+#[test]
+fn test_trim_range_delete_semantics() {
+    let conn = test_db();
+    for i in 0..5 {
+        insert_text(&conn, &format!("t{i}"), i as u64);
+    }
+    // Create a rowid gap by deleting the middle row ("t2", id 3).
+    conn.execute("DELETE FROM clipboard_history WHERE id = 3", []).unwrap();
+
+    // Under threshold: no-op.
+    crate::db::trim_db_history(&conn, 10);
+    assert_eq!(load_history_from_db(&conn, 3000).len(), 4);
+
+    // Over threshold: exactly the newest 2 survive, gaps included.
+    crate::db::trim_db_history(&conn, 2);
+    let loaded = load_history_from_db(&conn, 3000);
+    assert_eq!(loaded.len(), 2);
+    assert_eq!(loaded[0].label(), "t4");
+    assert_eq!(loaded[1].label(), "t3");
+}
+
+/// Simulate a DB written by the 0.99.15-dev build (user_version 1 era, where
+/// text hashes were DefaultHasher values): ensure_history_table must recompute
+/// them with the stable FNV-1a algorithm and stamp user_version = 2.
+#[test]
+fn test_metadata_recompute_for_version1_default_hasher() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE clipboard_history (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            entry_id        INTEGER NOT NULL DEFAULT 0,
+            entry_type      INTEGER NOT NULL,
+            text            TEXT,
+            png_data        BLOB,
+            width           INTEGER,
+            height          INTEGER,
+            thumb_data      BLOB,
+            thumb_width     INTEGER,
+            thumb_height    INTEGER,
+            hash            INTEGER,
+            timestamp       INTEGER NOT NULL DEFAULT 0,
+            source_name     TEXT NOT NULL DEFAULT '',
+            source_bundle_id TEXT NOT NULL DEFAULT '',
+            preview         TEXT NOT NULL DEFAULT '',
+            label           TEXT NOT NULL DEFAULT ''
+        );"
+    ).unwrap();
+    // DefaultHasher-era metadata: bogus hash 12345, placeholder preview/label.
+    conn.execute(
+        "INSERT INTO clipboard_history (entry_type, text, timestamp, hash, preview, label)
+         VALUES (0, 'stable-me', 100, 12345, 'x', 'x')",
+        [],
+    ).unwrap();
+    conn.pragma_update(None, "user_version", 1).unwrap();
+
+    crate::db::ensure_history_table(&conn).unwrap();
+
+    let loaded = load_history_from_db(&conn, 3000);
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(loaded[0].label(), "stable-me", "metadata recomputed from text");
+    let hash = match &loaded[0] {
+        ClipboardEntry::Text { text_hash, .. } => *text_hash,
+        _ => unreachable!("expected a text entry"),
+    };
+    assert_eq!(hash, crate::types::text_hash("stable-me"),
+        "version-1 DefaultHasher value must be replaced by the stable FNV-1a hash");
+
+    // The generation stamp makes the recompute a no-op from here on.
+    crate::db::ensure_history_table(&conn).unwrap();
+}
+
+/// ensure stamps the text-metadata generation (2) synchronously; image hashes
+/// migrate to generation 3 on the background thread driven by
+/// `ffi::init::spawn_image_hash_migration`.
+#[test]
+fn test_metadata_version_stamped_after_text_phase() {
+    let conn = test_db();
+    let v: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+    assert_eq!(v, 2, "text phase stamps 2; images reach 3 via the background thread");
+    assert_eq!(crate::db::METADATA_VERSION, 3);
+}
+
+/// A pre-migration image row carries a DefaultHasher value; the per-row
+/// migration decodes the stored PNG and replaces it with the stable FNV-1a
+/// hash — persisted value and cold-start load both agree.
+#[test]
+fn test_image_hash_migration_recomputes_stable_hash() {
+    let conn = test_db();
+    let rgba = make_test_image_rgba(8, 8, 42);
+    let expected = crate::image::image_hash(&rgba, 8, 8);
+    let img = make_image(&rgba, 8, 8, 100);
+    let (png, thumb, tw, th) = match &img {
+        ClipboardEntry::Image { png_data, thumb_data, thumb_width, thumb_height, .. } =>
+            (png_data.clone(), thumb_data.clone(), *thumb_width, *thumb_height),
+        _ => unreachable!("make_image must produce an image entry"),
+    };
+    insert_entry_to_db(&conn, &img, None, Some(&png), Some((&thumb, tw, th))).unwrap();
+    let db_id = conn.last_insert_rowid();
+
+    // Simulate the pre-migration generation: an arbitrary DefaultHasher value.
+    conn.execute("UPDATE clipboard_history SET hash = 12345 WHERE id = ?1", rusqlite::params![db_id]).unwrap();
+
+    let new_hash = crate::db::migrate_one_image_row(&conn, db_id).unwrap();
+    assert_eq!(new_hash, expected);
+
+    let stored: i64 = conn.query_row(
+        "SELECT hash FROM clipboard_history WHERE id = ?1",
+        rusqlite::params![db_id],
+        |r| r.get(0),
+    ).unwrap();
+    assert_eq!(stored as u64, expected, "persisted hash replaced with the stable algorithm");
+
+    let loaded = load_history_from_db(&conn, 3000);
+    match &loaded[0] {
+        ClipboardEntry::Image { hash, .. } => assert_eq!(*hash, expected),
+        _ => unreachable!("expected the image entry"),
+    }
+}
+
+/// An undecodable PNG must fail the migration loudly and leave the old hash
+/// untouched — never a silent placeholder.
+#[test]
+fn test_image_hash_migration_undecodable_row_fails_explicitly() {
+    let conn = test_db();
+    conn.execute(
+        "INSERT INTO clipboard_history (entry_type, png_data, width, height, hash, timestamp)
+         VALUES (1, X'00FF', 1, 1, 12345, 100)",
+        [],
+    ).unwrap();
+    let db_id = conn.last_insert_rowid();
+
+    assert!(crate::db::migrate_one_image_row(&conn, db_id).is_err());
+
+    let stored: i64 = conn.query_row(
+        "SELECT hash FROM clipboard_history WHERE id = ?1",
+        rusqlite::params![db_id],
+        |r| r.get(0),
+    ).unwrap();
+    assert_eq!(stored, 12345, "old hash left untouched when the PNG cannot be decoded");
 }

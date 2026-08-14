@@ -15,6 +15,16 @@ struct ItemRowView: View {
 
     private static let hexColorRegex = try! NSRegularExpression(pattern: "#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})\\b")
 
+    /// 10×10 color swatches are drawn once per unique hex color and cached —
+    /// the per-render `lockFocus` path (a fresh graphics context per match)
+    /// was the most expensive thing in this row's body. Bounded so a hostile
+    /// clipboard full of distinct colors cannot grow it without limit.
+    private static let swatchCache: NSCache<NSString, NSImage> = {
+        let c = NSCache<NSString, NSImage>()
+        c.countLimit = 64
+        return c
+    }()
+
     private func textColor(_ isSelected: Bool) -> Color {
         isSelected ? Color.white : theme.popupPrimaryText
     }
@@ -138,6 +148,11 @@ struct ItemRowView: View {
 
     /// Build a Text view with inline color swatches for hex color codes.
     private func coloredLabel(_ text: String) -> Text {
+        // Most clipboard texts contain no '#' at all — skip the regex engine
+        // for them (the regex runs on every body evaluation, i.e. hover,
+        // selection moves, and scroll refreshes of every visible row).
+        guard text.contains("#") else { return Text(text) }
+
         let nsRange = NSRange(text.startIndex..., in: text)
         let matches = Self.hexColorRegex.matches(in: text, range: nsRange)
 
@@ -154,8 +169,7 @@ struct ItemRowView: View {
             }
             // Color code with swatch
             let code = String(text[range])
-            if let color = parseHexColor(code),
-               let swatch = createColorSwatchImage(color) {
+            if let swatch = Self.swatch(for: code) {
                 result = Text("\(result)\(Image(nsImage: swatch))\(code)")
             } else {
                 result = Text("\(result)\(code)")
@@ -170,8 +184,27 @@ struct ItemRowView: View {
         return result
     }
 
+    /// Cached swatch image for a hex code (`#RGB` / `#RRGGBB`), nil for
+    /// non-colors. The 10×10 NSImage is drawn once per unique color.
+    private static func swatch(for code: String) -> NSImage? {
+        if let cached = swatchCache.object(forKey: code as NSString) {
+            return cached
+        }
+        guard let color = Self.parseHexColor(code) else { return nil }
+        let size = NSSize(width: 10, height: 10)
+        let image = NSImage(size: size)
+        image.lockFocus()
+        color.setFill()
+        let path = NSBezierPath(roundedRect: NSRect(origin: .zero, size: size),
+                                xRadius: 2, yRadius: 2)
+        path.fill()
+        image.unlockFocus()
+        swatchCache.setObject(image, forKey: code as NSString)
+        return image
+    }
+
     /// Parse a hex color string (#RGB or #RRGGBB) into NSColor.
-    private func parseHexColor(_ hex: String) -> NSColor? {
+    private static func parseHexColor(_ hex: String) -> NSColor? {
         var h = hex
         if h.hasPrefix("#") { h = String(h.dropFirst()) }
         guard let value = UInt64(h, radix: 16) else { return nil }
@@ -189,19 +222,6 @@ struct ItemRowView: View {
         default:
             return nil
         }
-    }
-
-    /// Create a small rounded square image filled with the given color.
-    private func createColorSwatchImage(_ color: NSColor) -> NSImage? {
-        let size = NSSize(width: 10, height: 10)
-        let image = NSImage(size: size)
-        image.lockFocus()
-        color.setFill()
-        let path = NSBezierPath(roundedRect: NSRect(origin: .zero, size: size),
-                                xRadius: 2, yRadius: 2)
-        path.fill()
-        image.unlockFocus()
-        return image
     }
 
     private func imageContent(dbId: Int, width: Int, height: Int) -> some View {

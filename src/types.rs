@@ -103,14 +103,29 @@ impl ClipboardEntry {
     }
 }
 
+/// FNV-1a 64-bit, the shared stable content hash for BOTH text and image
+/// identity. A fixed published algorithm — deliberately NOT `DefaultHasher`:
+/// std documents it as unstable across Rust releases, and the hash values are
+/// now persisted in SQLite (the `hash` column). A silent std change would make
+/// re-captured content stop matching pre-existing rows' hashes (ghost entries
+/// for text, duplicate entries for images). A stable algorithm can never
+/// drift under us.
+pub(crate) fn fnv1a(iter: impl IntoIterator<Item = u8>) -> u64 {
+    const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash = FNV_OFFSET_BASIS;
+    for b in iter {
+        hash ^= u64::from(b);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
+}
+
 /// Content hash for in-memory text dedup. DB-side dedup stays exact-text
 /// (`delete_matching_entry`), so a 64-bit hash only ever gates the in-memory
 /// duplicate removal — collision is ~2⁻⁶⁴ and self-heals on next DB pass.
 pub(crate) fn text_hash(text: &str) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    text.hash(&mut hasher);
-    hasher.finish()
+    fnv1a(text.as_bytes().iter().copied())
 }
 
 /// True if `line` is all whitespace, short-circuiting at the first non-

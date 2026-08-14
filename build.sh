@@ -106,6 +106,8 @@ fi
 "$SWIFTC" $SDK \
     -target arm64-apple-macosx15.0 \
     -swift-version 6 \
+    -O \
+    -whole-module-optimization \
     -framework CryptoKit \
     -framework IOKit \
     -framework Security \

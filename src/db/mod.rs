@@ -14,7 +14,18 @@ mod crud;
 mod migration;
 mod search;
 
-pub(crate) use schema::{ensure_history_table, get_persist_dir, open_db};
-pub(crate) use crud::{delete_matching_entry, insert_entry_to_db, load_history_from_db, trim_db_history};
+pub(crate) use schema::{ensure_history_table, open_db};
+// The image-hash migration driver lives in ffi/init.rs and is compiled out of
+// stress-test builds (their DBs are freshly generated with the stable
+// algorithm), so these re-exports follow the same gate; tests keep access.
+#[cfg(any(not(feature = "stress-test"), test))]
+pub(crate) use schema::{METADATA_VERSION, migrate_one_image_row};
+#[cfg(feature = "migration")]
+pub(crate) use schema::get_persist_dir;
+pub(crate) use crud::{insert_entry_to_db, load_history_from_db, persist_entry_to_db, trim_db_history};
 pub(crate) use migration::migrate_from_json_to_db;
+/// Test-only entry point (temp-dir parameterized); the production lib resolves
+/// the real persist dir inside `migrate_from_json_to_db`.
+#[cfg(all(feature = "migration", test))]
+pub(crate) use migration::migrate_from_json_to_db_at;
 pub(crate) use search::{load_text_by_db_id, search_history};

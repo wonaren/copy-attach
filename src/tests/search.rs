@@ -40,6 +40,22 @@ fn test_search_like_wildcards_escaped() {
 }
 
 #[test]
+fn test_search_short_query_matches_full_text_middle() {
+    // SEMANTIC TRIPWIRE: 1-2 char queries must match the FULL stored text,
+    // including the middle of long documents — not just the rendered preview
+    // (head……tail). A preview-only short-query path was once proposed for
+    // latency and rejected because it silently drops these matches.
+    let long = format!("{}MIDDLE{}", "x".repeat(200), "x".repeat(200));
+    let conn = test_db();
+    insert_text(&conn, &long, 100);
+
+    assert_eq!(crate::db::search_history(&conn, "mi").len(), 1,
+        "short query must reach the middle of a long document");
+    assert_eq!(crate::db::search_history(&conn, "mid").len(), 1,
+        "trigram path agrees on the same middle match");
+}
+
+#[test]
 fn test_search_reflects_delete() {
     let conn = test_db();
     let db_id = insert_text(&conn, "needle in haystack", 100);

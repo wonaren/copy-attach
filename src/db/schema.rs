@@ -9,7 +9,13 @@ pub(crate) fn get_persist_dir() -> Option<PathBuf> {
     Some(dir)
 }
 
-/// Open (or create) the `SQLite` database with mmap and a small page cache.
+/// Open (or create) the `SQLite` database with WAL, a small page cache, and no
+/// mmap.
+///
+/// WAL + `synchronous=NORMAL` turns the per-capture write-through (insert +
+/// dedup + trim) from 3 fully-synced transactions into 1 WAL append — one
+/// fsync instead of three, lower latency, and far less SSD/battery wear. Reads
+/// (search, thumbnail loads) no longer block behind writes.
 pub(crate) fn open_db() -> Option<Connection> {
     let db_path = get_persist_dir()?.join("history.db");
     let conn = Connection::open(&db_path).map_err(|e| {
@@ -21,15 +27,24 @@ pub(crate) fn open_db() -> Option<Connection> {
     // from the LRU page cache keeps DB-related resident memory bounded at the
     // cache size while still covering the same on-demand BLOB reads mmap used
     // to serve (thumbnails/full images are loaded one at a time, per click).
-    let _ = conn.execute_batch(
-        "PRAGMA mmap_size = 0;
-         PRAGMA cache_size = -4096;    -- 4 MB LRU page cache"
-    );
+    // `cache_size` is negative here, which SQLite reads as KiB (-4096 = 4 MB).
+    // A failed WAL switch (e.g. SQLITE_BUSY because an older app instance is
+    // still running against this DB) must be visible, not silently swallowed:
+    // the DB then stays in DELETE journal mode until the next clean launch.
+    if let Err(e) = conn.execute_batch(
+        "PRAGMA journal_mode = WAL;
+         PRAGMA synchronous = NORMAL;
+         PRAGMA mmap_size = 0;
+         PRAGMA cache_size = -4096;"
+    ) {
+        eprintln!("CopyAttach: failed to configure DB pragmas (WAL/synchronous/cache): {e}");
+    }
     Some(conn)
 }
 
 /// Create the history table if it does not already exist.
-/// Adds the `entry_id` column via migration for schema versioning.
+/// Adds the `entry_id`, `preview`, and `label` columns via migration for
+/// schema versioning.
 pub(crate) fn ensure_history_table(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS clipboard_history (
@@ -46,7 +61,9 @@ pub(crate) fn ensure_history_table(conn: &Connection) -> Result<(), rusqlite::Er
             hash            INTEGER,
             timestamp       INTEGER NOT NULL,
             source_name     TEXT NOT NULL DEFAULT '',
-            source_bundle_id TEXT NOT NULL DEFAULT ''
+            source_bundle_id TEXT NOT NULL DEFAULT '',
+            preview         TEXT NOT NULL DEFAULT '',
+            label           TEXT NOT NULL DEFAULT ''
         );"
     )?;
     // Add entry_id column if this is an old DB that lacks it.
@@ -72,6 +89,31 @@ pub(crate) fn ensure_history_table(conn: &Connection) -> Result<(), rusqlite::Er
     // propagate the error rather than silently falling back.
     conn.execute_batch(
         "UPDATE clipboard_history SET entry_id = id WHERE entry_id = 0;"
+    )?;
+
+    // Add preview/label columns if this is an old DB that lacks them (text
+    // metadata persisted so cold start never reads the full `text` column).
+    // Same guarded ALTER pattern as entry_id above.
+    if let Err(e) = conn.execute_batch(
+        "ALTER TABLE clipboard_history ADD COLUMN preview TEXT NOT NULL DEFAULT '';
+         ALTER TABLE clipboard_history ADD COLUMN label TEXT NOT NULL DEFAULT '';"
+    ) {
+        let has_column: bool = conn
+            .prepare("SELECT preview, label FROM clipboard_history LIMIT 0")
+            .is_ok();
+        if !has_column {
+            eprintln!("CopyAttach: failed to add preview/label columns: {e}");
+            return Err(e);
+        }
+    }
+    backfill_text_metadata(conn)?;
+
+    // Dedup lookup index: `delete_matching_entry` narrows by (entry_type,
+    // hash) and verifies exact text, so a duplicate scan is an index lookup
+    // instead of a full table scan on every capture.
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_history_type_hash
+         ON clipboard_history(entry_type, hash);"
     )?;
 
     // FTS5 full-text index over the text column (trigram tokenizer = substring
@@ -105,4 +147,104 @@ pub(crate) fn ensure_history_table(conn: &Connection) -> Result<(), rusqlite::Er
          END;"
     )?;
     Ok(())
+}
+
+/// Persisted-metadata generations, stamped into SQLite's `user_version`:
+/// 0 = pre-0.99.15 (no persisted text metadata, DefaultHasher image hashes),
+/// 1 = 0.99.15-dev (DefaultHasher text_hash persisted),
+/// 2 = stable FNV-1a text hashes (text phase done; image hashes may still be
+///     DefaultHasher — a background thread migrates them one row at a time and
+///     stamps 3 on completion),
+/// 3 = stable FNV-1a text AND image hashes.
+pub(crate) const METADATA_VERSION: i32 = 3;
+
+/// Backfill / recompute persisted text metadata (`hash`/`preview`/`label`) for
+/// text rows whose metadata predates generation 2. Gated on
+/// `user_version < 2`, so it runs exactly once per text generation: version 0
+/// rows get their first metadata, version 1 rows get their DefaultHasher
+/// hashes recomputed with the stable FNV-1a algorithm (`text_hash` is
+/// persisted — std's documented-unstable DefaultHasher must not survive in the
+/// DB, or a future Rust change would break re-capture dedup against old rows).
+/// On success stamps `user_version = 2`. Image hashes (generation 2 → 3) are
+/// migrated separately by `migrate_one_image_row` on a background thread —
+/// decoding hundreds of MB of stored PNGs must not stall startup.
+///
+/// Rows are processed one at a time (id list first, then per-row SELECT +
+/// UPDATE) so a legacy DB holding many multi-MB texts never has its whole
+/// corpus in memory at once. The cold-start load then never touches the
+/// `text` column again.
+fn backfill_text_metadata(conn: &Connection) -> Result<(), rusqlite::Error> {
+    let version: i32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if version >= 2 {
+        return Ok(());
+    }
+    let ids: Vec<i64> = {
+        let mut stmt = conn.prepare(
+            "SELECT id FROM clipboard_history
+             WHERE entry_type = 0 AND text IS NOT NULL"
+        )?;
+        let rows = stmt.query_map([], |row| row.get::<_, i64>(0))?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+    if !ids.is_empty() {
+        let tx = conn.unchecked_transaction()?;
+        for id in ids {
+            let text: String = tx.query_row(
+                "SELECT text FROM clipboard_history WHERE id = ?1",
+                rusqlite::params![id],
+                |row| row.get(0),
+            )?;
+            tx.execute(
+                "UPDATE clipboard_history SET hash = ?1, preview = ?2, label = ?3 WHERE id = ?4",
+                rusqlite::params![
+                    crate::types::text_hash(&text) as i64,
+                    crate::types::bounded_preview(&text),
+                    crate::types::label_from_text(&text),
+                    id,
+                ],
+            )?;
+        }
+        tx.commit()?;
+    }
+    // Stamp the text generation only after the recompute commits; a failure
+    // above leaves the old version in place and the next init retries.
+    conn.pragma_update(None, "user_version", 2)?;
+    Ok(())
+}
+
+/// Recompute ONE image row's persisted content hash with the stable algorithm
+/// (`image::image_hash`, FNV-1a over decoded RGBA). The hash hashes raw
+/// pixels, so the stored PNG must be decoded — PNG is lossless, so decoding
+/// reproduces exactly the RGBA the capture hashed.
+///
+/// Returns the new hash, or `Err` when the row is missing, its PNG is empty,
+/// or the PNG cannot be decoded — the old hash is left untouched and the
+/// caller logs/counts the failure explicitly. Callers run this one row at a
+/// time under a fresh DB lock so captures never wait behind a whole-corpus
+/// decode.
+pub(crate) fn migrate_one_image_row(conn: &Connection, id: i64) -> Result<u64, ()> {
+    let png: Vec<u8> = conn.query_row(
+        "SELECT png_data FROM clipboard_history WHERE id = ?1 AND entry_type = 1",
+        rusqlite::params![id],
+        |row| row.get(0),
+    ).map_err(|e| {
+        eprintln!("CopyAttach: image-hash migration: cannot load png for row {id}: {e}");
+    })?;
+    if png.is_empty() {
+        eprintln!("CopyAttach: image-hash migration: row {id} has empty png_data — hash left as-is");
+        return Err(());
+    }
+    let img = image::load_from_memory(&png).map_err(|e| {
+        eprintln!("CopyAttach: image-hash migration: row {id} png undecodable: {e}");
+    })?;
+    let rgba = img.to_rgba8();
+    let (w, h) = rgba.dimensions();
+    let hash = crate::image::image_hash(&rgba, w, h);
+    conn.execute(
+        "UPDATE clipboard_history SET hash = ?1 WHERE id = ?2",
+        rusqlite::params![hash as i64, id],
+    ).map_err(|e| {
+        eprintln!("CopyAttach: image-hash migration: update failed for row {id}: {e}");
+    })?;
+    Ok(hash)
 }

@@ -116,6 +116,18 @@ pub extern "C" fn clipboard_init() -> c_int {
         return 0; // Already initialized
     }
 
+    // One-time image-hash migration (DefaultHasher → stable FNV-1a,
+    // user_version 2 → 3) on a background thread: decoding ~250 MB of stored
+    // PNGs takes seconds, and the DB lock is held one row at a time so
+    // captures keep flowing during the window. Idempotent — an interrupted run
+    // is redone on the next launch (the recompute is a pure function of the
+    // stored bytes). Skipped in stress-test builds, whose DBs are generated
+    // fresh with the new algorithm.
+    #[cfg(not(feature = "stress-test"))]
+    if let Some(b) = crate::backend::try_backend() {
+        spawn_image_hash_migration(b);
+    }
+
     // NOTE: no baseline clipboard read here. The monitor seeds
     // `last_change_count` from the pasteboard changeCount at startup, so the
     // first poll never treats the pre-existing clipboard state as a new
@@ -139,6 +151,102 @@ pub extern "C" fn clipboard_init() -> c_int {
     }
 
     1
+}
+
+/// Background driver for the image-hash migration (`schema::migrate_one_image_row`).
+///
+/// Collects the image row ids once, then decodes and rehashes each row on a
+/// fresh DB lock — the lock is never held across a decode, so the capture
+/// monitor and paste paths only ever wait for a single row (~tens of ms). The
+/// in-memory entry's hash is mirrored as each row completes, so same-session
+/// re-capture dedup sees the new value immediately. On completion stamps
+/// `user_version = METADATA_VERSION`; failures are logged and counted but do
+/// not block the stamp — an undecodable row will never decode, and retrying it
+/// forever would waste every later launch. An interrupted run simply re-runs
+/// next launch (idempotent recompute).
+#[cfg(not(feature = "stress-test"))]
+fn spawn_image_hash_migration(b: &'static crate::backend::Backend) {
+    // Skip entirely once the image generation is stamped (3) — a later launch
+    // must not re-decode the whole corpus.
+    let version: i32 = match b.db.lock() {
+        Ok(c) => match c.query_row("PRAGMA user_version", [], |r| r.get(0)) {
+            Ok(v) => v,
+            Err(_) => return,
+        },
+        Err(_) => return,
+    };
+    if version >= crate::db::METADATA_VERSION {
+        return;
+    }
+    let ids: Vec<i64> = match b.db.lock() {
+        Ok(c) => {
+            let mut stmt = match c.prepare("SELECT id FROM clipboard_history WHERE entry_type = 1") {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("CopyAttach: image-hash migration: cannot list image rows: {e}");
+                    return;
+                }
+            };
+            let rows = match stmt.query_map([], |row| row.get::<_, i64>(0)) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("CopyAttach: image-hash migration: cannot read image rows: {e}");
+                    return;
+                }
+            };
+            rows.filter_map(|r| r.ok()).collect()
+        }
+        Err(_) => return,
+    };
+    if ids.is_empty() {
+        // Nothing to migrate — stamp the generation directly.
+        if let Ok(c) = b.db.lock() {
+            let _ = c.pragma_update(None, "user_version", crate::db::METADATA_VERSION);
+        }
+        return;
+    }
+    std::thread::spawn(move || {
+        let mut updated = 0usize;
+        let mut failed = 0usize;
+        for id in ids {
+            if !b.running.load(Ordering::SeqCst) {
+                return; // shutting down — next launch resumes (idempotent)
+            }
+            let result = match b.db.lock() {
+                Ok(c) => crate::db::migrate_one_image_row(&c, id),
+                Err(_) => {
+                    failed += 1;
+                    continue;
+                }
+            };
+            match result {
+                Ok(hash) => {
+                    updated += 1;
+                    // Mirror into the in-memory entry so same-session
+                    // re-capture dedup sees the stable hash immediately (a
+                    // re-copy before the next restart would otherwise show a
+                    // transient duplicate).
+                    if let Ok(mut hist) = b.history.lock() {
+                        for entry in hist.iter_mut() {
+                            if let crate::types::ClipboardEntry::Image { db_id, hash: h, .. } = entry {
+                                if *db_id == id {
+                                    *h = hash;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(()) => failed += 1,
+            }
+        }
+        if let Ok(c) = b.db.lock() {
+            if let Err(e) = c.pragma_update(None, "user_version", crate::db::METADATA_VERSION) {
+                eprintln!("CopyAttach: image-hash migration: failed to stamp user_version: {e}");
+            }
+        }
+        eprintln!("CopyAttach: image-hash migration complete: {updated} updated, {failed} failed");
+    });
 }
 
 #[no_mangle]

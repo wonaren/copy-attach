@@ -91,11 +91,16 @@ fn create_thumbnail_with_filter(
 }
 
 /// Compute a content hash (dimensions + raw pixels) for image deduplication.
+///
+/// FNV-1a 64 via `types::fnv1a` — the same stable-algorithm rationale as
+/// `text_hash`: the value is persisted in SQLite, and a std `DefaultHasher`
+/// drift would silently break cross-restart image dedup.
 pub(crate) fn image_hash(data: &[u8], width: u32, height: u32) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    width.hash(&mut hasher);
-    height.hash(&mut hasher);
-    data.hash(&mut hasher);
-    hasher.finish()
+    crate::types::fnv1a(
+        width
+            .to_le_bytes()
+            .into_iter()
+            .chain(height.to_le_bytes())
+            .chain(data.iter().copied()),
+    )
 }

@@ -1,15 +1,14 @@
 // Migration of clipboard history from legacy `history.json` to `SQLite`.
 // Feature-gated on `migration` (default on).
 
+#[cfg(feature = "migration")]
+use std::path::Path;
 use rusqlite::Connection;
 
+/// Core migration body, parameterized by the storage directory so tests can
+/// point it at a temp dir. Feature-gated with `migration`.
 #[cfg(feature = "migration")]
-fn migrate_from_json_to_db_impl(conn: &mut Connection) {
-    let dir = match super::get_persist_dir() {
-        Some(d) => d,
-        None => return,
-    };
-
+pub(crate) fn migrate_from_json_to_db_at(conn: &mut Connection, dir: &Path) {
     let json_path = dir.join("history.json");
     if !json_path.exists() {
         return;
@@ -99,11 +98,33 @@ fn migrate_from_json_to_db_impl(conn: &mut Connection) {
     for entry in entries.iter().rev() {
         let result = match entry {
             LegacyEntry::Text(lt) => {
+                // Persist the same derived metadata (hash/preview/label) the
+                // modern insert path stores: the metadata backfill in
+                // ensure_history_table ran BEFORE migration (the table must
+                // exist first), so rows written here would otherwise be
+                // skipped by the cold-start load as "never backfilled".
+                //
+                // entry_id is stamped per-row right after the insert, because
+                // the ensure_history_table entry_id backfill has already run
+                // by the time migration executes — a migrated row left at the
+                // default 0 would get a FRESH id on every load (favorites are
+                // keyed by entry_id and would break on each restart).
                 tx.execute(
-                    "INSERT INTO clipboard_history (entry_type, text, timestamp, source_name, source_bundle_id)
-                     VALUES (0, ?1, ?2, ?3, ?4)",
-                    rusqlite::params![lt.text, lt.timestamp as i64, lt.source_name, lt.source_bundle_id],
+                    "INSERT INTO clipboard_history
+                        (entry_type, text, timestamp, source_name, source_bundle_id,
+                         hash, preview, label)
+                     VALUES (0, ?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    rusqlite::params![
+                        lt.text, lt.timestamp as i64, lt.source_name, lt.source_bundle_id,
+                        crate::types::text_hash(&lt.text) as i64,
+                        crate::types::bounded_preview(&lt.text),
+                        crate::types::label_from_text(&lt.text),
+                    ],
                 )
+                .and_then(|_| tx.execute(
+                    "UPDATE clipboard_history SET entry_id = id WHERE id = last_insert_rowid()",
+                    [],
+                ))
             }
             LegacyEntry::Image(li) => {
                 tx.execute(
@@ -116,6 +137,10 @@ fn migrate_from_json_to_db_impl(conn: &mut Connection) {
                         li.source_name, li.source_bundle_id,
                     ],
                 )
+                .and_then(|_| tx.execute(
+                    "UPDATE clipboard_history SET entry_id = id WHERE id = last_insert_rowid()",
+                    [],
+                ))
             }
         };
         if let Err(e) = result {
@@ -132,11 +157,17 @@ fn migrate_from_json_to_db_impl(conn: &mut Connection) {
     let _ = std::fs::remove_file(dir.join("history.json.tmp"));
 }
 
-#[cfg(not(feature = "migration"))]
-fn migrate_from_json_to_db_impl(_conn: &mut Connection) {}
-
 /// Migrate clipboard history from legacy `history.json` to the `SQLite` database.
 /// No-op if the `migration` feature is disabled or no JSON file is present.
 pub(crate) fn migrate_from_json_to_db(conn: &mut Connection) {
-    migrate_from_json_to_db_impl(conn);
+    #[cfg(feature = "migration")]
+    {
+        let dir = match super::get_persist_dir() {
+            Some(d) => d,
+            None => return,
+        };
+        migrate_from_json_to_db_at(conn, &dir);
+    }
+    #[cfg(not(feature = "migration"))]
+    let _ = conn;
 }

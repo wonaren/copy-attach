@@ -6,7 +6,7 @@ use std::time::Duration;
 use arboard::Clipboard;
 
 use crate::backend::{backend, try_backend, copyattach_temp_root, mark_history_changed, PendingSelfWrite};
-use crate::db::{delete_matching_entry, insert_entry_to_db, load_text_by_db_id, trim_db_history};
+use crate::db::load_text_by_db_id;
 use crate::history::add_to_history;
 use crate::macos;
 use crate::types::ClipboardEntry;
@@ -195,7 +195,7 @@ fn select_and_paste_impl(mut item: ClipboardEntry) -> c_int {
 
     if let Some(b) = try_backend() {
         match b.db.lock() {
-            Ok(conn) => {
+            Ok(mut conn) => {
                 let png_for_db = match &db_item {
                     ClipboardEntry::Image { png_data, .. } if !png_data.is_empty() => {
                         Some(png_data.as_slice())
@@ -209,19 +209,25 @@ fn select_and_paste_impl(mut item: ClipboardEntry) -> c_int {
                     _ => None,
                 };
 
-                if insert_entry_to_db(&conn, &db_item, full_text.as_deref(), png_for_db, thumb_for_db).is_ok() {
-                    delete_matching_entry(&conn, &db_item, full_text.as_deref());
-                    let new_row_id = conn.last_insert_rowid();
-                    trim_db_history(&conn, b.cleanup_threshold.load(Ordering::Relaxed));
-
-                    match &mut item {
-                        ClipboardEntry::Image { ref mut db_id, .. } |
-                        ClipboardEntry::Text { ref mut db_id, .. } => {
-                            *db_id = new_row_id;
+                match crate::db::persist_entry_to_db(
+                    &mut conn,
+                    &db_item,
+                    full_text.as_deref(),
+                    png_for_db,
+                    thumb_for_db,
+                    b.cleanup_threshold.load(Ordering::Relaxed),
+                ) {
+                    Ok(new_row_id) => {
+                        match &mut item {
+                            ClipboardEntry::Image { ref mut db_id, .. } |
+                            ClipboardEntry::Text { ref mut db_id, .. } => {
+                                *db_id = new_row_id;
+                            }
                         }
                     }
-                } else {
-                    eprintln!("CopyAttach: select_and_paste DB insert failed — entry stays with db_id=0");
+                    Err(()) => {
+                        eprintln!("CopyAttach: select_and_paste DB insert failed — entry stays with db_id=0");
+                    }
                 }
             }
             Err(e) => {

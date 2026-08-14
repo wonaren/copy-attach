@@ -17,6 +17,7 @@ mod image;
 mod search;
 mod cleanup;
 mod db;
+mod migration;
 mod backend;
 
 fn make_text(text: &str, ts: u64) -> ClipboardEntry {

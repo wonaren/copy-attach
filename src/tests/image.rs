@@ -158,3 +158,14 @@ fn test_preview_image() {
     let i = make_image(&img_data, 1920, 1080, 100);
     assert!(i.preview().is_empty());
 }
+
+/// Locks the persisted image-hash algorithm: FNV-1a 64 over
+/// width.to_le_bytes() ++ height.to_le_bytes() ++ pixel bytes. The value is
+/// stored in SQLite — changing the algorithm would orphan every persisted
+/// image hash in user DBs (cross-restart re-copy dedup would show
+/// duplicates), so this vector is a tripwire, not incidental.
+#[test]
+fn test_image_hash_is_stable_fnv1a() {
+    // width=2, height=3, pixels=[0,1,2,3]
+    assert_eq!(image_hash(&[0, 1, 2, 3], 2, 3), 0xeaa1_0eff_b6c1_2ad4);
+}
