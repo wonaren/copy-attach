@@ -20,6 +20,7 @@ pub(crate) use schema::{ensure_history_table, open_db};
 // algorithm), so these re-exports follow the same gate; tests keep access.
 #[cfg(any(not(feature = "stress-test"), test))]
 pub(crate) use schema::{METADATA_VERSION, migrate_one_image_row};
+pub(crate) use schema::FTS_MAX_INDEXED_TEXT_LEN;
 #[cfg(feature = "migration")]
 pub(crate) use schema::get_persist_dir;
 pub(crate) use crud::{insert_entry_to_db, load_history_from_db, persist_entry_to_db, trim_db_history};

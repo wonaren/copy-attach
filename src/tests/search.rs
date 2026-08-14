@@ -114,6 +114,85 @@ fn test_search_backfills_preexisting_rows() {
 }
 
 #[test]
+fn test_fts_cap_skips_huge_text() {
+    // SEMANTIC TRIPWIRE for the FTS size cap: a text above
+    // FTS_MAX_INDEXED_TEXT_LEN characters must NOT be trigram-indexed (the
+    // capture-path insert cost and DB amplification both scale with text
+    // size), yet a ≥3-char query hitting its MIDDLE must still find it — via
+    // the LIKE fallback over oversized rows. Silently dropping huge documents
+    // from search results is not acceptable.
+    use crate::db::FTS_MAX_INDEXED_TEXT_LEN;
+    let cap = FTS_MAX_INDEXED_TEXT_LEN as usize;
+    let huge = format!(
+        "{}MIDDLE-MARKER{}",
+        "x".repeat(cap / 2),
+        "y".repeat(cap / 2)
+    );
+    assert!(huge.chars().count() > cap as usize, "test text must exceed the cap");
+
+    let conn = test_db();
+    insert_text(&conn, &huge, 100);
+    insert_text(&conn, "small needle here", 200);
+
+    // The huge row is stored but never indexed.
+    let fts_count: i64 = conn
+        .query_row("SELECT count(*) FROM clipboard_fts", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(fts_count, 1, "only the small text may be trigram-indexed");
+
+    // ≥3-char query reaches the middle of the un-indexed huge document.
+    assert_eq!(crate::db::search_history(&conn, "marker").len(), 1,
+        "huge un-indexed text must stay searchable via the LIKE fallback");
+    // The small text keeps the fast FTS path.
+    assert_eq!(crate::db::search_history(&conn, "needle").len(), 1);
+}
+
+#[test]
+fn test_fts_cap_legacy_oversized_rows_evicted() {
+    // A DB whose index predates the cap (oversized row already inside FTS)
+    // must have that row evicted by the next ensure_history_table run, while
+    // remaining searchable through the LIKE fallback. The startup cleanup is
+    // the only thing that shrinks a legacy index to the capped set.
+    use crate::db::FTS_MAX_INDEXED_TEXT_LEN;
+    let cap = FTS_MAX_INDEXED_TEXT_LEN as usize;
+    let huge = format!("{}LEGACY-HUGE{}", "a".repeat(cap / 2), "b".repeat(cap / 2));
+
+    let conn = test_db();
+    let db_id = insert_text(&conn, &huge, 100);
+    // search_history returns the stable Rust entry_id, not the SQLite rowid.
+    let entry_id: i64 = conn
+        .query_row(
+            "SELECT entry_id FROM clipboard_history WHERE id = ?1",
+            rusqlite::params![db_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+
+    // Simulate the pre-cap state: the row is manually present in the index.
+    conn.execute(
+        "INSERT INTO clipboard_fts(rowid, text)
+         SELECT id, text FROM clipboard_history WHERE id = ?1",
+        rusqlite::params![db_id],
+    ).unwrap();
+    let fts_count: i64 = conn
+        .query_row("SELECT count(*) FROM clipboard_fts", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(fts_count, 1, "precondition: legacy oversized row is indexed");
+
+    // Re-running schema ensure evicts it from the index (idempotent cleanup).
+    crate::db::ensure_history_table(&conn).unwrap();
+    let fts_count: i64 = conn
+        .query_row("SELECT count(*) FROM clipboard_fts", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(fts_count, 0, "oversized legacy row must be evicted from FTS");
+
+    // Search still reaches it — the LIKE fallback over oversized rows.
+    let hits = crate::db::search_history(&conn, "huge");
+    assert_eq!(hits.len(), 1, "evicted row must stay searchable");
+    assert_eq!(hits[0] as i64, entry_id);
+}
+
+#[test]
 fn test_snapshot_row_text() {
     let t = make_text("第一行\n第二行很长很长的内容", 100);
     let row = SnapshotRow::from_entry(&t);

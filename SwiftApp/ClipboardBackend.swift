@@ -337,21 +337,36 @@ class ClipboardBackend {
         return data
     }
 
-    func getCachedThumbnail(dbId: Int) -> NSImage? {
+    /// Synchronous NSCache-only lookup — no IO, safe in body evaluation.
+    /// Rows render already-decoded thumbnails instantly; cache misses go
+    /// through `loadThumbnail`, which never blocks the main thread.
+    func cachedThumbnail(dbId: Int) -> NSImage? {
+        guard dbId != 0 else { return nil }
+        return thumbnailCache.object(forKey: NSNumber(value: dbId))
+    }
+
+    /// Async full thumbnail load: NSCache hit, else the FFI read + PNG decode
+    /// run off the main thread, and the result is cached before returning.
+    /// The main thread never performs DB access or image decoding for rows.
+    func loadThumbnail(dbId: Int) async -> NSImage? {
         guard dbId != 0 else { return nil }
         let key = NSNumber(value: dbId)
         if let cached = thumbnailCache.object(forKey: key) { return cached }
-        var len: Int32 = 0
-        guard let ptr = clipboard_get_image_thumb_by_db_id(Int64(dbId), &len) else { return nil }
-        let data = Data(bytes: ptr, count: Int(len))
-        clipboard_free_bytes(ptr, len)
-        guard let image = NSImage(data: data) else {
-            print("[ClipboardBackend] failed to decode thumbnail for dbId=\(dbId): PNG data is \(data.count) bytes but NSImage(data:) returned nil")
-            return nil
-        }
+        let decoded = await Task.detached(priority: .userInitiated) { () -> DecodedImage? in
+            var len: Int32 = 0
+            guard let ptr = clipboard_get_image_thumb_by_db_id(Int64(dbId), &len) else { return nil }
+            let data = Data(bytes: ptr, count: Int(len))
+            clipboard_free_bytes(ptr, len)
+            guard let image = NSImage(data: data) else {
+                print("[ClipboardBackend] failed to decode thumbnail for dbId=\(dbId): PNG data is \(data.count) bytes but NSImage(data:) returned nil")
+                return nil
+            }
+            return DecodedImage(image: image)
+        }.value
+        guard let decoded else { return nil }
         // cost = decoded RGBA upper bound for a 300px-max-dimension thumbnail
-        thumbnailCache.setObject(image, forKey: key, cost: 300 * 300 * 4)
-        return image
+        thumbnailCache.setObject(decoded.image, forKey: key, cost: 300 * 300 * 4)
+        return decoded.image
     }
 
     /// Immediately release all cached thumbnails.

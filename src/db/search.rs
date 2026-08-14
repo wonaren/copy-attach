@@ -1,18 +1,25 @@
 use rusqlite::Connection;
 
+use crate::db::FTS_MAX_INDEXED_TEXT_LEN;
+
 /// Case-insensitive substring search over the stored full text.
 ///
 /// Queries of ≥3 Unicode scalars go through the FTS5 trigram index (substring
-/// semantics, full-Unicode case folding). Shorter queries cannot form a
-/// trigram, so they fall back to a LIKE scan over the full text column.
+/// semantics, full-Unicode case folding) PLUS a LIKE fallback over rows the
+/// index excludes (texts longer than [`FTS_MAX_INDEXED_TEXT_LEN`] characters —
+/// see schema.rs; the cap keeps the index and the capture-path insert cost
+/// bounded for huge pastes). The fallback preserves the ≥3-char substring
+/// promise for those rows: they are rare, so the scan is bounded to them.
+/// Shorter queries cannot form a trigram at all, so they fall back to a LIKE
+/// scan over the full text column.
 ///
 /// The LIKE fallback is DELIBERATE, not a leftover: matching only the bounded
 /// previews for 1-2 char queries would silently drop matches in the middle of
 /// long documents — a semantic regression for a latency gain. Known
 /// limitation, unchanged from before: SQLite's LIKE folds ASCII case only, so
-/// a <3-char query relying on non-ASCII case folding (e.g. `é` matching `É`)
-/// misses those variants; ≥3-char queries are unaffected (trigram folds
-/// Unicode). Returns matching entry_ids (the stable Rust IDs, not SQLite
+/// a query relying on non-ASCII case folding (e.g. `é` matching `É`) misses
+/// those variants in the LIKE paths; the trigram path (≥3 chars, indexed rows)
+/// folds Unicode. Returns matching entry_ids (the stable Rust IDs, not SQLite
 /// rowids).
 pub(crate) fn search_history(conn: &Connection, query: &str) -> Vec<u64> {
     let mut ids = Vec::new();
@@ -42,6 +49,44 @@ pub(crate) fn search_history(conn: &Connection, query: &str) -> Vec<u64> {
                 Ok(id) => ids.push(id as u64),
                 Err(e) => eprintln!("CopyAttach: FTS search row read error: {e}"),
             }
+        }
+
+        // LIKE fallback over rows the trigram index excludes (huge texts above
+        // the cap): the index is the fast path, the LIKE scan is bounded to
+        // the rare oversized rows, and the substring semantics never silently
+        // drop a huge document from search results.
+        let like = format!("%{}%", escape_like(query));
+        let mut stmt = match conn.prepare(
+            "SELECT entry_id FROM clipboard_history
+             WHERE entry_type = 0 AND length(text) > ?1 AND text LIKE ?2 ESCAPE '\\'",
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("CopyAttach: failed to prepare FTS-cap LIKE search: {e}");
+                return ids;
+            }
+        };
+        let rows = match stmt.query_map(
+            rusqlite::params![FTS_MAX_INDEXED_TEXT_LEN, like],
+            |row| row.get::<_, i64>(0),
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("CopyAttach: FTS-cap LIKE search failed: {e}");
+                return ids;
+            }
+        };
+        for row in rows {
+            match row {
+                Ok(id) => ids.push(id as u64),
+                Err(e) => eprintln!("CopyAttach: FTS-cap LIKE search row read error: {e}"),
+            }
+        }
+        // An oversized row can be double-reported while a legacy index still
+        // holds it (the startup cleanup removes those); dedup defensively.
+        if ids.len() > 1 {
+            let mut seen = std::collections::HashSet::with_capacity(ids.len());
+            ids.retain(|id| seen.insert(*id));
         }
     } else {
         let like = format!("%{}%", escape_like(query));

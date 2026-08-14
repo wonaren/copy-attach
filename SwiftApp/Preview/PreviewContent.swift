@@ -73,12 +73,20 @@ struct PreviewContent: View {
     private func loadImage(dbId: Int) async {
         guard dbId != 0 else { return }
         isLoadingImage = true
-        let data = await Task.detached(priority: .userInitiated) {
-            ClipboardBackend.getImageFullByDbId(dbId)
+
+        // The decode budget depends on the display constraints; capture them
+        // on the main actor, then decode fully off-main (ImageIO downsample —
+        // the decoded buffer is capped at display resolution + zoom headroom,
+        // never the full-resolution PNG).
+        let screenSize = NSScreen.main?.visibleFrame.size ?? NSSize(width: 1440, height: 900)
+        let scale = NSScreen.main?.backingScaleFactor ?? 2
+        let decoded = await Task.detached(priority: .userInitiated) { () -> DecodedImage? in
+            guard let data = ClipboardBackend.getImageFullByDbId(dbId) else { return nil }
+            return ImageDecode.previewImage(from: data, screenSize: screenSize, scale: scale)
         }.value
         // Only apply if we're still showing the same item
         if currentDbId == dbId {
-            if let data, let img = NSImage(data: data) { image = img }
+            if let decoded { image = decoded.image }
             isLoadingImage = false
         }
     }

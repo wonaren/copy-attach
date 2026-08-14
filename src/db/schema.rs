@@ -120,15 +120,29 @@ pub(crate) fn ensure_history_table(conn: &Connection) -> Result<(), rusqlite::Er
     // matching for ≥3-char queries). Keeping full text out of the in-memory
     // history Vec is what bounds memory; the index makes search fast on disk.
     //
-    // Sync is automatic via AFTER INSERT/DELETE triggers (triggers are per-DB,
-    // so they persist across restarts; `IF NOT EXISTS` keeps init idempotent).
-    // Image rows have text = NULL and are skipped by the WHEN clauses. The FTS
-    // rowid is the base-table rowid, so the AFTER DELETE trigger removes the
-    // indexed row directly (the `'delete'` special command is for external
-    // content tables and is not needed here). The backfill populates the index
-    // for rows that predate this virtual table, guarded so it only runs once
-    // (an already-populated index is left untouched).
-    conn.execute_batch(
+    // The index has a SIZE CAP: text rows longer than `FTS_MAX_INDEXED_TEXT_LEN`
+    // characters are NOT indexed. A trigram index costs several× the text size
+    // on disk (measured ~6.4×: 10.6MB of text → 68MB DB) and the synchronous
+    // capture-path insert scales linearly with size (measured: 2MB text →
+    // ~170ms, 8MB → ~760ms of monitor-thread stall). The cap keeps the index
+    // and the per-capture write cost bounded no matter how large pasted
+    // documents get. Excluded rows stay fully searchable: `db::search_history`
+    // runs a LIKE fallback over oversized rows for ≥3-char queries (substring
+    // semantics preserved, scan bounded to the rare huge rows — see search.rs).
+    //
+    // Sync is automatic via AFTER INSERT/DELETE triggers. The insert trigger is
+    // DROP + CREATE (not IF NOT EXISTS): triggers persist per-DB, so an old
+    // installation would otherwise keep its uncapped trigger forever; the
+    // per-launch DROP+CREATE of an empty trigger is negligible. Image rows
+    // have text = NULL and are skipped by the WHEN clauses. The FTS rowid is
+    // the base-table rowid, so the AFTER DELETE trigger removes the indexed
+    // row directly (the `'delete'` special command is for external content
+    // tables and is not needed here). The backfill populates the index for
+    // rows that predate this virtual table, guarded so it only runs once (an
+    // already-populated index is left untouched). The cleanup DELETE evicts
+    // oversized rows that predate the cap (idempotent; empty when nothing
+    // matches), so legacy indexes shrink to the capped set.
+    let fts_sql = format!(
         "CREATE VIRTUAL TABLE IF NOT EXISTS clipboard_fts USING fts5(
              text,
              tokenize = 'trigram'
@@ -136,16 +150,25 @@ pub(crate) fn ensure_history_table(conn: &Connection) -> Result<(), rusqlite::Er
          INSERT INTO clipboard_fts(rowid, text)
              SELECT id, text FROM clipboard_history
              WHERE text IS NOT NULL
+               AND length(text) <= {fts_cap}
                AND NOT EXISTS (SELECT 1 FROM clipboard_fts LIMIT 1);
-         CREATE TRIGGER IF NOT EXISTS clipboard_fts_ai AFTER INSERT ON clipboard_history
-         WHEN new.text IS NOT NULL BEGIN
+         DELETE FROM clipboard_fts
+             WHERE rowid IN (SELECT id FROM clipboard_history
+                             WHERE entry_type = 0 AND text IS NOT NULL
+                               AND length(text) > {fts_cap});
+         DROP TRIGGER IF EXISTS clipboard_fts_ai;
+         CREATE TRIGGER clipboard_fts_ai AFTER INSERT ON clipboard_history
+         WHEN new.text IS NOT NULL AND length(new.text) <= {fts_cap} BEGIN
              INSERT INTO clipboard_fts(rowid, text) VALUES (new.id, new.text);
          END;
-         CREATE TRIGGER IF NOT EXISTS clipboard_fts_ad AFTER DELETE ON clipboard_history
+         DROP TRIGGER IF EXISTS clipboard_fts_ad;
+         CREATE TRIGGER clipboard_fts_ad AFTER DELETE ON clipboard_history
          WHEN old.text IS NOT NULL BEGIN
              DELETE FROM clipboard_fts WHERE rowid = old.id;
-         END;"
-    )?;
+         END;",
+        fts_cap = FTS_MAX_INDEXED_TEXT_LEN,
+    );
+    conn.execute_batch(&fts_sql)?;
     Ok(())
 }
 
@@ -157,6 +180,15 @@ pub(crate) fn ensure_history_table(conn: &Connection) -> Result<(), rusqlite::Er
 ///     stamps 3 on completion),
 /// 3 = stable FNV-1a text AND image hashes.
 pub(crate) const METADATA_VERSION: i32 = 3;
+
+/// Upper bound (in Unicode characters — SQLite `length()` on TEXT counts
+/// characters) for text rows that get trigram-indexed. Above this the row is
+/// stored but NOT indexed: the trigram index amplifies disk usage several×
+/// (~6.4× measured) and the synchronous capture-path insert cost scales with
+/// text size (~0.17s per 2MB measured) — a cap keeps both bounded for huge
+/// pastes. Excluded rows remain searchable through the LIKE fallback in
+/// `db::search_history` (bounded to the rare oversized rows).
+pub(crate) const FTS_MAX_INDEXED_TEXT_LEN: i64 = 512 * 1024;
 
 /// Backfill / recompute persisted text metadata (`hash`/`preview`/`label`) for
 /// text rows whose metadata predates generation 2. Gated on

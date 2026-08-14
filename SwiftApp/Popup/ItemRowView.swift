@@ -11,6 +11,9 @@ struct ItemRowView: View {
     let isFavorite: Bool
     let selectionNamespace: Namespace.ID
     @State private var isHovering = false
+    /// The row's decoded thumbnail once loaded (async, off-main). Also keeps
+    /// the row from re-looking up the cache on every body evaluation.
+    @State private var thumbImage: NSImage?
     @Environment(\.appTheme) private var theme
 
     private static let hexColorRegex = try! NSRegularExpression(pattern: "#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})\\b")
@@ -226,7 +229,9 @@ struct ItemRowView: View {
 
     private func imageContent(dbId: Int, width: Int, height: Int) -> some View {
         HStack(spacing: 8) {
-            if let nsImage = ClipboardBackend.shared.getCachedThumbnail(dbId: dbId) {
+            // Synchronous cache hit renders instantly (no IO); a miss shows
+            // the placeholder while `loadThumbnail` decodes off-main (below).
+            if let nsImage = thumbImage ?? ClipboardBackend.shared.cachedThumbnail(dbId: dbId) {
                 Image(nsImage: nsImage).resizable().aspectRatio(contentMode: .fit)
                     .frame(maxHeight: 100)
                     .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
@@ -284,6 +289,16 @@ struct ItemRowView: View {
                 }
                 .frame(maxWidth: .infinity)
             }
+        }
+        // Load the thumbnail off the main thread (FFI read + PNG decode).
+        // `id: dbId` restarts the task when Phase 2 completes (dbId 0 → rowid)
+        // and auto-cancels it when the row scrolls out of view; a cancelled
+        // task must not publish a result to a dead row.
+        .task(id: dbId) {
+            guard dbId != 0 else { return }
+            let img = await ClipboardBackend.shared.loadThumbnail(dbId: dbId)
+            guard !Task.isCancelled else { return }
+            thumbImage = img
         }
     }
 }
