@@ -57,6 +57,7 @@ pub(crate) fn push_deleted(
         }
         stack.remove(0);
     }
+    eprintln!("CopyAttach: undo_push entries={} total_payload_bytes={}", stack.len(), bytes);
 }
 
 // ═══════════════════════════════════════════
@@ -160,9 +161,14 @@ pub(crate) struct ImageEncodeScratchGuard<'a> {
 
 impl<'a> ImageEncodeScratchGuard<'a> {
     pub(crate) fn acquire() -> Self {
-        ImageEncodeScratchGuard {
-            guard: IMAGE_ENCODE_SCRATCH.lock().unwrap(),
+        let guard = IMAGE_ENCODE_SCRATCH.lock().unwrap();
+        if guard.capacity() > 0 {
+            eprintln!("CopyAttach: encode_scratch acquire cap={}", guard.capacity());
         }
+        // The pooled buffer may be marked reusable from the previous idle
+        // cycle — claim its pages back before the encoder writes into it.
+        claim_pages(guard.as_ptr(), guard.capacity());
+        ImageEncodeScratchGuard { guard }
     }
 }
 
@@ -182,8 +188,201 @@ impl std::ops::DerefMut for ImageEncodeScratchGuard<'_> {
 impl Drop for ImageEncodeScratchGuard<'_> {
     fn drop(&mut self) {
         if self.guard.capacity() > IMAGE_ENCODE_SCRATCH_RETAIN_CAP {
+            // Release an oversized buffer without leaving its pages counted
+            // as freed-but-retained residue: mark them reusable first.
+            eprintln!("CopyAttach: encode_scratch drop oversized cap={} release",
+                self.guard.capacity());
+            mark_pages_reusable(self.guard.as_ptr(), self.guard.capacity());
             *self.guard = Vec::new();
+        } else if !self.guard.is_empty() {
+            // Idle pooled buffer: its pages stop counting against the process
+            // footprint until the next capture claims them back.
+            eprintln!("CopyAttach: encode_scratch drop cap={} mark_reusable",
+                self.guard.capacity());
+            mark_pages_reusable(self.guard.as_ptr(), self.guard.capacity());
         }
+    }
+}
+
+// ═══════════════════════════════════════════
+// Purgeable scratch pages (MADV_FREE_REUSABLE)
+// ═══════════════════════════════════════════
+
+/// macOS does not return freed large malloc pages to the process footprint by
+/// ANY means (measured on this OS: `free`, `madvise(MADV_FREE)`,
+/// `madvise(MADV_DONTNEED)` and `malloc_zone_pressure_relief` all leave
+/// `phys_footprint` unchanged), so the background footprint of a clipboard
+/// app ratchets up with every large transient allocation and stays there for
+/// the session. The one working mechanism is the purgeable-memory contract:
+/// `madvise(MADV_FREE_REUSABLE)` removes pages from the footprint and lets
+/// the kernel hand them out; `madvise(MADV_FREE_REUSE)` claims them back for
+/// writing. The two capture scratch pools use exactly this cycle — the buffer
+/// is fully rewritten before every read (decode writes every pixel, the PNG
+/// encoder writes every output byte), so the kernel reusing or zeroing an
+/// idle pool's pages is harmless.
+///
+/// Safety: only buffers that are page-aligned and ≥ one page are marked —
+/// those are the malloc large-zone (mmap'd) blocks, which own their pages
+/// exclusively. Small blocks share pages with other allocations; marking a
+/// shared page would forfeit a neighbor's data.
+///
+/// macOS page size (Apple Silicon; the max supported page size on arm64).
+const PAGE_SIZE: usize = 16 * 1024;
+
+#[cfg(target_os = "macos")]
+extern "C" {
+    fn madvise(addr: *mut core::ffi::c_void, len: usize, advice: i32) -> i32;
+}
+#[cfg(target_os = "macos")]
+const MADV_FREE_REUSABLE: i32 = 7; // "pages can be reused (by anyone)"
+#[cfg(target_os = "macos")]
+const MADV_FREE_REUSE: i32 = 8; // "caller wants to reuse those pages"
+
+/// Mark `[ptr, ptr + byte_len)` as reusable-by-anyone: the pages stop counting
+/// against the process footprint and the kernel may reclaim them. Contents are
+/// forfeited — only valid for scratch buffers fully rewritten before every
+/// read. No-op unless the range starts page-aligned and covers ≥ one page
+/// (the malloc large-zone / mmap'd blocks, which own their pages exclusively;
+/// small blocks share pages with other allocations and are never marked).
+pub(crate) fn mark_pages_reusable(ptr: *const u8, byte_len: usize) {
+    if byte_len < PAGE_SIZE {
+        return;
+    }
+    let start = ptr as usize;
+    if !start.is_multiple_of(PAGE_SIZE) {
+        // A >=1-page block whose base is not page-aligned cannot come from the
+        // malloc large zone (mmap'd, page-aligned) — it grew in place out of a
+        // small-zone block and shares pages with other allocations, so it must
+        // NOT be marked. Log it: such buffers silently pin their pages in the
+        // footprint forever, and this is exactly the kind of path that would
+        // otherwise hide.
+        eprintln!("CopyAttach: mark_pages_reusable SKIP unaligned base=0x{start:x} len={byte_len}");
+        return;
+    }
+    let end = start + byte_len;
+    let aligned_end = (end + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+    #[cfg(target_os = "macos")]
+    unsafe {
+        madvise(start as *mut core::ffi::c_void, aligned_end - start, MADV_FREE_REUSABLE);
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = aligned_end;
+}
+
+/// Claim marked pages back so writes land in them again. Contents are
+/// undefined (the kernel may have reused or zeroed them) — callers must
+/// rewrite before reading, which the scratch pools do by contract.
+pub(crate) fn claim_pages(ptr: *const u8, byte_len: usize) {
+    if byte_len < PAGE_SIZE {
+        return;
+    }
+    let start = ptr as usize;
+    if !start.is_multiple_of(PAGE_SIZE) {
+        eprintln!("CopyAttach: claim_pages SKIP unaligned base=0x{start:x} len={byte_len}");
+        return;
+    }
+    let end = start + byte_len;
+    let aligned_end = (end + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+    #[cfg(target_os = "macos")]
+    unsafe {
+        madvise(start as *mut core::ffi::c_void, aligned_end - start, MADV_FREE_REUSE);
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = aligned_end;
+}
+
+// ═══════════════════════════════════════
+// Image capture decode buffer pool
+// ═══════════════════════════════════════
+
+/// Pooled RGBA pixel buffer for the capture pipeline's *input* side
+/// (companion to [`IMAGE_ENCODE_SCRATCH`], which serves the output side).
+///
+/// macOS does not return large freed malloc regions to the OS promptly
+/// (measured: a freed multi-MB decode buffer lingers as a retained region
+/// while the next capture allocates a fresh one), so a per-capture
+/// `to_rgba8()` alloc + free ratchets RSS upward with every large image
+/// copied — the steady-state "常驻" the process shows at idle. The pool
+/// keeps ONE allocation reused across captures; the guard is held from the
+/// monitor-thread decode through the Phase 2 encode thread and returns the
+/// buffer on every exit path (success, encode failure, DB failure). An
+/// oversized buffer is released instead of pooled, so one huge image cannot
+/// pin its peak size for the process lifetime (mirrors the encode scratch cap).
+static IMAGE_DECODE_SCRATCH: Mutex<Option<Vec<u8>>> = Mutex::new(None);
+
+/// Retention cap for the pooled decode buffer (bytes).
+pub(crate) const IMAGE_DECODE_SCRATCH_RETAIN_CAP: usize = 64 * 1024 * 1024;
+
+/// Owns the capture pipeline's RGBA pixel buffer for one ingest. `Deref`
+/// exposes the pixels to hashing/thumbnail/encode; dropping returns the
+/// buffer to the pool (or releases it when over the retention cap).
+pub(crate) struct ImageDecodeBuffer {
+    buf: Option<Vec<u8>>,
+}
+
+impl ImageDecodeBuffer {
+    /// Take the pooled buffer (an empty `Vec` when the pool is currently
+    /// borrowed by another in-flight ingest — captures can overlap the
+    /// monitor thread's hand-off to the Phase 2 encode thread). Pages marked
+    /// reusable by the previous idle cycle are claimed back for writing.
+    pub(crate) fn acquire() -> Self {
+        let buf = IMAGE_DECODE_SCRATCH.lock().unwrap().take().unwrap_or_default();
+        if buf.capacity() > 0 {
+            eprintln!("CopyAttach: decode_scratch acquire cap={}", buf.capacity());
+        }
+        claim_pages(buf.as_ptr(), buf.capacity());
+        ImageDecodeBuffer { buf: Some(buf) }
+    }
+
+    /// Wrap a freshly allocated buffer (the generic-decoder fallback for
+    /// non-RGBA8 formats). It still returns to the pool on drop, so the next
+    /// capture reuses it. The decoder has already written every byte, but the
+    /// allocator may have handed back pages still marked reusable from an
+    /// earlier scratch — claim them so the kernel cannot reclaim the pixels
+    /// while the capture pipeline reads them (hashing/thumbnail/encode).
+    pub(crate) fn from_vec(v: Vec<u8>) -> Self {
+        claim_pages(v.as_ptr(), v.capacity());
+        ImageDecodeBuffer { buf: Some(v) }
+    }
+
+    pub(crate) fn as_mut_vec(&mut self) -> &mut Vec<u8> {
+        self.buf.as_mut().expect("image decode buffer accessed after hand-off")
+    }
+}
+
+impl Drop for ImageDecodeBuffer {
+    fn drop(&mut self) {
+        if let Some(buf) = self.buf.take() {
+            if buf.capacity() <= IMAGE_DECODE_SCRATCH_RETAIN_CAP {
+                let mut pool = IMAGE_DECODE_SCRATCH.lock().unwrap();
+                // A buffer already parked there (an overlapping ingest
+                // returned first) — release this one rather than churning.
+                if pool.is_none() {
+                    // Idle pooled buffer: remove its pages from the footprint.
+                    eprintln!("CopyAttach: decode_scratch drop cap={} mark_reusable",
+                        buf.capacity());
+                    mark_pages_reusable(buf.as_ptr(), buf.capacity());
+                    *pool = Some(buf);
+                } else {
+                    eprintln!("CopyAttach: decode_scratch drop cap={} pool_busy release",
+                        buf.capacity());
+                    mark_pages_reusable(buf.as_ptr(), buf.capacity());
+                }
+            } else {
+                // Oversized: drop it, but mark first so its pages do not stay
+                // counted as freed-but-retained residue.
+                eprintln!("CopyAttach: decode_scratch drop oversized cap={} release",
+                    buf.capacity());
+                mark_pages_reusable(buf.as_ptr(), buf.capacity());
+            }
+        }
+    }
+}
+
+impl std::ops::Deref for ImageDecodeBuffer {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        self.buf.as_deref().unwrap_or(&[])
     }
 }
 

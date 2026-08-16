@@ -265,10 +265,212 @@ pub extern "C" fn clipboard_get_image_thumb_by_db_id(db_id: i64, out_len: *mut c
     vec_to_raw(thumb_data)
 }
 
+/// Wraps the stored-blob `Vec` loaded for a preview decode: its pages are
+/// marked reusable when it drops, on every exit path (the blob is read into
+/// a fresh large-zone block that otherwise lingers as freed-but-retained
+/// residue — same class as the ImageIO decode buffers this FFI replaces).
+struct MarkBlobReusableOnDrop(Vec<u8>);
+
+impl Drop for MarkBlobReusableOnDrop {
+    fn drop(&mut self) {
+        crate::backend::mark_pages_reusable(self.0.as_ptr(), self.0.capacity());
+    }
+}
+
+/// Decode the stored image downscaled to at most `max_dim` on its longest
+/// side (aspect preserved; never upscales) into a Rust-owned RGBA8 buffer.
+///
+/// This is the preview decode path. The buffer is handed to the caller with
+/// EXACTLY `w * h * 4` bytes and must be returned via
+/// [`clipboard_preview_buffer_release`] — never `clipboard_free_bytes` (the
+/// two allocations have different layouts). Release marks the pages
+/// `MADV_FREE_REUSABLE` before freeing, so a closed preview's decode stops
+/// counting against the process footprint: macOS does not return freed large
+/// malloc pages by any other means (measured), which is why ImageIO-decoded
+/// previews previously accumulated tens of MB of permanent residue per
+/// session.
+///
+/// Decodes through the same codec paths as the capture pipeline (RGBA8 PNG
+/// fast path, generic decoder otherwise). The full-resolution intermediate is
+/// marked reusable before being dropped, so only the (downscaled) delivered
+/// buffer counts while the preview is on screen. `out_is_gif` is set to 1 when
+/// the stored blob is an animated GIF (Swift keeps the NSImage(data:) path for
+/// those to preserve animation). Returns null on failure (missing row,
+/// undecodable, zero-size). `max_dim <= 0` decodes at full resolution.
+#[no_mangle]
+pub extern "C" fn clipboard_decode_preview_by_db_id(
+    db_id: i64,
+    max_dim: c_int,
+    out_len: *mut c_int,
+    out_w: *mut c_int,
+    out_h: *mut c_int,
+    out_is_gif: *mut c_int,
+) -> *mut u8 {
+    if db_id == 0
+        || out_len.is_null()
+        || out_w.is_null()
+        || out_h.is_null()
+        || out_is_gif.is_null()
+    {
+        return std::ptr::null_mut();
+    }
+    eprintln!("CopyAttach: preview_decode db_id={db_id} max_dim={max_dim}");
+    unsafe {
+        *out_len = 0;
+        *out_w = 0;
+        *out_h = 0;
+        *out_is_gif = 0;
+    }
+
+    let png: Vec<u8> = match backend().db.lock() {
+        Ok(conn) => match conn.query_row(
+            "SELECT png_data FROM clipboard_history WHERE id = ? AND entry_type = 1",
+            rusqlite::params![db_id],
+            |row| row.get::<_, Vec<u8>>(0),
+        ) {
+            Ok(data) => data,
+            Err(e) => {
+                eprintln!("CopyAttach: failed to load png for preview db_id={db_id}: {e}");
+                return std::ptr::null_mut();
+            }
+        },
+        Err(e) => {
+            eprintln!("CopyAttach: DB mutex poisoned loading png for preview db_id={db_id}: {e}");
+            return std::ptr::null_mut();
+        }
+    };
+    // The blob's pages are returned to the system on every exit path below.
+    // Claim first: the allocator may have handed back a block whose pages are
+    // still marked reusable from a previous scratch — those pages stay
+    // kernel-reclaimable (and uncounted) until claimed, and this buffer is
+    // read by the decoder.
+    crate::backend::claim_pages(png.as_ptr(), png.capacity());
+    let png_guard = MarkBlobReusableOnDrop(png);
+    let png = &png_guard.0;
+    if png.is_empty() {
+        eprintln!("CopyAttach: preview db_id={db_id}: stored png_data is empty");
+        return std::ptr::null_mut();
+    }
+    // Animated GIFs are returned to Swift as-is (NSImage(data:) preserves the
+    // animation); Swift must know before consuming the decoded buffer.
+    if png.starts_with(&[0x47, 0x49, 0x46, 0x38]) {
+        unsafe { *out_is_gif = 1 };
+    }
+
+    let max_dim = max_dim.max(0) as u32;
+    let layout_for = |byte_len: usize| {
+        std::alloc::Layout::from_size_align(byte_len, 16)
+            .expect("preview buffer layout must be valid")
+    };
+
+    // Decode into the pooled buffer (fast path) or a fresh Vec (generic
+    // path); either way the intermediate's pages end up marked reusable, so
+    // the full-resolution decode never leaves permanent residue. The
+    // delivered buffer is a separate, exactly-sized allocation owned by the
+    // caller (released via `clipboard_preview_buffer_release`).
+    let mut pooled = crate::backend::ImageDecodeBuffer::acquire();
+    let delivered: Option<(*mut u8, u32, u32, usize)> =
+        if let Some((w, h)) = crate::image::decode_png_rgba8_into(png, pooled.as_mut_vec()) {
+            let (dw, dh) = crate::image::resize_dims(w, h, max_dim);
+            let byte_len = (dw as usize) * (dh as usize) * 4;
+            let dst = unsafe { std::alloc::alloc(layout_for(byte_len)) };
+            if dst.is_null() {
+                eprintln!("CopyAttach: preview alloc failed for {byte_len} bytes");
+                None
+            } else {
+                // The delivered buffer is handed to Swift as long-lived, read-
+                // only data: claim any reusable-marked pages the allocator may
+                // have handed back so the kernel cannot reclaim them while the
+                // preview is on screen.
+                crate::backend::claim_pages(dst, byte_len);
+                if (dw, dh) == (w, h) {
+                    unsafe { std::ptr::copy_nonoverlapping(pooled.as_ptr(), dst, byte_len) };
+                } else if let Some(resized) =
+                    crate::image::resize_rgba(&pooled, w, h, dw, dh)
+                {
+                    unsafe { std::ptr::copy_nonoverlapping(resized.as_ptr(), dst, byte_len) };
+                    crate::backend::mark_pages_reusable(resized.as_ptr(), resized.capacity());
+                } else {
+                    eprintln!("CopyAttach: preview resize failed for db_id={db_id}");
+                    unsafe { std::alloc::dealloc(dst, layout_for(byte_len)) };
+                    return std::ptr::null_mut();
+                }
+                // `pooled` returns to the pool here (pages marked reusable) —
+                // deliberately NOT taken out: the pool keeps its capacity.
+                drop(pooled);
+                Some((dst, dw, dh, byte_len))
+            }
+        } else {
+            drop(pooled);
+            match image::load_from_memory(png) {
+                Ok(img) => {
+                    let img = img.to_rgba8();
+                    let (w, h) = img.dimensions();
+                    let rgba = img.into_raw();
+                    let (dw, dh) = crate::image::resize_dims(w, h, max_dim);
+                    let byte_len = (dw as usize) * (dh as usize) * 4;
+                    let dst = unsafe { std::alloc::alloc(layout_for(byte_len)) };
+                    if dst.is_null() {
+                        eprintln!("CopyAttach: preview alloc failed for {byte_len} bytes");
+                        return std::ptr::null_mut();
+                    }
+                    // See the fast-path comment: claim before Swift owns it.
+                    crate::backend::claim_pages(dst, byte_len);
+                    if (dw, dh) == (w, h) {
+                        unsafe { std::ptr::copy_nonoverlapping(rgba.as_ptr(), dst, byte_len) };
+                    } else if let Some(resized) = crate::image::resize_rgba(&rgba, w, h, dw, dh) {
+                        unsafe { std::ptr::copy_nonoverlapping(resized.as_ptr(), dst, byte_len) };
+                        crate::backend::mark_pages_reusable(resized.as_ptr(), resized.capacity());
+                    } else {
+                        eprintln!("CopyAttach: preview resize failed for db_id={db_id}");
+                        unsafe { std::alloc::dealloc(dst, layout_for(byte_len)) };
+                        return std::ptr::null_mut();
+                    }
+                    crate::backend::mark_pages_reusable(rgba.as_ptr(), rgba.capacity());
+                    Some((dst, dw, dh, byte_len))
+                }
+                Err(e) => {
+                    eprintln!("CopyAttach: preview db_id={db_id} undecodable: {e}");
+                    return std::ptr::null_mut();
+                }
+            }
+        };
+
+    match delivered {
+        Some((ptr, w, h, byte_len)) => {
+            eprintln!("CopyAttach: preview_decode done db_id={db_id} w={w} h={h} bytes={byte_len} gif={}",
+                unsafe { *out_is_gif });
+            unsafe {
+                *out_len = byte_len as c_int;
+                *out_w = w as c_int;
+                *out_h = h as c_int;
+            }
+            ptr
+        }
+        None => std::ptr::null_mut(),
+    }
+}
+
+/// Return a buffer from [`clipboard_decode_preview_by_db_id`] to the system:
+/// mark its pages reusable (so they stop counting against the footprint) and
+/// free the allocation. Thread-safe; may be called from any thread (e.g. a
+/// CGImage data-provider release callback).
+#[no_mangle]
+pub extern "C" fn clipboard_preview_buffer_release(ptr: *mut u8, len: c_int) {
+    if ptr.is_null() || len <= 0 {
+        return;
+    }
+    eprintln!("CopyAttach: preview_buffer_release len={len} ptr=0x{:x}", ptr as usize);
+    let byte_len = len as usize;
+    crate::backend::mark_pages_reusable(ptr, byte_len);
+    let layout = std::alloc::Layout::from_size_align(byte_len, 16)
+        .expect("preview buffer layout must match the allocation");
+    unsafe { std::alloc::dealloc(ptr, layout) }
+}
+
 // ═══════════════════════════════════════════
 // Image Size
 // ═══════════════════════════════════════════
-
 #[no_mangle]
 pub extern "C" fn clipboard_get_image_size(index: c_int, out_width: *mut c_int, out_height: *mut c_int) -> c_int {
     let hist = backend().history.lock().unwrap();

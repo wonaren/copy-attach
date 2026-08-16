@@ -36,6 +36,46 @@ fn test_encode_decode_png() {
 }
 
 #[test]
+fn test_decode_png_rgba8_into_pooled_buffer() {
+    // The capture fast path: an 8-bit RGBA PNG (what `encode_png` produces —
+    // exactly the pasteboard screenshot format) decodes straight into the
+    // caller's buffer, byte-identical to the generic decoder.
+    let rgba = make_test_image_rgba(4, 3, 7);
+    let png = encode_png(4, 3, &rgba).expect("encode should succeed");
+
+    let mut pooled = Vec::with_capacity(1024); // pre-grown scratch, like the pool
+    pooled.extend_from_slice(&[0xEE; 64]);
+    let (w, h) = crate::image::decode_png_rgba8_into(&png, &mut pooled)
+        .expect("RGBA8 PNG must decode into the pooled buffer");
+    assert_eq!((w, h), (4, 3));
+    assert_eq!(pooled.len(), 4 * 3 * 4, "buffer must be exactly the image size");
+    assert_eq!(&pooled[..], &rgba[..], "pooled decode must match generic decode bytes");
+    assert!(pooled.capacity() >= 1024, "pre-grown scratch capacity must be retained");
+}
+
+#[test]
+fn test_decode_png_rgba8_into_rejects_other_formats() {
+    // RGB8 (no alpha), grayscale, and palette PNGs are not the fast path:
+    // the function must refuse them so callers fall back to the generic
+    // decoder instead of misreading a 3-channel buffer as RGBA.
+    let rgb = image::ImageBuffer::<image::Rgb<u8>, Vec<u8>>::from_pixel(2, 2, image::Rgb([1, 2, 3]));
+    let mut bytes = Vec::new();
+    rgb.write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png).unwrap();
+
+    let gray = image::ImageBuffer::<image::Luma<u8>, Vec<u8>>::from_pixel(2, 2, image::Luma([9]));
+    let mut gray_bytes = Vec::new();
+    gray.write_to(&mut std::io::Cursor::new(&mut gray_bytes), image::ImageFormat::Png).unwrap();
+
+    for png in [&bytes, &gray_bytes] {
+        let mut buf = Vec::new();
+        assert!(
+            crate::image::decode_png_rgba8_into(png, &mut buf).is_none(),
+            "non-RGBA8 PNG must fall back to the generic decoder"
+        );
+    }
+}
+
+#[test]
 fn test_create_thumbnail() {
     let rgba = make_test_image_rgba(200, 100, 150);
     let thumb = create_thumbnail(200, 100, &rgba, 50);
@@ -168,4 +208,70 @@ fn test_preview_image() {
 fn test_image_hash_is_stable_fnv1a() {
     // width=2, height=3, pixels=[0,1,2,3]
     assert_eq!(image_hash(&[0, 1, 2, 3], 2, 3), 0xeaa1_0eff_b6c1_2ad4);
+}
+
+#[test]
+fn test_resize_rgba_downscales() {
+    // 4×4 → 2×2: dims correct, output sized exactly, all four channels kept.
+    let src = make_test_image_rgba(4, 4, 42);
+    let out = crate::image::resize_rgba(&src, 4, 4, 2, 2).expect("resize should succeed");
+    assert_eq!(out.len(), 2 * 2 * 4);
+    // CatmullRom of a constant-color image stays constant (kernel renormalized
+    // at the edges — a bug here shows up as darkened edge pixels).
+    let solid = [0x80u8, 0x40, 0x20, 0xFF];
+    let src4 = solid.repeat(16);
+    let out4 = crate::image::resize_rgba(&src4, 4, 4, 2, 2).expect("resize should succeed");
+    for px in out4.chunks_exact(4) {
+        assert_eq!(px, &solid[..], "constant input must stay constant");
+    }
+}
+
+#[test]
+fn test_resize_rgba_no_upscale() {
+    // Output equal to input returns a copy; larger output also never invents
+    // pixels (callers route through resize_dims, which never upscales).
+    let src = make_test_image_rgba(4, 3, 7);
+    let same = crate::image::resize_rgba(&src, 4, 3, 4, 3).expect("resize should succeed");
+    assert_eq!(same, src, "same-size output must be a byte copy");
+
+    let bigger = crate::image::resize_rgba(&src, 4, 3, 8, 6).expect("resize should succeed");
+    assert_eq!(bigger, src, "upscale request must return the source unchanged");
+}
+
+#[test]
+fn test_resize_rgba_edges_and_invalid() {
+    // Edge clamping must not panic or produce out-of-bounds writes at tiny
+    // sizes (tap windows fall off the image on all sides).
+    let tiny = vec![0xFFu8; 4];
+    let out = crate::image::resize_rgba(&tiny, 1, 1, 1, 1).expect("1×1 resize should succeed");
+    assert_eq!(out, tiny);
+    let out2 = crate::image::resize_rgba(&tiny, 2, 2, 1, 1);
+    assert!(out2.is_none(), "short source must be rejected, not read out of bounds");
+
+    assert!(crate::image::resize_rgba(&tiny, 0, 1, 1, 1).is_none());
+    assert!(crate::image::resize_rgba(&tiny, 1, 0, 1, 1).is_none());
+    assert!(crate::image::resize_rgba(&tiny, 1, 1, 0, 1).is_none());
+    assert!(crate::image::resize_rgba(&tiny, 1, 1, 1, 0).is_none());
+    assert!(crate::image::resize_rgba(&[], 1, 1, 1, 1).is_none());
+}
+
+#[test]
+fn test_resize_rgba_vertical_quality() {
+    // A vertical gradient downscaled in the Y direction must keep its
+    // monotonicity (the vertical pass reads the intermediate column-wise —
+    // a row/column mixup would scramble it).
+    let w = 2u32;
+    let h = 8u32;
+    let mut src = Vec::with_capacity((w * h * 4) as usize);
+    for y in 0..h {
+        for _ in 0..w {
+            src.extend_from_slice(&[0u8, 0, 0, 255]);
+            src[((y * w) as usize) * 4] = (y * 32) as u8;
+        }
+    }
+    let out = crate::image::resize_rgba(&src, w, h, 2, 2).expect("resize should succeed");
+    let top = out[0];
+    let bottom = out[4 * 2];
+    assert!(bottom > top, "downscaled gradient must keep dark→bright order");
+    assert_eq!(out[3], 255, "alpha must survive the vertical pass");
 }

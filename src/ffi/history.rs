@@ -88,6 +88,10 @@ pub extern "C" fn clipboard_delete_by_id(entry_id: u64) -> c_int {
             );
             match loaded {
                 Ok((png, thumb, tw, th)) => {
+                    // Claim any reusable-marked pages the allocator handed
+                    // back: these blobs sit in the undo stack (long-lived).
+                    crate::backend::claim_pages(png.as_ptr(), png.capacity());
+                    crate::backend::claim_pages(thumb.as_ptr(), thumb.capacity());
                     *png_data = png;
                     *thumb_data = thumb;
                     *thumb_width = tw as u32;
@@ -160,6 +164,13 @@ pub extern "C" fn clipboard_delete_by_id(entry_id: u64) -> c_int {
     // (multi-MB memcpy) and the original is never used again after this point.
     {
         let mut stack = b.deleted_stack.lock().unwrap();
+        let payload_bytes = match &entry {
+            ClipboardEntry::Text { .. } => undo_text.as_deref().map(|t| t.len()).unwrap_or(0),
+            ClipboardEntry::Image { png_data, thumb_data, .. } => {
+                png_data.len() + thumb_data.len()
+            }
+        };
+        eprintln!("CopyAttach: delete push entry_id={entry_id} payload_bytes={payload_bytes}");
         push_deleted(&mut stack, entry, undo_text);
     }
 
@@ -235,12 +246,19 @@ pub extern "C" fn clipboard_undo_delete() -> c_int {
     // hit clones it under the history lock — stalling the monitor thread and
     // defeating MAX_UNDO_BYTES' purpose. Consumers (preview/paste/delete/drag)
     // all load by db_id, so the blob is redundant here.
+    //
+    // `mem::take`, not `clear()`: `clear()` drops the bytes but keeps the
+    // Vec's capacity, so an entry restored from a multi-MB deletion would
+    // silently pin its full PNG+thumb allocation inside the in-memory history
+    // Vec for the entry's entire lifetime — the exact "metadata only" memory
+    // invariant this block exists to preserve. `mem::take` hands the old
+    // buffer to a temporary that is dropped here, releasing the allocation.
     match &mut entry {
         ClipboardEntry::Text { ref mut db_id, .. } => *db_id = new_row_id,
         ClipboardEntry::Image { ref mut db_id, ref mut png_data, ref mut thumb_data, .. } => {
             *db_id = new_row_id;
-            png_data.clear();
-            thumb_data.clear();
+            let _ = std::mem::take(png_data);
+            let _ = std::mem::take(thumb_data);
         }
     }
 

@@ -13,6 +13,14 @@ class ClipboardBackend {
     var items: [ClipboardItem] = []
     var permissionGranted: Bool = false
 
+    /// Monotonic generation of the visible data set (`items` + `favoriteIds`).
+    /// Views memoize derived lists (filter + sort + day grouping) against it:
+    /// recomputing those passes over up to 3000 rows on every body evaluation
+    /// (selection moves, hover, scroll) is the popup's hottest transient
+    /// allocation path. Every mutation site below bumps this counter, so a
+    /// memo keyed on it can never serve stale data.
+    private(set) var itemsGeneration: Int = 0
+
     private var timer: Timer?
     private var sourceAppObserver: NSObjectProtocol?
     private let reloadQueue = DispatchQueue(label: "com.copyattach.reload", qos: .userInitiated)
@@ -56,6 +64,9 @@ class ClipboardBackend {
             favoriteIds.insert(entryId)
         }
         saveFavorites()
+        // The favorites filter tab derives its list from `favoriteIds` —
+        // invalidate any memoized display list.
+        itemsGeneration &+= 1
     }
 
     private init() {
@@ -298,6 +309,8 @@ class ClipboardBackend {
                 MainActor.assumeIsolated {
                     guard gen == self.reloadGeneration.withLock({ $0 }) else { return }
                     self.items = newItems
+                    // New base data — invalidate memoized display lists.
+                    self.itemsGeneration &+= 1
                 }
             }
         }
@@ -329,12 +342,23 @@ class ClipboardBackend {
 
     /// Pure FFI fetch (no instance or main-actor state), so preview windows can
     /// load full images off the main thread via `Task.detached`.
+    ///
+    /// The Rust side hands over a buffer allocated by its global (system)
+    /// allocator — i.e. `malloc` — with capacity pinned to `len`. `Data`
+    /// takes ownership of that exact pointer with the `.free` deallocator:
+    /// zero-copy, so a multi-MB full PNG is never duplicated across the FFI
+    /// boundary (the old `Data(bytes:)` + `clipboard_free_bytes` path held
+    /// two full copies simultaneously). The len==0 case is routed through the
+    /// FFI free helper because `bytesNoCopy` with count 0 is not guaranteed
+    /// to invoke the deallocator.
     nonisolated static func getImageFullByDbId(_ dbId: Int) -> Data? {
         var len: Int32 = 0
         guard let ptr = clipboard_get_image_full_by_db_id(Int64(dbId), &len) else { return nil }
-        let data = Data(bytes: ptr, count: Int(len))
-        clipboard_free_bytes(ptr, len)
-        return data
+        guard len > 0 else {
+            clipboard_free_bytes(ptr, len)
+            return nil
+        }
+        return Data(bytesNoCopy: ptr, count: Int(len), deallocator: .free)
     }
 
     /// Synchronous NSCache-only lookup — no IO, safe in body evaluation.
@@ -355,8 +379,15 @@ class ClipboardBackend {
         let decoded = await Task.detached(priority: .userInitiated) { () -> DecodedImage? in
             var len: Int32 = 0
             guard let ptr = clipboard_get_image_thumb_by_db_id(Int64(dbId), &len) else { return nil }
-            let data = Data(bytes: ptr, count: Int(len))
-            clipboard_free_bytes(ptr, len)
+            // Zero-copy hand-off of the Rust malloc'd buffer (same contract as
+            // `getImageFullByDbId`); the len==0 case still goes through the
+            // FFI free helper because `bytesNoCopy` with count 0 is not
+            // guaranteed to invoke the deallocator.
+            guard len > 0 else {
+                clipboard_free_bytes(ptr, len)
+                return nil
+            }
+            let data = Data(bytesNoCopy: ptr, count: Int(len), deallocator: .free)
             guard let image = NSImage(data: data) else {
                 print("[ClipboardBackend] failed to decode thumbnail for dbId=\(dbId): PNG data is \(data.count) bytes but NSImage(data:) returned nil")
                 return nil
@@ -383,6 +414,7 @@ class ClipboardBackend {
             saveFavorites()
             items.remove(at: index)
             count = items.count
+            itemsGeneration &+= 1
             // Bump generation to discard any stale in-flight snapshot
             // that might still include the deleted item.
             reloadGeneration.withLock { $0 &+= 1 }
@@ -427,6 +459,7 @@ class ClipboardBackend {
             // Rust didn't record a restored ID — use first-snapshot fallback.
             guard let restoredItem = readFirstSnapshotItem(snap) else { return false }
             items.insert(restoredItem, at: 0)
+            itemsGeneration &+= 1
             reloadGeneration.withLock { $0 &+= 1 }
             return true
         }
@@ -443,6 +476,7 @@ class ClipboardBackend {
             }
         }
 
+        itemsGeneration &+= 1
         reloadGeneration.withLock { $0 &+= 1 }
         return true
     }
@@ -524,6 +558,7 @@ class ClipboardBackend {
         DispatchQueue.main.async {
             self.count = 0
             self.items = []
+            self.itemsGeneration &+= 1
         }
     }
 

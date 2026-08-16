@@ -76,7 +76,12 @@ pub(crate) fn pasteboard_image_data() -> Option<Vec<u8>> {
                 continue;
             }
             let bytes = std::slice::from_raw_parts(ptr as *const u8, len);
-            return Some(bytes.to_vec());
+            let owned = bytes.to_vec();
+            // Claim any reusable-marked pages the allocator handed back (see
+            // ffi::mod::vec_to_raw): this buffer is decoded by the capture
+            // pipeline, which must never read kernel-reclaimable pages.
+            crate::backend::claim_pages(owned.as_ptr(), owned.capacity());
+            return Some(owned);
         }
         None
     })

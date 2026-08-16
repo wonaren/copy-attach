@@ -16,6 +16,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// locked SQLite file) is retried on a cooldown instead of staying dead
     /// for the whole session.
     private var lastBackendStartAttempt: Date?
+    /// True while a maintenance tick's async body is running — overlapping
+    /// triggers collapse into a single pass.
+    private var maintenanceTickInFlight = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         Self.shared = self
@@ -98,6 +101,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
             showLicenseGate()
         }
+        // Re-arm the one-shot maintenance timer for the new entitlement state.
+        scheduleMaintenanceTick()
     }
 
     @MainActor
@@ -139,23 +144,102 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @MainActor
     func licenseCelebrationFinished() {
         startBackendIfNeeded()
+        // The freshly applied lease schedules an immediate online status
+        // check (nextStatusCheckAt = now); arm the one-shot timer for it.
+        scheduleMaintenanceTick()
     }
 
     @MainActor
     private func startEntitlementTimer() {
+        scheduleMaintenanceTick()
+    }
+
+    /// Arms ONE one-shot maintenance timer against the earliest pending
+    /// deadline (license refresh / online status check / trial expiry /
+    /// backend-start retry). The previous design scheduled a repeating timer
+    /// that woke every second for the app's entire lifetime — 86 400 needless
+    /// wakeups per day on a no-op body for perpetual licenses (which schedule
+    /// no maintenance at all) and unlicensed installs. Deadline-based arming
+    /// brings steady-state timer wakeups to zero there and to one per
+    /// status-check interval (~2 min) for trial/subscription, with every check
+    /// still running at-or-before its original deadline.
+    @MainActor
+    private func scheduleMaintenanceTick() {
         entitlementTimer?.invalidate()
-        entitlementTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
-            Task { @MainActor in
-                // Skip while the activation celebration is playing in the gate
-                // window; entitlementDidChange() would close it too early.
-                guard LicenseManager.shared.celebration == nil else { return }
-                // Recover from a transient backend-start failure while the
-                // license stays valid (see retryBackendStartIfNeeded).
-                AppDelegate.shared?.retryBackendStartIfNeeded()
-                if await LicenseManager.shared.maintainEntitlement() {
-                    AppDelegate.shared?.entitlementDidChange()
-                }
+        entitlementTimer = nil
+
+        guard LicenseManager.shared.state.permitsCoreFeatures else { return }
+
+        // While the activation celebration plays in the still-open gate window,
+        // maintenance must not run: entitlementDidChange() would close it
+        // early. Defer by a second and re-evaluate.
+        if LicenseManager.shared.celebration != nil {
+            armMaintenanceTimer(at: Date().addingTimeInterval(1))
+            return
+        }
+
+        // A failed backend start retries on a 5s cooldown even when no license
+        // maintenance is pending (transient DB lock etc.).
+        let retryAt: Date? = {
+            guard !backendStarted, let last = lastBackendStartAttempt else { return nil }
+            return last.addingTimeInterval(5)
+        }()
+
+        var candidates: [Date] = []
+        if let d = LicenseManager.shared.nextMaintenanceAt { candidates.append(d) }
+        if let d = retryAt { candidates.append(d) }
+        guard let next = candidates.min() else {
+            // Perpetual license and a healthy backend: no timer at all.
+            return
+        }
+
+        if next.timeIntervalSinceNow <= 0.5 {
+            // Deadline already due — run the tick now; its completion re-arms
+            // against the fresh deadlines (the status check pushes the next
+            // one ~120s out, so this cannot hot-loop).
+            runMaintenanceTick()
+        } else {
+            armMaintenanceTimer(at: next)
+        }
+    }
+
+    @MainActor
+    private func armMaintenanceTimer(at fireDate: Date) {
+        let timer = Timer(fire: fireDate, interval: 0, repeats: false) { [weak self] _ in
+            guard let self else { return }
+            MainActor.assumeIsolated {
+                self.entitlementTimer = nil
+                self.runMaintenanceTick()
             }
+        }
+        entitlementTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    /// One maintenance pass: retry the backend start if it failed, then run
+    /// the license maintenance (lease refresh / status check / expiry) and
+    /// re-arm the next deadline. The in-flight flag collapses overlapping
+    /// triggers (e.g. `entitlementDidChange` firing while a tick is already
+    /// running) into a single pass.
+    @MainActor
+    private func runMaintenanceTick() {
+        guard !maintenanceTickInFlight else { return }
+        // The celebration plays in the still-open gate window; maintenance
+        // would close it early via entitlementDidChange — defer and re-arm
+        // (this also covers the timer-fire path, whose timer was armed while
+        // the celebration was running).
+        if LicenseManager.shared.celebration != nil {
+            armMaintenanceTimer(at: Date().addingTimeInterval(1))
+            return
+        }
+        maintenanceTickInFlight = true
+        retryBackendStartIfNeeded()
+        Task { @MainActor in
+            if await LicenseManager.shared.maintainEntitlement() {
+                AppDelegate.shared?.entitlementDidChange()
+            }
+            AppDelegate.shared?.maintenanceTickInFlight = false
+            AppDelegate.shared?.scheduleMaintenanceTick()
         }
     }
 

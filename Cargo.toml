@@ -1,6 +1,6 @@
 [package]
 name = "copy-attach"
-version = "0.99.16-dev"
+version = "0.99.17-dev"
 edition = "2021"
 license = "Apache-2.0"
 

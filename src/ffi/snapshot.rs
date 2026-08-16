@@ -60,6 +60,9 @@ pub extern "C" fn clipboard_snapshot_acquire() -> *mut Snapshot {
         None => return std::ptr::null_mut(),
     };
     let rows: Vec<SnapshotRow> = hist.iter().map(SnapshotRow::from_entry).collect();
+    // Swift reads the rows across the FFI for the popup's lifetime; claim any
+    // reusable-marked pages the allocator handed back (see vec_to_raw).
+    crate::backend::claim_pages(rows.as_ptr().cast::<u8>(), rows.capacity() * std::mem::size_of::<SnapshotRow>());
     Box::into_raw(Box::new(Snapshot(rows)))
 }
 

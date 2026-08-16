@@ -33,13 +33,15 @@ const THUMBNAIL_MAX_DIM: u32 = 300;
 /// Shared image processing pipeline: Phase 1 (in-memory) + Phase 2 (async DB).
 ///
 /// Accepts raw RGBA pixel data **by ownership**: Phase 1 borrows it, Phase 2
-/// moves it into the encoding thread — zero copies. Both the clipboard path
-/// (image-crate decode → `to_rgba8`) and the file path (`ImageBuffer`) hand
-/// over the buffer via `into_raw`, so no intermediate buffer is ever
-/// duplicated.
+/// moves it into the encoding thread — zero copies. The buffer itself is the
+/// pooled decode scratch ([`crate::backend::ImageDecodeBuffer`]): the
+/// clipboard path decodes 8-bit RGBA PNGs straight into it and the generic
+/// decoder fallback hands its buffer to the pool as well, so repeated large
+/// image captures reuse one allocation instead of alloc + lingering-freed-
+/// region per capture (macOS does not return large freed regions promptly).
 #[allow(clippy::too_many_arguments)]
 fn ingest_rgba_image(
-    rgba: Vec<u8>,
+    rgba: crate::backend::ImageDecodeBuffer,
     width: u32,
     height: u32,
     history: &Arc<Mutex<Vec<ClipboardEntry>>>,
@@ -209,7 +211,7 @@ fn try_ingest_image_files(
 
         let rgba = img.to_rgba8();
         let (w, h) = rgba.dimensions();
-        let pixels = rgba.into_raw();
+        let pixels = crate::backend::ImageDecodeBuffer::from_vec(rgba.into_raw());
 
         eprintln!("CopyAttach: captured image file: {path} ({w}x{h})");
 
@@ -325,18 +327,32 @@ pub(crate) fn clipboard_monitor(
 
         if image_allowed {
             if let Some(img_bytes) = macos::pasteboard_image_data() {
-                // Decode with the image crate (same codec path arboard used for
-                // TIFF, now extended to every pasteboard representation — PNG
-                // first, ~22× smaller than the TIFF for screenshots). Decoding
-                // here instead of via arboard keeps the largest transient (the
-                // CFData pasteboard copy) at ~1 MB instead of ~22 MB.
-                match image::load_from_memory(&img_bytes) {
-                    Ok(img) => {
-                        let rgba = img.to_rgba8();
-                        let (w, h) = rgba.dimensions();
+                // Pooled decode first: 8-bit RGBA PNGs (pasteboard screenshots
+                // — the largest transient on this path) go straight into the
+                // pooled buffer with zero intermediate allocation; anything
+                // else falls back to the generic decoder, whose buffer joins
+                // the pool anyway via `from_vec`.
+                let decoded: Result<(crate::backend::ImageDecodeBuffer, u32, u32), image::ImageError> = {
+                    let mut pooled = crate::backend::ImageDecodeBuffer::acquire();
+                    match crate::image::decode_png_rgba8_into(&img_bytes, pooled.as_mut_vec()) {
+                        Some((w, h)) => Ok((pooled, w, h)),
+                        None => {
+                            drop(pooled);
+                            image::load_from_memory(&img_bytes).map(|img| {
+                                let rgba = img.to_rgba8();
+                                let (w, h) = rgba.dimensions();
+                                (
+                                    crate::backend::ImageDecodeBuffer::from_vec(rgba.into_raw()),
+                                    w, h,
+                                )
+                            })
+                        }
+                    }
+                };
+                match decoded {
+                    Ok((pixels, w, h)) => {
                         ingest_rgba_image(
-                            rgba.into_raw(),
-                            w, h,
+                            pixels, w, h,
                             &history,
                             &db, &src, now, &cleanup_threshold, &ignore_rules,
                         );

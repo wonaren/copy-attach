@@ -139,6 +139,10 @@ fn select_and_paste_impl(mut item: ClipboardEntry) -> c_int {
                     )),
                 ) {
                     Ok((png, thumb, tw, th)) => {
+                        // Claim any reusable-marked pages the allocator handed
+                        // back: these blobs are written to the pasteboard.
+                        crate::backend::claim_pages(png.as_ptr(), png.capacity());
+                        crate::backend::claim_pages(thumb.as_ptr(), thumb.capacity());
                         *png_data = png;
                         *thumb_data = thumb;
                         *thumb_width = tw as u32;

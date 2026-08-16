@@ -108,10 +108,23 @@ class PreviewWindow: NSPanel {
         switch item {
         case .text(let entryId, let text, _, _, _, _, _):
             let pad: CGFloat = 32
-            // Find the longest line in the text to determine adaptive window width
-            let longestLine = text.components(separatedBy: .newlines).max(by: { $0.count < $1.count }) ?? ""
-            let lineWidth = (longestLine as NSString).size(withAttributes: [.font: PreviewTextLayout.font]).width
-            let textWidth = min(max(lineWidth + pad, 300), maxW)
+            // Find the longest line in the text to determine adaptive window width.
+            // Single-pass, line-at-a-time: the old `components(separatedBy: .newlines)`
+            // copied the ENTIRE text into an array of per-line strings held
+            // simultaneously — a multi-MB paste doubled its resident size just to
+            // measure the width. `enumerateLines` keeps one line alive at a time,
+            // and the scan stops early once a line already saturates the width
+            // cap (the final width is clamped to `maxW` anyway, so later lines
+            // can no longer change the result).
+            let widthLimit = maxW - pad
+            var longestLineWidth: CGFloat = 0
+            text.enumerateLines { line, stop in
+                let lineWidth = (line as NSString)
+                    .size(withAttributes: [.font: PreviewTextLayout.font]).width
+                if lineWidth > longestLineWidth { longestLineWidth = lineWidth }
+                if longestLineWidth >= widthLimit { stop = true }
+            }
+            let textWidth = min(max(longestLineWidth + pad, 300), maxW)
             let containerW = textWidth - pad
             let textH = calculateTextHeight(text, width: containerW, entryId: entryId)
             let totalH = min(textH + pad, maxH)

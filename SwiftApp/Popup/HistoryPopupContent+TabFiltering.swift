@@ -49,23 +49,11 @@ extension HistoryPopupContent {
         }
     }
 
-    /// The entries a filter tab shows, unsorted. `.all` passes the base through
-    /// unchanged (no copy); the other modes filter through `matches`, the
-    /// single source of the favorites/image/text predicates.
-    func filteredItems(for mode: FilterMode) -> [ClipboardItem] {
-        let base = effectiveSearchText.isEmpty ? backend.items : searchResults
-        switch mode {
-        case .all:
-            return base
-        case .favorites, .image, .text:
-            return base.filter { matches($0, filterMode: mode) }
-        }
-    }
-
     /// Whether an entry satisfies a filter tab's predicate. Single source of
-    /// truth for the filter definitions — `displayItems` and the tab-switch
+    /// truth for the filter definitions — the display memo
+    /// (`HistoryPopupContent.currentDisplayMemo`) and the tab-switch
     /// measurement both derive from it, so they can't drift apart.
-    private func matches(_ item: ClipboardItem, filterMode mode: FilterMode) -> Bool {
+    func matches(_ item: ClipboardItem, filterMode mode: FilterMode) -> Bool {
         switch mode {
         case .all: true
         case .favorites: backend.favoriteIds.contains(item.id)

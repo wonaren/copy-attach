@@ -110,11 +110,85 @@ struct HistoryPopupContent: View {
     /// When effectiveSearchText is empty, the view uses backend.items directly.
     @State var searchResults: [ClipboardItem] = []
 
+    // MARK: - Display-list memo
+    //
+    // `displayItems` is read from ~20 sites (body, actions, context menu,
+    // preview, bottom bar). It derives from backend data through a filter +
+    // timestamp sort, and `popupRows`/`bottomBar` then ran further O(n) passes
+    // over the result — on EVERY body evaluation (selection moves, hover,
+    // scroll-target updates), i.e. several full 3000-row passes per arrow-key
+    // press. The memo recomputes the filter, sort, day grouping, and type
+    // counts exactly once per data generation and serves every read from it.
+    // The memo box is a reference type because SwiftUI View structs re-init
+    // freely and a nonmutating getter cannot write a stored property; a fresh
+    // box (nil memo) simply recomputes once with identical output.
+
+    private struct DisplayMemo {
+        let itemsGeneration: Int
+        let effectiveSearchText: String
+        let filterMode: FilterMode
+        /// Start of the current calendar day — a midnight rollover must
+        /// invalidate the memo (day separators and 今天/昨天 labels move).
+        let startOfToday: Date
+        let items: [ClipboardItem]   // filter + timestamp-sorted
+        let rows: [PopupRow]         // flattened with day separators
+        let textCount: Int
+        let imageCount: Int
+    }
+
+    private final class DisplayMemoBox {
+        var memo: DisplayMemo?
+    }
+
+    private let displayMemoBox = DisplayMemoBox()
+
+    /// The memoized derived list for the current (data, search, filter, day).
+    private var currentDisplayMemo: DisplayMemo {
+        let today = Calendar.current.startOfDay(for: Date())
+        if let memo = displayMemoBox.memo,
+           memo.itemsGeneration == backend.itemsGeneration,
+           memo.effectiveSearchText == effectiveSearchText,
+           memo.filterMode == filterMode,
+           memo.startOfToday == today {
+            return memo
+        }
+        let base = effectiveSearchText.isEmpty ? backend.items : searchResults
+        let sorted: [ClipboardItem]
+        if filterMode == .all {
+            sorted = base.sorted { $0.timestamp > $1.timestamp }
+        } else {
+            sorted = base
+                .filter { matches($0, filterMode: filterMode) }
+                .sorted { $0.timestamp > $1.timestamp }
+        }
+        var rows: [PopupRow] = []
+        rows.reserveCapacity(sorted.count * 2)
+        var prevDay: UInt64?
+        var textCount = 0
+        for (index, item) in sorted.enumerated() {
+            let needsSeparator = prevDay.map { !DayGroup.isSameDay($0, item.timestamp) } ?? true
+            if needsSeparator {
+                rows.append(.separator(timestamp: item.timestamp, isFirst: prevDay == nil))
+            }
+            rows.append(.item(index: index, item: item))
+            prevDay = item.timestamp
+            if item.isText { textCount += 1 }
+        }
+        let memo = DisplayMemo(itemsGeneration: backend.itemsGeneration,
+                               effectiveSearchText: effectiveSearchText,
+                               filterMode: filterMode,
+                               startOfToday: today,
+                               items: sorted,
+                               rows: rows,
+                               textCount: textCount,
+                               imageCount: sorted.count - textCount)
+        displayMemoBox.memo = memo
+        return memo
+    }
+
     /// Items to display: full history when idle, cached results when searching.
     /// Sorted by timestamp descending so day separators receive a monotonic stream.
-    var displayItems: [ClipboardItem] {
-        filteredItems(for: filterMode).sorted { $0.timestamp > $1.timestamp }
-    }
+    var displayItems: [ClipboardItem] { currentDisplayMemo.items }
 
     /// The highest valid selectedIndex (search bar + item count).
     var maxIndex: Int { displayItems.count }
@@ -675,19 +749,9 @@ struct HistoryPopupContent: View {
     /// before any item whose calendar day differs from the preceding item's.
     /// Separators are purely visual — they carry no selection index, so
     /// `selectedIndex` keeps mapping to real item positions (index + 1).
-    private var popupRows: [PopupRow] {
-        var rows: [PopupRow] = []
-        var prevDay: UInt64? = nil
-        for (index, item) in displayItems.enumerated() {
-            let needsSeparator = prevDay.map { !DayGroup.isSameDay($0, item.timestamp) } ?? true
-            if needsSeparator {
-                rows.append(.separator(timestamp: item.timestamp, isFirst: prevDay == nil))
-            }
-            rows.append(.item(index: index, item: item))
-            prevDay = item.timestamp
-        }
-        return rows
-    }
+    /// Built once per data generation inside the display memo, not per body
+    /// evaluation (see `currentDisplayMemo`).
+    private var popupRows: [PopupRow] { currentDisplayMemo.rows }
 
     /// Returns the id to target for `scrollPosition` so that both the item at
     /// `itemIndex` and any date separator above it are visible after the scroll.
@@ -705,10 +769,10 @@ struct HistoryPopupContent: View {
     // MARK: - Bottom Bar (item count + shortcuts, single row)
 
     private var bottomBar: some View {
-        let items = displayItems
+        let memo = currentDisplayMemo
         return HStack(spacing: 0) {
             // --- Left: item count stats ---
-            Text("\(items.count) 项")
+            Text("\(memo.items.count) 项")
                 .font(.system(size: 10, weight: .medium))
                 .foregroundColor(theme.popupSecondaryText)
                 .contentTransition(.numericText())
@@ -720,12 +784,10 @@ struct HistoryPopupContent: View {
             Text(" · ")
                 .font(.system(size: 10))
                 .foregroundColor(theme.popupDimText)
-            let textCount = items.filter { $0.isText }.count
-            let imageCount = items.filter { $0.isImage }.count
-            Text("\(textCount) 文本")
+            Text("\(memo.textCount) 文本")
                 .font(.system(size: 10))
                 .foregroundColor(theme.popupMutedText)
-            Text("\(imageCount) 图片")
+            Text("\(memo.imageCount) 图片")
                 .font(.system(size: 10))
                 .foregroundColor(theme.popupMutedText)
 

@@ -16,6 +16,12 @@ struct PreviewContent: View {
         return dbId
     }
 
+    /// Stored pixel dimensions of the image item (capture-time decode size).
+    private var imagePixelSize: (w: Int, h: Int) {
+        guard case .image(_, _, let w, let h, _, _, _, _) = item else { return (0, 0) }
+        return (w, h)
+    }
+
     /// Derive NSColor from theme.previewPrimaryText so there's a single source
     /// of truth for the preview text color.
     private var previewTextNSColor: NSColor {
@@ -74,15 +80,19 @@ struct PreviewContent: View {
         guard dbId != 0 else { return }
         isLoadingImage = true
 
-        // The decode budget depends on the display constraints; capture them
-        // on the main actor, then decode fully off-main (ImageIO downsample —
-        // the decoded buffer is capped at display resolution + zoom headroom,
-        // never the full-resolution PNG).
+        // The decode budget depends on the display constraints and the item's
+        // stored pixel size; capture them on the main actor, then decode fully
+        // off-main. The Rust backend downscales and delivers an exactly-sized
+        // RGBA buffer whose pages stop counting against the footprint when the
+        // preview closes (ImageIO's decodes lingered as `MALLOC_LARGE
+        // (empty)` residue — see ImageDecode).
         let screenSize = NSScreen.main?.visibleFrame.size ?? NSSize(width: 1440, height: 900)
         let scale = NSScreen.main?.backingScaleFactor ?? 2
+        let size = imagePixelSize
+        let maxPixel = ImageDecode.previewBudget(width: size.w, height: size.h,
+                                                 screenSize: screenSize, scale: scale)
         let decoded = await Task.detached(priority: .userInitiated) { () -> DecodedImage? in
-            guard let data = ClipboardBackend.getImageFullByDbId(dbId) else { return nil }
-            return ImageDecode.previewImage(from: data, screenSize: screenSize, scale: scale)
+            ImageDecode.previewImage(dbId: dbId, maxPixel: maxPixel)
         }.value
         // Only apply if we're still showing the same item
         if currentDbId == dbId {

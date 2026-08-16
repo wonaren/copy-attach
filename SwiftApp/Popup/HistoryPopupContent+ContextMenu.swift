@@ -127,9 +127,56 @@ extension HistoryPopupContent {
                 debugLog("copyItemContent: image not ready (entry \(item.id))")
                 return
             }
+            // File-URL clipboard write — the same convention as the paste and
+            // drag paths. Putting the raw PNG DATA on the pasteboard instead
+            // makes the pasteboard machinery eagerly decode the full image
+            // in-process and keep a TIFF representation alive per write
+            // (measured: every image-data write pins ~2 full-size RGBA
+            // buffers forever, across NSPasteboard, NSPasteboardItem, AND the
+            // raw CorePasteboard API — 29 copies ≈ 320MB of permanent
+            // resident memory). A file-URL string write costs bytes and is
+            // consumed exactly like a Finder file copy: notes/chat apps
+            // attach the file, terminals and TUI agents get the path text.
+            // The file lives OUTSIDE the CopyAttach temp root
+            // (`CopyAttach-copy/`), so the monitor re-captures it (dedup
+            // keeps the entry and moves it to top — the same re-copy
+            // semantics as the old data write) instead of skipping it as a
+            // self-materialization.
+            let url: URL
+            do {
+                url = try Self.copyImageURL(entryId: item.id)
+                try data.write(to: url, options: .atomic)
+            } catch {
+                debugLog("copyItemContent: failed to materialize copy image \(item.id): \(error)")
+                return
+            }
             NSPasteboard.general.clearContents()
-            NSPasteboard.general.setData(data, forType: .png)
+            NSPasteboard.general.setString(url.absoluteString, forType: .fileURL)
         }
+    }
+
+    /// Destination for a copied image's temp PNG. Purges previous copy
+    /// artifacts past the in-flight window: only the newest URL can still
+    /// reference the pasteboard, and a paste target may read it asynchronously
+    /// (mirrors the Rust paste-file TTL).
+    private static func copyImageURL(entryId: Int) throws -> URL {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("CopyAttach-copy", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+
+        let ttl: TimeInterval = 60
+        let now = Date()
+        for url in try FileManager.default.contentsOfDirectory(
+            at: dir,
+            includingPropertiesForKeys: [.contentModificationDateKey]
+        ) {
+            let mtime = (try? url.resourceValues(forKeys: [.contentModificationDateKey])
+                .contentModificationDate) ?? .distantPast
+            if now.timeIntervalSince(mtime) > ttl {
+                try? FileManager.default.removeItem(at: url)
+            }
+        }
+        return dir.appendingPathComponent("clipboard-\(entryId)-\(UUID().uuidString).png")
     }
 
     /// Save an image entry to a user-chosen location as a PNG file.

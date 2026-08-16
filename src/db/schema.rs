@@ -266,6 +266,9 @@ pub(crate) fn migrate_one_image_row(conn: &Connection, id: i64) -> Result<u64, (
         eprintln!("CopyAttach: image-hash migration: row {id} has empty png_data — hash left as-is");
         return Err(());
     }
+    // Claim any reusable-marked pages the allocator handed back before the
+    // decoder reads the blob (see ffi::mod::vec_to_raw for the rationale).
+    crate::backend::claim_pages(png.as_ptr(), png.capacity());
     let img = image::load_from_memory(&png).map_err(|e| {
         eprintln!("CopyAttach: image-hash migration: row {id} png undecodable: {e}");
     })?;

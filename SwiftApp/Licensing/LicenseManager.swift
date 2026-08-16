@@ -25,8 +25,7 @@ final class LicenseManager {
     /// 而不用等 Lease 中点/到期（最多可差一个完整验证周期）。
     private var nextStatusCheckAt: Date?
     private let statusCheckInterval: TimeInterval = 120
-    private var maintenanceInProgress = false
-    /// Bumped whenever an authoritative lease is (re)applied or a device is
+    private var maintenanceInProgress = false    /// Bumped whenever an authoritative lease is (re)applied or a device is
     /// deactivated. A background refresh that started against an older epoch
     /// discards its result, so a stale refresh cannot clobber a concurrent
     /// activation or deactivation.
@@ -163,6 +162,30 @@ final class LicenseManager {
             }
             return true
         }
+    }
+
+    /// Earliest deadline of any scheduled background maintenance: the lease
+    /// refresh, the periodic online status check, and the local trial/
+    /// subscription expiry. nil when nothing is scheduled — perpetual licenses
+    /// run no periodic work at all (signature + device binding is authoritative,
+    /// fully offline). `AppDelegate` arms a one-shot timer against this
+    /// deadline instead of ticking every second; a past deadline means "due
+    /// now". Trial/subscription expiry is included directly so the entitlement
+    /// boundary flips at the exact expiry second, not up to a status-check
+    /// interval later.
+    var nextMaintenanceAt: Date? {
+        var candidates: [Date] = []
+        if let d = nextRefreshAt { candidates.append(d) }
+        if let d = nextStatusCheckAt { candidates.append(d) }
+        switch state {
+        case .trialActive(let endsAt, _):
+            candidates.append(endsAt)
+        case .subscriptionActive(let expiresAt, _, _):
+            candidates.append(expiresAt)
+        default:
+            break
+        }
+        return candidates.min()
     }
 
     func startTrial() async {
