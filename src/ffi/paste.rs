@@ -32,7 +32,7 @@ fn write_paste_image_file(png_data: &[u8], entry_id: u64) -> Option<String> {
     let mut dir = copyattach_temp_root();
     dir.push("Paste");
     if let Err(e) = std::fs::create_dir_all(&dir) {
-        eprintln!("CopyAttach: cannot create paste image dir {}: {e}", dir.display());
+        crate::error_log!("CopyAttach: cannot create paste image dir {}: {e}", dir.display());
         return None;
     }
     let now = std::time::SystemTime::now()
@@ -40,7 +40,7 @@ fn write_paste_image_file(png_data: &[u8], entry_id: u64) -> Option<String> {
         .unwrap_or_default();
     let path = dir.join(format!("clipboard-{entry_id}-{}.png", now.as_micros()));
     if let Err(e) = std::fs::write(&path, png_data) {
-        eprintln!("CopyAttach: cannot write paste image {}: {e}", path.display());
+        crate::error_log!("CopyAttach: cannot write paste image {}: {e}", path.display());
         return None;
     }
     if let Ok(entries) = std::fs::read_dir(&dir) {
@@ -71,7 +71,7 @@ fn select_and_paste_impl(mut item: ClipboardEntry) -> c_int {
         // that can never happen — and the old fall-through still reported
         // success (1). No permission → explicit failure, clipboard untouched.
         if !macos::check_permission() {
-            eprintln!("CopyAttach: accessibility permission not granted — paste aborted, clipboard untouched");
+            crate::error_log!("CopyAttach: accessibility permission not granted — paste aborted, clipboard untouched");
             return 0;
         }
     }
@@ -97,19 +97,19 @@ fn select_and_paste_impl(mut item: ClipboardEntry) -> c_int {
     let full_text: Option<String> = match &item {
         ClipboardEntry::Text { db_id, .. } => {
             if *db_id == 0 {
-                eprintln!("CopyAttach: select_and_paste aborted for text entry {}: db_id=0 (entry not persisted)", item.entry_id());
+                crate::error_log!("CopyAttach: select_and_paste aborted for text entry {}: db_id=0 (entry not persisted)", item.entry_id());
                 return 0;
             }
             match backend().db.lock() {
                 Ok(conn) => match load_text_by_db_id(&conn, *db_id) {
                     Some(t) => Some(t),
                     None => {
-                        eprintln!("CopyAttach: select_and_paste DB text load failed for entry {} (db_id={}) — paste aborted", item.entry_id(), *db_id);
+                        crate::error_log!("CopyAttach: select_and_paste DB text load failed for entry {} (db_id={}) — paste aborted", item.entry_id(), *db_id);
                         return 0;
                     }
                 },
                 Err(e) => {
-                    eprintln!("CopyAttach: DB mutex poisoned in select_and_paste text load: {e}");
+                    crate::error_log!("CopyAttach: DB mutex poisoned in select_and_paste text load: {e}");
                     return 0;
                 }
             }
@@ -124,7 +124,7 @@ fn select_and_paste_impl(mut item: ClipboardEntry) -> c_int {
                 let conn = match backend().db.lock() {
                     Ok(c) => c,
                     Err(e) => {
-                        eprintln!("CopyAttach: DB mutex poisoned in select_and_paste image load: {e}");
+                        crate::error_log!("CopyAttach: DB mutex poisoned in select_and_paste image load: {e}");
                         return 0;
                     }
                 };
@@ -149,7 +149,7 @@ fn select_and_paste_impl(mut item: ClipboardEntry) -> c_int {
                         *thumb_height = th as u32;
                     }
                     Err(e) => {
-                        eprintln!("CopyAttach: select_and_paste DB load failed for image entry {} (db_id={}): {e} — paste aborted", item.entry_id(), *db_id);
+                        crate::error_log!("CopyAttach: select_and_paste DB load failed for image entry {} (db_id={}): {e} — paste aborted", item.entry_id(), *db_id);
                         return 0;
                     }
                 }
@@ -174,7 +174,7 @@ fn select_and_paste_impl(mut item: ClipboardEntry) -> c_int {
             let text = match &full_text {
                 Some(t) => t,
                 None => {
-                    eprintln!("CopyAttach: select_and_paste text body missing — paste aborted");
+                    crate::error_log!("CopyAttach: select_and_paste text body missing — paste aborted");
                     return 0;
                 }
             };
@@ -230,12 +230,12 @@ fn select_and_paste_impl(mut item: ClipboardEntry) -> c_int {
                         }
                     }
                     Err(()) => {
-                        eprintln!("CopyAttach: select_and_paste DB insert failed — entry stays with db_id=0");
+                        crate::error_log!("CopyAttach: select_and_paste DB insert failed — entry stays with db_id=0");
                     }
                 }
             }
             Err(e) => {
-                eprintln!("CopyAttach: DB mutex poisoned in select_and_paste persist: {e} — entry stays with db_id=0");
+                crate::error_log!("CopyAttach: DB mutex poisoned in select_and_paste persist: {e} — entry stays with db_id=0");
             }
         }
     }
@@ -260,7 +260,7 @@ fn select_and_paste_impl(mut item: ClipboardEntry) -> c_int {
         // Permission was already verified up front; here only the key event
         // can fail.
         if !macos::simulate_cmd_v(front_pid) {
-            eprintln!("CopyAttach: simulate_cmd_v failed");
+            crate::error_log!("CopyAttach: simulate_cmd_v failed");
             return 0;
         }
     }
@@ -324,7 +324,7 @@ pub extern "C" fn clipboard_get_text_by_id(entry_id: u64) -> *mut c_char {
         }
     };
     if db_id == 0 {
-        eprintln!("CopyAttach: get_text_by_id for entry {entry_id}: db_id=0 (entry not persisted)");
+        crate::error_log!("CopyAttach: get_text_by_id for entry {entry_id}: db_id=0 (entry not persisted)");
         return std::ptr::null_mut();
     }
     let text = match b.db.lock() {
@@ -333,7 +333,7 @@ pub extern "C" fn clipboard_get_text_by_id(entry_id: u64) -> *mut c_char {
             None => return std::ptr::null_mut(),
         },
         Err(e) => {
-            eprintln!("CopyAttach: DB mutex poisoned loading text for entry {entry_id}: {e}");
+            crate::error_log!("CopyAttach: DB mutex poisoned loading text for entry {entry_id}: {e}");
             return std::ptr::null_mut();
         }
     };

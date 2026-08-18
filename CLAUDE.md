@@ -60,6 +60,21 @@ open "CopyAttach.app"
 
 build.sh 流程：读取 `Cargo.toml` 版本号 → 通过 PlistBuddy 同步到 `Info.plist`（只需在 Cargo.toml 中改版本） → `cargo build --release` → sips + iconutil 生成图标 → 拷贝 dylib + 设置 install_name → `swiftc` 编译 SwiftApp 下所有 `.swift`（带 FFI 桥接头，**`-O -whole-module-optimization`——发布必须是优化构建，缺省 `-Onone` 会让 SwiftUI 前端全速跑在未优化代码上**） → codesign（优先用已安装的 Apple Development 身份，无身份时回退 ad-hoc）。
 
+### 沙盒构建限制
+
+在 Claude Code 的沙盒环境中，`./build.sh` 的 Swift 编译阶段可能因 `@Observable` 宏插件失败而中断，典型报错：
+
+```
+external macro implementation type 'ObservationMacros.ObservableMacro' could not be found for macro 'Observable()'
+'/Applications/Xcode.app/.../swift-plugin-server' produced malformed response
+```
+
+这是沙盒/Xcode 插件环境问题，不是代码问题。遇到时**不要每次重复解释**，直接按以下约定处理：
+
+- 沙盒内验证以 `cargo check` / `cargo test` / `cargo clippy` / `swiftc -parse` 为准；完整 `./build.sh` 留给正常 Xcode 环境执行。
+- `./build.sh` 在 Swift 编译前会先删除旧 `CopyAttach.app`，沙盒内失败会留下半成品或没有 App。失败后可清理半成品 `CopyAttach.app`。
+- `./build.sh` 会把 License 参数写入 `SwiftApp/Info.plist`，正常构建结束后会回删；若沙盒内构建中途失败，需手动从 `SwiftApp/Info.plist` 删除 `CopyAttachLicenseServerURL` / `CopyAttachLicenseSigningKeyID` / `CopyAttachLicenseSigningPublicKey` 三个键，保持源码 plist 不含 License 值。
+
 **版本号约定**：每次功能/修复提交都在 `Cargo.toml` 中提升 `version` 并写入提交信息（习惯写法「版本号升至 X.Y.Z」）；开发中的版本带 `-dev` 后缀（如 `0.93.0-dev`），发布版本去掉后缀。`build.sh` 以 `Cargo.toml` 为唯一版本来源同步到 `Info.plist` 的 `CFBundleShortVersionString`。
 
 ### 生产构建（连接生产 License Server）
@@ -93,12 +108,12 @@ COPYATTACH_LICENSE_PUBLIC_KEY='efsKYx9a7urNlr-UXR7b0-Fl9w0mJNKe3RME-OeseOs' \
 | `ffi/` | 所有 `#[no_mangle] extern "C"` 导出函数（目录模块）：`snapshot.rs`(Snapshot API)、`search.rs`、`init.rs`(生命周期/ignore rules)、`accessors.rs`(索引访问/图片加载/存储权限)、`paste.rs`(select_and_paste)、`history.rs`(删除/撤销/trim)、`stress.rs`(cfg-gated)。`mod.rs` 持共享助手并 `pub(crate) use` 重导出保持 `crate::ffi::*` 路径 |
 | `tests/` | 单元测试（cfg-gated），按主题拆分子模块：history/image/search/cleanup/db/backend；共享 helpers 在 `mod.rs`。覆盖：去重/顺序/图片编解码/FFI 安全/阈值清理/边界值/ignore rules |
 | `db/` | SQLite write-through（rusqlite bundled），目录模块：`schema.rs`(连接/建表/FTS5 索引/元数据回填)、`crud.rs`(load/insert/dedup/trim + `persist_entry_to_db` 单事务写穿)、`migration.rs`(legacy JSON)、`search.rs`(FTS/LIKE/text 加载)。**禁用 mmap + 4MB LRU page cache**（`cache_size=-4096`，负数按 KiB 计 = 4MB；FTS5 trigram 索引若被 mmap 会整段计入驻留内存，实测 ~1:1 RSS 膨胀，故全部走有界页缓存）。**FTS 索引尺寸上限（0.99.16）**：`FTS_MAX_INDEXED_TEXT_LEN`（512K 字符）以上的 text 行不建 trigram 索引——实测索引放大 ~6.4×（10.6MB 文本 → 68MB DB）、2MB 文本同步插入 ~170ms，无上限会让大文本把捕获路径卡数百 ms 且 DB 无界膨胀；不入索引的行在 ≥3 字符查询时由 `db::search_history` 走 LIKE 兜底（只扫罕见的超大行，子串语义不丢，见 `test_fts_cap_skips_huge_text` 绊线）；触发器以 DROP+CREATE 替换旧版无上限触发器（触发器按库持久化，IF NOT EXISTS 不会更新存量），启动时清理存量超大行（幂等，`test_fts_cap_legacy_oversized_rows_evicted` 覆盖）。**WAL + `synchronous=NORMAL`**：捕获/粘贴的 insert+dedup+trim 合并为 `persist_entry_to_db` 单事务一次 WAL append（1 次 fsync 而非 3 次），读（搜索/缩略图）不再被写阻塞。**text 行持久化 preview/label/text_hash**（`hash` 列复用作 text_hash，**算法为稳定 FNV-1a 64**——std `DefaultHasher` 文档不保证跨版本稳定，持久化后若漂移会让旧行去重失配；`ensure_history_table` 以 `PRAGMA user_version` 门控：0=旧库 text 逐行回填、1=0.99.15-dev 的 DefaultHasher text 值全量重算、2=text 已 FNV（同步盖 2）、3=text+image 全 FNV）——冷启动 `load_history_from_db` **只读元数据列、绝不读 `text` 列**；无 preview 的 text 行视为未回填损坏，显式跳过并日志（不回读 text 兜底）。**图片 hash 同为 FNV-1a（`types::fnv1a`）**，旧 DefaultHasher 值的迁移（user_version 2→3）在 `ffi::init::spawn_image_hash_migration` **后台线程逐行解码重算**（`schema::migrate_one_image_row`：一次只锁 DB 一行、解码在锁内逐行进行，捕获只等单行解码而非整库；每行完成后同步镜像进内存条目，同会话重复复制即时去重；完成盖 3，中断幂等重跑，不可解码行显式计数不阻塞盖章；stress-test 构建跳过——其 DB 全部新生成）。**dedup/trim 索引化**：`idx_history_type_hash(entry_type, hash)` 使 `delete_matching_entry` 从全表扫描变索引查找（text 仍带 exact-text 谓词兜底防 2⁻⁶⁴ 碰撞误删），`trim_db_history` 改为 `id <= (SELECT id ... OFFSET ?)` 范围删除——只触达被删行，表内 ≤阈值时子查询为 NULL 完全不扫描（原 `NOT IN` 形态每次捕获全表扫描）。**`migrate_from_json_to_db` 插入的旧 JSON 行同步盖 `entry_id = rowid`**——ensure 的 entry_id 回填先于迁移执行，迁移行若不盖章则每次加载都换新 ID（收藏按 entry_id 存储，重启即失效）；迁移体参数化目录（`migrate_from_json_to_db_at`，test-only 重导出），回归测试用临时目录 |
-| `monitor.rs` | 后台线程每 300ms 轮询 arboard，先 `changeCount` 轻量检测再读内容，write-through DB，ignore rules 过滤，Finder 文件复制支持。文本捕获 db_id 赋值按**内容 hash 匹配**（`history::assign_db_id_by_text_hash`，与图片 Phase 2 对称，绝不按头部位置） |
+| `monitor.rs` | 后台线程每 500ms 轮询 arboard，先 `changeCount` 轻量检测再读内容，write-through DB，ignore rules 过滤，Finder 文件复制支持。文本捕获 db_id 赋值按**内容 hash 匹配**（`history::assign_db_id_by_text_hash`，与图片 Phase 2 对称，绝不按头部位置） |
 | `ignore.rs` | 捕获时忽略规则：按 app bundle ID、文本/图片类型、短文本阈值（Unicode scalar count）过滤。规则在插入前求值 |
 | `stress/` | 应力测试数据生成与基准测试，feature-gated behind `stress-test`（不在 release 构建中发布）。目录模块：`text.rs`/`image.rs`(内容生成)、`inject.rs`(DB 注入 + FFI/bench 助手)。生成 1 万条混合文本/图片数据 |
 | `types.rs` | `ClipboardEntry` 枚举（Text/Image），`SourceApp` 元数据，label 生成 |
 | `image.rs` | PNG/JPEG/GIF/WebP/BMP/TIFF 编解码，CatmullRom 缩略图（最长边 300px），**内容哈希为稳定 FNV-1a 64**（`types::fnv1a`，与 text_hash 同算法同理由——持久化值不依赖 std 不保证跨版本稳定的 `DefaultHasher`） |
-| `backend.rs` | `OnceLock<Backend>` 单例，entry_id（`AtomicU64`），常量（3000 阈值、300ms 轮询间隔），`HISTORY_REVISION`/`IMAGE_ENCODING_COUNTER` 原子计数器，`PendingSelfWrite` 自写抑制，`reload_history_from_db` |
+| `backend.rs` | `OnceLock<Backend>` 单例，entry_id（`AtomicU64`），常量（3000 阈值、500ms 轮询间隔），`HISTORY_REVISION`/`IMAGE_ENCODING_COUNTER` 原子计数器，`PendingSelfWrite` 自写抑制，`reload_history_from_db` |
 | `macos.rs` | NSPasteboard `changeCount` + 文件 URL 读写（`set_pasteboard_file_url`），CGEventPost Cmd+V / Ctrl+V，AXIsProcessTrusted，文件复制检测。cfg-gated，非 macOS 用空桩 |
 | `history.rs` | `add_to_history()` — 去重 + 头部插入，纯函数式（返回新 Vec） |
 | `bench_tests/` | 性能基准测试（cfg-gated on `test` + `stress-test`），目录模块：`thresholds.rs`/`images.rs`/`memory_probe.rs`，共享测量助手在 `mod.rs`。覆盖：历史阈值扩展性、图片捕获/编码/缩略图性能、DB 存储规模测试 |

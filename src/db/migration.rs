@@ -26,7 +26,7 @@ pub(crate) fn migrate_from_json_to_db_at(conn: &mut Connection, dir: &Path) {
     let content = match std::fs::read_to_string(&json_path) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("CopyAttach: cannot read history.json for migration: {e}");
+            crate::error_log!("CopyAttach: cannot read history.json for migration: {e}");
             return;
         }
     };
@@ -82,7 +82,7 @@ pub(crate) fn migrate_from_json_to_db_at(conn: &mut Connection, dir: &Path) {
     let entries: Vec<LegacyEntry> = match serde_json::from_str(&content) {
         Ok(e) => e,
         Err(e) => {
-            eprintln!("CopyAttach: failed to parse history.json: {e}");
+            crate::error_log!("CopyAttach: failed to parse history.json: {e}");
             return;
         }
     };
@@ -91,7 +91,7 @@ pub(crate) fn migrate_from_json_to_db_at(conn: &mut Connection, dir: &Path) {
     let tx = match conn.transaction() {
         Ok(t) => t,
         Err(e) => {
-            eprintln!("CopyAttach: failed to begin migration transaction: {e}");
+            crate::error_log!("CopyAttach: failed to begin migration transaction: {e}");
             return;
         }
     };
@@ -144,12 +144,12 @@ pub(crate) fn migrate_from_json_to_db_at(conn: &mut Connection, dir: &Path) {
             }
         };
         if let Err(e) = result {
-            eprintln!("CopyAttach: migration insert error: {e}");
+            crate::error_log!("CopyAttach: migration insert error: {e}");
             return;
         }
     }
     if let Err(e) = tx.commit() {
-        eprintln!("CopyAttach: failed to commit migration: {e}");
+        crate::error_log!("CopyAttach: failed to commit migration: {e}");
         return;
     }
 

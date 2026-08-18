@@ -1,6 +1,6 @@
 //! Background clipboard monitor thread.
 //!
-//! Polls the system clipboard every 300ms, detects new content via `NSPasteboard`
+//! Polls the system clipboard every 500ms, detects new content via `NSPasteboard`
 //! `changeCount` (lightweight) + content comparison.
 //!
 //! ## Image capture pipeline (two-phase)
@@ -64,7 +64,7 @@ fn ingest_rgba_image(
             // Thumbnail creation failed (likely corrupt pixel data). Create
             // the entry anyway — Phase 2 full encode will determine if the
             // image data is truly broken and remove the entry if so.
-            eprintln!("CopyAttach: thumbnail creation failed for image {width}x{height} — capturing without thumbnail");
+            crate::debug_log!("CopyAttach: thumbnail creation failed for image {width}x{height} — capturing without thumbnail");
             // Fall through: create entry with empty thumbnail, continue to Phase 2
             (Vec::new(), 0u32, 0u32)
         };
@@ -112,7 +112,7 @@ fn ingest_rgba_image(
             let full_png = match crate::image::encode_png_into(width, height, &rgba, &mut scratch) {
                 Some(()) => scratch.as_slice(),
                 None => {
-                    eprintln!("CopyAttach: failed to encode full-size PNG for image {width}x{height} — removing broken entry from history");
+                    crate::debug_log!("CopyAttach: failed to encode full-size PNG for image {width}x{height} — removing broken entry from history");
                     // Remove the entry created in Phase 1 — without PNG data it can
                     // never be pasted. The user sees the entry appear and disappear,
                     // which is better than a ghost entry that silently fails on paste.
@@ -138,7 +138,7 @@ fn ingest_rgba_image(
                 let mut conn = match db.lock() {
                     Ok(c) => c,
                     Err(e) => {
-                        eprintln!("CopyAttach: DB mutex poisoned in Phase 2 image persist: {e}");
+                        crate::error_log!("CopyAttach: DB mutex poisoned in Phase 2 image persist: {e}");
                         return;
                     }
                 };
@@ -165,7 +165,7 @@ fn ingest_rgba_image(
                         crate::backend::IMAGE_ENCODING_COUNTER.fetch_add(1, Ordering::Relaxed);
                     }
                     Err(()) => {
-                        eprintln!("CopyAttach: Phase 2 DB insert failed for image {width}x{height} — entry stays with db_id=0");
+                        crate::error_log!("CopyAttach: Phase 2 DB insert failed for image {width}x{height} — entry stays with db_id=0");
                     }
                 }
             }
@@ -213,8 +213,7 @@ fn try_ingest_image_files(
         let (w, h) = rgba.dimensions();
         let pixels = crate::backend::ImageDecodeBuffer::from_vec(rgba.into_raw());
 
-        eprintln!("CopyAttach: captured image file: {path} ({w}x{h})");
-
+        crate::debug_log!("CopyAttach: captured image file: {path} ({w}x{h})");
         ingest_rgba_image(
             pixels, w, h,
             history, db, src, now, cleanup_threshold, ignore_rules,
@@ -239,7 +238,7 @@ pub(crate) fn clipboard_monitor(
         match Clipboard::new() {
             Ok(c) => break c,
             Err(e) => {
-                eprintln!("clipboard-monitor: failed to open clipboard: {e}, retrying in 1s...");
+                crate::error_log!("clipboard-monitor: failed to open clipboard: {e}, retrying in 1s...");
                 if !running.load(Ordering::SeqCst) { return; }
                 thread::sleep(Duration::from_secs(1));
             }
@@ -290,10 +289,12 @@ pub(crate) fn clipboard_monitor(
         if observed_change_count.is_none() || is_self_write {
             // No new platform event, or precisely the event written by this
             // app. In neither case may we fabricate a history capture.
-            for _ in 0..10 {
-                if !running.load(Ordering::SeqCst) { return; }
-                thread::sleep(Duration::from_millis(POLL_INTERVAL_MS / 10));
-            }
+            // Park once for the full poll interval instead of ten 30ms slices:
+            // the 30ms slicing woke the CPU roughly 30x/s in the idle path for
+            // no functional benefit. `clipboard_cleanup()` unparks the thread
+            // so shutdown still completes immediately.
+            if !running.load(Ordering::SeqCst) { return; }
+            thread::park_timeout(Duration::from_millis(POLL_INTERVAL_MS));
             continue;
         }
 
@@ -361,7 +362,7 @@ pub(crate) fn clipboard_monitor(
                     Err(e) => {
                         // Image data present but undecodable (exotic format).
                         // Fail explicitly — do not fabricate a capture.
-                        eprintln!("CopyAttach: pasteboard image data ({} bytes) undecodable: {e}", img_bytes.len());
+                        crate::debug_log!("CopyAttach: pasteboard image data ({} bytes) undecodable: {e}", img_bytes.len());
                     }
                 }
             }
@@ -437,7 +438,7 @@ pub(crate) fn clipboard_monitor(
                                         // as a ghost. Match by content hash, not index, so a
                                         // concurrent select-and-paste moving another entry to the
                                         // head can't be disturbed.
-                                        eprintln!("CopyAttach: failed to insert text entry to DB — removing it from history");
+                                        crate::error_log!("CopyAttach: failed to insert text entry to DB — removing it from history");
                                         let mut hist = history.lock().unwrap();
                                         hist.retain(|e| match e {
                                             ClipboardEntry::Text { text_hash: h, .. } => *h != failed_hash,
@@ -447,7 +448,7 @@ pub(crate) fn clipboard_monitor(
                                 }
                             }
                             Err(e) => {
-                                eprintln!("CopyAttach: DB mutex poisoned in text capture persist: {e}");
+                                crate::error_log!("CopyAttach: DB mutex poisoned in text capture persist: {e}");
                                 let mut hist = history.lock().unwrap();
                                 hist.retain(|e| match e {
                                     ClipboardEntry::Text { text_hash: h, .. } => *h != failed_hash,
@@ -460,9 +461,7 @@ pub(crate) fn clipboard_monitor(
             }
         }
 
-        for _ in 0..10 {
-            if !running.load(Ordering::SeqCst) { return; }
-            thread::sleep(Duration::from_millis(POLL_INTERVAL_MS / 10));
-        }
+        if !running.load(Ordering::SeqCst) { return; }
+        thread::park_timeout(Duration::from_millis(POLL_INTERVAL_MS));
     }
 }

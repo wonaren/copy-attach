@@ -18,6 +18,27 @@
 
 #![allow(dead_code)]
 
+macro_rules! debug_log {
+    ($($arg:tt)*) => {
+        if crate::backend::debug_log_enabled() {
+            crate::backend::debug_log_fmt(format_args!($($arg)*));
+        }
+    };
+}
+
+/// Always-on error/warning logging. Unlike `debug_log!`, this is not gated by
+/// the debug-logging preference: real failures should still be observable in
+/// release builds (they are rare, but crucial for support). The settings UI
+/// only controls verbose/debug logging, not these errors.
+macro_rules! error_log {
+    ($($arg:tt)*) => {
+        crate::backend::error_log_fmt(format_args!($($arg)*))
+    };
+}
+
+pub(crate) use debug_log;
+pub(crate) use error_log;
+
 mod types;
 mod backend;
 mod image;
@@ -32,7 +53,7 @@ mod macos {
     pub(crate) fn check_permission() -> bool { true }
     pub(crate) fn open_preferences() {}
     pub(crate) fn simulate_cmd_v() -> bool {
-        eprintln!("Warning: paste simulation only supported on macOS");
+        crate::debug_log!("Warning: paste simulation only supported on macOS");
         false
     }
     pub(crate) fn pasteboard_change_count() -> Option<i64> { None }

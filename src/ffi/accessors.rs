@@ -98,7 +98,7 @@ pub extern "C" fn clipboard_get_item_text(index: c_int) -> *mut c_char {
             None => std::ptr::null_mut(),
         },
         Err(e) => {
-            eprintln!("CopyAttach: DB mutex poisoned loading text at index {index}: {e}");
+            crate::error_log!("CopyAttach: DB mutex poisoned loading text at index {index}: {e}");
             std::ptr::null_mut()
         }
     }
@@ -134,13 +134,13 @@ pub extern "C" fn clipboard_get_image_thumb(index: c_int, out_len: *mut c_int) -
             ) {
                 Ok(data) => data,
                 Err(e) => {
-                    eprintln!("CopyAttach: failed to load thumbnail for db_id={db_id}: {e}");
+                    crate::debug_log!("CopyAttach: failed to load thumbnail for db_id={db_id}: {e}");
                     return std::ptr::null_mut();
                 }
             }
         }
         Err(e) => {
-            eprintln!("CopyAttach: DB mutex poisoned loading thumbnail for db_id={db_id}: {e}");
+            crate::error_log!("CopyAttach: DB mutex poisoned loading thumbnail for db_id={db_id}: {e}");
             return std::ptr::null_mut();
         }
     };
@@ -178,13 +178,13 @@ pub extern "C" fn clipboard_get_image_full(index: c_int, out_len: *mut c_int) ->
                 ) {
                     Ok(data) => data,
                     Err(e) => {
-                        eprintln!("CopyAttach: failed to load full image for db_id={db_id}: {e}");
+                        crate::error_log!("CopyAttach: failed to load full image for db_id={db_id}: {e}");
                         return std::ptr::null_mut();
                     }
                 }
             }
             Err(e) => {
-                eprintln!("CopyAttach: DB mutex poisoned loading full image for db_id={db_id}: {e}");
+                crate::error_log!("CopyAttach: DB mutex poisoned loading full image for db_id={db_id}: {e}");
                 return std::ptr::null_mut();
             }
         }
@@ -216,13 +216,13 @@ pub extern "C" fn clipboard_get_image_full_by_db_id(db_id: i64, out_len: *mut c_
             ) {
                 Ok(data) => data,
                 Err(e) => {
-                    eprintln!("CopyAttach: failed to load full image for db_id={db_id}: {e}");
+                    crate::error_log!("CopyAttach: failed to load full image for db_id={db_id}: {e}");
                     return std::ptr::null_mut();
                 }
             }
         }
         Err(e) => {
-            eprintln!("CopyAttach: DB mutex poisoned loading full image for db_id={db_id}: {e}");
+            crate::error_log!("CopyAttach: DB mutex poisoned loading full image for db_id={db_id}: {e}");
             return std::ptr::null_mut();
         }
     };
@@ -249,13 +249,13 @@ pub extern "C" fn clipboard_get_image_thumb_by_db_id(db_id: i64, out_len: *mut c
             ) {
                 Ok(data) => data,
                 Err(e) => {
-                    eprintln!("CopyAttach: failed to load thumbnail for db_id={db_id}: {e}");
+                    crate::debug_log!("CopyAttach: failed to load thumbnail for db_id={db_id}: {e}");
                     return std::ptr::null_mut();
                 }
             }
         }
         Err(e) => {
-            eprintln!("CopyAttach: DB mutex poisoned loading thumbnail for db_id={db_id}: {e}");
+            crate::error_log!("CopyAttach: DB mutex poisoned loading thumbnail for db_id={db_id}: {e}");
             return std::ptr::null_mut();
         }
     };
@@ -294,8 +294,9 @@ impl Drop for MarkBlobReusableOnDrop {
 /// fast path, generic decoder otherwise). The full-resolution intermediate is
 /// marked reusable before being dropped, so only the (downscaled) delivered
 /// buffer counts while the preview is on screen. `out_is_gif` is set to 1 when
-/// the stored blob is an animated GIF (Swift keeps the NSImage(data:) path for
-/// those to preserve animation). Returns null on failure (missing row,
+/// the stored blob is an animated GIF; in that case the function returns null
+/// immediately so Swift can use the NSImage(data:) path without paying for a
+/// throwaway first-frame decode. Returns null on failure (missing row,
 /// undecodable, zero-size). `max_dim <= 0` decodes at full resolution.
 #[no_mangle]
 pub extern "C" fn clipboard_decode_preview_by_db_id(
@@ -314,13 +315,13 @@ pub extern "C" fn clipboard_decode_preview_by_db_id(
     {
         return std::ptr::null_mut();
     }
-    eprintln!("CopyAttach: preview_decode db_id={db_id} max_dim={max_dim}");
     unsafe {
         *out_len = 0;
         *out_w = 0;
         *out_h = 0;
         *out_is_gif = 0;
     }
+    crate::debug_log!("CopyAttach: preview_decode db_id={db_id} max_dim={max_dim}");
 
     let png: Vec<u8> = match backend().db.lock() {
         Ok(conn) => match conn.query_row(
@@ -330,12 +331,12 @@ pub extern "C" fn clipboard_decode_preview_by_db_id(
         ) {
             Ok(data) => data,
             Err(e) => {
-                eprintln!("CopyAttach: failed to load png for preview db_id={db_id}: {e}");
+                crate::error_log!("CopyAttach: failed to load png for preview db_id={db_id}: {e}");
                 return std::ptr::null_mut();
             }
         },
         Err(e) => {
-            eprintln!("CopyAttach: DB mutex poisoned loading png for preview db_id={db_id}: {e}");
+            crate::error_log!("CopyAttach: DB mutex poisoned loading png for preview db_id={db_id}: {e}");
             return std::ptr::null_mut();
         }
     };
@@ -348,13 +349,16 @@ pub extern "C" fn clipboard_decode_preview_by_db_id(
     let png_guard = MarkBlobReusableOnDrop(png);
     let png = &png_guard.0;
     if png.is_empty() {
-        eprintln!("CopyAttach: preview db_id={db_id}: stored png_data is empty");
+        crate::debug_log!("CopyAttach: preview db_id={db_id}: stored png_data is empty");
         return std::ptr::null_mut();
     }
     // Animated GIFs are returned to Swift as-is (NSImage(data:) preserves the
-    // animation); Swift must know before consuming the decoded buffer.
+    // animation). Return early after flagging the GIF: decoding even the first
+    // frame here would be thrown away by Swift and costs CPU/RAM for no user
+    // benefit.
     if png.starts_with(&[0x47, 0x49, 0x46, 0x38]) {
         unsafe { *out_is_gif = 1 };
+        return std::ptr::null_mut();
     }
 
     let max_dim = max_dim.max(0) as u32;
@@ -375,7 +379,7 @@ pub extern "C" fn clipboard_decode_preview_by_db_id(
             let byte_len = (dw as usize) * (dh as usize) * 4;
             let dst = unsafe { std::alloc::alloc(layout_for(byte_len)) };
             if dst.is_null() {
-                eprintln!("CopyAttach: preview alloc failed for {byte_len} bytes");
+                crate::error_log!("CopyAttach: preview alloc failed for {byte_len} bytes");
                 None
             } else {
                 // The delivered buffer is handed to Swift as long-lived, read-
@@ -391,7 +395,7 @@ pub extern "C" fn clipboard_decode_preview_by_db_id(
                     unsafe { std::ptr::copy_nonoverlapping(resized.as_ptr(), dst, byte_len) };
                     crate::backend::mark_pages_reusable(resized.as_ptr(), resized.capacity());
                 } else {
-                    eprintln!("CopyAttach: preview resize failed for db_id={db_id}");
+                    crate::debug_log!("CopyAttach: preview resize failed for db_id={db_id}");
                     unsafe { std::alloc::dealloc(dst, layout_for(byte_len)) };
                     return std::ptr::null_mut();
                 }
@@ -411,7 +415,7 @@ pub extern "C" fn clipboard_decode_preview_by_db_id(
                     let byte_len = (dw as usize) * (dh as usize) * 4;
                     let dst = unsafe { std::alloc::alloc(layout_for(byte_len)) };
                     if dst.is_null() {
-                        eprintln!("CopyAttach: preview alloc failed for {byte_len} bytes");
+                        crate::error_log!("CopyAttach: preview alloc failed for {byte_len} bytes");
                         return std::ptr::null_mut();
                     }
                     // See the fast-path comment: claim before Swift owns it.
@@ -422,7 +426,7 @@ pub extern "C" fn clipboard_decode_preview_by_db_id(
                         unsafe { std::ptr::copy_nonoverlapping(resized.as_ptr(), dst, byte_len) };
                         crate::backend::mark_pages_reusable(resized.as_ptr(), resized.capacity());
                     } else {
-                        eprintln!("CopyAttach: preview resize failed for db_id={db_id}");
+                        crate::debug_log!("CopyAttach: preview resize failed for db_id={db_id}");
                         unsafe { std::alloc::dealloc(dst, layout_for(byte_len)) };
                         return std::ptr::null_mut();
                     }
@@ -430,7 +434,7 @@ pub extern "C" fn clipboard_decode_preview_by_db_id(
                     Some((dst, dw, dh, byte_len))
                 }
                 Err(e) => {
-                    eprintln!("CopyAttach: preview db_id={db_id} undecodable: {e}");
+                    crate::debug_log!("CopyAttach: preview db_id={db_id} undecodable: {e}");
                     return std::ptr::null_mut();
                 }
             }
@@ -438,7 +442,7 @@ pub extern "C" fn clipboard_decode_preview_by_db_id(
 
     match delivered {
         Some((ptr, w, h, byte_len)) => {
-            eprintln!("CopyAttach: preview_decode done db_id={db_id} w={w} h={h} bytes={byte_len} gif={}",
+            crate::debug_log!("CopyAttach: preview_decode done db_id={db_id} w={w} h={h} bytes={byte_len} gif={}",
                 unsafe { *out_is_gif });
             unsafe {
                 *out_len = byte_len as c_int;
@@ -460,7 +464,7 @@ pub extern "C" fn clipboard_preview_buffer_release(ptr: *mut u8, len: c_int) {
     if ptr.is_null() || len <= 0 {
         return;
     }
-    eprintln!("CopyAttach: preview_buffer_release len={len} ptr=0x{:x}", ptr as usize);
+    crate::debug_log!("CopyAttach: preview_buffer_release len={len} ptr=0x{:x}", ptr as usize);
     let byte_len = len as usize;
     crate::backend::mark_pages_reusable(ptr, byte_len);
     let layout = std::alloc::Layout::from_size_align(byte_len, 16)
@@ -491,12 +495,23 @@ pub extern "C" fn clipboard_get_image_size(index: c_int, out_width: *mut c_int, 
 #[no_mangle]
 pub extern "C" fn clipboard_free_string(s: *mut c_char) {
     if s.is_null() { return; }
+    // Same footprint contract as `clipboard_free_bytes`: mark the C string's
+    // pages reusable before freeing so large full-text loads do not leave
+    // freed-but-retained memory in the process footprint.
+    let byte_len = unsafe { std::ffi::CStr::from_ptr(s).to_bytes().len() + 1 };
+    crate::backend::mark_pages_reusable(s as *const u8, byte_len);
     unsafe { let _ = CString::from_raw(s); }
 }
 
 #[no_mangle]
 pub extern "C" fn clipboard_free_bytes(data: *mut u8, len: c_int) {
     if data.is_null() { return; }
+    // Mark the block reusable before returning it to the allocator. Freed
+    // large malloc blocks otherwise stay in the process footprint forever on
+    // macOS; this is the same contract as `clipboard_preview_buffer_release`,
+    // applied to every Rust-owned Vec handed to Swift (`vec_to_raw` buffers).
+    // Small/unaligned buffers are no-ops inside `mark_pages_reusable`.
+    crate::backend::mark_pages_reusable(data, len as usize);
     unsafe { let _ = Vec::from_raw_parts(data, len as usize, len as usize); }
 }
 
@@ -541,7 +556,7 @@ pub extern "C" fn clipboard_get_storage_size() -> i64 {
     let conn = match b.db.lock() {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("CopyAttach: DB mutex poisoned in get_storage_size: {e}");
+            crate::error_log!("CopyAttach: DB mutex poisoned in get_storage_size: {e}");
             return 0;
         }
     };
@@ -552,7 +567,7 @@ pub extern "C" fn clipboard_get_storage_size() -> i64 {
     ) {
         Ok(size) => size,
         Err(e) => {
-            eprintln!("CopyAttach: failed to query storage size: {e}");
+            crate::error_log!("CopyAttach: failed to query storage size: {e}");
             0
         }
     }

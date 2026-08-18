@@ -26,7 +26,7 @@ pub extern "C" fn clipboard_set_runtime_entitlement(state: c_int) -> c_int {
 #[no_mangle]
 pub extern "C" fn clipboard_init() -> c_int {
     if crate::backend::RUNTIME_ENTITLEMENT.load(Ordering::SeqCst) == 0 {
-        eprintln!("CopyAttach: clipboard_init rejected: runtime entitlement is denied");
+        crate::error_log!("CopyAttach: clipboard_init rejected: runtime entitlement is denied");
         return 0;
     }
     // OnceLock intentionally retains the backend for process lifetime. A
@@ -54,12 +54,12 @@ pub extern "C" fn clipboard_init() -> c_int {
     }
 
     let mut conn = if let Some(c) = open_db() { c } else {
-        eprintln!("CopyAttach: failed to open database, init failed");
+        crate::error_log!("CopyAttach: failed to open database, init failed");
         return 0;
     };
 
     if let Err(e) = ensure_history_table(&conn) {
-        eprintln!("CopyAttach: failed to create table: {e}");
+        crate::error_log!("CopyAttach: failed to create table: {e}");
         return 0;
     }
 
@@ -183,14 +183,14 @@ fn spawn_image_hash_migration(b: &'static crate::backend::Backend) {
             let mut stmt = match c.prepare("SELECT id FROM clipboard_history WHERE entry_type = 1") {
                 Ok(s) => s,
                 Err(e) => {
-                    eprintln!("CopyAttach: image-hash migration: cannot list image rows: {e}");
+                    crate::error_log!("CopyAttach: image-hash migration: cannot list image rows: {e}");
                     return;
                 }
             };
             let rows = match stmt.query_map([], |row| row.get::<_, i64>(0)) {
                 Ok(r) => r,
                 Err(e) => {
-                    eprintln!("CopyAttach: image-hash migration: cannot read image rows: {e}");
+                    crate::error_log!("CopyAttach: image-hash migration: cannot read image rows: {e}");
                     return;
                 }
             };
@@ -242,10 +242,10 @@ fn spawn_image_hash_migration(b: &'static crate::backend::Backend) {
         }
         if let Ok(c) = b.db.lock() {
             if let Err(e) = c.pragma_update(None, "user_version", crate::db::METADATA_VERSION) {
-                eprintln!("CopyAttach: image-hash migration: failed to stamp user_version: {e}");
+                crate::error_log!("CopyAttach: image-hash migration: failed to stamp user_version: {e}");
             }
         }
-        eprintln!("CopyAttach: image-hash migration complete: {updated} updated, {failed} failed");
+        crate::debug_log!("CopyAttach: image-hash migration complete: {updated} updated, {failed} failed");
     });
 }
 
@@ -255,10 +255,29 @@ pub extern "C" fn clipboard_cleanup() {
         b.running.store(false, Ordering::SeqCst);
         if let Ok(mut handle) = b.monitor_handle.lock() {
             if let Some(h) = handle.take() {
+                h.thread().unpark();
                 let _ = h.join();
             }
         }
     }
+}
+
+/// Enable or disable Rust-side stderr logging at runtime.
+///
+/// Default is `cfg!(debug_assertions)`: debug builds log, release builds do
+/// not. The Swift settings UI calls this to persist an explicit user choice.
+#[no_mangle]
+pub extern "C" fn clipboard_set_debug_logging(enabled: c_int) -> c_int {
+    crate::backend::set_debug_logging(enabled != 0);
+    1
+}
+
+/// Returns 1 if Rust-side stderr logging is currently enabled. Mainly used by
+/// the settings UI to show the correct switch state before a user override
+/// exists.
+#[no_mangle]
+pub extern "C" fn clipboard_is_debug_logging() -> c_int {
+    c_int::from(crate::backend::debug_log_enabled())
 }
 
 #[no_mangle]

@@ -190,6 +190,17 @@ extension InlineSettingsView {
             .onChange(of: closePopupAfterDrag) { _, newValue in
                 UserDefaults.standard.set(newValue, forKey: HistoryPopupWindow.closePopupAfterDragDefaultsKey)
             }
+            sectionDivider().padding(.vertical, 4)
+            settingToggleRow(
+                icon: "ant.circle.fill",
+                iconColor: debugLogging ? .orange : .secondary,
+                title: "调试日志",
+                desc: "开发/诊断时输出日志到 /tmp/copyattach_debug.log；分发版默认关闭以节省资源。",
+                isOn: $debugLogging
+            )
+            .onChange(of: debugLogging) { _, newValue in
+                backend.setDebugLogging(newValue)
+            }
         }
     }
 

@@ -33,21 +33,21 @@ pub(crate) fn search_history(conn: &Connection, query: &str) -> Vec<u64> {
         ) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("CopyAttach: failed to prepare FTS search: {e}");
+                crate::error_log!("CopyAttach: failed to prepare FTS search: {e}");
                 return ids;
             }
         };
         let rows = match stmt.query_map(rusqlite::params![phrase], |row| row.get::<_, i64>(0)) {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("CopyAttach: FTS search failed: {e}");
+                crate::error_log!("CopyAttach: FTS search failed: {e}");
                 return ids;
             }
         };
         for row in rows {
             match row {
                 Ok(id) => ids.push(id as u64),
-                Err(e) => eprintln!("CopyAttach: FTS search row read error: {e}"),
+                Err(e) => crate::error_log!("CopyAttach: FTS search row read error: {e}"),
             }
         }
 
@@ -62,7 +62,7 @@ pub(crate) fn search_history(conn: &Connection, query: &str) -> Vec<u64> {
         ) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("CopyAttach: failed to prepare FTS-cap LIKE search: {e}");
+                crate::error_log!("CopyAttach: failed to prepare FTS-cap LIKE search: {e}");
                 return ids;
             }
         };
@@ -72,14 +72,14 @@ pub(crate) fn search_history(conn: &Connection, query: &str) -> Vec<u64> {
         ) {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("CopyAttach: FTS-cap LIKE search failed: {e}");
+                crate::error_log!("CopyAttach: FTS-cap LIKE search failed: {e}");
                 return ids;
             }
         };
         for row in rows {
             match row {
                 Ok(id) => ids.push(id as u64),
-                Err(e) => eprintln!("CopyAttach: FTS-cap LIKE search row read error: {e}"),
+                Err(e) => crate::error_log!("CopyAttach: FTS-cap LIKE search row read error: {e}"),
             }
         }
         // An oversized row can be double-reported while a legacy index still
@@ -96,21 +96,21 @@ pub(crate) fn search_history(conn: &Connection, query: &str) -> Vec<u64> {
         ) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("CopyAttach: failed to prepare LIKE search: {e}");
+                crate::error_log!("CopyAttach: failed to prepare LIKE search: {e}");
                 return ids;
             }
         };
         let rows = match stmt.query_map(rusqlite::params![like], |row| row.get::<_, i64>(0)) {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("CopyAttach: LIKE search failed: {e}");
+                crate::error_log!("CopyAttach: LIKE search failed: {e}");
                 return ids;
             }
         };
         for row in rows {
             match row {
                 Ok(id) => ids.push(id as u64),
-                Err(e) => eprintln!("CopyAttach: LIKE search row read error: {e}"),
+                Err(e) => crate::error_log!("CopyAttach: LIKE search row read error: {e}"),
             }
         }
     }
@@ -139,6 +139,6 @@ pub(crate) fn load_text_by_db_id(conn: &Connection, db_id: i64) -> Option<String
         rusqlite::params![db_id],
         |row| row.get(0),
     )
-    .map_err(|e| eprintln!("CopyAttach: failed to load text for db_id={db_id}: {e}"))
+    .map_err(|e| crate::error_log!("CopyAttach: failed to load text for db_id={db_id}: {e}"))
     .ok()
 }

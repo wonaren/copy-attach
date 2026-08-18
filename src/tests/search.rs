@@ -128,7 +128,7 @@ fn test_fts_cap_skips_huge_text() {
         "x".repeat(cap / 2),
         "y".repeat(cap / 2)
     );
-    assert!(huge.chars().count() > cap as usize, "test text must exceed the cap");
+    assert!(huge.chars().count() > cap, "test text must exceed the cap");
 
     let conn = test_db();
     insert_text(&conn, &huge, 100);

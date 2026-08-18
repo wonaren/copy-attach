@@ -44,5 +44,9 @@ pub extern "C" fn clipboard_search_ids(query: *const c_char, out_count: *mut c_i
 #[no_mangle]
 pub extern "C" fn clipboard_free_u64_array(ptr: *mut u64, len: c_int) {
     if ptr.is_null() || len <= 0 { return; }
+    // Same footprint contract as `clipboard_free_bytes`: mark the block
+    // reusable before returning it to the allocator so large match sets do not
+    // leave freed-but-retained memory in the process footprint.
+    crate::backend::mark_pages_reusable(ptr as *const u8, (len as usize) * std::mem::size_of::<u64>());
     unsafe { let _ = Vec::from_raw_parts(ptr, len as usize, len as usize); }
 }

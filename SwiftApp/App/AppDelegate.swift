@@ -30,6 +30,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // guesswork.
         redirectStderrToDebugLog()
 
+        // Apply the persisted debug-logging preference before any debugLog
+        // call, so startup/licensing diagnostics are captured even when the
+        // Rust backend has not started yet (e.g. license gate).
+        ClipboardBackend.syncDebugLogging()
+
         debugLog("Starting initialization...")
 
         // Get HotkeyManager setup first (doesn't require Rust backend)

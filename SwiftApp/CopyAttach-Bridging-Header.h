@@ -8,6 +8,10 @@
 int32_t clipboard_set_runtime_entitlement(int32_t state);
 int32_t clipboard_init(void);
 void clipboard_cleanup(void);
+// Debug logging toggle: default is debug-build-on / release-build-off.
+// Settings UI can override at runtime.
+int32_t clipboard_set_debug_logging(int32_t enabled);
+int32_t clipboard_is_debug_logging(void);
 
 // ─── Query ───
 int32_t clipboard_get_count(void);
@@ -64,10 +68,12 @@ uint8_t* clipboard_get_image_full_by_db_id(int64_t db_id, int32_t* out_len);
 // Decodes + downscales the stored image to at most `max_dim` on its longest
 // side (aspect preserved; never upscales). Returns a Rust-owned RGBA8 buffer
 // (length w*h*4) or null on failure. `out_is_gif` is set to 1 when the stored
-// blob is an animated GIF — callers should keep the NSImage(data:) path for
-// those to preserve animation. The buffer's pages are marked reusable by
-// `clipboard_preview_buffer_release`, so closed previews stop counting against
-// the process footprint (the malloc pages never return otherwise).
+// blob is an animated GIF; in that case the return value is null and callers
+// should keep the NSImage(data:) path instead; the Rust side deliberately
+// does not decode a throwaway first frame. The buffer's pages are marked
+// reusable by `clipboard_preview_buffer_release`, so closed previews stop
+// counting against the process footprint (the malloc pages never return
+// otherwise).
 uint8_t* clipboard_decode_preview_by_db_id(int64_t db_id, int32_t max_dim,
                                            int32_t* out_len, int32_t* out_w, int32_t* out_h,
                                            int32_t* out_is_gif);

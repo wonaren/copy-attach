@@ -109,6 +109,10 @@ struct HistoryPopupContent: View {
     /// Cached search results, computed off the main thread in the debounce task.
     /// When effectiveSearchText is empty, the view uses backend.items directly.
     @State var searchResults: [ClipboardItem] = []
+    /// Bumped whenever `searchResults` is replaced. The display-list memo keys
+    /// on this so a re-run of the same query (same `effectiveSearchText`) still
+    /// invalidates when fresh results arrive.
+    @State private var searchResultsGeneration = 0
 
     // MARK: - Display-list memo
     //
@@ -120,12 +124,14 @@ struct HistoryPopupContent: View {
     // press. The memo recomputes the filter, sort, day grouping, and type
     // counts exactly once per data generation and serves every read from it.
     // The memo box is a reference type because SwiftUI View structs re-init
-    // freely and a nonmutating getter cannot write a stored property; a fresh
-    // box (nil memo) simply recomputes once with identical output.
+    // freely and a nonmutating getter cannot write a stored property; marking
+    // it with @State keeps the same box alive across body evaluations, so the
+    // expensive passes run once per data generation instead of once per body.
 
     private struct DisplayMemo {
         let itemsGeneration: Int
         let effectiveSearchText: String
+        let searchResultsGeneration: Int
         let filterMode: FilterMode
         /// Start of the current calendar day — a midnight rollover must
         /// invalidate the memo (day separators and 今天/昨天 labels move).
@@ -140,7 +146,7 @@ struct HistoryPopupContent: View {
         var memo: DisplayMemo?
     }
 
-    private let displayMemoBox = DisplayMemoBox()
+    @State private var displayMemoBox = DisplayMemoBox()
 
     /// The memoized derived list for the current (data, search, filter, day).
     private var currentDisplayMemo: DisplayMemo {
@@ -148,6 +154,7 @@ struct HistoryPopupContent: View {
         if let memo = displayMemoBox.memo,
            memo.itemsGeneration == backend.itemsGeneration,
            memo.effectiveSearchText == effectiveSearchText,
+           memo.searchResultsGeneration == searchResultsGeneration,
            memo.filterMode == filterMode,
            memo.startOfToday == today {
             return memo
@@ -176,6 +183,7 @@ struct HistoryPopupContent: View {
         }
         let memo = DisplayMemo(itemsGeneration: backend.itemsGeneration,
                                effectiveSearchText: effectiveSearchText,
+                               searchResultsGeneration: searchResultsGeneration,
                                filterMode: filterMode,
                                startOfToday: today,
                                items: sorted,
@@ -443,6 +451,7 @@ struct HistoryPopupContent: View {
                     effectiveSearchText = ""
                 }
                 searchResults = []
+                searchResultsGeneration &+= 1
                 scrollTarget = scrollTargetForItem(at: 0)
                 return
             }
@@ -482,6 +491,7 @@ struct HistoryPopupContent: View {
                     withAnimation(.easeInOut(duration: 0.25)) {
                         effectiveSearchText = newValue
                         searchResults = filtered
+                        searchResultsGeneration &+= 1
                     }
                     if selectedIndex == 0 {
                         scrollTarget = scrollTargetForItem(at: 0)

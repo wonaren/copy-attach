@@ -21,7 +21,7 @@ pub(crate) fn load_history_from_db(conn: &Connection, threshold: usize) -> Vec<C
     ) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("CopyAttach: failed to prepare load query: {e}");
+            crate::error_log!("CopyAttach: failed to prepare load query: {e}");
             return Vec::new();
         }
     };
@@ -45,7 +45,7 @@ pub(crate) fn load_history_from_db(conn: &Connection, threshold: usize) -> Vec<C
     }) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("CopyAttach: failed to query history: {e}");
+            crate::error_log!("CopyAttach: failed to query history: {e}");
             return Vec::new();
         }
     };
@@ -59,7 +59,7 @@ pub(crate) fn load_history_from_db(conn: &Connection, threshold: usize) -> Vec<C
              timestamp, source_name, source_bundle_id) = match row {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("CopyAttach: row read error at index {}: {}", result.len() + skipped as usize + 1, e);
+                crate::error_log!("CopyAttach: row read error at index {}: {}", result.len() + skipped as usize + 1, e);
                 skipped += 1;
                 continue;
             }
@@ -76,7 +76,7 @@ pub(crate) fn load_history_from_db(conn: &Connection, threshold: usize) -> Vec<C
                 // reported, not transparently recovered.
                 let preview = preview.unwrap_or_default();
                 if preview.is_empty() {
-                    eprintln!("CopyAttach: text row {db_id} has no persisted preview — skipped");
+                    crate::debug_log!("CopyAttach: text row {db_id} has no persisted preview — skipped");
                     skipped += 1;
                     continue;
                 }
@@ -106,13 +106,13 @@ pub(crate) fn load_history_from_db(conn: &Connection, threshold: usize) -> Vec<C
                 db_id,
             }),
             _ => {
-                eprintln!("CopyAttach: unknown entry_type {entry_type} in DB, skipped");
+                crate::error_log!("CopyAttach: unknown entry_type {entry_type} in DB, skipped");
                 skipped += 1;
             }
         }
     }
     if skipped > 0 {
-        eprintln!("CopyAttach: skipped {skipped} corrupt or unknown row(s) during history load");
+        crate::debug_log!("CopyAttach: skipped {skipped} corrupt or unknown row(s) during history load");
     }
     result
 }
@@ -133,7 +133,7 @@ pub(crate) fn insert_entry_to_db(
             let full = match text {
                 Some(t) => t,
                 None => {
-                    eprintln!("CopyAttach: cannot insert text entry: full text not provided");
+                    crate::error_log!("CopyAttach: cannot insert text entry: full text not provided");
                     return Err(());
                 }
             };
@@ -153,17 +153,17 @@ pub(crate) fn insert_entry_to_db(
                     source_name, source_bundle_id, *id as i64,
                     preview, label,
                 ],
-            ).map(|_| ()).map_err(|e| { eprintln!("CopyAttach: failed to insert text entry: {e}"); })
+            ).map(|_| ()).map_err(|e| { crate::error_log!("CopyAttach: failed to insert text entry: {e}"); })
         }
         ClipboardEntry::Image { width, height,
                                 thumb_width: _, thumb_height: _, hash,
                                 timestamp, source_name, source_bundle_id, id, .. } => {
             let png = if let Some(data) = image_png { data } else {
-                eprintln!("CopyAttach: cannot insert image entry: missing png_data");
+                crate::error_log!("CopyAttach: cannot insert image entry: missing png_data");
                 return Err(());
             };
             let (thumb_data, tw, th) = if let Some(t) = image_thumb { t } else {
-                eprintln!("CopyAttach: cannot insert image entry: missing thumb_data");
+                crate::error_log!("CopyAttach: cannot insert image entry: missing thumb_data");
                 return Err(());
             };
             conn.execute(
@@ -179,7 +179,7 @@ pub(crate) fn insert_entry_to_db(
                     source_name, source_bundle_id,
                     *id as i64,
                 ],
-            ).map(|_| ()).map_err(|e| { eprintln!("CopyAttach: failed to insert image entry: {e}"); })
+            ).map(|_| ()).map_err(|e| { crate::error_log!("CopyAttach: failed to insert image entry: {e}"); })
         }
     };
     result
@@ -199,7 +199,7 @@ pub(crate) fn delete_matching_entry(conn: &Connection, entry: &ClipboardEntry, t
             let full = match text {
                 Some(t) => t,
                 None => {
-                    eprintln!("CopyAttach: cannot dedup text entry: full text not provided");
+                    crate::error_log!("CopyAttach: cannot dedup text entry: full text not provided");
                     return;
                 }
             };
@@ -224,7 +224,7 @@ pub(crate) fn delete_matching_entry(conn: &Connection, entry: &ClipboardEntry, t
         }
     };
     if let Err(e) = result {
-        eprintln!("CopyAttach: failed to delete matching entry: {e}");
+        crate::error_log!("CopyAttach: failed to delete matching entry: {e}");
     }
 }
 
@@ -242,7 +242,7 @@ pub(crate) fn trim_db_history(conn: &Connection, threshold: usize) {
                       ORDER BY id DESC LIMIT 1 OFFSET ?)",
         rusqlite::params![threshold as i64],
     ) {
-        eprintln!("CopyAttach: failed to trim DB history: {e}");
+        crate::error_log!("CopyAttach: failed to trim DB history: {e}");
     }
 }
 
@@ -262,14 +262,14 @@ pub(crate) fn persist_entry_to_db(
     // `unchecked_transaction` skips the BEGIN round-trip: the first write
     // statement opens the implicit transaction and `commit` closes it.
     let tx = conn.unchecked_transaction().map_err(|e| {
-        eprintln!("CopyAttach: failed to begin write transaction: {e}");
+        crate::error_log!("CopyAttach: failed to begin write transaction: {e}");
     })?;
     insert_entry_to_db(&tx, entry, text, image_png, image_thumb)?;
     delete_matching_entry(&tx, entry, text);
     trim_db_history(&tx, threshold);
     let row_id = tx.last_insert_rowid();
     tx.commit().map_err(|e| {
-        eprintln!("CopyAttach: failed to commit write transaction: {e}");
+        crate::error_log!("CopyAttach: failed to commit write transaction: {e}");
     })?;
     Ok(row_id)
 }

@@ -75,6 +75,10 @@ class ClipboardBackend {
     }
 
     func start() -> Bool {
+        // Apply the debug-logging preference BEFORE init: init-time diagnostics
+        // (DB open, schema ensure, migration) are the ones most needed in a
+        // release build; syncing afterwards would silently drop them.
+        Self.syncDebugLogging()
         let result = clipboard_init()
         guard result != 0 else {
             print("[ClipboardBackend] init failed (result: \(result)) — Rust backend not available")
@@ -142,10 +146,15 @@ class ClipboardBackend {
             refreshPermission()
             refresh()
             guard timer == nil else { return }
-            timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            let t = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
                 guard let self = self else { return }
                 MainActor.assumeIsolated { self.refresh() }
             }
+            // Allow AppKit to coalesce this timer with other system timers /
+            // display refresh work. A 100ms slack on a 500ms UI poll is
+            // imperceptible but reduces idle wakeups while the popup is open.
+            t.tolerance = 0.1
+            timer = t
         } else {
             timer?.invalidate()
             timer = nil
@@ -168,6 +177,21 @@ class ClipboardBackend {
         if result == 0 {
             debugLog("Failed to apply clipboard ignore rules")
         }
+    }
+
+    /// Apply the persisted debug-logging preference as early as possible.
+    /// If the user has never touched the setting, keep Rust's build-profile
+    /// default (debug builds log, release builds do not).
+    static func syncDebugLogging() {
+        if UserDefaults.standard.object(forKey: "DebugLogging") != nil {
+            clipboard_set_debug_logging(UserDefaults.standard.bool(forKey: "DebugLogging") ? 1 : 0)
+        }
+    }
+
+    /// Persist and apply the debug-logging switch.
+    func setDebugLogging(_ enabled: Bool) {
+        UserDefaults.standard.set(enabled, forKey: "DebugLogging")
+        clipboard_set_debug_logging(enabled ? 1 : 0)
     }
 
     /// Detect the current frontmost app and tell Rust about it. The pid is
@@ -345,12 +369,13 @@ class ClipboardBackend {
     ///
     /// The Rust side hands over a buffer allocated by its global (system)
     /// allocator — i.e. `malloc` — with capacity pinned to `len`. `Data`
-    /// takes ownership of that exact pointer with the `.free` deallocator:
-    /// zero-copy, so a multi-MB full PNG is never duplicated across the FFI
-    /// boundary (the old `Data(bytes:)` + `clipboard_free_bytes` path held
-    /// two full copies simultaneously). The len==0 case is routed through the
-    /// FFI free helper because `bytesNoCopy` with count 0 is not guaranteed
-    /// to invoke the deallocator.
+    /// takes ownership of that exact pointer with a custom deallocator that
+    /// routes through `clipboard_free_bytes`, which marks the pages reusable
+    /// before freeing (macOS otherwise leaves freed large malloc blocks in the
+    /// process footprint). This is zero-copy, so a multi-MB full PNG is never
+    /// duplicated across the FFI boundary. The len==0 case is routed through
+    /// the same FFI free helper because `bytesNoCopy` with count 0 is not
+    /// guaranteed to invoke the deallocator.
     nonisolated static func getImageFullByDbId(_ dbId: Int) -> Data? {
         var len: Int32 = 0
         guard let ptr = clipboard_get_image_full_by_db_id(Int64(dbId), &len) else { return nil }
@@ -358,7 +383,9 @@ class ClipboardBackend {
             clipboard_free_bytes(ptr, len)
             return nil
         }
-        return Data(bytesNoCopy: ptr, count: Int(len), deallocator: .free)
+        return Data(bytesNoCopy: ptr, count: Int(len), deallocator: .custom { raw, size in
+            clipboard_free_bytes(raw.assumingMemoryBound(to: UInt8.self), Int32(size))
+        })
     }
 
     /// Synchronous NSCache-only lookup — no IO, safe in body evaluation.
@@ -387,7 +414,9 @@ class ClipboardBackend {
                 clipboard_free_bytes(ptr, len)
                 return nil
             }
-            let data = Data(bytesNoCopy: ptr, count: Int(len), deallocator: .free)
+            let data = Data(bytesNoCopy: ptr, count: Int(len), deallocator: .custom { raw, size in
+                clipboard_free_bytes(raw.assumingMemoryBound(to: UInt8.self), Int32(size))
+            })
             guard let image = NSImage(data: data) else {
                 print("[ClipboardBackend] failed to decode thumbnail for dbId=\(dbId): PNG data is \(data.count) bytes but NSImage(data:) returned nil")
                 return nil

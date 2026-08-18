@@ -57,7 +57,7 @@ pub(crate) fn push_deleted(
         }
         stack.remove(0);
     }
-    eprintln!("CopyAttach: undo_push entries={} total_payload_bytes={}", stack.len(), bytes);
+    crate::debug_log!("CopyAttach: undo_push entries={} total_payload_bytes={}", stack.len(), bytes);
 }
 
 // ═══════════════════════════════════════════
@@ -65,7 +65,51 @@ pub(crate) fn push_deleted(
 // ═══════════════════════════════════════════
 
 pub(crate) const DEFAULT_CLEANUP_THRESHOLD: usize = 3000;
-pub(crate) const POLL_INTERVAL_MS: u64 = 300;
+/// Background clipboard poll cadence. 500ms keeps capture latency well under a
+/// second while further reducing idle wakeups on top of the single park/wake
+/// primitive used by the monitor.
+pub(crate) const POLL_INTERVAL_MS: u64 = 500;
+
+// ═══════════════════════════════════════════
+// Debug logging toggle
+// ═══════════════════════════════════════════
+
+/// Debug/release log gate.
+///
+/// Default follows the build profile: `cargo build` (debug_assertions) logs,
+/// `cargo build --release` (distribution) does not. Swift can override this at
+/// runtime through `clipboard_set_debug_logging` / the in-app setting so a
+/// release build can still produce diagnostics when explicitly enabled.
+static DEBUG_LOGGING: AtomicBool = AtomicBool::new(cfg!(debug_assertions));
+
+pub(crate) fn debug_log_enabled() -> bool {
+    DEBUG_LOGGING.load(Ordering::Relaxed)
+}
+
+pub(crate) fn set_debug_logging(enabled: bool) {
+    DEBUG_LOGGING.store(enabled, Ordering::Relaxed);
+}
+
+/// The implementation behind the `debug_log!` macro. The macro performs the
+/// enabled check before formatting, so this function can write unconditionally.
+/// Writing via `stderr()` keeps the macro definition free of `eprintln!`, so
+/// mechanically replacing legacy `eprintln!` call sites with `crate::debug_log!`
+/// is safe.
+pub(crate) fn debug_log_fmt(args: std::fmt::Arguments<'_>) {
+    use std::io::Write;
+    let mut err = std::io::stderr();
+    let _ = err.write_fmt(args);
+    let _ = err.write_all(b"\n");
+}
+
+/// Always-on implementation behind `error_log!`. This is intentionally not
+/// gated: errors are exceptional and should survive release builds for support.
+pub(crate) fn error_log_fmt(args: std::fmt::Arguments<'_>) {
+    use std::io::Write;
+    let mut err = std::io::stderr();
+    let _ = err.write_fmt(args);
+    let _ = err.write_all(b"\n");
+}
 
 // ═══════════════════════════════════════════
 // CopyAttach temp-file convention
@@ -162,9 +206,7 @@ pub(crate) struct ImageEncodeScratchGuard<'a> {
 impl<'a> ImageEncodeScratchGuard<'a> {
     pub(crate) fn acquire() -> Self {
         let guard = IMAGE_ENCODE_SCRATCH.lock().unwrap();
-        if guard.capacity() > 0 {
-            eprintln!("CopyAttach: encode_scratch acquire cap={}", guard.capacity());
-        }
+        crate::debug_log!("CopyAttach: encode_scratch acquire cap={}", guard.capacity());
         // The pooled buffer may be marked reusable from the previous idle
         // cycle — claim its pages back before the encoder writes into it.
         claim_pages(guard.as_ptr(), guard.capacity());
@@ -190,14 +232,14 @@ impl Drop for ImageEncodeScratchGuard<'_> {
         if self.guard.capacity() > IMAGE_ENCODE_SCRATCH_RETAIN_CAP {
             // Release an oversized buffer without leaving its pages counted
             // as freed-but-retained residue: mark them reusable first.
-            eprintln!("CopyAttach: encode_scratch drop oversized cap={} release",
+            crate::debug_log!("CopyAttach: encode_scratch drop oversized cap={} release",
                 self.guard.capacity());
             mark_pages_reusable(self.guard.as_ptr(), self.guard.capacity());
             *self.guard = Vec::new();
         } else if !self.guard.is_empty() {
             // Idle pooled buffer: its pages stop counting against the process
             // footprint until the next capture claims them back.
-            eprintln!("CopyAttach: encode_scratch drop cap={} mark_reusable",
+            crate::debug_log!("CopyAttach: encode_scratch drop cap={} mark_reusable",
                 self.guard.capacity());
             mark_pages_reusable(self.guard.as_ptr(), self.guard.capacity());
         }
@@ -253,10 +295,10 @@ pub(crate) fn mark_pages_reusable(ptr: *const u8, byte_len: usize) {
         // A >=1-page block whose base is not page-aligned cannot come from the
         // malloc large zone (mmap'd, page-aligned) — it grew in place out of a
         // small-zone block and shares pages with other allocations, so it must
-        // NOT be marked. Log it: such buffers silently pin their pages in the
-        // footprint forever, and this is exactly the kind of path that would
-        // otherwise hide.
-        eprintln!("CopyAttach: mark_pages_reusable SKIP unaligned base=0x{start:x} len={byte_len}");
+        // NOT be marked. Log only when debug logging is explicitly enabled;
+        // such buffers silently pin their pages in the footprint, and this is
+        // exactly the kind of path that would otherwise hide.
+        crate::debug_log!("CopyAttach: mark_pages_reusable SKIP unaligned base=0x{start:x} len={byte_len}");
         return;
     }
     let end = start + byte_len;
@@ -278,7 +320,7 @@ pub(crate) fn claim_pages(ptr: *const u8, byte_len: usize) {
     }
     let start = ptr as usize;
     if !start.is_multiple_of(PAGE_SIZE) {
-        eprintln!("CopyAttach: claim_pages SKIP unaligned base=0x{start:x} len={byte_len}");
+        crate::debug_log!("CopyAttach: claim_pages SKIP unaligned base=0x{start:x} len={byte_len}");
         return;
     }
     let end = start + byte_len;
@@ -328,7 +370,7 @@ impl ImageDecodeBuffer {
     pub(crate) fn acquire() -> Self {
         let buf = IMAGE_DECODE_SCRATCH.lock().unwrap().take().unwrap_or_default();
         if buf.capacity() > 0 {
-            eprintln!("CopyAttach: decode_scratch acquire cap={}", buf.capacity());
+            crate::debug_log!("CopyAttach: decode_scratch acquire cap={}", buf.capacity());
         }
         claim_pages(buf.as_ptr(), buf.capacity());
         ImageDecodeBuffer { buf: Some(buf) }
@@ -359,19 +401,19 @@ impl Drop for ImageDecodeBuffer {
                 // returned first) — release this one rather than churning.
                 if pool.is_none() {
                     // Idle pooled buffer: remove its pages from the footprint.
-                    eprintln!("CopyAttach: decode_scratch drop cap={} mark_reusable",
+                    crate::debug_log!("CopyAttach: decode_scratch drop cap={} mark_reusable",
                         buf.capacity());
                     mark_pages_reusable(buf.as_ptr(), buf.capacity());
                     *pool = Some(buf);
                 } else {
-                    eprintln!("CopyAttach: decode_scratch drop cap={} pool_busy release",
+                    crate::debug_log!("CopyAttach: decode_scratch drop cap={} pool_busy release",
                         buf.capacity());
                     mark_pages_reusable(buf.as_ptr(), buf.capacity());
                 }
             } else {
                 // Oversized: drop it, but mark first so its pages do not stay
                 // counted as freed-but-retained residue.
-                eprintln!("CopyAttach: decode_scratch drop oversized cap={} release",
+                crate::debug_log!("CopyAttach: decode_scratch drop oversized cap={} release",
                     buf.capacity());
                 mark_pages_reusable(buf.as_ptr(), buf.capacity());
             }

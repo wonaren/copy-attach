@@ -15,7 +15,7 @@ pub extern "C" fn clipboard_clear_history() {
         }
         if let Ok(conn) = b.db.lock() {
             if let Err(e) = conn.execute("DELETE FROM clipboard_history", []) {
-                eprintln!("CopyAttach: failed to clear DB history: {e}");
+                crate::error_log!("CopyAttach: failed to clear DB history: {e}");
             }
         }
     }
@@ -50,20 +50,20 @@ pub extern "C" fn clipboard_delete_by_id(entry_id: u64) -> c_int {
     let mut undo_text: Option<String> = None;
     if let ClipboardEntry::Text { db_id, .. } = &entry {
         if *db_id == 0 {
-            eprintln!("CopyAttach: cannot delete text entry {entry_id}: db_id=0 (entry not persisted)");
+            crate::error_log!("CopyAttach: cannot delete text entry {entry_id}: db_id=0 (entry not persisted)");
             return 0;
         }
         let conn = match b.db.lock() {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("CopyAttach: DB lock poisoned loading text for undo of entry {entry_id}: {e}");
+                crate::error_log!("CopyAttach: DB lock poisoned loading text for undo of entry {entry_id}: {e}");
                 return 0;
             }
         };
         match load_text_by_db_id(&conn, *db_id) {
             Some(t) => undo_text = Some(t),
             None => {
-                eprintln!("CopyAttach: failed to load text for undo of entry {entry_id} — delete aborted");
+                crate::error_log!("CopyAttach: failed to load text for undo of entry {entry_id} — delete aborted");
                 return 0;
             }
         }
@@ -98,14 +98,14 @@ pub extern "C" fn clipboard_delete_by_id(entry_id: u64) -> c_int {
                     *thumb_height = th as u32;
                 }
                 Err(e) => {
-                    eprintln!("CopyAttach: failed to load image data from DB for undo: {e}");
+                    crate::error_log!("CopyAttach: failed to load image data from DB for undo: {e}");
                     return 0;
                 }
             }
         } else if png_data.is_empty() && *db_id == 0 {
             // Phase 2 async persist has not completed — no image data exists in DB.
             // Reject deletion: the entry stays in history, user can retry later.
-            eprintln!("CopyAttach: cannot delete image entry {entry_id}: Phase 2 not yet complete (db_id=0)");
+            crate::error_log!("CopyAttach: cannot delete image entry {entry_id}: Phase 2 not yet complete (db_id=0)");
             return 0;
         }
     }
@@ -115,7 +115,7 @@ pub extern "C" fn clipboard_delete_by_id(entry_id: u64) -> c_int {
         let conn = match b.db.lock() {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("CopyAttach: DB lock poisoned deleting entry {entry_id}: {e}");
+                crate::error_log!("CopyAttach: DB lock poisoned deleting entry {entry_id}: {e}");
                 return 0;
             }
         };
@@ -144,7 +144,7 @@ pub extern "C" fn clipboard_delete_by_id(entry_id: u64) -> c_int {
                 }
             }
         } {
-            eprintln!("CopyAttach: failed to delete entry {entry_id} from DB: {e}");
+            crate::error_log!("CopyAttach: failed to delete entry {entry_id} from DB: {e}");
             return 0;
         }
     }
@@ -170,7 +170,7 @@ pub extern "C" fn clipboard_delete_by_id(entry_id: u64) -> c_int {
                 png_data.len() + thumb_data.len()
             }
         };
-        eprintln!("CopyAttach: delete push entry_id={entry_id} payload_bytes={payload_bytes}");
+        crate::debug_log!("CopyAttach: delete push entry_id={entry_id} payload_bytes={payload_bytes}");
         push_deleted(&mut stack, entry, undo_text);
     }
 
@@ -332,11 +332,11 @@ pub extern "C" fn clipboard_trim_oldest_percent(percent: i32) -> c_int {
                     SELECT id FROM clipboard_history ORDER BY id ASC LIMIT ?)",
                 rusqlite::params![count as i64],
             ) {
-                eprintln!("CopyAttach: failed to trim DB by {count} entries: {e}");
+                crate::error_log!("CopyAttach: failed to trim DB by {count} entries: {e}");
             }
         }
         Err(e) => {
-            eprintln!("CopyAttach: DB mutex poisoned in trim_oldest_percent: {e}");
+            crate::error_log!("CopyAttach: DB mutex poisoned in trim_oldest_percent: {e}");
         }
     }
 

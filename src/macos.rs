@@ -89,7 +89,7 @@ pub(crate) fn pasteboard_image_data() -> Option<Vec<u8>> {
 
 /// Cached `NSPasteboard` class reference.
 ///
-/// The monitor thread resolves the class and reads `changeCount` every 300 ms
+/// The monitor thread resolves the class and reads `changeCount` every 500 ms
 /// for the app's entire lifetime — that is ~120k class lookups per day, each
 /// of which walks the dyld class registry. Caching makes the poll a pure
 /// message-send on a stable pointer: structurally allocation-free, so the
@@ -104,7 +104,7 @@ fn nspasteboard_class() -> Option<&'static objc2::runtime::AnyClass> {
 /// or converting any image data. Returns `None` if pasteboard is inaccessible.
 ///
 /// Wrapped in an autorelease pool: this is the monitor thread's hot path
-/// (every 300 ms); a Rust thread has no implicit pool, and any autoreleased
+/// (every 500 ms); a Rust thread has no implicit pool, and any autoreleased
 /// intermediate created by AppKit under the hood would otherwise linger
 /// until the thread exits.
 pub(crate) fn pasteboard_change_count() -> Option<i64> {
@@ -151,11 +151,11 @@ pub(crate) fn pasteboard_file_paths() -> Vec<String> {
         // NSURL + NSString always exist in the ObjC runtime on macOS.
         // Return empty if somehow absent — don't fall back to raw file:// strings.
         let nsurl_cls = if let Some(c) = objc2::runtime::AnyClass::get(c"NSURL") { c } else {
-            eprintln!("CopyAttach: NSURL class not found in ObjC runtime, cannot convert file URLs");
+            crate::error_log!("CopyAttach: NSURL class not found in ObjC runtime, cannot convert file URLs");
             return vec![];
         };
         let nsstr_cls = if let Some(c) = objc2::runtime::AnyClass::get(c"NSString") { c } else {
-            eprintln!("CopyAttach: NSString class not found in ObjC runtime, cannot convert file URLs");
+            crate::error_log!("CopyAttach: NSString class not found in ObjC runtime, cannot convert file URLs");
             return vec![];
         };
 
@@ -271,53 +271,53 @@ pub(crate) fn set_pasteboard_file_url(path: &str) -> bool {
         let pasteboard_cls = match nspasteboard_class() {
             Some(c) => c,
             None => {
-                eprintln!("CopyAttach: NSPasteboard class not found in ObjC runtime");
+                crate::error_log!("CopyAttach: NSPasteboard class not found in ObjC runtime");
                 return false;
             }
         };
         let pasteboard: *mut objc2::runtime::NSObject = msg_send![pasteboard_cls, generalPasteboard];
         if pasteboard.is_null() {
-            eprintln!("CopyAttach: generalPasteboard unavailable");
+            crate::error_log!("CopyAttach: generalPasteboard unavailable");
             return false;
         }
 
         let nsstr_cls = match objc2::runtime::AnyClass::get(c"NSString") {
             Some(c) => c,
             None => {
-                eprintln!("CopyAttach: NSString class not found in ObjC runtime");
+                crate::error_log!("CopyAttach: NSString class not found in ObjC runtime");
                 return false;
             }
         };
         let c_path = match std::ffi::CString::new(path) {
             Ok(s) => s,
             Err(_) => {
-                eprintln!("CopyAttach: path contains NUL: {path:?}");
+                crate::error_log!("CopyAttach: path contains NUL: {path:?}");
                 return false;
             }
         };
         let path_obj: *mut objc2::runtime::NSObject =
             msg_send![nsstr_cls, stringWithUTF8String: c_path.as_ptr()];
         if path_obj.is_null() {
-            eprintln!("CopyAttach: failed to build NSString for path {path}");
+            crate::error_log!("CopyAttach: failed to build NSString for path {path}");
             return false;
         }
 
         let nsurl_cls = match objc2::runtime::AnyClass::get(c"NSURL") {
             Some(c) => c,
             None => {
-                eprintln!("CopyAttach: NSURL class not found in ObjC runtime");
+                crate::error_log!("CopyAttach: NSURL class not found in ObjC runtime");
                 return false;
             }
         };
         let url_obj: *mut objc2::runtime::NSObject = msg_send![nsurl_cls, fileURLWithPath: path_obj];
         if url_obj.is_null() {
-            eprintln!("CopyAttach: failed to build NSURL for path {path}");
+            crate::error_log!("CopyAttach: failed to build NSURL for path {path}");
             return false;
         }
 
         let url_str: *mut objc2::runtime::NSObject = msg_send![url_obj, absoluteString];
         if url_str.is_null() {
-            eprintln!("CopyAttach: failed to read absoluteString of file URL {path}");
+            crate::error_log!("CopyAttach: failed to read absoluteString of file URL {path}");
             return false;
         }
 
@@ -326,14 +326,14 @@ pub(crate) fn set_pasteboard_file_url(path: &str) -> bool {
         let file_url_type: *mut objc2::runtime::NSObject =
             msg_send![nsstr_cls, stringWithUTF8String: type_bytes.as_ptr().cast::<i8>()];
         if file_url_type.is_null() {
-            eprintln!("CopyAttach: failed to build public.file-url type string");
+            crate::error_log!("CopyAttach: failed to build public.file-url type string");
             return false;
         }
 
         let _: isize = msg_send![pasteboard, clearContents];
         let ok: bool = msg_send![pasteboard, setString: url_str, forType: file_url_type];
         if !ok {
-            eprintln!("CopyAttach: setString:forType: failed for file URL {path}");
+            crate::error_log!("CopyAttach: setString:forType: failed for file URL {path}");
         }
         ok
     }
@@ -344,7 +344,7 @@ pub(crate) fn set_pasteboard_file_url(path: &str) -> bool {
 /// Returns `false` if pid is 0 or event creation fails.
 pub(crate) fn simulate_cmd_v(pid: i32) -> bool {
     if pid <= 0 {
-        eprintln!("CopyAttach: simulate_cmd_v: no target PID (frontmost app unknown)");
+        crate::error_log!("CopyAttach: simulate_cmd_v: no target PID (frontmost app unknown)");
         return false;
     }
     let source = CGEventSource::new(CGEventSourceStateID::Private);
@@ -359,7 +359,7 @@ pub(crate) fn simulate_cmd_v(pid: i32) -> bool {
         CGEvent::post_to_pid(pid, Some(&*ku));
         true
     } else {
-        eprintln!("CopyAttach: failed to create CGEvent for paste simulation");
+        crate::error_log!("CopyAttach: failed to create CGEvent for paste simulation");
         false
     }
 }

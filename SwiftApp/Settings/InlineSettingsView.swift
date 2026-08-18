@@ -24,6 +24,7 @@ struct InlineSettingsView: View {
     @State var pendingThreshold: Int? = nil
     @State var thresholdBeforeEdit: Double = 3000
     @State var closePopupAfterDrag = HistoryPopupWindow.closePopupAfterDragEnabled
+    @State var debugLogging = UserDefaults.standard.object(forKey: "DebugLogging") as? Bool ?? (clipboard_is_debug_logging() != 0)
     @State var showDragGuide = false
     @State var isHoveringDragIcon = false
     @State var updateState: UpdateCheckState = .idle

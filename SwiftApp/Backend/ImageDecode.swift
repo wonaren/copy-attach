@@ -84,19 +84,19 @@ enum ImageDecode {
     static func previewImage(dbId: Int, maxPixel: Int) -> DecodedImage? {
         guard dbId != 0 else { return nil }
         var len: Int32 = 0, w: Int32 = 0, h: Int32 = 0, isGif: Int32 = 0
-        guard let ptr = clipboard_decode_preview_by_db_id(Int64(dbId), Int32(maxPixel),
-                                                          &len, &w, &h, &isGif),
-              len > 0, w > 0, h > 0 else { return nil }
+        let ptr = clipboard_decode_preview_by_db_id(Int64(dbId), Int32(maxPixel),
+                                                    &len, &w, &h, &isGif)
 
-        // Animated GIF: discard the (first-frame) decoded buffer and hand the
-        // stored blob to NSImage as the old path did — animation preserved.
+        // Animated GIF: the Rust backend already flagged it and intentionally
+        // returns no decoded buffer; hand the stored blob to NSImage directly
+        // to preserve animation and avoid decoding a throwaway first frame.
         if isGif != 0 {
-            clipboard_preview_buffer_release(ptr, len)
             guard let data = ClipboardBackend.getImageFullByDbId(dbId),
                   let image = NSImage(data: data) else { return nil }
             return DecodedImage(image: image)
         }
 
+        guard let ptr, len > 0, w > 0, h > 0 else { return nil }
         return makeImage(ptr: ptr, len: len, width: Int(w), height: Int(h))
     }
 

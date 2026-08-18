@@ -19,7 +19,7 @@ pub(crate) fn get_persist_dir() -> Option<PathBuf> {
 pub(crate) fn open_db() -> Option<Connection> {
     let db_path = get_persist_dir()?.join("history.db");
     let conn = Connection::open(&db_path).map_err(|e| {
-        eprintln!("CopyAttach: failed to open database: {e}");
+        crate::error_log!("CopyAttach: failed to open database: {e}");
     }).ok()?;
     // No mmap: the FTS5 trigram index (several× the text size) would be mapped
     // into the process and count as resident memory — confirmed ~1:1 RSS growth
@@ -37,7 +37,7 @@ pub(crate) fn open_db() -> Option<Connection> {
          PRAGMA mmap_size = 0;
          PRAGMA cache_size = -4096;"
     ) {
-        eprintln!("CopyAttach: failed to configure DB pragmas (WAL/synchronous/cache): {e}");
+        crate::error_log!("CopyAttach: failed to configure DB pragmas (WAL/synchronous/cache): {e}");
     }
     Some(conn)
 }
@@ -76,7 +76,7 @@ pub(crate) fn ensure_history_table(conn: &Connection) -> Result<(), rusqlite::Er
             .prepare("SELECT entry_id FROM clipboard_history LIMIT 0")
             .is_ok();
         if !has_column {
-            eprintln!("CopyAttach: failed to add entry_id column: {e}");
+            crate::error_log!("CopyAttach: failed to add entry_id column: {e}");
             return Err(e);
         }
     }
@@ -102,7 +102,7 @@ pub(crate) fn ensure_history_table(conn: &Connection) -> Result<(), rusqlite::Er
             .prepare("SELECT preview, label FROM clipboard_history LIMIT 0")
             .is_ok();
         if !has_column {
-            eprintln!("CopyAttach: failed to add preview/label columns: {e}");
+            crate::error_log!("CopyAttach: failed to add preview/label columns: {e}");
             return Err(e);
         }
     }
@@ -260,17 +260,17 @@ pub(crate) fn migrate_one_image_row(conn: &Connection, id: i64) -> Result<u64, (
         rusqlite::params![id],
         |row| row.get(0),
     ).map_err(|e| {
-        eprintln!("CopyAttach: image-hash migration: cannot load png for row {id}: {e}");
+        crate::debug_log!("CopyAttach: image-hash migration: cannot load png for row {id}: {e}");
     })?;
     if png.is_empty() {
-        eprintln!("CopyAttach: image-hash migration: row {id} has empty png_data — hash left as-is");
+        crate::debug_log!("CopyAttach: image-hash migration: row {id} has empty png_data — hash left as-is");
         return Err(());
     }
     // Claim any reusable-marked pages the allocator handed back before the
     // decoder reads the blob (see ffi::mod::vec_to_raw for the rationale).
     crate::backend::claim_pages(png.as_ptr(), png.capacity());
     let img = image::load_from_memory(&png).map_err(|e| {
-        eprintln!("CopyAttach: image-hash migration: row {id} png undecodable: {e}");
+        crate::debug_log!("CopyAttach: image-hash migration: row {id} png undecodable: {e}");
     })?;
     let rgba = img.to_rgba8();
     let (w, h) = rgba.dimensions();
@@ -279,7 +279,7 @@ pub(crate) fn migrate_one_image_row(conn: &Connection, id: i64) -> Result<u64, (
         "UPDATE clipboard_history SET hash = ?1 WHERE id = ?2",
         rusqlite::params![hash as i64, id],
     ).map_err(|e| {
-        eprintln!("CopyAttach: image-hash migration: update failed for row {id}: {e}");
+        crate::debug_log!("CopyAttach: image-hash migration: update failed for row {id}: {e}");
     })?;
     Ok(hash)
 }

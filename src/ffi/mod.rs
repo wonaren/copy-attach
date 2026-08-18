@@ -63,7 +63,7 @@ fn vec_to_raw(v: Vec<u8>) -> *mut u8 {
 fn to_ffi_cstring(s: &str) -> *mut c_char {
     if let Ok(cs) = CString::new(s) { cs.into_raw() } else {
         let null_pos = s.find('\0').unwrap_or(s.len());
-        eprintln!("CopyAttach: FFI string contains interior null byte at offset {} (len={}), truncating",
+        crate::debug_log!("CopyAttach: FFI string contains interior null byte at offset {} (len={}), truncating",
                   null_pos, s.len());
         let truncated: String = s.chars().take_while(|&c| c != '\0').collect();
         CString::new(truncated).unwrap_or_default().into_raw()
