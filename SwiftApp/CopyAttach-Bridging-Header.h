@@ -40,6 +40,8 @@ char* clipboard_get_text_by_id(uint64_t entry_id);
 
 // ─── Snapshot API (single-lock, race-free read) ───
 void* clipboard_snapshot_acquire(void);
+// One-allocation wire-format snapshot: caller frees with clipboard_free_bytes.
+uint8_t* clipboard_snapshot_packed_acquire(int32_t* out_len);
 int32_t clipboard_snapshot_count(void* snap);
 int32_t clipboard_snapshot_item_type(void* snap, int32_t index);
 int64_t clipboard_snapshot_item_id(void* snap, int32_t index);

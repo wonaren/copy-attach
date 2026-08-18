@@ -256,78 +256,28 @@ class ClipboardBackend {
         let generationLock = reloadGeneration
         reloadQueue.async { [gen, generationLock] in
             // Several changes can queue reloads in a burst (e.g. consecutive
-            // image Phase-2 completions). Skip building a full snapshot —
-            // per-row CString allocs/frees for up to thousands of rows — when
+            // image Phase-2 completions). Skip building a full snapshot when
             // a newer request has already superseded this one; the result
             // would be discarded anyway.
             let stale = generationLock.withLock { $0 != gen }
-            guard !stale, let snap = clipboard_snapshot_acquire() else { return }
-            defer { clipboard_snapshot_release(snap) }
+            guard !stale else { return }
 
-            let c = Int(clipboard_snapshot_count(snap))
-            var newItems: [ClipboardItem] = []
+            // Packed path: Rust serializes the whole snapshot into one
+            // allocation; the old per-row API allocated + freed one CString
+            // per string field (9k-12k tiny allocations per 3000-row refresh).
+            var packedLength: Int32 = 0
+            guard let packed = clipboard_snapshot_packed_acquire(&packedLength),
+                  packedLength > 0 else { return }
+            defer { clipboard_free_bytes(packed, packedLength) }
 
-            for i in 0..<c {
-                let type = Int(clipboard_snapshot_item_type(snap, Int32(i)))
-                let id = Int(clipboard_snapshot_item_id(snap, Int32(i)))
-                let timestamp = UInt64(clipboard_snapshot_item_timestamp(snap, Int32(i)))
-
-                let label: String = {
-                    guard let cStr = clipboard_snapshot_item_label(snap, Int32(i)) else { return "" }
-                    let s = String(cString: cStr)
-                    clipboard_free_string(cStr)
-                    return s
-                }()
-
-                let sourceName: String = {
-                    guard let cStr = clipboard_snapshot_item_source_name(snap, Int32(i)) else { return "" }
-                    let s = String(cString: cStr)
-                    clipboard_free_string(cStr)
-                    return s
-                }()
-
-                let sourceBundleId: String = {
-                    guard let cStr = clipboard_snapshot_item_source_bundle_id(snap, Int32(i)) else { return "" }
-                    let s = String(cString: cStr)
-                    clipboard_free_string(cStr)
-                    return s
-                }()
-
-                switch type {
-                case 0: // Text
-                    let preview: String = {
-                        guard let cStr = clipboard_snapshot_item_preview(snap, Int32(i)) else { return label }
-                        let s = String(cString: cStr)
-                        clipboard_free_string(cStr)
-                        return s
-                    }()
-                    newItems.append(.text(
-                        entryId: id,
-                        text: label,
-                        timestamp: timestamp,
-                        label: label,
-                        sourceName: sourceName,
-                        sourceBundleId: sourceBundleId,
-                        preview: preview
-                    ))
-                case 1: // Image
-                    let dbId = Int(clipboard_snapshot_get_image_db_id(snap, Int32(i)))
-                    let w = Int(clipboard_snapshot_get_image_width(snap, Int32(i)))
-                    let h = Int(clipboard_snapshot_get_image_height(snap, Int32(i)))
-                    newItems.append(.image(
-                        entryId: id,
-                        dbId: dbId,
-                        width: w,
-                        height: h,
-                        timestamp: timestamp,
-                        label: label,
-                        sourceName: sourceName,
-                        sourceBundleId: sourceBundleId
-                    ))
-                default:
-                    break
-                }
+            guard let newItems = PackedSnapshot.decodeItems(
+                from: UnsafeRawPointer(packed),
+                length: Int(packedLength)
+            ) else {
+                debugLog("Packed snapshot decode failed; skipping reload")
+                return
             }
+
             DispatchQueue.main.async { [gen, weak self] in
                 guard let self = self else { return }
                 MainActor.assumeIsolated {

@@ -27,6 +27,15 @@ class HistoryPopupWindow: NSPanel {
     /// can cancel a pending guarantee when the window is re-shown before it fires.
     private var closeGuaranteeTimer: Timer?
 
+    /// Reused SwiftUI hosting view across popup sessions. macOS small-zone
+    /// pages are retained at their high-water mark after a SwiftUI view graph
+    /// is torn down; rebuilding the hosting view on every show re-dirties the
+    /// graph pages for no user-visible reason. A microbenchmark with a
+    /// 3000-row LazyVStack measured 35.8 MB steady state when the hosting view
+    /// was recreated per session vs 15.8 MB when one hosting view was
+    /// detached/reattached and only its rootView was replaced.
+    private var popupHostingView: PopupHostingView?
+
     // MARK: - Drag anti-occlusion parking (智能防遮挡)
     //
     // While an item drag is in flight the popup parks at the screen edge
@@ -156,7 +165,14 @@ class HistoryPopupWindow: NSPanel {
             debugLog("HistoryPopupContent onClose callback")
             self?.close()
         }).withAppTheme())
-        let hosting = PopupHostingView(rootView: contentView)
+        let hosting: PopupHostingView
+        if let existing = popupHostingView {
+            existing.rootView = contentView
+            hosting = existing
+        } else {
+            hosting = PopupHostingView(rootView: contentView)
+            popupHostingView = hosting
+        }
         let contentRect = self.contentRect(forFrameRect: self.frame)
         hosting.frame = contentRect
 
@@ -393,6 +409,9 @@ class HistoryPopupWindow: NSPanel {
         previewPanel?.close()
         previewPanel = nil
         super.close()
+        // Detach but do not destroy: popupHostingView stays alive for the
+        // next session, so SwiftUI reuses its AttributeGraph instead of
+        // re-dirtying a fresh set of small-zone pages on every open.
         self.contentView = nil
         self.alphaValue = 1.0 // reset for next open
     }

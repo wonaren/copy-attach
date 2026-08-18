@@ -304,8 +304,26 @@ struct HistoryPopupContent: View {
             return .handled
         }
         .onAppear {
+            // The hosting view is reused across popup sessions, so SwiftUI may
+            // keep @State storage alive while the window is closed. Reset the
+            // full transient session state here instead of relying on a fresh
+            // view value; resetting state in place keeps the AttributeGraph
+            // identity stable (a UUID .id() forces teardown and measurably
+            // raises the small-zone high-water mark again).
             selectedIndex = backend.items.isEmpty ? 0 : 1
             searchText = ""
+            effectiveSearchText = ""
+            searchResults = []
+            searchResultsGeneration &+= 1
+            searchTask?.cancel()
+            searchTask = nil
+            filterMode = .all
+            showPreview = false
+            scrollTarget = nil
+            contextMenuArmed = false
+            pendingContextMenuRequest = nil
+            displayMemoBox.memo = nil
+            openingScale = 1.10
             isControlPressed = NSEvent.modifierFlags.contains(.control)
             isCommandPressed = NSEvent.modifierFlags.contains(.command)
 

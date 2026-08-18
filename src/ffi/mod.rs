@@ -39,7 +39,7 @@ pub(crate) use history::*;
 #[allow(unused_imports)]
 pub(crate) use stress::*;
 
-fn vec_to_raw(v: Vec<u8>) -> *mut u8 {
+pub(super) fn vec_to_raw(v: Vec<u8>) -> *mut u8 {
     let mut v = v;
     // Pin capacity == len so `clipboard_free_bytes` can reconstruct the Vec
     // with from_raw_parts(ptr, len, len) without layout mismatch — same
