@@ -1,10 +1,49 @@
 // Entry-ID persistence tests — stable IDs across restarts and deletion.
 
 use crate::backend::{new_entry_id, prime_entry_id};
-use crate::db::{ensure_history_table, insert_entry_to_db, load_history_from_db, persist_entry_to_db};
+use crate::db::{ensure_history_table, insert_entry_to_db, load_history_from_db, persist_entry_to_db, seed_first_launch_tips};
 use crate::types::ClipboardEntry;
 use rusqlite::Connection;
 use super::{insert_text, make_image, make_test_image_rgba, test_db};
+
+#[test]
+fn test_first_launch_tips_seed_into_empty_db() {
+    let conn = test_db();
+    seed_first_launch_tips(&conn);
+
+    let loaded = load_history_from_db(&conn, crate::backend::DEFAULT_CLEANUP_THRESHOLD);
+    assert!(!loaded.is_empty(), "empty DB should be seeded with usage tips");
+    assert!(loaded.len() >= 5, "expected several tips, got {}", loaded.len());
+
+    // Every seeded row must be attributed to CopyAttach so the list shows the
+    // app's own icon (Swift resolves source icons by bundle id).
+    for e in &loaded {
+        assert_eq!(e.source_name(), "CopyAttach", "tip source name");
+        assert_eq!(e.source_bundle_id(), "com.example.copyattach", "tip source bundle id");
+    }
+
+    // First tip (welcome) is intended to be read first → newest at top.
+    assert_eq!(loaded[0].label(), "欢迎使用 CopyAttach !");
+    assert!(loaded[0].label().chars().count() <= 60, "label must fit one line");
+
+    // Text rows must carry persisted preview so cold-start load never reads
+    // the `text` column.
+    for e in &loaded {
+        assert!(!e.preview().is_empty(), "tip must have a persisted preview");
+    }
+}
+
+#[test]
+fn test_first_launch_tips_not_seeded_when_history_exists() {
+    let conn = test_db();
+    insert_text(&conn, "real captured content", 100);
+
+    seed_first_launch_tips(&conn);
+
+    let loaded = load_history_from_db(&conn, crate::backend::DEFAULT_CLEANUP_THRESHOLD);
+    assert_eq!(loaded.len(), 1, "existing history must never be re-seeded");
+    assert_eq!(loaded[0].label(), "real captured content");
+}
 
 #[test]
 fn test_entry_id_persistence_and_restore() {

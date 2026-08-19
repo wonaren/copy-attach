@@ -2,6 +2,86 @@ use rusqlite::Connection;
 
 use crate::types::ClipboardEntry;
 
+/// One-time onboarding rows shown the very first time the app opens with an
+/// empty database. Each tip is a normal text entry, so it renders, pastes, and
+/// searches exactly like any real capture — but its source is CopyAttach
+/// itself, which makes the row show the app's own icon (Swift resolves the
+/// source icon by `source_bundle_id` through NSWorkspace).
+///
+/// Guarded on the table being empty before any real capture: a fresh install
+/// has no rows and gets the tips; once anything is captured (or a legacy JSON
+/// migration lands) the table is non-empty and seeding is a no-op forever. The
+/// first tip is written last so it gets the newest rowid and sits at the top
+/// of the newest-first list; timestamps are staggered for realism.
+pub(crate) fn seed_first_launch_tips(conn: &Connection) {
+    const TIPS: &[&str] = &[
+        "欢迎使用 CopyAttach !",
+        "1. 打开：按 ⌥X 打开或关闭剪贴板，打字即搜索",
+        "2. 粘贴：按回车或点击条目，直接粘贴到应用",
+        "3. 预览：按空格预览大图与文本，按 Esc 退出",
+        "4. 搜索：直接输入关键词实时过滤，支持全文",
+        "5. 标签页：按 ← → 或双指横滑切换不同分类",
+        "6. 收藏：按 ⌥P 收藏常用条目，重启不丢失",
+        "7. 删除与撤销：按 ⌃⌫ 删除，按 ⌘Z 撤销恢复",
+        "8. 右键菜单：右键条目弹出菜单，支持另存与复制",
+        "9. 拖拽：直接拖拽条目到其他应用，自动避让",
+    ];
+
+    let count: i64 = match conn.query_row("SELECT COUNT(*) FROM clipboard_history", [], |r| r.get(0)) {
+        Ok(c) => c,
+        Err(e) => {
+            crate::error_log!("CopyAttach: failed to check history count for first-launch seeding: {e}");
+            return;
+        }
+    };
+    if count > 0 {
+        return; // Existing user (or migrated history) — never re-seed.
+    }
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let tx = match conn.unchecked_transaction() {
+        Ok(tx) => tx,
+        Err(e) => {
+            crate::error_log!("CopyAttach: failed to begin first-launch seeding transaction: {e}");
+            return;
+        }
+    };
+
+    // Insert in reverse display order so the first tip (intended to be read
+    // first) gets the newest rowid and tops the newest-first history.
+    for (i, tip) in TIPS.iter().enumerate().rev() {
+        let full = tip.to_string();
+        // db_id = 0 here is fine: these rows are reloaded from the DB on
+        // launch (load assigns the real rowid), the in-memory entry is never
+        // used for paste-by-id before that.
+        let entry = ClipboardEntry::text_entry(
+            crate::backend::new_entry_id(),
+            &full,
+            now - i as u64,
+            "CopyAttach".to_string(),
+            "com.example.copyattach".to_string(),
+            0,
+        );
+        if insert_entry_to_db(&tx, &entry, Some(&full), None, None).is_err() {
+            crate::error_log!("CopyAttach: failed to seed first-launch tip");
+            return;
+        }
+    }
+
+    if let Err(e) = tx.commit() {
+        crate::error_log!("CopyAttach: failed to commit first-launch seeding: {e}");
+        return;
+    }
+    crate::debug_log!(
+        "CopyAttach: seeded {} first-launch usage tips (source: CopyAttach)",
+        TIPS.len()
+    );
+}
+
 /// Load up to `threshold` entries from the DB, newest first.
 ///
 /// Only metadata is read: the full `text` column is never touched at load.

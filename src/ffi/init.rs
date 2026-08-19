@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use crate::backend::{set_backend, Backend, DEFAULT_CLEANUP_THRESHOLD};
-use crate::db::{ensure_history_table, load_history_from_db, migrate_from_json_to_db, open_db, trim_db_history};
+use crate::db::{ensure_history_table, load_history_from_db, migrate_from_json_to_db, open_db, seed_first_launch_tips, trim_db_history};
 use crate::ignore::IgnoreRules;
 use crate::monitor::clipboard_monitor;
 use crate::types::ClipboardEntry;
@@ -64,6 +64,11 @@ pub extern "C" fn clipboard_init() -> c_int {
     }
 
     migrate_from_json_to_db(&mut conn);
+
+    // One-time onboarding: seed usage tips (source icon = CopyAttach) only when
+    // the history is empty. Runs before load so the tips are picked up as
+    // normal rows; a no-op for any existing user.
+    seed_first_launch_tips(&conn);
 
     // First determine the load limit; then load, THEN trim — otherwise the
     // trim below the load limit discards entries before we can read them.
