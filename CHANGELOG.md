@@ -4,8 +4,16 @@
 
 ## [Unreleased]
 
-- 浓缩初次使用技巧指引，支持单行完整显示并补充右键与欢迎信息。
-- 继续改进稳定性、性能和 macOS 使用体验。
+## [0.99.20] - 2026-08-19
+
+### 界面与交互
+
+- 浓缩初次使用技巧指引，支持文本单行完整显示。
+- 补充右键操作与欢迎信息，让常用操作更易发现。
+
+### 测试与文档
+
+- 更新压力测试数据，修正 README 中的实测性能指标，并清理旧测试数据库。
 
 ## [0.99.19] - 2026-08-19
 
@@ -28,6 +36,7 @@
 - 修复文本捕获并发时历史条目身份错配的问题。
 - 增加 Rust 侧调试日志落盘，便于诊断数据库和 FFI 错误。
 
-[Unreleased]: https://github.com/wonaren/copy-attach/compare/v0.99.19...HEAD
+[Unreleased]: https://github.com/wonaren/copy-attach/compare/v0.99.20...HEAD
+[0.99.20]: https://github.com/wonaren/copy-attach/compare/v0.99.19...v0.99.20
 [0.99.19]: https://github.com/wonaren/copy-attach/compare/v0.99.13...v0.99.19
 [0.99.13]: https://github.com/wonaren/copy-attach/releases/tag/v0.99.13
