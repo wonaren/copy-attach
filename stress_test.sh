@@ -69,6 +69,9 @@ else
     # ─── 2. 生成测试数据 ──────────────────────────────────────────────────
     h1 "Phase 2: Generate test data"
 
+    log "移除旧压力测试数据库"
+    rm -f "$STRESS_DB"
+
     log "运行 stress-gen (${COUNT} 条, 文本 ${TEXT_RATIO})..."
     cargo run --release --bin stress-gen --features stress-test -- \
         --count "$COUNT" --text-ratio "$TEXT_RATIO" --seed "$SEED" \
