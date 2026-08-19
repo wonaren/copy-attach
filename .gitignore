@@ -30,3 +30,5 @@ vision-hook.js
 skills-lock.json
 
 .reasonix/
+.jspace/history.json
+.jspace/WORKSPACE.md
