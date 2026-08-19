@@ -1,0 +1,2 @@
+lanzou-api==2.6.10
+requests-toolbelt==1.0.0

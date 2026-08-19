@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-蓝奏云 Cookie 保活与自动续期脚本
-定期向蓝奏云发起心跳，捕获最新 Set-Cookie 并回写到 GitHub Secrets 中。
-"""
+"""蓝奏云 Cookie 保活验证脚本。仅验证当前 Cookie，不修改 GitHub Secret。"""
 
 import sys
 import os
@@ -13,7 +10,7 @@ LANZOU_MYDISK_URL = "https://pc.woozooo.com/mydisk.php"
 LANZOU_DOUPLOAD_URL = "https://pc.woozooo.com/doupload.php"
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/75.0.3770.100 Safari/537.36",
     "Referer": "https://pc.woozooo.com/mydisk.php",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
 }

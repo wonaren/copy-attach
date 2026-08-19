@@ -20,7 +20,7 @@ jobs:
           python-version: '3.x'
 
       - name: Install dependencies
-        run: pip install requests
+        run: python3 -m pip install --user -r scripts/requirements-lanzou.txt
 
       - name: Run keepalive
         id: keepalive

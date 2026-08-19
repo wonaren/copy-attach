@@ -9,6 +9,10 @@ import sys
 import os
 import argparse
 from lanzou.api import LanZouCloud
+from requests_toolbelt.multipart.encoder import MultipartEncoder, MultipartEncoderMonitor
+
+ACCOUNT_URL = "https://pc.woozooo.com/account.php"
+MYDISK_URL = "https://pc.woozooo.com/mydisk.php"
 
 
 def parse_cookie_str(cookie_str: str) -> dict:
@@ -29,6 +33,65 @@ def write_github_output(key: str, value: str):
     if output_file and os.path.exists(output_file):
         with open(output_file, "a", encoding="utf-8") as f:
             f.write(f"{key}={value}\n")
+
+
+def login_by_cookie(lzy: LanZouCloud, cookies: dict) -> int:
+    """使用控制台页验证 Cookie；lanzou-api 的 account.php 检查会误判当前页面。"""
+    if "ylogin" not in cookies or "phpdisk_info" not in cookies:
+        return LanZouCloud.FAILED
+    lzy._uid = cookies["ylogin"]
+    lzy._session.cookies.update(cookies)
+    response = lzy._get(MYDISK_URL)
+    if not response:
+        return LanZouCloud.NETWORK_ERROR
+    return LanZouCloud.SUCCESS if "mydisk.php?item=files" in response.text else LanZouCloud.FAILED
+
+
+def upload_file(lzy: LanZouCloud, file_path: str, folder_id: int, callback=None, uploaded_handler=None) -> int:
+    """调用蓝奏云当前网页上传接口 html5up.php。"""
+    file_size = os.path.getsize(file_path)
+    file_name = os.path.basename(file_path)
+    with open(file_path, "rb") as file_handle:
+        encoder = MultipartEncoder(fields={
+            "task": "1",
+            "vie": "2",
+            "ve": "2",
+            "folder_id_bb_n": str(folder_id),
+            "name": file_name,
+            "upload_file": (file_name, file_handle, "application/octet-stream"),
+        })
+
+        def report(monitor):
+            if callback:
+                callback(file_name, file_size, monitor.bytes_read)
+
+        monitor = MultipartEncoderMonitor(encoder, report)
+        headers = lzy._headers.copy()
+        headers["Content-Type"] = monitor.content_type
+        response = lzy._session.post(
+            "https://pc.woozooo.com/html5up.php",
+            data=monitor,
+            headers=headers,
+            verify=False,
+            timeout=3600,
+        )
+
+    try:
+        result = response.json()
+    except ValueError:
+        print(f"[!] 上传接口返回非 JSON: HTTP {response.status_code}")
+        return LanZouCloud.FAILED
+
+    if result.get("zt") != 1:
+        print(f"[!] 蓝奏云拒绝上传: {result}")
+        return LanZouCloud.FAILED
+
+    items = result.get("text") or []
+    if not items:
+        return LanZouCloud.FAILED
+    if uploaded_handler:
+        uploaded_handler(int(items[0]["id"]), True)
+    return LanZouCloud.SUCCESS
 
 
 def main():
@@ -52,9 +115,10 @@ def main():
     lzy = LanZouCloud()
 
     print("[*] 正在验证蓝奏云登录态...")
-    code = lzy.login_by_cookie(cookies)
+    code = login_by_cookie(lzy, cookies)
     if code != LanZouCloud.SUCCESS:
-        print(f"[!] 登录失败！错误代码: {code}，请检查 Cookie 是否有效或已过期。")
+        print(f"[!] 登录失败！错误代码: {code}，请检查 Cookie 是否有效、是否从 pc.woozooo.com 域名复制，或是否已过期。")
+        print("    Cookie 只需要包含 ylogin 和 phpdisk_info，不要复制浏览器的 Cookie 请求头前缀。")
         sys.exit(1)
     print("[+] 登录成功！")
 
@@ -96,11 +160,12 @@ def main():
                 else:
                     print(f"\n[!] 设置提取码返回码: {res}")
 
-    code = lzy.upload_file(
+    code = upload_file(
+        lzy,
         file_path,
         folder_id=folder_id,
         callback=progress_callback,
-        uploaded_handler=uploaded_handler
+        uploaded_handler=uploaded_handler,
     )
     print()
 
