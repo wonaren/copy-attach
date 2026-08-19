@@ -217,6 +217,29 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v5
+
+      - name: Prepare release notes
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+          NOTES_FILE: ${{ runner.temp }}/release-notes.md
+        run: |
+          # Extract exactly one version section. A missing section is a release
+          # error so a published release can never silently lose its notes.
+          awk -v version="$VERSION" '
+            $0 ~ "^## \\[" version "\\]" { found=1; print; next }
+            found && /^## / { exit }
+            found { print }
+            END {
+              if (!found) {
+                print "Missing changelog section for version " version > "/dev/stderr"
+                exit 1
+              }
+            }
+          ' CHANGELOG.md > "$NOTES_FILE"
+          test -s "$NOTES_FILE"
+          echo "Release notes prepared for v${VERSION}"
+
       - name: Download DMG artifact
         uses: actions/download-artifact@v8
         with:
@@ -229,6 +252,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           SOURCE_REPOSITORY: ${{ github.repository }}
           VERSION: ${{ needs.build.outputs.version }}
+          NOTES_FILE: ${{ runner.temp }}/release-notes.md
         run: |
           TAG="v${VERSION}"
 
@@ -236,7 +260,11 @@ jobs:
             gh release create "$TAG" \
               --repo "$SOURCE_REPOSITORY" \
               --title "CopyAttach ${TAG}" \
-              --generate-notes
+              --notes-file "$NOTES_FILE"
+          else
+            gh release edit "$TAG" \
+              --repo "$SOURCE_REPOSITORY" \
+              --notes-file "$NOTES_FILE"
           fi
 
           gh release upload "$TAG" build/CopyAttach-*.dmg \
@@ -249,6 +277,7 @@ jobs:
           GH_TOKEN: ${{ secrets.PUBLIC_RELEASE_TOKEN }}
           PUBLIC_REPOSITORY: wonaren/copyattach-release
           VERSION: ${{ needs.build.outputs.version }}
+          NOTES_FILE: ${{ runner.temp }}/release-notes.md
         run: |
           TAG="v${VERSION}"
 
@@ -256,7 +285,11 @@ jobs:
             gh release create "$TAG" \
               --repo "$PUBLIC_REPOSITORY" \
               --title "CopyAttach ${TAG}" \
-              --generate-notes
+              --notes-file "$NOTES_FILE"
+          else
+            gh release edit "$TAG" \
+              --repo "$PUBLIC_REPOSITORY" \
+              --notes-file "$NOTES_FILE"
           fi
 
           gh release upload "$TAG" build/CopyAttach-*.dmg \
