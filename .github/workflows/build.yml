@@ -259,7 +259,7 @@ jobs:
             exit 0
           fi
 
-          pip install requests requests_toolbelt
+          pip install lanzou-api requests_toolbelt
 
           # 将 DMG 打包成 ZIP（蓝奏云最兼容格式）
           ZIP_NAME="CopyAttach-v${VERSION}-macOS.zip"
