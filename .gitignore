@@ -29,6 +29,14 @@ vision.js
 vision-hook.js
 skills-lock.json
 
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.venv/
+venv/
+
 .reasonix/
 .jspace/history.json
 .jspace/WORKSPACE.md

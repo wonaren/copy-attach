@@ -1,0 +1,34 @@
+name: Lanzou Cookie Keepalive
+
+on:
+  schedule:
+    # 每 3 天 UTC 00:00 (北京时间 08:00) 运行一次，保持 Session 活跃
+    - cron: '0 0 */3 * *'
+  workflow_dispatch:
+
+jobs:
+  keepalive:
+    name: Lanzou Keepalive & Token Refresh
+    runs-on: ubuntu-latest
+    environment: src2release-env
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run keepalive
+        id: keepalive
+        env:
+          LANZOU_COOKIE: ${{ secrets.LANZOU_COOKIE }}
+        run: |
+          if [ -z "$LANZOU_COOKIE" ]; then
+            echo "::warning::未配置 LANZOU_COOKIE secret，跳过保活"
+            exit 0
+          fi
+          python3 scripts/lanzou_keepalive.py

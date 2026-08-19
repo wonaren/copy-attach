@@ -246,6 +246,41 @@ jobs:
           name: CopyAttach-${{ needs.build.outputs.version }}
           path: build/
 
+      # 上传到蓝奏云（国内极速下载分发），并向 Release Notes 追加国内下载链接
+      - name: Upload to Lanzou Cloud
+        id: lanzou
+        env:
+          LANZOU_COOKIE: ${{ secrets.LANZOU_COOKIE }}
+          VERSION: ${{ needs.build.outputs.version }}
+          NOTES_FILE: ${{ runner.temp }}/release-notes.md
+        run: |
+          if [ -z "$LANZOU_COOKIE" ]; then
+            echo "::warning::未配置 LANZOU_COOKIE secret，跳过蓝奏云上传"
+            exit 0
+          fi
+
+          pip install requests requests_toolbelt
+
+          # 将 DMG 打包成 ZIP（蓝奏云最兼容格式）
+          ZIP_NAME="CopyAttach-v${VERSION}-macOS.zip"
+          ZIP_PATH="build/${ZIP_NAME}"
+          zip -j "$ZIP_PATH" build/CopyAttach-*.dmg
+
+          # 上传到指定文件夹并设置提取码
+          python3 scripts/lanzou_uploader.py "$ZIP_PATH" \
+            --folder-name "copyattach" \
+            --password "1234"
+
+          # 向 Release Notes 追加国内极速下载信息
+          cat << 'EOF' >> "$NOTES_FILE"
+
+---
+### ⚡ 国内极速下载（免登录不限速）
+- **蓝奏云网盘**：[点击前往下载页面](https://wwbvw.lanzouv.com/b0341lhs5g)（访问密码: `1234`）
+EOF
+          echo "Lanzou release notes appended."
+        continue-on-error: true
+
       # The automatic GITHUB_TOKEN publishes a private release in the source repo.
       - name: Create or update private source release
         env:
