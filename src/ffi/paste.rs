@@ -18,6 +18,27 @@ use super::to_ffi_cstring;
 /// older than this can no longer be in flight and is safe to purge.
 const PASTE_IMAGE_TTL: Duration = Duration::from_secs(60);
 
+/// Bundle identifiers whose Cmd+V handler does not translate a Finder-style
+/// `public.file-url` pasteboard item into path text. VS Code's integrated
+/// terminal reads plain text on paste; its file-resource fallback only
+/// understands VS Code's private `code/file-list` clipboard format, never the
+/// `public.file-url` item that native terminals translate into a path.
+/// For these targets the materialized image path must be written as plain
+/// text so Cmd+V inserts the same path string that drag-and-drop inserts.
+const TEXT_PATH_PASTE_BUNDLE_IDS: &[&str] = &[
+    "com.microsoft.VSCode",
+    "com.microsoft.VSCodeInsiders",
+    "com.microsoft.VSCodeExploration",
+    "com.visualstudio.code.oss",
+    "com.vscodium",
+];
+
+/// Whether an image paste into `bundle_id` must put the temp PNG path on the
+/// pasteboard as `public.utf8-plain-text` instead of `public.file-url`.
+fn image_target_needs_text_path(bundle_id: &str) -> bool {
+    TEXT_PATH_PASTE_BUNDLE_IDS.contains(&bundle_id)
+}
+
 /// Materialize a clipboard image as a PNG file under the per-user temp
 /// directory, mirroring the drag provider's convention (separate `Paste`
 /// subdir so drag cleanup never races with a paste in flight). The new file
@@ -164,11 +185,13 @@ fn select_and_paste_impl(mut item: ClipboardEntry) -> c_int {
     // not fail on an arboard handle it never uses.
     let b = backend();
     let _event_guard = b.pasteboard_event_lock.lock().unwrap();
-    // Image paste always uses drag-style file-path mode — the single,
-    // universal convention: the image is materialized as a temp PNG and only
-    // its file URL goes on the pasteboard (Finder "copy file" semantics).
-    // Terminals translate the URL into the path text (TUI agents like Claude
-    // Code consume exactly this form); chat/notes apps attach the file.
+    // Image paste uses drag-style file-path mode: the image is materialized
+    // as a temp PNG and only its file URL goes on the pasteboard (Finder
+    // "copy file" semantics). Terminals translate the URL into the path text
+    // (TUI agents like Claude Code consume exactly this form); chat/notes
+    // apps attach the file. VS Code's integrated terminal is the exception:
+    // its Cmd+V handler only reads plain text, so the path is written as text
+    // for that target.
     match &db_item {
         ClipboardEntry::Text { .. } => {
             let text = match &full_text {
@@ -187,7 +210,17 @@ fn select_and_paste_impl(mut item: ClipboardEntry) -> c_int {
                 Some(p) => p,
                 None => return 0,
             };
-            if !macos::set_pasteboard_file_url(&path) { return 0; }
+            let target_bundle_id = b.source_app.lock()
+                .ok()
+                .map(|src| src.bundle_id.clone())
+                .unwrap_or_default();
+            if image_target_needs_text_path(&target_bundle_id) {
+                crate::debug_log!("CopyAttach: image paste as path text for target {target_bundle_id}");
+                let mut cb = match Clipboard::new() { Ok(c) => c, Err(_) => return 0 };
+                if cb.set_text(&path).is_err() { return 0; }
+            } else if !macos::set_pasteboard_file_url(&path) {
+                return 0;
+            }
         }
     }
     let change_count = macos::pasteboard_change_count()
@@ -338,4 +371,27 @@ pub extern "C" fn clipboard_get_text_by_id(entry_id: u64) -> *mut c_char {
         }
     };
     to_ffi_cstring(&text)
+}
+
+#[cfg(test)]
+mod image_paste_target_tests {
+    use super::image_target_needs_text_path;
+
+    #[test]
+    fn vs_code_targets_need_plain_text_paths() {
+        assert!(image_target_needs_text_path("com.microsoft.VSCode"));
+        assert!(image_target_needs_text_path("com.microsoft.VSCodeInsiders"));
+        assert!(image_target_needs_text_path("com.microsoft.VSCodeExploration"));
+        assert!(image_target_needs_text_path("com.visualstudio.code.oss"));
+        assert!(image_target_needs_text_path("com.vscodium"));
+    }
+
+    #[test]
+    fn native_terminals_keep_file_url_paste() {
+        assert!(!image_target_needs_text_path("com.mitchellh.ghostty"));
+        assert!(!image_target_needs_text_path("com.apple.Terminal"));
+        assert!(!image_target_needs_text_path("com.googlecode.iterm2"));
+        assert!(!image_target_needs_text_path("net.kovidgoyal.kitty"));
+        assert!(!image_target_needs_text_path(""));
+    }
 }
