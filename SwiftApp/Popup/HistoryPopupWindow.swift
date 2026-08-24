@@ -39,32 +39,25 @@ class HistoryPopupWindow: NSPanel {
     // MARK: - Drag anti-occlusion parking (智能防遮挡)
     //
     // While an item drag is in flight the popup parks at the screen edge
-    // opposite the drag direction — dragging right parks it at the left edge,
-    // dragging left at the right edge — so the popup never covers the drop
-    // target. Direction is re-evaluated continuously on every watcher tick:
-    // reversing the drag by more than `dragOcclusionThreshold` flips the popup
-    // to the other edge, so one long drag that changes course keeps the popup
-    // out of the way the whole time (持续拖动).
+    // opposite the mouse position — mouse in right 45% parks popup at left edge,
+    // mouse in left 45% parks popup at right edge — so the popup never covers
+    // the drop target. The center 10% (45%..55%) serves as a deadband where
+    // no window movement is triggered.
     //
     // The state and constants below are shared with the `+DragParking`
-    // extension, which owns the mechanics (tick/park/flip/restore).
+    // extension, which owns the mechanics (tick/park/restore).
 
     /// Edge the popup is parked at during an item drag (nil = centered).
     var parkedSide: ParkSide?
-    /// Net horizontal mouse travel since the last park decision (points).
-    var dragDxAccum: CGFloat = 0
-    /// Mouse x at the previous parking tick.
-    var lastDragMouseX: CGFloat?
     /// Target x of the in-flight park slide (nil when no slide is pending).
     var pendingParkTargetX: CGFloat?
     /// Frame x at the previous tick — progress check for the slide animation.
     var lastParkTickX: CGFloat?
     var parkSlideStallTicks = 0
-    /// Horizontal mouse travel that parks the popup at an edge, or flips it
-    /// to the opposite edge after a course reversal. Large enough that the
-    /// small jitter of picking up a drag never triggers anything; small
-    /// enough that the popup is out of the way well before the drop.
-    static let dragOcclusionThreshold: CGFloat = 40
+    /// Left zone boundary ratio (0% .. 45%) for anti-occlusion parking.
+    static let dragParkLeftZoneRatio: CGFloat = 0.45
+    /// Right zone boundary ratio (55% .. 100%) for anti-occlusion parking.
+    static let dragParkRightZoneRatio: CGFloat = 0.55
     /// Distance from the visible frame edge when the popup is parked.
     static let dragParkMargin: CGFloat = 12
     /// Duration of the park / restore slide.
@@ -137,10 +130,6 @@ class HistoryPopupWindow: NSPanel {
         awaitingPostDragInteraction = false
         removePostDragClickMonitor()
         startMouseUpWatcher()
-        // Anti-occlusion: measure the drag run from the moment the item is
-        // picked up.
-        dragDxAccum = 0
-        lastDragMouseX = NSEvent.mouseLocation.x
     }
 
     func show() {

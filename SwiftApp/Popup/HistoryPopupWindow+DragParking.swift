@@ -10,46 +10,23 @@ enum ParkSide {
 }
 
 extension HistoryPopupWindow {
-    /// Continuous direction tracking during a drag. Each watcher tick adds the
-    /// horizontal mouse travel to an accumulator; once the accumulated travel
-    /// crosses `dragOcclusionThreshold` the popup parks at the edge opposite
-    /// the drag direction and the accumulator restarts. Reversing beyond the
-    /// same threshold flips the popup to the other edge. Jitter below the
-    /// threshold never triggers anything, and because the accumulator is
-    /// zeroed on every flip, wiggling in place cannot oscillate the popup.
+    /// Screen-zone based parking: divides the screen into 45% : 10% : 45%.
+    /// Mouse in right 45% (> 55% width) parks popup at left edge;
+    /// mouse in left 45% (< 45% width) parks popup at right edge.
+    /// Center 10% (45%..55%) and minor movements within the current zone
+    /// do not trigger window repositioning.
     func tickDragParking() {
-        let mouseX = NSEvent.mouseLocation.x
-        defer { lastDragMouseX = mouseX }
-        guard let lastX = lastDragMouseX else { return }
-        let dx = mouseX - lastX
-        // A jump this large is a coordinate-space discontinuity (e.g. a screen
-        // configuration change mid-drag), not mouse travel; restart the run.
-        guard abs(dx) < 400 else {
-            dragDxAccum = 0
-            return
-        }
-        dragDxAccum += dx
+        guard let screen = self.screen ?? NSScreen.main else { return }
+        let visible = screen.visibleFrame
+        guard visible.width > 0 else { return }
 
-        let threshold = Self.dragOcclusionThreshold
-        switch parkedSide {
-        case nil:
-            if dragDxAccum >= threshold {
-                park(at: .left)          // heading right → get out of the way left
-            } else if dragDxAccum <= -threshold {
-                park(at: .right)         // heading left → get out of the way right
-            }
-        case .left:
-            // Reversed course: accumulated leftward travel beyond the
-            // threshold flips the popup to the right edge. Same-direction
-            // (rightward) drift must not tax that accumulation — after a long
-            // same-direction run, a partial reversal would otherwise need to
-            // out-travel the whole run before flipping, leaving the popup
-            // parked exactly over the new drop target.
-            dragDxAccum = min(dragDxAccum, 0)
-            if dragDxAccum <= -threshold { park(at: .right) }
-        case .right:
-            dragDxAccum = max(dragDxAccum, 0)
-            if dragDxAccum >= threshold { park(at: .left) }
+        let mouseX = NSEvent.mouseLocation.x
+        let ratio = (mouseX - visible.minX) / visible.width
+
+        if ratio < Self.dragParkLeftZoneRatio {
+            park(at: .right)
+        } else if ratio > Self.dragParkRightZoneRatio {
+            park(at: .left)
         }
     }
 
@@ -57,8 +34,8 @@ extension HistoryPopupWindow {
     /// screen (same y — the popup only slides sideways, never jumps
     /// vertically).
     func park(at side: ParkSide) {
+        guard parkedSide != side else { return }
         parkedSide = side
-        dragDxAccum = 0
         guard let screen = self.screen ?? NSScreen.main else { return }
         let visible = screen.visibleFrame
         let targetX: CGFloat
@@ -138,8 +115,6 @@ extension HistoryPopupWindow {
 
     func resetDragParking() {
         parkedSide = nil
-        dragDxAccum = 0
-        lastDragMouseX = nil
         pendingParkTargetX = nil
         lastParkTickX = nil
         parkSlideStallTicks = 0
