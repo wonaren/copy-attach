@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+## [0.99.22] - 2026-08-24
+
+### 界面与交互
+
+- 拖拽历史条目时，弹窗改为按鼠标所在屏幕区域（两侧各 45%）停靠到对侧边缘，避免遮挡落点；屏幕中间 10% 为死区，小幅晃动不会触发弹窗反复横跳。
+- 图片粘贴到 VS Code 集成终端等不翻译文件引用的目标应用时，改为以纯文本写入临时 PNG 路径，修复粘贴无效的问题。
+
 ## [0.99.20] - 2026-08-19
 
 ### 界面与交互
@@ -36,7 +43,8 @@
 - 修复文本捕获并发时历史条目身份错配的问题。
 - 增加 Rust 侧调试日志落盘，便于诊断数据库和 FFI 错误。
 
-[Unreleased]: https://github.com/wonaren/copy-attach/compare/v0.99.20...HEAD
+[Unreleased]: https://github.com/wonaren/copy-attach/compare/v0.99.22...HEAD
+[0.99.22]: https://github.com/wonaren/copy-attach/compare/v0.99.20...v0.99.22
 [0.99.20]: https://github.com/wonaren/copy-attach/compare/v0.99.19...v0.99.20
 [0.99.19]: https://github.com/wonaren/copy-attach/compare/v0.99.13...v0.99.19
 [0.99.13]: https://github.com/wonaren/copy-attach/releases/tag/v0.99.13
