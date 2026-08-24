@@ -47,9 +47,7 @@ type EncodedSample = (Vec<u8>, Vec<u8>, u32, u32, u32, u32, u64);
 
 #[test]
 fn benchmark_images() {
-    // ══════════════════════════════════════════════════
     // 1. IMAGE CAPTURE PROCESSING BENCHMARK
-    // ══════════════════════════════════════════════════
     let resolutions: [(u32, u32, &str); 3] = [
         (800, 600, "800×600 (small crop)"),
         (1920, 1080, "1920×1080 (FHD)"),
@@ -119,9 +117,7 @@ fn benchmark_images() {
         encoded_samples.push((png, thumb_data, _thumb_w, _thumb_h, w, h, hash));
     }
 
-    // ══════════════════════════════════════════════════
     // 2. IN-MEMORY IMAGE HISTORY BENCHMARK
-    // ══════════════════════════════════════════════════
     let thresholds: [usize; 6] = [100, 500, 1000, 2000, 3000, 5000];
     const SS_SAMPLES: usize = 50;
 
@@ -218,9 +214,7 @@ fn benchmark_images() {
         );
     }
 
-    // ══════════════════════════════════════════════════
     // 3. DB STORAGE WITH IMAGES
-    // ══════════════════════════════════════════════════
 
     // Use the 1920×1080 and 3840×2160 encoded samples
     let fhd_png = &encoded_samples[1].0;    // 1920×1080 PNG

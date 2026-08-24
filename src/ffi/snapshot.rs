@@ -71,9 +71,7 @@ pub extern "C" fn clipboard_snapshot_acquire() -> *mut Snapshot {
     );
     Box::into_raw(Box::new(Snapshot(rows)))
 }
-// ═══════════════════════════════════════════
 // Packed snapshot wire format (one allocation, no per-field CString churn)
-// ═══════════════════════════════════════════
 //
 // The per-row snapshot API above allocates and frees one CString per string
 // field on every full-history reload. For 3000 rows that is ~9k-12k tiny

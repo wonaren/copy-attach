@@ -2,10 +2,7 @@
 
 use image::imageops::FilterType;
 
-/// Encode raw RGBA bytes into PNG format, writing into `output`. The buffer
-/// is reused across captures: capacity is retained between calls, so repeated
-/// image copies don't allocate-and-free a fresh multi-MB Vec (and its
-/// doubling realloc chain) each time.
+/// Encode raw RGBA bytes into PNG, reusing `output`'s capacity.
 pub(crate) fn encode_png_into(width: u32, height: u32, rgba_bytes: &[u8], output: &mut Vec<u8>) -> Option<()> {
     use image::{ImageBuffer, Rgba};
     let img = ImageBuffer::<Rgba<u8>, &[u8]>::from_raw(width, height, rgba_bytes)?;
@@ -29,18 +26,8 @@ pub(crate) fn decode_png(png_data: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
     Some((rgba.into_raw(), w, h))
 }
 
-/// Decode an 8-bit RGBA PNG directly into a caller-owned buffer (the pooled
-/// capture decode scratch) — the capture path's dominant and largest transient
-/// (macOS pasteboard screenshots are exactly 8-bit RGBA PNGs). The generic
-/// `image::load_from_memory` decoder allocates a `DynamicImage` plus an RGBA
-/// `ImageBuffer` per capture; this path writes the pixels straight into the
-/// pooled buffer with zero intermediate allocation.
-///
-/// Returns `None` for any other color type / bit depth (RGB8, grayscale,
-/// palette, 16-bit, APNG — the generic path handles those) — never a
-/// different format: callers must fall back, not proceed. On success `out` is
-/// exactly `width * height * 4` bytes (grown if needed, truncated from any
-/// larger pooled capacity).
+/// Decode an 8-bit RGBA PNG directly into `out` (zero intermediate allocation).
+/// Returns None for other formats so callers can fall back to the generic path.
 pub(crate) fn decode_png_rgba8_into(png: &[u8], out: &mut Vec<u8>) -> Option<(u32, u32)> {
     use image::codecs::png::PngDecoder;
     use image::ImageDecoder;
@@ -73,14 +60,10 @@ pub(crate) fn create_thumbnail_fast(
     create_thumbnail_with_filter(width, height, rgba_bytes, max_dim, FilterType::CatmullRom)
 }
 
-/// Ensure the thumbnail short side has at least this many pixels
-/// so that horizontally long images don't render blurry in the UI.
-/// Computed as `max_dim/5` so it scales with the caller's `max_dim`
-/// (e.g. 60px for the standard 300px max thumbnail dimension).
+/// Keep thumbnail short side >= max_dim / 5 to avoid blurry wide images.
 const MIN_THUMB_SHORT_RATIO: u32 = 5;
 
-/// Hard cap on the thumbnail long side to prevent extreme panoramas
-/// from generating oversized thumbnails.
+/// Hard cap on thumbnail long side for extreme panoramas.
 const MAX_THUMB_LONG: u32 = 900;
 
 /// Core thumbnail logic parameterized by resize filter.
@@ -94,9 +77,7 @@ fn create_thumbnail_with_filter(
         return encode_png(width, height, rgba_bytes).map(|d| (d, width, height));
     }
 
-    // Ensure the short side doesn't drop below max_dim / MIN_THUMB_SHORT_RATIO.
-    // Without this, a 1920×100 image would produce a 300×16 thumbnail
-    // that gets upscaled 3× in the UI row → blurry.
+    // Keep the short side large enough that the UI doesn't upscale a blurry thumb.
     let min_short = (max_dim / MIN_THUMB_SHORT_RATIO).max(1);
     let scale = if (f64::from(width.min(height)) * scale_long) < f64::from(min_short) {
         let by_short = (f64::from(min_short) / f64::from(width.min(height))).min(1.0);
@@ -119,11 +100,7 @@ fn create_thumbnail_with_filter(
     Some((output, new_w.max(1), new_h.max(1)))
 }
 
-/// Compute a content hash (dimensions + raw pixels) for image deduplication.
-///
-/// FNV-1a 64 via `types::fnv1a` — the same stable-algorithm rationale as
-/// `text_hash`: the value is persisted in SQLite, and a std `DefaultHasher`
-/// drift would silently break cross-restart image dedup.
+/// Stable FNV-1a hash of dimensions + raw pixels for image dedup.
 pub(crate) fn image_hash(data: &[u8], width: u32, height: u32) -> u64 {
     crate::types::fnv1a(
         width
@@ -160,10 +137,7 @@ fn catmull_rom(t: f32) -> f32 {
     }
 }
 
-/// Sample `width` RGBA8 pixels of `row` at fractional position `center`
-/// (in source-pixel coordinates) with a 4-tap CatmullRom kernel, edge-clamped
-/// and renormalized (interior taps already sum to 1; clamping makes the edge
-/// weights exceed 1, so renormalization keeps edges from darkening).
+/// Sample one RGBA8 row at fractional `center` with an edge-clamped CatmullRom kernel.
 fn sample_catmull_row(row: &[u8], width: u32, center: f32, out: &mut [u8]) {
     let base = center.floor() as i64;
     let mut acc = [0f32; 4];
@@ -196,22 +170,8 @@ fn sample_catmull_row(row: &[u8], width: u32, center: f32, out: &mut [u8]) {
 
 /// Two-pass CatmullRom RGBA8 downscale into a fresh buffer.
 ///
-/// Replaces `image::imageops::resize`, which converts through an
-/// `Rgba32FImage` working buffer of `width × dst_h × 16` bytes — a 60.5 MB
-/// calloc for a 2940×1846→2048 preview. That buffer is freed without ever
-/// being returned to the process footprint on macOS (the freed-but-retained
-/// residue this session is eliminating), so it must not be allocated at all.
-/// This implementation resamples in u8 with a single horizontal intermediate
-/// (`dst_w × src_h × 4`) whose pages are marked reusable before it drops.
-///
-/// The horizontal pass writes the intermediate, the vertical pass reads it
-/// (strided but one-shot); alpha is treated as straight (non-premultiplied),
-/// matching the pool buffers — unlike `imageops::resize`, which assumes
-/// premultiplied alpha and can tint semi-transparent pixels.
-///
-/// Returns None only when the source is empty or `src` is shorter than
-/// `width × height × 4`. Never upscales: an output equal to or larger than
-/// the input returns a copy of the source.
+/// Avoids `imageops::resize`'s large float intermediate and handles alpha as
+/// straight (non-premultiplied). Never upscales.
 pub(crate) fn resize_rgba(
     src: &[u8],
     width: u32,
@@ -227,21 +187,17 @@ pub(crate) fn resize_rgba(
         return None;
     }
     if dst_w >= width && dst_h >= height {
-        // Never upscale (callers route through `resize_dims`, which already
-        // guarantees this) — return the source pixels unchanged.
+        // Never upscale; return source pixels unchanged.
         return Some(src[..src_len].to_vec());
     }
 
     let scale_x = width as f32 / dst_w as f32;
     let scale_y = height as f32 / dst_h as f32;
 
-    // Horizontal pass: src(w×h) → tmp(dst_w×h).
+    // Horizontal pass: src -> tmp.
     let tmp_len = (dst_w as usize) * (height as usize) * 4;
     let mut tmp = vec![0u8; tmp_len];
-    // Claim before writing: the allocator may have handed back pages still
-    // marked reusable from an earlier scratch (they stay kernel-reclaimable —
-    // and uncounted — until claimed; every byte below is rewritten after the
-    // claim, so any prior contents are irrelevant).
+    // Claim pages before writing; every byte is rewritten below.
     crate::backend::claim_pages(tmp.as_ptr(), tmp.capacity());
     for y in 0..height {
         let src_row = &src[(y as usize) * (width as usize) * 4..];
@@ -252,7 +208,7 @@ pub(crate) fn resize_rgba(
         }
     }
 
-    // Vertical pass: tmp(dst_w×h) → out(dst_w×dst_h).
+    // Vertical pass: tmp -> out.
     let mut out = vec![0u8; (dst_w as usize) * (dst_h as usize) * 4];
     crate::backend::claim_pages(out.as_ptr(), out.capacity());
     let row_bytes = (dst_w as usize) * 4;
@@ -291,9 +247,7 @@ pub(crate) fn resize_rgba(
         }
     }
 
-    // The intermediate never leaves this function — return its pages to the
-    // system now (on macOS, freed large malloc blocks stay in the footprint
-    // otherwise, which is exactly the residue this function avoids).
+    // Return the intermediate's pages to the system before it drops.
     crate::backend::mark_pages_reusable(tmp.as_ptr(), tmp.capacity());
     Some(out)
 }

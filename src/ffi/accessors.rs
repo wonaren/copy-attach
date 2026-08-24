@@ -7,9 +7,7 @@ use crate::macos;
 use crate::types::ClipboardEntry;
 use super::{to_ffi_cstring, vec_to_raw};
 
-// ═══════════════════════════════════════════
 // Legacy Index-Based Accessors
-// ═══════════════════════════════════════════
 
 #[no_mangle]
 pub extern "C" fn clipboard_get_count() -> c_int {
@@ -17,9 +15,7 @@ pub extern "C" fn clipboard_get_count() -> c_int {
     hist.len() as c_int
 }
 
-/// Returns a monotonically increasing counter that increments each time a
-/// Phase 2 image encoding finishes and updates `db_id` in memory. Swift uses
-/// this to detect thumbnail-ready items without a change in entry count.
+/// Monotonic counter bumped when Phase 2 image encoding finishes.
 #[no_mangle]
 pub extern "C" fn clipboard_get_image_encoding_counter() -> u64 {
     IMAGE_ENCODING_COUNTER.load(Ordering::Relaxed)
@@ -76,8 +72,7 @@ pub extern "C" fn clipboard_get_item_label(index: c_int) -> *mut c_char {
     to_ffi_cstring(&label)
 }
 
-/// Get text content by array index. Full text lives in SQLite, not the history
-/// Vec — resolve the entry's db_id in memory, then load the body from DB.
+/// Get text by index, loading the body from SQLite.
 /// Caller must free with `clipboard_free_string()`.
 #[no_mangle]
 pub extern "C" fn clipboard_get_item_text(index: c_int) -> *mut c_char {
@@ -104,9 +99,7 @@ pub extern "C" fn clipboard_get_item_text(index: c_int) -> *mut c_char {
     }
 }
 
-// ═══════════════════════════════════════════
 // Image Loading (Index-Based & by db_id)
-// ═══════════════════════════════════════════
 
 /// Load thumbnail by array index. Caller must free with `clipboard_free_bytes()`.
 #[no_mangle]
@@ -197,10 +190,8 @@ pub extern "C" fn clipboard_get_image_full(index: c_int, out_len: *mut c_int) ->
     vec_to_raw(data)
 }
 
-/// Load full image directly by database row id.
-/// Pure SQLite load — the in-memory history entries never hold `png_data`
-/// (metadata only, see the memory invariant), so there is no cache to consult
-/// and no history lock is touched. Caller must free with `clipboard_free_bytes()`.
+/// Load full image directly by database row id (no history lock).
+/// Caller must free with `clipboard_free_bytes()`.
 #[no_mangle]
 pub extern "C" fn clipboard_get_image_full_by_db_id(db_id: i64, out_len: *mut c_int) -> *mut u8 {
     if db_id == 0 || out_len.is_null() {
@@ -232,7 +223,7 @@ pub extern "C" fn clipboard_get_image_full_by_db_id(db_id: i64, out_len: *mut c_
     vec_to_raw(data)
 }
 
-/// Load thumbnail directly by database row id. Does NOT touch the history lock.
+/// Load thumbnail directly by database row id (no history lock).
 /// Caller must free with `clipboard_free_bytes()`.
 #[no_mangle]
 pub extern "C" fn clipboard_get_image_thumb_by_db_id(db_id: i64, out_len: *mut c_int) -> *mut u8 {
@@ -265,10 +256,7 @@ pub extern "C" fn clipboard_get_image_thumb_by_db_id(db_id: i64, out_len: *mut c
     vec_to_raw(thumb_data)
 }
 
-/// Wraps the stored-blob `Vec` loaded for a preview decode: its pages are
-/// marked reusable when it drops, on every exit path (the blob is read into
-/// a fresh large-zone block that otherwise lingers as freed-but-retained
-/// residue — same class as the ImageIO decode buffers this FFI replaces).
+/// Marks a stored-blob Vec's pages reusable when dropped.
 struct MarkBlobReusableOnDrop(Vec<u8>);
 
 impl Drop for MarkBlobReusableOnDrop {
@@ -277,27 +265,9 @@ impl Drop for MarkBlobReusableOnDrop {
     }
 }
 
-/// Decode the stored image downscaled to at most `max_dim` on its longest
-/// side (aspect preserved; never upscales) into a Rust-owned RGBA8 buffer.
-///
-/// This is the preview decode path. The buffer is handed to the caller with
-/// EXACTLY `w * h * 4` bytes and must be returned via
-/// [`clipboard_preview_buffer_release`] — never `clipboard_free_bytes` (the
-/// two allocations have different layouts). Release marks the pages
-/// `MADV_FREE_REUSABLE` before freeing, so a closed preview's decode stops
-/// counting against the process footprint: macOS does not return freed large
-/// malloc pages by any other means (measured), which is why ImageIO-decoded
-/// previews previously accumulated tens of MB of permanent residue per
-/// session.
-///
-/// Decodes through the same codec paths as the capture pipeline (RGBA8 PNG
-/// fast path, generic decoder otherwise). The full-resolution intermediate is
-/// marked reusable before being dropped, so only the (downscaled) delivered
-/// buffer counts while the preview is on screen. `out_is_gif` is set to 1 when
-/// the stored blob is an animated GIF; in that case the function returns null
-/// immediately so Swift can use the NSImage(data:) path without paying for a
-/// throwaway first-frame decode. Returns null on failure (missing row,
-/// undecodable, zero-size). `max_dim <= 0` decodes at full resolution.
+/// Decode a stored image downscaled to at most `max_dim`, returning an RGBA8
+/// buffer owned by the caller (release via `clipboard_preview_buffer_release`).
+/// Animated GIFs are flagged and returned as null so Swift can use NSImage(data:).
 #[no_mangle]
 pub extern "C" fn clipboard_decode_preview_by_db_id(
     db_id: i64,
@@ -340,11 +310,7 @@ pub extern "C" fn clipboard_decode_preview_by_db_id(
             return std::ptr::null_mut();
         }
     };
-    // The blob's pages are returned to the system on every exit path below.
-    // Claim first: the allocator may have handed back a block whose pages are
-    // still marked reusable from a previous scratch — those pages stay
-    // kernel-reclaimable (and uncounted) until claimed, and this buffer is
-    // read by the decoder.
+    // Claim pages before the decoder reads the blob.
     crate::backend::claim_pages(png.as_ptr(), png.capacity());
     let png_guard = MarkBlobReusableOnDrop(png);
     let png = &png_guard.0;
@@ -352,10 +318,7 @@ pub extern "C" fn clipboard_decode_preview_by_db_id(
         crate::debug_log!("CopyAttach: preview db_id={db_id}: stored png_data is empty");
         return std::ptr::null_mut();
     }
-    // Animated GIFs are returned to Swift as-is (NSImage(data:) preserves the
-    // animation). Return early after flagging the GIF: decoding even the first
-    // frame here would be thrown away by Swift and costs CPU/RAM for no user
-    // benefit.
+    // Let Swift handle animated GIFs via NSImage(data:) instead of decoding here.
     if png.starts_with(&[0x47, 0x49, 0x46, 0x38]) {
         unsafe { *out_is_gif = 1 };
         return std::ptr::null_mut();
@@ -367,11 +330,8 @@ pub extern "C" fn clipboard_decode_preview_by_db_id(
             .expect("preview buffer layout must be valid")
     };
 
-    // Decode into the pooled buffer (fast path) or a fresh Vec (generic
-    // path); either way the intermediate's pages end up marked reusable, so
-    // the full-resolution decode never leaves permanent residue. The
-    // delivered buffer is a separate, exactly-sized allocation owned by the
-    // caller (released via `clipboard_preview_buffer_release`).
+    // Decode into the pooled buffer or a fresh Vec; the delivered buffer is
+    // a separate allocation owned by the caller.
     let mut pooled = crate::backend::ImageDecodeBuffer::acquire();
     let delivered: Option<(*mut u8, u32, u32, usize)> =
         if let Some((w, h)) = crate::image::decode_png_rgba8_into(png, pooled.as_mut_vec()) {
@@ -382,10 +342,7 @@ pub extern "C" fn clipboard_decode_preview_by_db_id(
                 crate::error_log!("CopyAttach: preview alloc failed for {byte_len} bytes");
                 None
             } else {
-                // The delivered buffer is handed to Swift as long-lived, read-
-                // only data: claim any reusable-marked pages the allocator may
-                // have handed back so the kernel cannot reclaim them while the
-                // preview is on screen.
+                // Claim pages before Swift owns the long-lived buffer.
                 crate::backend::claim_pages(dst, byte_len);
                 if (dw, dh) == (w, h) {
                     unsafe { std::ptr::copy_nonoverlapping(pooled.as_ptr(), dst, byte_len) };
@@ -399,8 +356,6 @@ pub extern "C" fn clipboard_decode_preview_by_db_id(
                     unsafe { std::alloc::dealloc(dst, layout_for(byte_len)) };
                     return std::ptr::null_mut();
                 }
-                // `pooled` returns to the pool here (pages marked reusable) —
-                // deliberately NOT taken out: the pool keeps its capacity.
                 drop(pooled);
                 Some((dst, dw, dh, byte_len))
             }
@@ -418,7 +373,6 @@ pub extern "C" fn clipboard_decode_preview_by_db_id(
                         crate::error_log!("CopyAttach: preview alloc failed for {byte_len} bytes");
                         return std::ptr::null_mut();
                     }
-                    // See the fast-path comment: claim before Swift owns it.
                     crate::backend::claim_pages(dst, byte_len);
                     if (dw, dh) == (w, h) {
                         unsafe { std::ptr::copy_nonoverlapping(rgba.as_ptr(), dst, byte_len) };
@@ -455,10 +409,7 @@ pub extern "C" fn clipboard_decode_preview_by_db_id(
     }
 }
 
-/// Return a buffer from [`clipboard_decode_preview_by_db_id`] to the system:
-/// mark its pages reusable (so they stop counting against the footprint) and
-/// free the allocation. Thread-safe; may be called from any thread (e.g. a
-/// CGImage data-provider release callback).
+/// Release a preview buffer, marking its pages reusable before freeing.
 #[no_mangle]
 pub extern "C" fn clipboard_preview_buffer_release(ptr: *mut u8, len: c_int) {
     if ptr.is_null() || len <= 0 {
@@ -472,9 +423,7 @@ pub extern "C" fn clipboard_preview_buffer_release(ptr: *mut u8, len: c_int) {
     unsafe { std::alloc::dealloc(ptr, layout) }
 }
 
-// ═══════════════════════════════════════════
 // Image Size
-// ═══════════════════════════════════════════
 #[no_mangle]
 pub extern "C" fn clipboard_get_image_size(index: c_int, out_width: *mut c_int, out_height: *mut c_int) -> c_int {
     let hist = backend().history.lock().unwrap();
@@ -488,16 +437,12 @@ pub extern "C" fn clipboard_get_image_size(index: c_int, out_width: *mut c_int, 
     }
 }
 
-// ═══════════════════════════════════════════
 // Memory Management Helpers
-// ═══════════════════════════════════════════
 
 #[no_mangle]
 pub extern "C" fn clipboard_free_string(s: *mut c_char) {
     if s.is_null() { return; }
-    // Same footprint contract as `clipboard_free_bytes`: mark the C string's
-    // pages reusable before freeing so large full-text loads do not leave
-    // freed-but-retained memory in the process footprint.
+    // Mark pages reusable before freeing, matching `clipboard_free_bytes`.
     let byte_len = unsafe { std::ffi::CStr::from_ptr(s).to_bytes().len() + 1 };
     crate::backend::mark_pages_reusable(s as *const u8, byte_len);
     unsafe { let _ = CString::from_raw(s); }
@@ -506,18 +451,12 @@ pub extern "C" fn clipboard_free_string(s: *mut c_char) {
 #[no_mangle]
 pub extern "C" fn clipboard_free_bytes(data: *mut u8, len: c_int) {
     if data.is_null() { return; }
-    // Mark the block reusable before returning it to the allocator. Freed
-    // large malloc blocks otherwise stay in the process footprint forever on
-    // macOS; this is the same contract as `clipboard_preview_buffer_release`,
-    // applied to every Rust-owned Vec handed to Swift (`vec_to_raw` buffers).
-    // Small/unaligned buffers are no-ops inside `mark_pages_reusable`.
+    // Mark pages reusable before freeing (small/unaligned buffers are no-ops).
     crate::backend::mark_pages_reusable(data, len as usize);
     unsafe { let _ = Vec::from_raw_parts(data, len as usize, len as usize); }
 }
 
-// ═══════════════════════════════════════════
 // Cleanup Threshold
-// ═══════════════════════════════════════════
 
 #[no_mangle]
 pub extern "C" fn clipboard_get_cleanup_threshold() -> i32 {
@@ -543,9 +482,7 @@ pub extern "C" fn clipboard_set_cleanup_threshold(threshold: i32) {
     }
 }
 
-// ═══════════════════════════════════════════
 // Storage & Permissions
-// ═══════════════════════════════════════════
 
 #[no_mangle]
 pub extern "C" fn clipboard_get_storage_size() -> i64 {
@@ -587,16 +524,13 @@ pub extern "C" fn clipboard_open_preferences() {
     macos::open_preferences();
 }
 
-/// Reload the in-memory history from the database using the current cleanup
-/// threshold.  Useful after changing the threshold or injecting test data.
-/// Returns the number of entries loaded.
+/// Reload in-memory history from the DB using the current cleanup threshold.
 #[no_mangle]
 pub extern "C" fn clipboard_reload_history() -> c_int {
     let b = match try_backend() {
         Some(b) => b,
         None => return 0,
     };
-    // Verify DB lock is healthy before calling the shared helper.
     if b.db.lock().is_err() {
         return 0;
     }

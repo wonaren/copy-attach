@@ -12,27 +12,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var stressWindowController: StressTestWindowController?
     private var firstLaunchDone = false
     private var backendStarted = false
-    /// When the backend was last attempted so a transient failure (e.g. a
-    /// locked SQLite file) is retried on a cooldown instead of staying dead
-    /// for the whole session.
+    /// Last backend start attempt, for retry cooldown.
     private var lastBackendStartAttempt: Date?
-    /// True while a maintenance tick's async body is running — overlapping
-    /// triggers collapse into a single pass.
+    /// True while a maintenance tick's async body is running.
     private var maintenanceTickInFlight = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         Self.shared = self
 
-        // Route the Rust backend's stderr (eprintln) into the debug log. The
-        // LSUIElement agent has no terminal — without this, every Rust-side
-        // failure (DB write errors, persistence rollbacks, ghost-entry guards)
-        // is silently discarded by launchd and diagnosing data issues becomes
-        // guesswork.
+        // Route Rust stderr into the debug log (the agent has no terminal).
         redirectStderrToDebugLog()
 
-        // Apply the persisted debug-logging preference before any debugLog
-        // call, so startup/licensing diagnostics are captured even when the
-        // Rust backend has not started yet (e.g. license gate).
+        // Apply persisted debug-logging preference before startup diagnostics.
         ClipboardBackend.syncDebugLogging()
 
         debugLog("Starting initialization...")
@@ -45,8 +36,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         debugLog("Hotkey callback set up")
 
-        // Licensing is initialized before the clipboard core. The Rust backend
-        // never starts while the entitlement is absent or invalid.
+        // Licensing runs before the clipboard core; backend stays gated on entitlement.
         Task { @MainActor in
             await LicenseManager.shared.initialize()
             entitlementDidChange()
@@ -67,9 +57,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return event
         }
 
-        // First-launch routing happens after licensing initialization above.
-        // An unlicensed app always opens directly on the License tab.
-
         firstLaunchDone = true
         debugLog("Initialization complete")
     }
@@ -79,10 +66,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if backendStarted { ClipboardBackend.shared.stop() }
     }
 
-    /// dup2 the process's stderr onto the debug log file so Rust's eprintln
-    /// diagnostics (which bypass Swift's debugLog) land in the same log.
-    /// Must run before the Rust backend starts. debugLog no longer writes to
-    /// stderr itself — the redirected fd would duplicate every line.
+    /// Redirect stderr to the debug log so Rust diagnostics land in the same file.
     private func redirectStderrToDebugLog() {
         let path = "/tmp/copyattach_debug.log"
         let fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0o644)
@@ -106,7 +90,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
             showLicenseGate()
         }
-        // Re-arm the one-shot maintenance timer for the new entitlement state.
         scheduleMaintenanceTick()
     }
 
@@ -130,9 +113,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if !backendStarted { debugLog("Rust backend failed to initialize") }
     }
 
-    /// Retries a failed backend start (transient DB lock etc.) on a 5s
-    /// cooldown so a licensed app recovers without a relaunch. Idempotent:
-    /// `start()` is a no-op once the Rust backend is running.
+    /// Retry a failed backend start on a 5s cooldown.
     @MainActor
     private func retryBackendStartIfNeeded() {
         guard !backendStarted,
@@ -142,15 +123,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         startBackendIfNeeded()
     }
 
-    /// The activation celebration has finished. Return to the license page so
-    /// the user can confirm activation succeeded before dismissing the gate.
-    /// The backend starts now so the app is already functional while the gate
-    /// stays open.
+    /// The activation celebration finished; start the backend and re-arm maintenance.
     @MainActor
     func licenseCelebrationFinished() {
         startBackendIfNeeded()
-        // The freshly applied lease schedules an immediate online status
-        // check (nextStatusCheckAt = now); arm the one-shot timer for it.
         scheduleMaintenanceTick()
     }
 
@@ -159,15 +135,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         scheduleMaintenanceTick()
     }
 
-    /// Arms ONE one-shot maintenance timer against the earliest pending
-    /// deadline (license refresh / online status check / trial expiry /
-    /// backend-start retry). The previous design scheduled a repeating timer
-    /// that woke every second for the app's entire lifetime — 86 400 needless
-    /// wakeups per day on a no-op body for perpetual licenses (which schedule
-    /// no maintenance at all) and unlicensed installs. Deadline-based arming
-    /// brings steady-state timer wakeups to zero there and to one per
-    /// status-check interval (~2 min) for trial/subscription, with every check
-    /// still running at-or-before its original deadline.
+    /// Arm one one-shot maintenance timer for the earliest pending deadline.
     @MainActor
     private func scheduleMaintenanceTick() {
         entitlementTimer?.invalidate()
@@ -175,16 +143,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         guard LicenseManager.shared.state.permitsCoreFeatures else { return }
 
-        // While the activation celebration plays in the still-open gate window,
-        // maintenance must not run: entitlementDidChange() would close it
-        // early. Defer by a second and re-evaluate.
+        // Defer while the activation celebration is playing.
         if LicenseManager.shared.celebration != nil {
             armMaintenanceTimer(at: Date().addingTimeInterval(1))
             return
         }
 
-        // A failed backend start retries on a 5s cooldown even when no license
-        // maintenance is pending (transient DB lock etc.).
+        // Include backend-start retry cooldown in the candidate deadlines.
         let retryAt: Date? = {
             guard !backendStarted, let last = lastBackendStartAttempt else { return nil }
             return last.addingTimeInterval(5)
@@ -193,15 +158,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         var candidates: [Date] = []
         if let d = LicenseManager.shared.nextMaintenanceAt { candidates.append(d) }
         if let d = retryAt { candidates.append(d) }
-        guard let next = candidates.min() else {
-            // Perpetual license and a healthy backend: no timer at all.
-            return
-        }
+        guard let next = candidates.min() else { return }
 
         if next.timeIntervalSinceNow <= 0.5 {
-            // Deadline already due — run the tick now; its completion re-arms
-            // against the fresh deadlines (the status check pushes the next
-            // one ~120s out, so this cannot hot-loop).
             runMaintenanceTick()
         } else {
             armMaintenanceTimer(at: next)
@@ -221,18 +180,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         RunLoop.main.add(timer, forMode: .common)
     }
 
-    /// One maintenance pass: retry the backend start if it failed, then run
-    /// the license maintenance (lease refresh / status check / expiry) and
-    /// re-arm the next deadline. The in-flight flag collapses overlapping
-    /// triggers (e.g. `entitlementDidChange` firing while a tick is already
-    /// running) into a single pass.
+    /// One maintenance pass: retry backend, run license maintenance, re-arm.
     @MainActor
     private func runMaintenanceTick() {
         guard !maintenanceTickInFlight else { return }
-        // The celebration plays in the still-open gate window; maintenance
-        // would close it early via entitlementDidChange — defer and re-arm
-        // (this also covers the timer-fire path, whose timer was armed while
-        // the celebration was running).
         if LicenseManager.shared.celebration != nil {
             armMaintenanceTimer(at: Date().addingTimeInterval(1))
             return
@@ -248,10 +199,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
-    /// Called by LicenseManager right after a successful activation to signal
-    /// that the in-window celebration is about to play. Nothing needs to
-    /// happen here (the gate stays open on purpose), but the hook documents
-    /// the contract and keeps the flow explicit.
+    /// Called when the activation celebration is about to play.
     @MainActor
     func licenseCelebrationDidStart() {
         debugLog("License celebration started; gate stays open until animation finishes")
@@ -269,12 +217,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard window === settingsWindow else { return }
         settingsWindow = nil
 
-        // When "Run in background" is off, closing the settings window quits
-        // the app (conventional single-window app behavior). When on, the app
-        // stays alive in the menu bar.
-        // Without an entitlement there is no background functionality to run:
-        // closing the mandatory license window exits instead of leaving a
-        // non-functional menu-bar process alive.
+        // Quit unless background mode is enabled (or no entitlement to run it).
         if !LicenseManager.shared.state.permitsCoreFeatures {
             NSApp.terminate(nil)
             return
@@ -310,7 +253,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     // MARK: - Stress Test Panel
 
     @objc func toggleStressPanel() {
-        // Check if stress-test feature is compiled in
         guard clipboard_stress_available() == 1 else {
             let alert = NSAlert()
             alert.messageText = "Stress-Test 功能未启用"
@@ -362,17 +304,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.hidesOnDeactivate = false
         window.delegate = self
         window.contentViewController = NSHostingController(rootView: LicenseGateView().withAppTheme())
-        // Pin the gate window to its fixed size so SwiftUI fitting-size
-        // adjustments (e.g. when the in-window celebration swaps content)
-        // never resize or relocate the window.
+        // Pin the gate window to its fixed size.
         window.setContentSize(NSSize(width: 500, height: 470))
         window.center()
         licenseGateWindow = window
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
-        // Re-center after the window is on screen: AppKit can still adjust the
-        // frame once the hosting view lays out, which would move the window
-        // away from the screen center.
+        // Re-center after AppKit adjusts the frame during layout.
         DispatchQueue.main.async {
             window.setContentSize(NSSize(width: 500, height: 470))
             window.center()
@@ -388,11 +326,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private func openSettingsWindow(initialTab: Int = 0) {
-        // Settings shows the accessibility-permission state — refresh it now
-        // (explicit check point, no background polling).
         ClipboardBackend.shared.refreshPermission()
 
-        // If we already have a settings window, bring it to front
         if let existing = settingsWindow, existing.isVisible {
             debugLog("Reusing existing settings window")
             if initialTab == 4 {
@@ -404,9 +339,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         settingsWindow = nil
 
-        // Look for the window by title — skip NSPanel instances (popup,
-        // preview) which coincidentally use the same title "CopyAttach",
-        // to avoid falsely "reusing" the popup when no settings window exists.
+        // Match by title, skipping NSPanels that share the same title.
         for window in NSApp.windows {
             if !(window is NSPanel) && window.title == "CopyAttach" {
                 debugLog("Found existing settings window by title")
@@ -417,7 +350,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
         }
 
-        // No window found - create one using NSWindow with NSHostingView
         debugLog("Creating new settings window")
         createSettingsWindow(initialTab: initialTab)
     }

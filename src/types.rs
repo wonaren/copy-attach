@@ -10,27 +10,23 @@ pub(crate) struct SourceApp {
 
 /// A clipboard history entry.
 ///
-/// Each entry carries a stable monotonic `id` (survives reordering) and a
-/// `SQLite` `db_id` for on-demand image/thumb loading from the database.
+/// `id` is stable across reordering; `db_id` points to SQLite for on-demand
+/// image/thumb loading.
 #[derive(Clone, Debug)]
 pub(crate) enum ClipboardEntry {
     Text {
         /// Stable, unique entry identifier (monotonic, survives reordering).
         id: u64,
-        /// Bounded single-line preview for the list row (≤256 Unicode scalars;
-        /// long entries elided to `head……tail`). The full text lives only in
-        /// SQLite (FTS5-indexed) and is loaded on demand by `db_id` — the
-        /// in-memory entry never holds it, so memory stays flat regardless of
-        /// how large pasted documents are.
+        /// Bounded preview; full text is loaded from SQLite by `db_id`.
         preview: String,
-        /// First non-empty line of the original text, ≤60 scalars (list title).
+        /// First non-empty line of the original text (≤60 scalars).
         label: String,
-        /// Content hash for in-memory dedup (DB dedup stays exact-text).
+        /// Content hash for in-memory dedup.
         text_hash: u64,
         timestamp: u64,
         source_name: String,
         source_bundle_id: String,
-        /// `SQLite` row id for DB-level operations (0 = unset).
+        /// SQLite row id (0 = unset).
         db_id: i64,
     },
     Image {
@@ -46,7 +42,7 @@ pub(crate) enum ClipboardEntry {
         timestamp: u64,
         source_name: String,
         source_bundle_id: String,
-        /// `SQLite` row id for loading full image on demand (0 = unset).
+        /// SQLite row id (0 = unset).
         db_id: i64,
     },
 }
@@ -92,9 +88,7 @@ impl ClipboardEntry {
         }
     }
 
-    /// Bounded preview for the list row (≤ 256 Unicode scalars), precomputed at
-    /// capture/load time from the full text. The snapshot carries this instead
-    /// of the full multi-KB text.
+    /// Bounded preview for the list row.
     pub(crate) fn preview(&self) -> String {
         match self {
             ClipboardEntry::Text { preview, .. } => preview.clone(),
@@ -103,13 +97,7 @@ impl ClipboardEntry {
     }
 }
 
-/// FNV-1a 64-bit, the shared stable content hash for BOTH text and image
-/// identity. A fixed published algorithm — deliberately NOT `DefaultHasher`:
-/// std documents it as unstable across Rust releases, and the hash values are
-/// now persisted in SQLite (the `hash` column). A silent std change would make
-/// re-captured content stop matching pre-existing rows' hashes (ghost entries
-/// for text, duplicate entries for images). A stable algorithm can never
-/// drift under us.
+/// Stable FNV-1a hash for persisted content identity (never `DefaultHasher`).
 pub(crate) fn fnv1a(iter: impl IntoIterator<Item = u8>) -> u64 {
     const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
     const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -121,23 +109,16 @@ pub(crate) fn fnv1a(iter: impl IntoIterator<Item = u8>) -> u64 {
     hash
 }
 
-/// Content hash for in-memory text dedup. DB-side dedup stays exact-text
-/// (`delete_matching_entry`), so a 64-bit hash only ever gates the in-memory
-/// duplicate removal — collision is ~2⁻⁶⁴ and self-heals on next DB pass.
+/// Content hash for in-memory text dedup.
 pub(crate) fn text_hash(text: &str) -> u64 {
     fnv1a(text.as_bytes().iter().copied())
 }
 
-/// True if `line` is all whitespace, short-circuiting at the first non-
-/// whitespace char — O(1) for any non-blank line, however long.
 fn is_blank_line(line: &str) -> bool {
     line.chars().all(|c| c.is_whitespace())
 }
 
-/// First non-empty line of `text`, ≤60 Unicode scalars (else truncated with
-/// `…`). O(60) for a non-blank line regardless of length: the blank check
-/// short-circuits at the first non-whitespace char and the truncation only
-/// reads 61 scalars — a multi-MB single-line paste is not scanned in full.
+/// First non-empty line of `text`, truncated to 60 Unicode scalars.
 pub(crate) fn label_from_text(text: &str) -> String {
     let first = text.lines().find(|l| !is_blank_line(l)).unwrap_or(text);
     let char_count: usize = first.chars().take(61).count();
@@ -150,9 +131,8 @@ pub(crate) fn label_from_text(text: &str) -> String {
 }
 
 impl ClipboardEntry {
-    /// Build a Text entry from the full captured text, deriving the bounded
-    /// preview, row label, and dedup hash. The full text is written through to
-    /// SQLite by the caller (which still holds it) but is not retained here.
+    /// Build a Text entry with bounded preview, label, and dedup hash.
+    /// The full text is not retained in memory.
     pub(crate) fn text_entry(
         id: u64,
         full_text: &str,
@@ -174,18 +154,13 @@ impl ClipboardEntry {
     }
 }
 
-/// Preview budget in Unicode scalars carried by the snapshot for one row.
-/// Small enough that a refresh of a large history stays light.
+/// Preview budget in Unicode scalars.
 const PREVIEW_SCALARS: usize = 256;
-/// Head window of an elided preview; the tail gets the budget that remains
-/// after the elision marker.
+/// Head window of an elided preview.
 const PREVIEW_HEAD: usize = 180;
 const PREVIEW_ELISION: &str = "……";
 
-/// Single-line bounded preview for a text entry: the whole text when it fits
-/// the budget, else `head……tail`. O(budget) regardless of text length — head is
-/// taken from the front, tail from the back, and the "longer than budget" probe
-/// only reads one scalar past the limit.
+/// Single-line preview: whole text when it fits, else `head……tail`.
 pub(crate) fn bounded_preview(text: &str) -> String {
     let over_budget = text.chars().take(PREVIEW_SCALARS + 1).count() > PREVIEW_SCALARS;
     if !over_budget {

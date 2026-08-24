@@ -21,8 +21,7 @@ enum FilterMode: String, CaseIterable {
 
 // MARK: - Popup Row (item or date separator)
 
-/// A row in the flattened list stream. `selectedIndex` indexes into the real
-/// items only, so separators never occupy a selectable position.
+/// A row in the flattened list; separators are not selectable.
 private enum PopupRow: Identifiable {
     case separator(timestamp: UInt64, isFirst: Bool)
     case item(index: Int, item: ClipboardItem)
@@ -41,10 +40,7 @@ private enum PopupRow: Identifiable {
 
 // MARK: - Right-Click Context Menu Support
 
-/// One-shot preference key: rows report their screen-space frames only while
-/// a right-click is being resolved (`contextMenuArmed`). The snapshot is
-/// measured on the layout pass right after arming, then the rows stop
-/// reporting — no per-row geometry work while scrolling.
+/// One-shot preference for row frames while resolving a right-click.
 private struct RowFramePreferenceKey: PreferenceKey {
     static let defaultValue: [Int: CGRect] = [:]
     static func reduce(value: inout [Int: CGRect], nextValue: () -> [Int: CGRect]) {
@@ -52,17 +48,11 @@ private struct RowFramePreferenceKey: PreferenceKey {
     }
 }
 
-/// Retains a closure for the lifetime of an NSMenuItem. `NSMenuItem.target`
-/// is weak, so the menu keeps the handler alive through `representedObject`
-/// (strong) — the local scope of `showContextMenu` additionally holds it while
-/// the synchronous `popUp` tracking loop runs.
+/// Retains a closure for the lifetime of an NSMenuItem.
 final class ContextMenuItemTarget: NSObject {
     private let action: () -> Void
     init(_ action: @escaping () -> Void) { self.action = action }
-    // Explicit @objc name: Swift's `perform(_:)` would bridge to
-    // `performSelector:`, which collides with NSObject's own method of that
-    // name — NSMenu's action dispatch then resolves the selector to garbage
-    // and crashes. `invoke:` is collision-free.
+    // `invoke:` avoids colliding with NSObject's `performSelector:` bridging.
     @objc(invoke:) func invoke(_ sender: Any?) { action() }
 }
 
@@ -81,60 +71,38 @@ struct HistoryPopupContent: View {
     @State var effectiveSearchText: String = ""
     @State private var searchTask: Task<Void, Never>?
     @State var scrollTarget: Int?
-    /// Id of the always-laid-out zero-height anchor at the very top of the
-    /// list content (outside the LazyVStack, so its position is exact and
-    /// never depends on lazy row-height estimation). Scrolling to it returns
-    /// the viewport to offset 0 reliably.
+    /// Zero-height anchor at the top of the list for reliable scroll-to-top.
     let listTopAnchorID = 0
 
     @State var filterMode: FilterMode = .all
 
-    /// True while a right-click is waiting for the one-shot row-frame
-    /// snapshot (see `RowFramePreferenceKey`). Rows report frames only during
-    /// this window; the snapshot is resolved and disarmed on the next layout
-    /// pass.
+    /// True while a right-click is waiting for the one-shot row-frame snapshot.
     @State var contextMenuArmed = false
     @State var pendingContextMenuRequest: PopupContextMenuRequest?
 
-    // Namespace for the sliding selection highlight (Spotlight-style glide
-    // between rows when the selection moves with ↑/↓ keys or a click).
     @Namespace private var selectionNamespace
 
-    // Spotlight opening animation: start slightly larger, spring in
     @State private var openingScale: CGFloat = 1.10
 
     @FocusState private var isSearchFocused: Bool
     @FocusState private var isContainerFocused: Bool
 
-    /// Cached search results, computed off the main thread in the debounce task.
-    /// When effectiveSearchText is empty, the view uses backend.items directly.
+    /// Cached search results from the debounce task.
     @State var searchResults: [ClipboardItem] = []
-    /// Bumped whenever `searchResults` is replaced. The display-list memo keys
-    /// on this so a re-run of the same query (same `effectiveSearchText`) still
-    /// invalidates when fresh results arrive.
+    /// Bumped whenever `searchResults` is replaced, to invalidate the display memo.
     @State private var searchResultsGeneration = 0
 
     // MARK: - Display-list memo
     //
-    // `displayItems` is read from ~20 sites (body, actions, context menu,
-    // preview, bottom bar). It derives from backend data through a filter +
-    // timestamp sort, and `popupRows`/`bottomBar` then ran further O(n) passes
-    // over the result — on EVERY body evaluation (selection moves, hover,
-    // scroll-target updates), i.e. several full 3000-row passes per arrow-key
-    // press. The memo recomputes the filter, sort, day grouping, and type
-    // counts exactly once per data generation and serves every read from it.
-    // The memo box is a reference type because SwiftUI View structs re-init
-    // freely and a nonmutating getter cannot write a stored property; marking
-    // it with @State keeps the same box alive across body evaluations, so the
-    // expensive passes run once per data generation instead of once per body.
+    // Memoize derived rows/counts per data generation to avoid repeated O(n)
+    // passes on every body evaluation.
 
     private struct DisplayMemo {
         let itemsGeneration: Int
         let effectiveSearchText: String
         let searchResultsGeneration: Int
         let filterMode: FilterMode
-        /// Start of the current calendar day — a midnight rollover must
-        /// invalidate the memo (day separators and 今天/昨天 labels move).
+        /// Start of the current calendar day (invalidates memo at midnight).
         let startOfToday: Date
         let items: [ClipboardItem]   // filter + timestamp-sorted
         let rows: [PopupRow]         // flattened with day separators
@@ -210,19 +178,12 @@ struct HistoryPopupContent: View {
     /// Extra seconds per unit of visible change (rows entering or leaving),
     /// saturating once the change exceeds what fits on screen.
     let filterSwitchPerChange: TimeInterval = 0.011
-    /// Per-direction cap on counted change: past ~6 rows the extra rows are
-    /// offscreen and contribute no visible motion.
+    /// Per-direction cap on counted change (offscreen rows add no motion).
     let filterSwitchChangeCap = 6
-    /// Hard ceiling: the control (tab pill) already snaps instantly, so the
-    /// content animation never needs more than this.
+    /// Hard ceiling for filter content animation.
     let filterSwitchMaxDuration: TimeInterval = 0.28
 
-    /// Row-level enter/exit for filter changes: fade + a slight scale in place.
-    /// No directional offset — filtering the same data pool is not navigation.
-    /// Survivors (rows whose entry_id survives the new filter) have no
-    /// transition at all: they stay pinned and only shift as the list collapses
-    /// around them, which is what visually says "same data, new filter" instead
-    /// of "another page".
+    /// Filter changes fade/scale rows in place; survivors stay pinned.
     private var filterRowTransition: AnyTransition {
         .asymmetric(
             insertion: .opacity.combined(with: .scale(scale: 0.96)),
@@ -236,11 +197,9 @@ struct HistoryPopupContent: View {
 
     var body: some View {
         ZStack {
-            // === Layer 0: Dark Translucent Background (HUD look) ===
             theme.popupBackground
                 .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
 
-            // === Layer 1: Content ===
             if backend.items.isEmpty {
                 emptyStateView
             } else {
@@ -252,10 +211,6 @@ struct HistoryPopupContent: View {
                     filterModeTabs
                         .padding(.horizontal, 5)
 
-                    // Filter tabs re-filter the SAME data pool: rows keep their
-                    // entry_id identity, survivors stay pinned, removed rows
-                    // dissolve in place (`filterRowTransition`) and the list
-                    // collapses. No page slide — filtering is not navigation.
                     filterPageContent
                 }
                 .padding(.all, 3)
@@ -304,12 +259,7 @@ struct HistoryPopupContent: View {
             return .handled
         }
         .onAppear {
-            // The hosting view is reused across popup sessions, so SwiftUI may
-            // keep @State storage alive while the window is closed. Reset the
-            // full transient session state here instead of relying on a fresh
-            // view value; resetting state in place keeps the AttributeGraph
-            // identity stable (a UUID .id() forces teardown and measurably
-            // raises the small-zone high-water mark again).
+            // Reset transient state in place; the hosting view is reused across sessions.
             selectedIndex = backend.items.isEmpty ? 0 : 1
             searchText = ""
             effectiveSearchText = ""

@@ -9,28 +9,14 @@ pub(crate) fn get_persist_dir() -> Option<PathBuf> {
     Some(dir)
 }
 
-/// Open (or create) the `SQLite` database with WAL, a small page cache, and no
-/// mmap.
-///
-/// WAL + `synchronous=NORMAL` turns the per-capture write-through (insert +
-/// dedup + trim) from 3 fully-synced transactions into 1 WAL append — one
-/// fsync instead of three, lower latency, and far less SSD/battery wear. Reads
-/// (search, thumbnail loads) no longer block behind writes.
+/// Open (or create) the SQLite database with WAL, a small page cache, and no mmap.
 pub(crate) fn open_db() -> Option<Connection> {
     let db_path = get_persist_dir()?.join("history.db");
     let conn = Connection::open(&db_path).map_err(|e| {
         crate::error_log!("CopyAttach: failed to open database: {e}");
     }).ok()?;
-    // No mmap: the FTS5 trigram index (several× the text size) would be mapped
-    // into the process and count as resident memory — confirmed ~1:1 RSS growth
-    // with the index when the DB file stays under the old 32MB cap. Serving it
-    // from the LRU page cache keeps DB-related resident memory bounded at the
-    // cache size while still covering the same on-demand BLOB reads mmap used
-    // to serve (thumbnails/full images are loaded one at a time, per click).
-    // `cache_size` is negative here, which SQLite reads as KiB (-4096 = 4 MB).
-    // A failed WAL switch (e.g. SQLITE_BUSY because an older app instance is
-    // still running against this DB) must be visible, not silently swallowed:
-    // the DB then stays in DELETE journal mode until the next clean launch.
+    // No mmap keeps the FTS index out of resident memory; a failed WAL switch
+    // is logged rather than swallowed so the journal mode remains visible.
     if let Err(e) = conn.execute_batch(
         "PRAGMA journal_mode = WAL;
          PRAGMA synchronous = NORMAL;
@@ -42,9 +28,7 @@ pub(crate) fn open_db() -> Option<Connection> {
     Some(conn)
 }
 
-/// Create the history table if it does not already exist.
-/// Adds the `entry_id`, `preview`, and `label` columns via migration for
-/// schema versioning.
+/// Create the history table and migrate legacy columns/indexes.
 pub(crate) fn ensure_history_table(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS clipboard_history (
@@ -66,9 +50,7 @@ pub(crate) fn ensure_history_table(conn: &Connection) -> Result<(), rusqlite::Er
             label           TEXT NOT NULL DEFAULT ''
         );"
     )?;
-    // Add entry_id column if this is an old DB that lacks it.
-    // We try ALTER TABLE and only propagate the error if the column still
-    // doesn't exist afterwards (duplicate-column on re-run is harmless).
+    // Add entry_id to old DBs; ignore duplicate-column errors if it already exists.
     if let Err(e) = conn.execute_batch(
         "ALTER TABLE clipboard_history ADD COLUMN entry_id INTEGER NOT NULL DEFAULT 0;"
     ) {
@@ -80,20 +62,13 @@ pub(crate) fn ensure_history_table(conn: &Connection) -> Result<(), rusqlite::Er
             return Err(e);
         }
     }
-    // Backfill entry_id for rows that still have the default (0) using the
-    // stable SQLite rowid, ensuring every entry has a persistent, unique ID
-    // that survives restarts and reordering. Running this multiple times is
-    // safe: once a row has a non-zero entry_id, the UPDATE is a no-op.
-    // NB: if this fails, load_history_from_db will read entry_id=0 and
-    // assign fresh IDs on every restart, breaking favorites — so we
-    // propagate the error rather than silently falling back.
+    // Backfill persistent entry IDs from rowids; propagate failure so favorites
+    // don't silently break on every restart.
     conn.execute_batch(
         "UPDATE clipboard_history SET entry_id = id WHERE entry_id = 0;"
     )?;
 
-    // Add preview/label columns if this is an old DB that lacks them (text
-    // metadata persisted so cold start never reads the full `text` column).
-    // Same guarded ALTER pattern as entry_id above.
+    // Add preview/label to old DBs; same guarded ALTER pattern as entry_id.
     if let Err(e) = conn.execute_batch(
         "ALTER TABLE clipboard_history ADD COLUMN preview TEXT NOT NULL DEFAULT '';
          ALTER TABLE clipboard_history ADD COLUMN label TEXT NOT NULL DEFAULT '';"
@@ -108,40 +83,14 @@ pub(crate) fn ensure_history_table(conn: &Connection) -> Result<(), rusqlite::Er
     }
     backfill_text_metadata(conn)?;
 
-    // Dedup lookup index: `delete_matching_entry` narrows by (entry_type,
-    // hash) and verifies exact text, so a duplicate scan is an index lookup
-    // instead of a full table scan on every capture.
+    // Dedup lookup index for (entry_type, hash).
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_history_type_hash
          ON clipboard_history(entry_type, hash);"
     )?;
 
-    // FTS5 full-text index over the text column (trigram tokenizer = substring
-    // matching for ≥3-char queries). Keeping full text out of the in-memory
-    // history Vec is what bounds memory; the index makes search fast on disk.
-    //
-    // The index has a SIZE CAP: text rows longer than `FTS_MAX_INDEXED_TEXT_LEN`
-    // characters are NOT indexed. A trigram index costs several× the text size
-    // on disk (measured ~6.4×: 10.6MB of text → 68MB DB) and the synchronous
-    // capture-path insert scales linearly with size (measured: 2MB text →
-    // ~170ms, 8MB → ~760ms of monitor-thread stall). The cap keeps the index
-    // and the per-capture write cost bounded no matter how large pasted
-    // documents get. Excluded rows stay fully searchable: `db::search_history`
-    // runs a LIKE fallback over oversized rows for ≥3-char queries (substring
-    // semantics preserved, scan bounded to the rare huge rows — see search.rs).
-    //
-    // Sync is automatic via AFTER INSERT/DELETE triggers. The insert trigger is
-    // DROP + CREATE (not IF NOT EXISTS): triggers persist per-DB, so an old
-    // installation would otherwise keep its uncapped trigger forever; the
-    // per-launch DROP+CREATE of an empty trigger is negligible. Image rows
-    // have text = NULL and are skipped by the WHEN clauses. The FTS rowid is
-    // the base-table rowid, so the AFTER DELETE trigger removes the indexed
-    // row directly (the `'delete'` special command is for external content
-    // tables and is not needed here). The backfill populates the index for
-    // rows that predate this virtual table, guarded so it only runs once (an
-    // already-populated index is left untouched). The cleanup DELETE evicts
-    // oversized rows that predate the cap (idempotent; empty when nothing
-    // matches), so legacy indexes shrink to the capped set.
+    // FTS5 trigram index with a size cap. Oversized rows are skipped and remain
+    // searchable via LIKE fallback; triggers keep the index in sync.
     let fts_sql = format!(
         "CREATE VIRTUAL TABLE IF NOT EXISTS clipboard_fts USING fts5(
              text,
@@ -172,39 +121,13 @@ pub(crate) fn ensure_history_table(conn: &Connection) -> Result<(), rusqlite::Er
     Ok(())
 }
 
-/// Persisted-metadata generations, stamped into SQLite's `user_version`:
-/// 0 = pre-0.99.15 (no persisted text metadata, DefaultHasher image hashes),
-/// 1 = 0.99.15-dev (DefaultHasher text_hash persisted),
-/// 2 = stable FNV-1a text hashes (text phase done; image hashes may still be
-///     DefaultHasher — a background thread migrates them one row at a time and
-///     stamps 3 on completion),
-/// 3 = stable FNV-1a text AND image hashes.
+/// Metadata migration version stored in SQLite `user_version`.
 pub(crate) const METADATA_VERSION: i32 = 3;
 
-/// Upper bound (in Unicode characters — SQLite `length()` on TEXT counts
-/// characters) for text rows that get trigram-indexed. Above this the row is
-/// stored but NOT indexed: the trigram index amplifies disk usage several×
-/// (~6.4× measured) and the synchronous capture-path insert cost scales with
-/// text size (~0.17s per 2MB measured) — a cap keeps both bounded for huge
-/// pastes. Excluded rows remain searchable through the LIKE fallback in
-/// `db::search_history` (bounded to the rare oversized rows).
+/// Max text length indexed by FTS; oversized rows use a LIKE fallback.
 pub(crate) const FTS_MAX_INDEXED_TEXT_LEN: i64 = 512 * 1024;
 
-/// Backfill / recompute persisted text metadata (`hash`/`preview`/`label`) for
-/// text rows whose metadata predates generation 2. Gated on
-/// `user_version < 2`, so it runs exactly once per text generation: version 0
-/// rows get their first metadata, version 1 rows get their DefaultHasher
-/// hashes recomputed with the stable FNV-1a algorithm (`text_hash` is
-/// persisted — std's documented-unstable DefaultHasher must not survive in the
-/// DB, or a future Rust change would break re-capture dedup against old rows).
-/// On success stamps `user_version = 2`. Image hashes (generation 2 → 3) are
-/// migrated separately by `migrate_one_image_row` on a background thread —
-/// decoding hundreds of MB of stored PNGs must not stall startup.
-///
-/// Rows are processed one at a time (id list first, then per-row SELECT +
-/// UPDATE) so a legacy DB holding many multi-MB texts never has its whole
-/// corpus in memory at once. The cold-start load then never touches the
-/// `text` column again.
+/// Backfill/recompute text metadata once for legacy rows, one at a time.
 fn backfill_text_metadata(conn: &Connection) -> Result<(), rusqlite::Error> {
     let version: i32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     if version >= 2 {
@@ -238,22 +161,12 @@ fn backfill_text_metadata(conn: &Connection) -> Result<(), rusqlite::Error> {
         }
         tx.commit()?;
     }
-    // Stamp the text generation only after the recompute commits; a failure
-    // above leaves the old version in place and the next init retries.
+    // Stamp only after commit so a failure retries next launch.
     conn.pragma_update(None, "user_version", 2)?;
     Ok(())
 }
 
-/// Recompute ONE image row's persisted content hash with the stable algorithm
-/// (`image::image_hash`, FNV-1a over decoded RGBA). The hash hashes raw
-/// pixels, so the stored PNG must be decoded — PNG is lossless, so decoding
-/// reproduces exactly the RGBA the capture hashed.
-///
-/// Returns the new hash, or `Err` when the row is missing, its PNG is empty,
-/// or the PNG cannot be decoded — the old hash is left untouched and the
-/// caller logs/counts the failure explicitly. Callers run this one row at a
-/// time under a fresh DB lock so captures never wait behind a whole-corpus
-/// decode.
+/// Recompute one image row's hash to the stable algorithm; `Err` leaves it untouched.
 pub(crate) fn migrate_one_image_row(conn: &Connection, id: i64) -> Result<u64, ()> {
     let png: Vec<u8> = conn.query_row(
         "SELECT png_data FROM clipboard_history WHERE id = ?1 AND entry_type = 1",
@@ -266,8 +179,7 @@ pub(crate) fn migrate_one_image_row(conn: &Connection, id: i64) -> Result<u64, (
         crate::debug_log!("CopyAttach: image-hash migration: row {id} has empty png_data — hash left as-is");
         return Err(());
     }
-    // Claim any reusable-marked pages the allocator handed back before the
-    // decoder reads the blob (see ffi::mod::vec_to_raw for the rationale).
+    // Claim reusable-marked pages before the decoder reads the blob.
     crate::backend::claim_pages(png.as_ptr(), png.capacity());
     let img = image::load_from_memory(&png).map_err(|e| {
         crate::debug_log!("CopyAttach: image-hash migration: row {id} png undecodable: {e}");

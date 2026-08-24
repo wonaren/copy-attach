@@ -1,8 +1,4 @@
-//! macOS-specific utilities: pasteboard access, paste simulation, accessibility permissions.
-//!
-//! This file is only compiled on macOS (the `mod macos;` declaration in lib.rs
-//! is gated with `#[cfg(target_os = "macos")]`). A no-op stub in lib.rs covers
-//! non-macOS builds so the crate compiles everywhere.
+//! macOS-specific pasteboard, paste simulation, and accessibility utilities.
 
 use std::ffi::c_int;
 use std::process::Command;
@@ -30,22 +26,7 @@ pub(crate) fn open_preferences() {
         .spawn();
 }
 
-/// Read the raw bytes of the first supported image representation from the
-/// general pasteboard.
-///
-/// Representation preference order: PNG first (typically the smallest
-/// full-resolution encoding — a 2940×1912 screenshot is ~1 MB PNG vs ~22 MB
-/// TIFF), then TIFF, JPEG, GIF, WebP, BMP. The pasteboard daemon usually
-/// publishes several representations of the same content; decoding the
-/// smallest keeps the capture pipeline's large transient buffers small
-/// (pasteboard data is CFData, whose freed blocks are NOT returned to the
-/// OS promptly — measured: a 22.5 MB TIFF read lingers as a ~21.5 MB
-/// retained region per capture, while the ~1 MB PNG counterpart is
-/// negligible).
-///
-/// Returns `None` if the pasteboard is inaccessible or carries no supported
-/// image representation. Format detection happens in the caller (the image
-/// crate sniffs magic bytes).
+/// Read the first supported image representation, preferring smaller formats.
 pub(crate) fn pasteboard_image_data() -> Option<Vec<u8>> {
     use objc2::rc::autoreleasepool;
     autoreleasepool(|_| unsafe {
@@ -77,9 +58,7 @@ pub(crate) fn pasteboard_image_data() -> Option<Vec<u8>> {
             }
             let bytes = std::slice::from_raw_parts(ptr as *const u8, len);
             let owned = bytes.to_vec();
-            // Claim any reusable-marked pages the allocator handed back (see
-            // ffi::mod::vec_to_raw): this buffer is decoded by the capture
-            // pipeline, which must never read kernel-reclaimable pages.
+            // Claim reusable-marked pages before the capture pipeline decodes them.
             crate::backend::claim_pages(owned.as_ptr(), owned.capacity());
             return Some(owned);
         }
@@ -87,26 +66,14 @@ pub(crate) fn pasteboard_image_data() -> Option<Vec<u8>> {
     })
 }
 
-/// Cached `NSPasteboard` class reference.
-///
-/// The monitor thread resolves the class and reads `changeCount` every 500 ms
-/// for the app's entire lifetime — that is ~120k class lookups per day, each
-/// of which walks the dyld class registry. Caching makes the poll a pure
-/// message-send on a stable pointer: structurally allocation-free, so the
-/// hot poll path can never accumulate memory no matter how long it runs.
+/// Cached `NSPasteboard` class to keep the hot poll path allocation-free.
 static NSPASTEBOARD_CLASS: OnceLock<Option<&'static objc2::runtime::AnyClass>> = OnceLock::new();
 
 fn nspasteboard_class() -> Option<&'static objc2::runtime::AnyClass> {
     *NSPASTEBOARD_CLASS.get_or_init(|| objc2::runtime::AnyClass::get(c"NSPasteboard"))
 }
 
-/// Lightweight check: returns the pasteboard change count without reading
-/// or converting any image data. Returns `None` if pasteboard is inaccessible.
-///
-/// Wrapped in an autorelease pool: this is the monitor thread's hot path
-/// (every 500 ms); a Rust thread has no implicit pool, and any autoreleased
-/// intermediate created by AppKit under the hood would otherwise linger
-/// until the thread exits.
+/// Lightweight pasteboard change count; wrapped in an autorelease pool.
 pub(crate) fn pasteboard_change_count() -> Option<i64> {
     use objc2::rc::autoreleasepool;
     autoreleasepool(|_| unsafe {
@@ -120,27 +87,12 @@ pub(crate) fn pasteboard_change_count() -> Option<i64> {
     })
 }
 
-/// Check whether the general pasteboard contains file URLs.
-///
-/// When a file is copied in Finder, macOS populates the pasteboard with
-/// `public.file-url` types and provides the file icon as an image preview.
-/// This function checks for the presence of `public.file-url` so callers
-/// can skip capturing the icon as a clipboard image entry.
-///
-/// Returns `false` if the pasteboard is inaccessible or no file items exist.
+/// Whether the pasteboard contains file URLs (to skip capturing the icon).
 pub(crate) fn pasteboard_has_files() -> bool {
     unsafe { !pasteboard_file_url_strings().is_empty() }
 }
 
-/// Extract file paths from the general pasteboard.
-///
-/// When files are copied in Finder, each pasteboard item with `public.file-url`
-/// type corresponds to a file URL. This function converts those URLs to
-/// absolute file paths using NSURL's `path` method for proper percent-decoding.
-///
-/// Returns an empty `Vec` if the pasteboard is inaccessible or has no file URLs.
-/// Malformed or unconvertible URLs are silently skipped (not returned as
-/// degraded data) — the caller receives only usable absolute paths.
+/// Extract absolute file paths from pasteboard file URLs; skips unusable ones.
 pub(crate) fn pasteboard_file_paths() -> Vec<String> {
     unsafe {
         let url_strings = pasteboard_file_url_strings();
@@ -148,8 +100,7 @@ pub(crate) fn pasteboard_file_paths() -> Vec<String> {
             return vec![];
         }
 
-        // NSURL + NSString always exist in the ObjC runtime on macOS.
-        // Return empty if somehow absent — don't fall back to raw file:// strings.
+        // NSURL/NSString should always exist; don't fall back to raw file:// strings.
         let nsurl_cls = if let Some(c) = objc2::runtime::AnyClass::get(c"NSURL") { c } else {
             crate::error_log!("CopyAttach: NSURL class not found in ObjC runtime, cannot convert file URLs");
             return vec![];
@@ -253,19 +204,9 @@ unsafe fn pasteboard_file_url_strings() -> Vec<String> {
     results
 }
 
-/// Put a single file URL on the general pasteboard — the Finder "copy file"
-/// convention. Terminal emulators translate `public.file-url` into the
-/// absolute path when the user pastes, so TUI agents (Claude Code et al.)
-/// receive the path text; the paste target consumes the file immediately
-/// after the simulated Cmd+V.
+/// Put a single file URL on the pasteboard for the Finder "copy file" convention.
 ///
-/// The pasteboard is cleared first (NSPasteboard offers no atomic replace), so
-/// on a failed write the previous clipboard contents are already gone and the
-/// pasteboard is left empty. The caller must treat `false` as an *aborted*
-/// paste — the target receives nothing — never as a harmless no-op.
-///
-/// Returns `false` if the pasteboard is inaccessible or the URL cannot be
-/// written (the pasteboard has been cleared regardless).
+/// Clears the pasteboard first; on failure the caller must treat the paste as aborted.
 pub(crate) fn set_pasteboard_file_url(path: &str) -> bool {
     unsafe {
         let pasteboard_cls = match nspasteboard_class() {
@@ -369,10 +310,7 @@ mod paste_tests {
     use super::*;
     use arboard::Clipboard;
 
-    /// Roundtrip check for the drag-style file-URL pasteboard write:
-    /// set a file URL, read it back as a path, then restore the previous
-    /// text/image clipboard content (this test briefly touches the user's
-    /// real pasteboard).
+    /// Roundtrip file-URL pasteboard write/read, restoring the user's clipboard.
     #[test]
     fn test_set_pasteboard_file_url_roundtrip() {
         let mut cb = Clipboard::new().unwrap();
@@ -380,8 +318,6 @@ mod paste_tests {
         let saved_image = cb.get_image().ok();
 
         let path = "/tmp/copyattach-paste-check.png";
-        // Run the actual write/read, restore the user's clipboard first, then
-        // assert — a failed assertion must never leave the pasteboard clobbered.
         let ok_set = set_pasteboard_file_url(path);
         let paths = pasteboard_file_paths();
 

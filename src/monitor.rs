@@ -1,18 +1,7 @@
 //! Background clipboard monitor thread.
 //!
-//! Polls the system clipboard every 500ms, detects new content via `NSPasteboard`
-//! `changeCount` (lightweight) + content comparison.
-//!
-//! ## Image capture pipeline (two-phase)
-//!
-//! **Phase 1 (sync — monitor thread)**:
-//!   hash → fast thumbnail (`CatmullRom`) → update in-memory history
-//!
-//! **Phase 2 (async — background thread)**:
-//!   full PNG encode (expensive) → write-through `SQLite` → update `db_id` in history
-//!
-//! This split keeps the monitor thread responsive: 4K capture blocks for ~1s
-//! instead of ~5s, and changeCount checks continue to work during encoding.
+//! Polls the pasteboard via `changeCount`; image capture runs in two phases so
+//! the monitor thread stays responsive while full PNG encoding happens async.
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -30,15 +19,8 @@ use crate::macos;
 /// Maximum length of the longest edge for thumbnail generation.
 const THUMBNAIL_MAX_DIM: u32 = 300;
 
-/// Shared image processing pipeline: Phase 1 (in-memory) + Phase 2 (async DB).
-///
-/// Accepts raw RGBA pixel data **by ownership**: Phase 1 borrows it, Phase 2
-/// moves it into the encoding thread — zero copies. The buffer itself is the
-/// pooled decode scratch ([`crate::backend::ImageDecodeBuffer`]): the
-/// clipboard path decodes 8-bit RGBA PNGs straight into it and the generic
-/// decoder fallback hands its buffer to the pool as well, so repeated large
-/// image captures reuse one allocation instead of alloc + lingering-freed-
-/// region per capture (macOS does not return large freed regions promptly).
+/// Shared image pipeline: Phase 1 updates memory, Phase 2 encodes and persists.
+/// Uses the pooled decode buffer to avoid per-capture large allocations.
 #[allow(clippy::too_many_arguments)]
 fn ingest_rgba_image(
     rgba: crate::backend::ImageDecodeBuffer,
@@ -56,16 +38,12 @@ fn ingest_rgba_image(
     }
     let hash = image_hash(&rgba, width, height);
 
-    // The caller invokes us only for a new pasteboard changeCount. Equal image
-    // content is therefore a genuine re-copy and must refresh its history use.
+    // A new changeCount means a genuine re-copy, even with equal image content.
     if width > 0 && height > 0 {
-        // ── Phase 1 (sync): fast thumbnail → in-memory history ──
+        // Phase 1 (sync): fast thumbnail -> in-memory history.
         let (thumb_data, thumb_w, thumb_h) = if let Some(t) = create_thumbnail_fast(width, height, &rgba, THUMBNAIL_MAX_DIM) { t } else {
-            // Thumbnail creation failed (likely corrupt pixel data). Create
-            // the entry anyway — Phase 2 full encode will determine if the
-            // image data is truly broken and remove the entry if so.
+            // Keep the entry; Phase 2 will remove it if the image is truly broken.
             crate::debug_log!("CopyAttach: thumbnail creation failed for image {width}x{height} — capturing without thumbnail");
-            // Fall through: create entry with empty thumbnail, continue to Phase 2
             (Vec::new(), 0u32, 0u32)
         };
 
@@ -84,7 +62,7 @@ fn ingest_rgba_image(
             db_id: 0,
         };
 
-        // In-memory update (metadata only — no PNG blobs held)
+        // In-memory update (metadata only, no PNG blobs).
         {
             let mut hist = history.lock().unwrap();
             *hist = add_to_history(std::mem::take(&mut *hist), item);
@@ -94,7 +72,7 @@ fn ingest_rgba_image(
             crate::backend::mark_history_changed();
         }
 
-        // ── Phase 2 (async): full PNG encode → DB write ────────
+        // Phase 2 (async): full PNG encode -> DB write.
         let db = db.clone();
         let history = history.clone();
         let threshold = cleanup_threshold.load(Ordering::Relaxed);
@@ -102,20 +80,13 @@ fn ingest_rgba_image(
         let thumb_async = thumb_data;
 
         thread::spawn(move || {
-            // Encode into the shared scratch buffer (reused across captures):
-            // a fresh multi-MB output Vec per capture would linger as a
-            // retained region after free (large freed blocks are not returned
-            // to the OS promptly in this process). The RAII guard trims the
-            // pool on drop when one oversized encode grew it past the
-            // retention cap (see backend::ImageEncodeScratchGuard).
+            // Use the pooled scratch buffer to avoid per-capture large allocations.
             let mut scratch = crate::backend::ImageEncodeScratchGuard::acquire();
             let full_png = match crate::image::encode_png_into(width, height, &rgba, &mut scratch) {
                 Some(()) => scratch.as_slice(),
                 None => {
                     crate::debug_log!("CopyAttach: failed to encode full-size PNG for image {width}x{height} — removing broken entry from history");
-                    // Remove the entry created in Phase 1 — without PNG data it can
-                    // never be pasted. The user sees the entry appear and disappear,
-                    // which is better than a ghost entry that silently fails on paste.
+                    // Remove the Phase 1 entry: without PNG data it can never be pasted.
                     let mut hist = history.lock().unwrap();
                     hist.retain(|e| match e {
                         ClipboardEntry::Image { hash: h, .. } => *h != item_hash,
@@ -125,7 +96,6 @@ fn ingest_rgba_image(
                 }
             };
 
-            // Lock history FIRST to find and clone the item (consistent lock order)
             let db_item = {
                 let hist = history.lock().unwrap();
                 hist.iter().find(|e| match e {
@@ -151,7 +121,6 @@ fn ingest_rgba_image(
                 );
                 match persisted {
                     Ok(row_id) => {
-                        // Re-acquire history lock to update db_id in memory
                         let mut hist = history.lock().unwrap();
                         for entry in hist.iter_mut() {
                             if let ClipboardEntry::Image { hash: h, db_id, .. } = entry {
@@ -161,7 +130,6 @@ fn ingest_rgba_image(
                                 }
                             }
                         }
-                        // Signal Swift that a thumbnail is now available via DB
                         crate::backend::IMAGE_ENCODING_COUNTER.fetch_add(1, Ordering::Relaxed);
                     }
                     Err(()) => {
@@ -171,16 +139,12 @@ fn ingest_rgba_image(
             }
         });
     } else {
-        // Zero-size image — observe the event but create no entry.
+        // Zero-size image: observe but do not create an entry.
     }
 }
 
-/// Try to decode image files from the given file paths and process them
-/// through the standard image pipeline. Returns `true` if any file was
-/// successfully decoded and ingested.
-///
-/// Non-image files are silently skipped (the caller's `continue` ensures
-/// the file icon from the pasteboard is not recorded).
+/// Decode image files from Finder copies and run them through the image pipeline.
+/// Returns true if any file was ingested; non-image files are skipped.
 #[allow(clippy::too_many_arguments)]
 fn try_ingest_image_files(
     paths: &[String],
@@ -195,15 +159,10 @@ fn try_ingest_image_files(
         return false;
     }
     for path in paths {
-        // Files under CopyAttach's own temp tree (paste/drag materializations)
-        // must never re-enter history: after an image paste the temp file-url
-        // can linger on the pasteboard until the next paste, and a later
-        // non-self-write changeCount would otherwise re-ingest it as a "Finder
-        // file copy" — re-stamping the entry and jumping it to the top.
+        // Skip our own temp files so they don't re-enter history as Finder copies.
         if crate::backend::is_copyattach_temp_path(path) {
             continue;
         }
-        // image::open checks magic bytes, not extension — reliable format detection
         let img = match image::open(path) {
             Ok(img) => img,
             Err(_) => continue,
@@ -245,17 +204,11 @@ pub(crate) fn clipboard_monitor(
         }
     };
 
-    // Seed with the current changeCount so the first poll doesn't treat
-    // the existing clipboard state as a new change. Without this, every
-    // app restart would capture a duplicate entry with empty source-app
-    // metadata (SourceApp::default), which overwrites the DB-loaded
-    // entry's correct source info via dedup.
+    // Ignore the pre-existing clipboard state on startup to avoid a duplicate capture.
     let mut last_change_count: Option<i64> = macos::pasteboard_change_count();
 
     while running.load(Ordering::SeqCst) {
-        // A new changeCount is a new clipboard-use event, even if its payload
-        // equals the previous payload. Serialize this observation with our own
-        // pasteboard writes so their suppression token cannot race us.
+        // A new changeCount is a new clipboard use; serialize with our own writes.
         let event_guard = pasteboard_event_lock.lock().unwrap();
         let observed_change_count = match (macos::pasteboard_change_count(), last_change_count) {
             (Some(cc), Some(last)) if cc == last => None,
@@ -266,8 +219,7 @@ pub(crate) fn clipboard_monitor(
             _ => None,
         };
 
-        // A token can only suppress its own exact pasteboard change. Once a
-        // different change arrives it is stale and must not affect later copies.
+        // A token suppresses only its exact pasteboard change.
         let is_self_write = if let Some(cc) = observed_change_count {
             let mut pending = pending_self_write.lock().unwrap();
             match pending.as_ref() {
@@ -287,12 +239,7 @@ pub(crate) fn clipboard_monitor(
         drop(event_guard);
 
         if observed_change_count.is_none() || is_self_write {
-            // No new platform event, or precisely the event written by this
-            // app. In neither case may we fabricate a history capture.
-            // Park once for the full poll interval instead of ten 30ms slices:
-            // the 30ms slicing woke the CPU roughly 30x/s in the idle path for
-            // no functional benefit. `clipboard_cleanup()` unparks the thread
-            // so shutdown still completes immediately.
+            // No new event or a self-write: park for the full poll interval.
             if !running.load(Ordering::SeqCst) { return; }
             thread::park_timeout(Duration::from_millis(POLL_INTERVAL_MS));
             continue;
@@ -308,10 +255,7 @@ pub(crate) fn clipboard_monitor(
             continue;
         }
 
-        // ── Handle file copies ───────────────────────────────────────────
-        // When files are copied in Finder, macOS provides the file icon as
-        // an image on the pasteboard. We skip the clipboard image read and
-        // instead try to decode the actual files from disk.
+        // Handle Finder file copies: decode the files instead of the file icon.
         if macos::pasteboard_has_files() {
             let paths = macos::pasteboard_file_paths();
             try_ingest_image_files(
@@ -322,17 +266,13 @@ pub(crate) fn clipboard_monitor(
             continue;
         }
 
-        // ── Try image from clipboard ─────────────────────────────────────
+        // Try image from clipboard.
         let image_allowed = !ignore_rules.lock().unwrap().ignores_image();
         let mut captured = false;
 
         if image_allowed {
             if let Some(img_bytes) = macos::pasteboard_image_data() {
-                // Pooled decode first: 8-bit RGBA PNGs (pasteboard screenshots
-                // — the largest transient on this path) go straight into the
-                // pooled buffer with zero intermediate allocation; anything
-                // else falls back to the generic decoder, whose buffer joins
-                // the pool anyway via `from_vec`.
+                // Fast path for 8-bit RGBA PNGs; generic decoder otherwise.
                 let decoded: Result<(crate::backend::ImageDecodeBuffer, u32, u32), image::ImageError> = {
                     let mut pooled = crate::backend::ImageDecodeBuffer::acquire();
                     match crate::image::decode_png_rgba8_into(&img_bytes, pooled.as_mut_vec()) {
@@ -360,23 +300,19 @@ pub(crate) fn clipboard_monitor(
                         captured = true;
                     }
                     Err(e) => {
-                        // Image data present but undecodable (exotic format).
-                        // Fail explicitly — do not fabricate a capture.
+                        // Undecodable image data: fail explicitly, don't fabricate a capture.
                         crate::debug_log!("CopyAttach: pasteboard image data ({} bytes) undecodable: {e}", img_bytes.len());
                     }
                 }
             }
         }
 
-        // ── Text (always sync — fast: no PNG encoding) ───────────────
+        // Text (always sync: no PNG encoding).
         if !captured {
             if let Ok(text) = cb.get_text() {
                 if !text.is_empty() {
                     let trimmed = text.trim();
                     if trimmed.len() >= 2 && !ignore_rules.lock().unwrap().ignores_text(&text) {
-                        // The full text is still live here (`text`); the entry
-                        // derives preview/label/hash and hands the body to the
-                        // DB write-through below without retaining it.
                         let item = ClipboardEntry::text_entry(
                             crate::backend::new_entry_id(),
                             &text,
@@ -386,7 +322,7 @@ pub(crate) fn clipboard_monitor(
                             0,
                         );
 
-                        // Scope 1: in-memory history update (history lock only)
+                        // In-memory update first.
                         let item_for_db = {
                             let mut hist = history.lock().unwrap();
                             *hist = add_to_history(std::mem::take(&mut *hist), item);
@@ -397,10 +333,7 @@ pub(crate) fn clipboard_monitor(
                             hist[0].clone()
                         }; // history lock released
 
-                        // Scope 2: DB write-through (db lock only — no history lock held).
-                        // The captured text's hash identifies the just-added memory entry so
-                        // a failed persist can roll it back below (the entry's body exists
-                        // only in SQLite, so unpersisted text would be an inert ghost).
+                        // DB write-through; use the hash to roll back on failure.
                         let failed_hash = match &item_for_db {
                             ClipboardEntry::Text { text_hash, .. } => *text_hash,
                             _ => unreachable!("text capture produced a non-text entry"),
@@ -416,14 +349,7 @@ pub(crate) fn clipboard_monitor(
                                     cleanup_threshold.load(Ordering::Relaxed),
                                 ) {
                                     Ok(row_id) => {
-                                        // Re-acquire history lock to set db_id on the captured
-                                        // entry. Match by content hash, never by head position:
-                                        // a concurrent select-and-paste (or undo) may have
-                                        // moved another entry to position 0 between Scope 1
-                                        // and here, and writing our rowid into that entry would
-                                        // orphan this one (db_id=0 forever) while pointing the
-                                        // other at a row that a later delete would remove from
-                                        // under us — an unpasteable, undeletable ghost.
+                                        // Set db_id by hash, not index, to survive concurrent moves.
                                         let mut hist = history.lock().unwrap();
                                         crate::history::assign_db_id_by_text_hash(
                                             &mut hist,
@@ -432,12 +358,7 @@ pub(crate) fn clipboard_monitor(
                                         );
                                     }
                                     Err(()) => {
-                                        // Persist failed (I/O error, SQLITE_BUSY, or the FTS
-                                        // trigger failing). The entry can never be pasted or
-                                        // deleted — roll it out of memory so it doesn't linger
-                                        // as a ghost. Match by content hash, not index, so a
-                                        // concurrent select-and-paste moving another entry to the
-                                        // head can't be disturbed.
+                                        // Persist failed: roll back by hash so concurrent moves aren't disturbed.
                                         crate::error_log!("CopyAttach: failed to insert text entry to DB — removing it from history");
                                         let mut hist = history.lock().unwrap();
                                         hist.retain(|e| match e {
