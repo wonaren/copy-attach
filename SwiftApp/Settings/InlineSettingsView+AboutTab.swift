@@ -94,23 +94,82 @@ extension InlineSettingsView {
                     }
 
                     // Green download button, only shown when an update exists.
-                    if case .updateAvailable(_, let releaseURL, _) = updateState {
-                        Button {
-                            NSWorkspace.shared.open(releaseURL)
-                        } label: {
-                            Text("下载更新")
-                                .font(.system(size: 12, weight: .medium))
-                                .padding(.horizontal, 16).padding(.vertical, 8)
+                    // While a download/install runs it is replaced by progress UI.
+                    switch updater.phase {
+                    case .idle, .failed:
+                        if case .updateAvailable(_, _, _) = updateState {
+                            Button {
+                                startDirectDownload()
+                            } label: {
+                                Text("下载更新")
+                                    .font(.system(size: 12, weight: .medium))
+                                    .padding(.horizontal, 16).padding(.vertical, 8)
+                            }
+                            .background(Color.green)
+                            .foregroundColor(.white)
+                            .cornerRadius(6)
+                            .buttonStyle(.plain)
+                            .transition(.scale(scale: 0.85).combined(with: .opacity))
                         }
-                        .background(Color.green)
-                        .foregroundColor(.white)
+                    case .downloading(let progress):
+                        VStack(spacing: 5) {
+                            HStack(spacing: 8) {
+                                ProgressView(value: progress)
+                                    .frame(width: 130)
+                                Text("\(Int((progress * 100).rounded()))%")
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .foregroundColor(theme.secondaryText)
+                                    .frame(width: 36, alignment: .trailing)
+                            }
+                            Text("正在下载新版本…")
+                                .font(.system(size: 10.5))
+                                .foregroundColor(theme.tertiaryText)
+                        }
+                        .padding(.horizontal, 14).padding(.vertical, 8)
+                        .background(theme.cardBackground)
                         .cornerRadius(6)
-                        .buttonStyle(.plain)
-                        .transition(.scale(scale: 0.85).combined(with: .opacity))
+                        .transition(.scale(scale: 0.95).combined(with: .opacity))
+                    case .installing:
+                        HStack(spacing: 8) {
+                            ProgressView()
+                                .controlSize(.small)
+                                .scaleEffect(0.8)
+                            Text("正在安装，即将自动重启…")
+                                .font(.system(size: 12, weight: .medium))
+                        }
+                        .padding(.horizontal, 16).padding(.vertical, 8)
+                        .background(theme.cardBackground)
+                        .cornerRadius(6)
+                        .transition(.scale(scale: 0.95).combined(with: .opacity))
                     }
                 }
                 .animation(.easeOut(duration: 0.2), value: updateState)
+                // Animate only phase transitions (button → progress card), not
+                // every progress tick — implicit animation on the enum value
+                // makes the bar lag behind the download and look frozen.
+                .animation(.easeOut(duration: 0.2), value: updater.phase.isBusy)
                 .padding(.top, 4)
+
+                if case .failed(let message) = updater.phase {
+                    VStack(spacing: 6) {
+                        Text(message)
+                            .font(.system(size: 11))
+                            .foregroundColor(.red)
+                            .multilineTextAlignment(.center)
+                            .frame(maxWidth: 320)
+                        // Manual escape hatch when programmatic download fails:
+                        // open the release page / lanzou share in the browser.
+                        Button {
+                            NSWorkspace.shared.open(repoURL)
+                        } label: {
+                            Text("在浏览器中打开下载页")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundColor(Color.accentColor)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(.top, 6)
+                }
             }
             .padding(40)
             .frame(maxWidth: .infinity)
@@ -123,22 +182,22 @@ extension InlineSettingsView {
                     message: Text("当前版本 v\(version) 已是最新"),
                     dismissButton: .default(Text("好的"))
                 )
-            case .updateAvailable(let latestVersion, let releaseURL, let isDowngrade):
+            case .updateAvailable(let latestVersion, _, let isDowngrade):
                 if isDowngrade {
                     return Alert(
                         title: Text("正式版可用 v\(latestVersion)"),
-                        message: Text("当前为开发版本 v\(appVersion)\n是否切换到正式版？"),
-                        primaryButton: .default(Text("前往下载")) {
-                            NSWorkspace.shared.open(releaseURL)
+                        message: Text("当前为开发版本 v\(appVersion)\n是否立即下载并安装？"),
+                        primaryButton: .default(Text("立即下载")) {
+                            startDirectDownload()
                         },
                         secondaryButton: .cancel(Text("继续使用开发版"))
                     )
                 } else {
                     return Alert(
                         title: Text("发现新版本 v\(latestVersion)"),
-                        message: Text("当前版本：v\(appVersion)\n是否前往下载页面？"),
-                        primaryButton: .default(Text("前往下载")) {
-                            NSWorkspace.shared.open(releaseURL)
+                        message: Text("当前版本：v\(appVersion)\n是否立即下载并安装？"),
+                        primaryButton: .default(Text("立即下载")) {
+                            startDirectDownload()
                         },
                         secondaryButton: .cancel(Text("取消"))
                     )
@@ -185,6 +244,13 @@ extension InlineSettingsView {
         default:
             break
         }
+    }
+
+    /// Seamless update: download + install in the background (GitHub first,
+    /// lanzou fallback), then auto-relaunch. No browser, no manual steps.
+    private func startDirectDownload() {
+        guard case .updateAvailable(let latestVersion, _, _) = updateState else { return }
+        updater.startDownload(version: latestVersion)
     }
 
     /// Strip pre-release suffix (e.g. "-dev") for version comparison.

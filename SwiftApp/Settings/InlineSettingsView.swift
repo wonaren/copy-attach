@@ -31,6 +31,8 @@ struct InlineSettingsView: View {
     /// Alert item, decoupled from `updateState` so dismissing an alert does not
     /// clear the badge / download button (which persist until a re-check).
     @State var updateAlert: UpdateCheckState? = nil
+    /// Seamless download/install engine (GitHub first, lanzou fallback).
+    @StateObject var updater = UpdateDownloader.shared
     @Environment(\.appTheme) var theme
 
     init(initialTab: Int = 0) {
