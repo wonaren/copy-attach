@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+## [0.99.24] - 2026-08-25
+
+### 界面与交互
+
+- 优化「下载更新」UI 交互：统一下载与安装过程中的卡片视觉风格与尺寸，下载和安装阶段平滑切换无跳变；进度条下方精准展示「下载中...」与「安装更新...」状态提示。
+
 ## [0.99.23] - 2026-08-25
 
 ### 界面与交互
@@ -17,7 +23,8 @@
 - 修复下载完成后临时文件移动竞态：URLSession 回调返回即删除临时文件，改为在回调内同步移动，避免主线程繁忙时安装包丢失报错。
 - 修复下载进度条不动的假象：进度更新不再被隐式动画插值拖住，改为实时直通刷新。
 
-[Unreleased]: https://github.com/wonaren/copy-attach/compare/v0.99.23...HEAD
+[Unreleased]: https://github.com/wonaren/copy-attach/compare/v0.99.24...HEAD
+[0.99.24]: https://github.com/wonaren/copy-attach/compare/v0.99.23...v0.99.24
 [0.99.23]: https://github.com/wonaren/copy-attach/compare/v0.99.22...v0.99.23
 
 ## [0.99.22] - 2026-08-24

@@ -56,107 +56,32 @@ extension InlineSettingsView {
                     .lineSpacing(3)
                     .frame(maxWidth: 300)
 
-                HStack(spacing: 12) {
-                    Button {
-                        checkForUpdates()
-                    } label: {
-                        HStack(spacing: 6) {
-                            if case .checking = updateState {
-                                ProgressView()
-                                    .controlSize(.small)
-                                    .scaleEffect(0.8)
-                                Text("检查中…")
-                                    .font(.system(size: 12, weight: .medium))
-                            } else {
-                                Text("检查更新")
-                                    .font(.system(size: 12, weight: .medium))
-                            }
-                        }
-                        .padding(.horizontal, 16).padding(.vertical, 8)
-                    }
-                    .disabled(updateState == .checking)
-                    .background(Color.accentColor)
-                    .foregroundColor(.white)
-                    .cornerRadius(6)
-                    .buttonStyle(.plain)
-                    .overlay(alignment: .topTrailing) {
-                        // Red badge showing the latest version when an update exists.
-                        if case .updateAvailable(let latestVersion, _, _) = updateState {
-                            Text(latestVersion)
-                                .font(.system(size: 9, weight: .bold, design: .rounded))
-                                .foregroundColor(.white)
-                                .padding(.horizontal, 5).padding(.vertical, 2)
-                                .background(Color.red)
-                                .clipShape(Capsule())
-                                .offset(x: 6, y: -6)
-                                .transition(.scale(scale: 0.85).combined(with: .opacity))
-                        }
-                    }
-
-                    // Green download button, only shown when an update exists.
-                    // While a download/install runs it is replaced by progress UI.
-                    switch updater.phase {
-                    case .idle, .failed:
-                        if case .updateAvailable(_, _, _) = updateState {
-                            Button {
-                                startDirectDownload()
-                            } label: {
-                                Text("下载更新")
-                                    .font(.system(size: 12, weight: .medium))
-                                    .padding(.horizontal, 16).padding(.vertical, 8)
-                            }
-                            .background(Color.green)
-                            .foregroundColor(.white)
-                            .cornerRadius(6)
-                            .buttonStyle(.plain)
-                            .transition(.scale(scale: 0.85).combined(with: .opacity))
-                        }
-                    case .downloading(let progress):
-                        VStack(spacing: 5) {
-                            HStack(spacing: 8) {
-                                ProgressView(value: progress)
-                                    .frame(width: 130)
-                                Text("\(Int((progress * 100).rounded()))%")
-                                    .font(.system(size: 11, design: .monospaced))
-                                    .foregroundColor(theme.secondaryText)
-                                    .frame(width: 36, alignment: .trailing)
-                            }
-                            Text("正在下载新版本…")
-                                .font(.system(size: 10.5))
-                                .foregroundColor(theme.tertiaryText)
-                        }
-                        .padding(.horizontal, 14).padding(.vertical, 8)
-                        .background(theme.cardBackground)
-                        .cornerRadius(6)
-                        .transition(.scale(scale: 0.95).combined(with: .opacity))
-                    case .installing:
-                        HStack(spacing: 8) {
-                            ProgressView()
-                                .controlSize(.small)
-                                .scaleEffect(0.8)
-                            Text("正在安装，即将自动重启…")
-                                .font(.system(size: 12, weight: .medium))
-                        }
-                        .padding(.horizontal, 16).padding(.vertical, 8)
-                        .background(theme.cardBackground)
-                        .cornerRadius(6)
-                        .transition(.scale(scale: 0.95).combined(with: .opacity))
+                Group {
+                    if updater.phase.isBusy {
+                        updateProgressCard
+                            .transition(.scale(scale: 0.95).combined(with: .opacity))
+                    } else {
+                        updateButtonsRow
+                            .transition(.scale(scale: 0.95).combined(with: .opacity))
                     }
                 }
-                .animation(.easeOut(duration: 0.2), value: updateState)
-                // Animate only phase transitions (button → progress card), not
-                // every progress tick — implicit animation on the enum value
-                // makes the bar lag behind the download and look frozen.
                 .animation(.easeOut(duration: 0.2), value: updater.phase.isBusy)
+                .animation(.easeOut(duration: 0.2), value: updateState)
                 .padding(.top, 4)
 
                 if case .failed(let message) = updater.phase {
                     VStack(spacing: 6) {
-                        Text(message)
-                            .font(.system(size: 11))
-                            .foregroundColor(.red)
-                            .multilineTextAlignment(.center)
-                            .frame(maxWidth: 320)
+                        HStack(spacing: 5) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .font(.system(size: 11))
+                                .foregroundColor(.red)
+                            Text(message)
+                                .font(.system(size: 11))
+                                .foregroundColor(.red)
+                        }
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 320)
+
                         // Manual escape hatch when programmatic download fails:
                         // open the release page / lanzou share in the browser.
                         Button {
@@ -168,7 +93,7 @@ extension InlineSettingsView {
                         }
                         .buttonStyle(.plain)
                     }
-                    .padding(.top, 6)
+                    .padding(.top, 4)
                 }
             }
             .padding(40)
@@ -219,6 +144,111 @@ extension InlineSettingsView {
     }
 
     // MARK: - About tab actions
+
+    private var updateButtonsRow: some View {
+        HStack(spacing: 12) {
+            Button {
+                checkForUpdates()
+            } label: {
+                HStack(spacing: 6) {
+                    if case .checking = updateState {
+                        ProgressView()
+                            .controlSize(.small)
+                            .scaleEffect(0.8)
+                        Text("检查中…")
+                            .font(.system(size: 12, weight: .medium))
+                    } else {
+                        Text("检查更新")
+                            .font(.system(size: 12, weight: .medium))
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+            }
+            .disabled(updateState == .checking)
+            .background(Color.accentColor)
+            .foregroundColor(.white)
+            .cornerRadius(6)
+            .buttonStyle(.plain)
+            .overlay(alignment: .topTrailing) {
+                // Red badge showing the latest version when an update exists.
+                if case .updateAvailable(let latestVersion, _, _) = updateState {
+                    Text(latestVersion)
+                        .font(.system(size: 9, weight: .bold, design: .rounded))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 5).padding(.vertical, 2)
+                        .background(Color.red)
+                        .clipShape(Capsule())
+                        .offset(x: 6, y: -6)
+                        .transition(.scale(scale: 0.85).combined(with: .opacity))
+                }
+            }
+
+            // Green download button, only shown when an update exists.
+            if case .updateAvailable = updateState {
+                Button {
+                    startDirectDownload()
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "arrow.down.circle.fill")
+                            .font(.system(size: 12))
+                        Text("下载更新")
+                            .font(.system(size: 12, weight: .medium))
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                }
+                .background(Color.green)
+                .foregroundColor(.white)
+                .cornerRadius(6)
+                .buttonStyle(.plain)
+                .transition(.scale(scale: 0.85).combined(with: .opacity))
+            }
+        }
+    }
+
+    private var updateProgressCard: some View {
+        VStack(spacing: 8) {
+            // 上方：通栏进度条
+            if case .downloading(let progress) = updater.phase {
+                ProgressView(value: progress)
+                    .progressViewStyle(.linear)
+            } else if case .installing = updater.phase {
+                ProgressView(value: 1.0)
+                    .progressViewStyle(.linear)
+            }
+
+            // 下方：提示文案与进度百分比/状态指示
+            HStack(spacing: 6) {
+                if case .downloading(let progress) = updater.phase {
+                    Text("下载中...")
+                        .font(.system(size: 11))
+                        .foregroundColor(theme.secondaryText)
+                    Spacer()
+                    Text("\(Int((progress * 100).rounded()))%")
+                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                        .foregroundColor(theme.secondaryText)
+                } else if case .installing = updater.phase {
+                    Text("安装更新...")
+                        .font(.system(size: 11))
+                        .foregroundColor(theme.secondaryText)
+                    Spacer()
+                    ProgressView()
+                        .controlSize(.small)
+                        .scaleEffect(0.65)
+                }
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .frame(width: 250)
+        .background(theme.cardBackground)
+        .cornerRadius(8)
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(theme.cardBorder.opacity(0.5), lineWidth: 1)
+        )
+    }
 
     private func githubIconImage() -> NSImage? {
         guard let url = Bundle.main.resourceURL?.appendingPathComponent("github.svg"),

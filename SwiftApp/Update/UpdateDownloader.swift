@@ -115,7 +115,7 @@ final class UpdateDownloader: NSObject, ObservableObject, URLSessionDownloadDele
             guard Self.looksLikeInstaller(package) else {
                 throw UpdateError.install("下载的安装包无效（文件不完整）")
             }
-            phase = .downloading(1)
+            phase = .installing
             try install(package: package, version: version)
         } catch {
             let message = (error as? UpdateError)?.errorDescription ?? error.localizedDescription
