@@ -221,7 +221,7 @@ fn test_resize_rgba_downscales() {
     let solid = [0x80u8, 0x40, 0x20, 0xFF];
     let src4 = solid.repeat(16);
     let out4 = crate::image::resize_rgba(&src4, 4, 4, 2, 2).expect("resize should succeed");
-    for px in out4.chunks_exact(4) {
+    for px in out4.as_chunks::<4>().0 {
         assert_eq!(px, &solid[..], "constant input must stay constant");
     }
 }
