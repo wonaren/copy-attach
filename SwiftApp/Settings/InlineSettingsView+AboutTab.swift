@@ -57,33 +57,65 @@ extension InlineSettingsView {
                     .frame(maxWidth: 300)
 
                 HStack(spacing: 12) {
-                    Button(action: checkForUpdates) {
-                        if case .checking = updateState {
-                            HStack(spacing: 6) {
+                    Button {
+                        checkForUpdates()
+                    } label: {
+                        HStack(spacing: 6) {
+                            if case .checking = updateState {
                                 ProgressView()
                                     .controlSize(.small)
                                     .scaleEffect(0.8)
                                 Text("检查中…")
                                     .font(.system(size: 12, weight: .medium))
+                            } else {
+                                Text("检查更新")
+                                    .font(.system(size: 12, weight: .medium))
                             }
-                        } else {
-                            Text("检查更新")
-                                .font(.system(size: 12, weight: .medium))
                         }
+                        .padding(.horizontal, 16).padding(.vertical, 8)
                     }
                     .disabled(updateState == .checking)
-                    .padding(.horizontal, 16).padding(.vertical, 8)
                     .background(Color.accentColor)
                     .foregroundColor(.white)
                     .cornerRadius(6)
                     .buttonStyle(.plain)
+                    .overlay(alignment: .topTrailing) {
+                        // Red badge showing the latest version when an update exists.
+                        if case .updateAvailable(let latestVersion, _, _) = updateState {
+                            Text(latestVersion)
+                                .font(.system(size: 9, weight: .bold, design: .rounded))
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 5).padding(.vertical, 2)
+                                .background(Color.red)
+                                .clipShape(Capsule())
+                                .offset(x: 6, y: -6)
+                                .transition(.scale(scale: 0.85).combined(with: .opacity))
+                        }
+                    }
+
+                    // Green download button, only shown when an update exists.
+                    if case .updateAvailable(_, let releaseURL, _) = updateState {
+                        Button {
+                            NSWorkspace.shared.open(releaseURL)
+                        } label: {
+                            Text("下载更新")
+                                .font(.system(size: 12, weight: .medium))
+                                .padding(.horizontal, 16).padding(.vertical, 8)
+                        }
+                        .background(Color.green)
+                        .foregroundColor(.white)
+                        .cornerRadius(6)
+                        .buttonStyle(.plain)
+                        .transition(.scale(scale: 0.85).combined(with: .opacity))
+                    }
                 }
+                .animation(.easeOut(duration: 0.2), value: updateState)
                 .padding(.top, 4)
             }
             .padding(40)
             .frame(maxWidth: .infinity)
         }
-        .alert(item: alertBinding) { result in
+        .alert(item: $updateAlert) { result in
             switch result {
             case .upToDate(let version):
                 return Alert(
@@ -118,9 +150,12 @@ extension InlineSettingsView {
                     dismissButton: .default(Text("好的"))
                 )
             case .idle, .checking:
-                // Should never be shown — alertBinding filters these out.
+                // Should never be shown — updateAlert is only set for terminal states.
                 return Alert(title: Text(""))
             }
+        }
+        .onAppear {
+            autoCheckForUpdates()
         }
     }
 
@@ -140,13 +175,15 @@ extension InlineSettingsView {
         NSWorkspace.shared.open(repoURL)
     }
 
-    private var alertBinding: Binding<UpdateCheckState?> {
-        Binding {
-            if case .idle = updateState { return nil }
-            if case .checking = updateState { return nil }
-            return updateState
-        } set: { _ in
-            updateState = .idle
+    /// Silent check when the About tab appears. Never shows the alert —
+    /// the result surfaces only through the badge / download button.
+    /// Retried on re-entry after an error, but not after a successful check.
+    private func autoCheckForUpdates() {
+        switch updateState {
+        case .idle, .error:
+            checkForUpdates(showAlert: false)
+        default:
+            break
         }
     }
 
@@ -158,8 +195,8 @@ extension InlineSettingsView {
     }
     private func stripDevSuffix(_ version: String) -> String { Self.stripDevSuffix(version) }
 
-    private func checkForUpdates() {
-        guard case .idle = updateState else { return }
+    private func checkForUpdates(showAlert: Bool = true) {
+        guard updateState != .checking else { return }
         updateState = .checking
 
         let url = URL(string: "https://api.github.com/repos/wonaren/copyattach-release/releases/latest")!
@@ -170,12 +207,12 @@ extension InlineSettingsView {
         URLSession.shared.dataTask(with: request) { [self] data, response, error in
             DispatchQueue.main.async {
                 if let error {
-                    updateState = .error("无法连接到更新服务器：\(error.localizedDescription)")
+                    finishUpdateCheck(.error("无法连接到更新服务器：\(error.localizedDescription)"), showAlert: showAlert)
                     return
                 }
 
                 guard let httpResponse = response as? HTTPURLResponse else {
-                    updateState = .error("无效的服务器响应")
+                    finishUpdateCheck(.error("无效的服务器响应"), showAlert: showAlert)
                     return
                 }
 
@@ -183,20 +220,20 @@ extension InlineSettingsView {
                 case 200:
                     break // continue parsing
                 case 404:
-                    updateState = .error("未找到版本信息（仓库中尚无正式 Release）")
+                    finishUpdateCheck(.error("未找到版本信息（仓库中尚无正式 Release）"), showAlert: showAlert)
                     return
                 case 403:
-                    updateState = .error("API 请求过于频繁，请稍后再试")
+                    finishUpdateCheck(.error("API 请求过于频繁，请稍后再试"), showAlert: showAlert)
                     return
                 default:
-                    updateState = .error("服务器返回错误 (HTTP \(httpResponse.statusCode))")
+                    finishUpdateCheck(.error("服务器返回错误 (HTTP \(httpResponse.statusCode))"), showAlert: showAlert)
                     return
                 }
 
                 guard let data,
                       let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                       let tagName = json["tag_name"] as? String else {
-                    updateState = .error("无法解析更新信息")
+                    finishUpdateCheck(.error("无法解析更新信息"), showAlert: showAlert)
                     return
                 }
 
@@ -214,16 +251,23 @@ extension InlineSettingsView {
 
                 if latestVersion.compare(currentBase, options: .numeric) == .orderedDescending {
                     // Normal upgrade: a newer version exists
-                    updateState = .updateAvailable(latestVersion: latestVersion, releaseURL: releaseURL, isDowngrade: false)
+                    finishUpdateCheck(.updateAvailable(latestVersion: latestVersion, releaseURL: releaseURL, isDowngrade: false), showAlert: showAlert)
                 } else if isDev {
                     // Dev → stable: offer the stable release even if it's the same
                     // version number or slightly behind (downgrade from dev)
-                    updateState = .updateAvailable(latestVersion: latestVersion, releaseURL: releaseURL, isDowngrade: true)
+                    finishUpdateCheck(.updateAvailable(latestVersion: latestVersion, releaseURL: releaseURL, isDowngrade: true), showAlert: showAlert)
                 } else {
-                    updateState = .upToDate(currentVersion: currentVersion)
+                    finishUpdateCheck(.upToDate(currentVersion: currentVersion), showAlert: showAlert)
                 }
             }
         }.resume()
+    }
+
+    /// Terminal-state sink: drives the badge / download button, and optionally
+    /// the alert (manual checks only — auto checks stay silent).
+    private func finishUpdateCheck(_ result: UpdateCheckState, showAlert: Bool) {
+        updateState = result
+        if showAlert { updateAlert = result }
     }
 
     private var todoBadge: some View {

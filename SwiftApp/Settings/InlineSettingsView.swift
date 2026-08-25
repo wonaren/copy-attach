@@ -28,6 +28,9 @@ struct InlineSettingsView: View {
     @State var showDragGuide = false
     @State var isHoveringDragIcon = false
     @State var updateState: UpdateCheckState = .idle
+    /// Alert item, decoupled from `updateState` so dismissing an alert does not
+    /// clear the badge / download button (which persist until a re-check).
+    @State var updateAlert: UpdateCheckState? = nil
     @Environment(\.appTheme) var theme
 
     init(initialTab: Int = 0) {
