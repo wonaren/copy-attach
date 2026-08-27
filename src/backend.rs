@@ -239,6 +239,43 @@ pub(crate) fn claim_pages(ptr: *const u8, byte_len: usize) {
     let _ = aligned_end;
 }
 
+/// Marks a transient blob Vec's pages reusable when dropped. Release-path
+/// symmetry for buffers that were claimed on acquisition (DB blobs,
+/// pasteboard reads): without this their pages stay dirty in the footprint
+/// until the allocator happens to reuse them.
+pub(crate) struct MarkBlobReusableOnDrop(pub(crate) Vec<u8>);
+
+impl Drop for MarkBlobReusableOnDrop {
+    fn drop(&mut self) {
+        mark_pages_reusable(self.0.as_ptr(), self.0.capacity());
+    }
+}
+
+/// String counterpart of [`MarkBlobReusableOnDrop`] for transient full-text
+/// bodies loaded from SQLite (paste/preview/undo paths).
+pub(crate) struct MarkStringReusableOnDrop(pub(crate) String);
+
+impl Drop for MarkStringReusableOnDrop {
+    fn drop(&mut self) {
+        mark_pages_reusable(self.0.as_ptr(), self.0.capacity());
+    }
+}
+
+/// Marks an entry's transient image blobs reusable on drop. Used by the
+/// paste path, whose DB-loaded blobs are re-persisted from slices and never
+/// stored — every early return must free their pages, so the guard owns the
+/// entry for the scope.
+pub(crate) struct MarkEntryBlobsReusableOnDrop(pub(crate) ClipboardEntry);
+
+impl Drop for MarkEntryBlobsReusableOnDrop {
+    fn drop(&mut self) {
+        if let ClipboardEntry::Image { png_data, thumb_data, .. } = &self.0 {
+            mark_pages_reusable(png_data.as_ptr(), png_data.capacity());
+            mark_pages_reusable(thumb_data.as_ptr(), thumb_data.capacity());
+        }
+    }
+}
+
 // Image capture decode buffer pool
 
 /// Pooled RGBA decode buffer, reused across image captures.
@@ -322,7 +359,8 @@ pub(crate) struct Backend {
     pub(crate) cleanup_threshold: Arc<AtomicUsize>,
     /// Live-replaceable capture policy (metadata only, no payloads).
     pub(crate) ignore_rules: Arc<Mutex<IgnoreRules>>,
-    /// Stack of deleted entries for undo (Cmd+Z). Max 10 items.
+    /// Stack of deleted entries for undo (Cmd+Z). Caps: DELETE_STACK_LIMIT
+    /// entries + MAX_UNDO_BYTES total payload (see `push_deleted`).
     pub(crate) deleted_stack: Arc<Mutex<Vec<DeletedStackEntry>>>,
     /// Entry ID of the most recently undo-restored entry (0 if none).
     pub(crate) last_restored_id: Arc<AtomicU64>,

@@ -89,7 +89,12 @@ pub extern "C" fn clipboard_get_item_text(index: c_int) -> *mut c_char {
     }
     match b.db.lock() {
         Ok(conn) => match load_text_by_db_id(&conn, db_id) {
-            Some(t) => to_ffi_cstring(&t),
+            // The guard marks the body's pages reusable on drop — the text is
+            // transient here (copied into the FFI CString).
+            Some(t) => {
+                let guard = crate::backend::MarkStringReusableOnDrop(t);
+                to_ffi_cstring(&guard.0)
+            }
             None => std::ptr::null_mut(),
         },
         Err(e) => {
@@ -256,14 +261,7 @@ pub extern "C" fn clipboard_get_image_thumb_by_db_id(db_id: i64, out_len: *mut c
     vec_to_raw(thumb_data)
 }
 
-/// Marks a stored-blob Vec's pages reusable when dropped.
-struct MarkBlobReusableOnDrop(Vec<u8>);
-
-impl Drop for MarkBlobReusableOnDrop {
-    fn drop(&mut self) {
-        crate::backend::mark_pages_reusable(self.0.as_ptr(), self.0.capacity());
-    }
-}
+use crate::backend::MarkBlobReusableOnDrop;
 
 /// Decode a stored image downscaled to at most `max_dim`, returning an RGBA8
 /// buffer owned by the caller (release via `clipboard_preview_buffer_release`).

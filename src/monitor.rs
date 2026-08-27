@@ -302,15 +302,18 @@ pub(crate) fn clipboard_monitor(
         let mut captured = false;
 
         if image_allowed {
-            if let Some(img_bytes) = macos::pasteboard_image_data() {
+            // The guard marks the raw pasteboard bytes' pages reusable on
+            // drop — release-path symmetry with the claim in
+            // `pasteboard_image_data` (the buffer is dead after decoding).
+            if let Some(img_bytes) = macos::pasteboard_image_data().map(crate::backend::MarkBlobReusableOnDrop) {
                 // Fast path for 8-bit RGBA PNGs; generic decoder otherwise.
                 let decoded: Result<(crate::backend::ImageDecodeBuffer, u32, u32), image::ImageError> = {
                     let mut pooled = crate::backend::ImageDecodeBuffer::acquire();
-                    match crate::image::decode_png_rgba8_into(&img_bytes, pooled.as_mut_vec()) {
+                    match crate::image::decode_png_rgba8_into(&img_bytes.0, pooled.as_mut_vec()) {
                         Some((w, h)) => Ok((pooled, w, h)),
                         None => {
                             drop(pooled);
-                            image::load_from_memory(&img_bytes).map(|img| {
+                            image::load_from_memory(&img_bytes.0).map(|img| {
                                 let rgba = img.to_rgba8();
                                 let (w, h) = rgba.dimensions();
                                 (
@@ -332,7 +335,7 @@ pub(crate) fn clipboard_monitor(
                     }
                     Err(e) => {
                         // Undecodable image data: fail explicitly, don't fabricate a capture.
-                        crate::debug_log!("CopyAttach: pasteboard image data ({} bytes) undecodable: {e}", img_bytes.len());
+                        crate::debug_log!("CopyAttach: pasteboard image data ({} bytes) undecodable: {e}", img_bytes.0.len());
                     }
                 }
             }

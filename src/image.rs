@@ -54,10 +54,19 @@ pub(crate) fn create_thumbnail(
 
 /// Create a thumbnail with `CatmullRom` filtering.
 /// Visually indistinguishable from Lanczos3 at small output sizes, ~2× faster.
+///
+/// Resizes via the in-house u8 two-pass [`resize_rgba`]: `imageops::resize`
+/// would allocate a `dst_w × src_h × 16B` float intermediate per capture
+/// (~14MB for a 5K screenshot) whose pages are never returned to the OS.
 pub(crate) fn create_thumbnail_fast(
     width: u32, height: u32, rgba_bytes: &[u8], max_dim: u32,
 ) -> Option<(Vec<u8>, u32, u32)> {
-    create_thumbnail_with_filter(width, height, rgba_bytes, max_dim, FilterType::CatmullRom)
+    let (new_w, new_h) = match thumbnail_target_dims(width, height, max_dim) {
+        Some(d) => d,
+        None => return encode_png(width, height, rgba_bytes).map(|d| (d, width, height)),
+    };
+    let resized = resize_rgba(rgba_bytes, width, height, new_w, new_h)?;
+    encode_png(new_w, new_h, &resized).map(|d| (d, new_w, new_h))
 }
 
 /// Keep thumbnail short side >= max_dim / 5 to avoid blurry wide images.
@@ -66,15 +75,13 @@ const MIN_THUMB_SHORT_RATIO: u32 = 5;
 /// Hard cap on thumbnail long side for extreme panoramas.
 const MAX_THUMB_LONG: u32 = 900;
 
-/// Core thumbnail logic parameterized by resize filter.
-fn create_thumbnail_with_filter(
-    width: u32, height: u32, rgba_bytes: &[u8], max_dim: u32,
-    filter: FilterType,
-) -> Option<(Vec<u8>, u32, u32)> {
-    use image::{ImageBuffer, Rgba};
+/// Aspect-preserving thumbnail target dims: `max_dim` long side, short side
+/// kept >= max_dim/5, long side capped for extreme panoramas. Returns `None`
+/// when no downscale is needed (encode the source as-is).
+fn thumbnail_target_dims(width: u32, height: u32, max_dim: u32) -> Option<(u32, u32)> {
     let scale_long = (f64::from(max_dim) / f64::from(width.max(height))).min(1.0);
     if scale_long >= 1.0 {
-        return encode_png(width, height, rgba_bytes).map(|d| (d, width, height));
+        return None;
     }
 
     // Keep the short side large enough that the UI doesn't upscale a blurry thumb.
@@ -91,13 +98,27 @@ fn create_thumbnail_with_filter(
         scale_long
     };
 
-    let new_w = (f64::from(width) * scale).round() as u32;
-    let new_h = (f64::from(height) * scale).round() as u32;
+    Some((
+        (f64::from(width) * scale).round().max(1.0) as u32,
+        (f64::from(height) * scale).round().max(1.0) as u32,
+    ))
+}
+
+/// Core thumbnail logic parameterized by resize filter.
+fn create_thumbnail_with_filter(
+    width: u32, height: u32, rgba_bytes: &[u8], max_dim: u32,
+    filter: FilterType,
+) -> Option<(Vec<u8>, u32, u32)> {
+    use image::{ImageBuffer, Rgba};
+    let (new_w, new_h) = match thumbnail_target_dims(width, height, max_dim) {
+        Some(d) => d,
+        None => return encode_png(width, height, rgba_bytes).map(|d| (d, width, height)),
+    };
     let img = ImageBuffer::<Rgba<u8>, &[u8]>::from_raw(width, height, rgba_bytes)?;
-    let thumb = image::imageops::resize(&img, new_w.max(1), new_h.max(1), filter);
+    let thumb = image::imageops::resize(&img, new_w, new_h, filter);
     let mut output = Vec::new();
     thumb.write_to(&mut std::io::Cursor::new(&mut output), image::ImageFormat::Png).ok()?;
-    Some((output, new_w.max(1), new_h.max(1)))
+    Some((output, new_w, new_h))
 }
 
 /// Stable FNV-1a hash of dimensions + raw pixels for image dedup.

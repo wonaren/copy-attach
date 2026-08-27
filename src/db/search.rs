@@ -134,11 +134,16 @@ fn escape_like(query: &str) -> String {
 
 /// Load the full text body for a row by its SQLite rowid (== `db_id`).
 pub(crate) fn load_text_by_db_id(conn: &Connection, db_id: i64) -> Option<String> {
-    conn.query_row(
-        "SELECT text FROM clipboard_history WHERE id = ?1",
-        rusqlite::params![db_id],
-        |row| row.get(0),
-    )
-    .map_err(|e| crate::error_log!("CopyAttach: failed to load text for db_id={db_id}: {e}"))
-    .ok()
+    let text: String = conn
+        .query_row(
+            "SELECT text FROM clipboard_history WHERE id = ?1",
+            rusqlite::params![db_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| crate::error_log!("CopyAttach: failed to load text for db_id={db_id}: {e}"))
+        .ok()?;
+    // rusqlite may have grown this buffer over reusable-marked pages; claim
+    // them before the caller reads the body (same contract as blob reads).
+    crate::backend::claim_pages(text.as_ptr(), text.capacity());
+    Some(text)
 }

@@ -121,6 +121,11 @@ pub extern "C" fn clipboard_init() -> c_int {
         return 0; // Already initialized
     }
 
+    // Purge stale materialized paste PNGs once at launch: the per-paste
+    // purge only runs when an image paste happens, so a long stretch without
+    // one leaves stale files until the OS cleans $TMPDIR.
+    super::paste::purge_stale_paste_images();
+
     // One-time image-hash migration (DefaultHasher → stable FNV-1a,
     // user_version 2 → 3) on a background thread: decoding ~250 MB of stored
     // PNGs takes seconds, and the DB lock is held one row at a time so

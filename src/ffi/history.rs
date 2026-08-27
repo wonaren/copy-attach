@@ -257,8 +257,13 @@ pub extern "C" fn clipboard_undo_delete() -> c_int {
         ClipboardEntry::Text { ref mut db_id, .. } => *db_id = new_row_id,
         ClipboardEntry::Image { ref mut db_id, ref mut png_data, ref mut thumb_data, .. } => {
             *db_id = new_row_id;
-            let _ = std::mem::take(png_data);
-            let _ = std::mem::take(thumb_data);
+            let taken_png = std::mem::take(png_data);
+            let taken_thumb = std::mem::take(thumb_data);
+            // Release-path symmetry with the claim at delete time: the blobs
+            // were persisted above and are dropped here — free their pages
+            // from the footprint, not just the allocation.
+            crate::backend::mark_pages_reusable(taken_png.as_ptr(), taken_png.capacity());
+            crate::backend::mark_pages_reusable(taken_thumb.as_ptr(), taken_thumb.capacity());
         }
     }
 

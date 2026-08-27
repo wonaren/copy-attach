@@ -211,6 +211,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard let window = notification.object as? NSWindow else { return }
         if window === licenseGateWindow {
             licenseGateWindow = nil
+            // Closing the gate mid-celebration cancels the celebration view's
+            // `.task`, so finishCelebration() would never run — leaving
+            // `celebration` non-nil forever, which freezes license maintenance
+            // and spins a 1Hz re-arm loop in scheduleMaintenanceTick(). The
+            // activation already succeeded, so finish the celebration here.
+            if LicenseManager.shared.celebration != nil {
+                LicenseManager.shared.finishCelebration()
+            }
             if !LicenseManager.shared.state.permitsCoreFeatures { NSApp.terminate(nil) }
             return
         }

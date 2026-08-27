@@ -64,6 +64,23 @@ fn write_paste_image_file(png_data: &[u8], entry_id: u64) -> Option<String> {
         crate::error_log!("CopyAttach: cannot write paste image {}: {e}", path.display());
         return None;
     }
+    purge_stale_paste_images();
+    Some(path.to_string_lossy().into_owned())
+}
+
+/// Purge materialized paste PNGs older than [`PASTE_IMAGE_TTL`]. Runs after
+/// each successful paste materialization (never before the new file is on
+/// disk — a failed write must not delete the file the pasteboard still
+/// references) and once at backend init: a long stretch without image pastes
+/// would otherwise leave stale files until the OS cleans $TMPDIR. Never
+/// deletes everything, since the previous paste's target may still be
+/// reading its file.
+pub(crate) fn purge_stale_paste_images() {
+    let mut dir = copyattach_temp_root();
+    dir.push("Paste");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
     if let Ok(entries) = std::fs::read_dir(&dir) {
         for entry in entries.flatten() {
             if let Ok(meta) = entry.metadata() {
@@ -77,7 +94,6 @@ fn write_paste_image_file(png_data: &[u8], entry_id: u64) -> Option<String> {
             }
         }
     }
-    Some(path.to_string_lossy().into_owned())
 }
 
 /// Shared implementation for select-and-paste.
@@ -115,7 +131,12 @@ fn select_and_paste_impl(mut item: ClipboardEntry) -> c_int {
     // entry only carries preview/label/hash. A text entry with db_id=0 was
     // never persisted (DB write failed) and cannot be pasted: explicit
     // failure, clipboard untouched, mirroring the image load failure below.
-    let full_text: Option<String> = match &item {
+    // The guard marks the body's pages reusable on drop: the text is
+    // transient here (written to the pasteboard and re-persisted from a
+    // slice), so its pages must leave the footprint at scope end on every
+    // return path — release-path symmetry with the claim in
+    // `load_text_by_db_id`.
+    let full_text: Option<crate::backend::MarkStringReusableOnDrop> = match &item {
         ClipboardEntry::Text { db_id, .. } => {
             if *db_id == 0 {
                 crate::error_log!("CopyAttach: select_and_paste aborted for text entry {}: db_id=0 (entry not persisted)", item.entry_id());
@@ -123,7 +144,7 @@ fn select_and_paste_impl(mut item: ClipboardEntry) -> c_int {
             }
             match backend().db.lock() {
                 Ok(conn) => match load_text_by_db_id(&conn, *db_id) {
-                    Some(t) => Some(t),
+                    Some(t) => Some(crate::backend::MarkStringReusableOnDrop(t)),
                     None => {
                         crate::error_log!("CopyAttach: select_and_paste DB text load failed for entry {} (db_id={}) — paste aborted", item.entry_id(), *db_id);
                         return 0;
@@ -179,6 +200,11 @@ fn select_and_paste_impl(mut item: ClipboardEntry) -> c_int {
         }
         _ => item.clone(),
     };
+    // The DB-loaded blobs above are transient (re-persisted from slices
+    // below, never stored). The guard marks their pages reusable at scope
+    // end on every return path — release-path symmetry with the claim at
+    // load time.
+    let db_item = crate::backend::MarkEntryBlobsReusableOnDrop(db_item);
 
     // Text paste needs the arboard clipboard handle; image paste writes the
     // pasteboard directly via NSPasteboard (set_pasteboard_file_url) and must
@@ -192,7 +218,7 @@ fn select_and_paste_impl(mut item: ClipboardEntry) -> c_int {
     // apps attach the file. VS Code's integrated terminal is the exception:
     // its Cmd+V handler only reads plain text, so the path is written as text
     // for that target.
-    match &db_item {
+    match &db_item.0 {
         ClipboardEntry::Text { .. } => {
             let text = match &full_text {
                 Some(t) => t,
@@ -202,7 +228,7 @@ fn select_and_paste_impl(mut item: ClipboardEntry) -> c_int {
                 }
             };
             let mut cb = match Clipboard::new() { Ok(c) => c, Err(_) => return 0 };
-            if cb.set_text(text).is_err() { return 0; }
+            if cb.set_text(&text.0).is_err() { return 0; }
         }
         ClipboardEntry::Image { png_data, id, .. } => {
             if png_data.is_empty() { return 0; }
@@ -233,13 +259,13 @@ fn select_and_paste_impl(mut item: ClipboardEntry) -> c_int {
     if let Some(b) = try_backend() {
         match b.db.lock() {
             Ok(mut conn) => {
-                let png_for_db = match &db_item {
+                let png_for_db = match &db_item.0 {
                     ClipboardEntry::Image { png_data, .. } if !png_data.is_empty() => {
                         Some(png_data.as_slice())
                     }
                     _ => None,
                 };
-                let thumb_for_db = match &db_item {
+                let thumb_for_db = match &db_item.0 {
                     ClipboardEntry::Image { thumb_data, thumb_width, thumb_height, .. } if !thumb_data.is_empty() => {
                         Some((thumb_data.as_slice(), *thumb_width, *thumb_height))
                     }
@@ -248,8 +274,8 @@ fn select_and_paste_impl(mut item: ClipboardEntry) -> c_int {
 
                 match crate::db::persist_entry_to_db(
                     &mut conn,
-                    &db_item,
-                    full_text.as_deref(),
+                    &db_item.0,
+                    full_text.as_ref().map(|g| g.0.as_str()),
                     png_for_db,
                     thumb_for_db,
                     b.cleanup_threshold.load(Ordering::Relaxed),
@@ -370,7 +396,9 @@ pub extern "C" fn clipboard_get_text_by_id(entry_id: u64) -> *mut c_char {
             return std::ptr::null_mut();
         }
     };
-    to_ffi_cstring(&text)
+    // Transient body: mark its pages reusable once the FFI CString is built.
+    let guard = crate::backend::MarkStringReusableOnDrop(text);
+    to_ffi_cstring(&guard.0)
 }
 
 #[cfg(test)]
