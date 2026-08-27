@@ -167,7 +167,7 @@ extension InlineSettingsView {
             }
             .disabled(updateState == .checking)
             .background(Color.accentColor)
-            .foregroundColor(.white)
+            .foregroundColor(theme.buttonText)
             .cornerRadius(6)
             .buttonStyle(.plain)
             .overlay(alignment: .topTrailing) {
@@ -199,7 +199,7 @@ extension InlineSettingsView {
                     .padding(.vertical, 8)
                 }
                 .background(Color.green)
-                .foregroundColor(.white)
+                .foregroundColor(theme.buttonText)
                 .cornerRadius(6)
                 .buttonStyle(.plain)
                 .transition(.scale(scale: 0.85).combined(with: .opacity))

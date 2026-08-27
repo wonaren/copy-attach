@@ -53,7 +53,7 @@ struct AppTheme {
         tertiaryText: Color(nsColor: NSColor(calibratedRed: 0.55, green: 0.55, blue: 0.58, alpha: 1.0)),
         buttonBackground: Color(nsColor: NSColor(calibratedRed: 0.22, green: 0.22, blue: 0.24, alpha: 1.0)),
         buttonBorder: Color(nsColor: NSColor(calibratedRed: 0.45, green: 0.45, blue: 0.48, alpha: 1.0)),
-        buttonText: Color(white: 0.95),
+        buttonText: Color(white: 0.85),
         cardRowBackground: Color(nsColor: NSColor(calibratedRed: 0.12, green: 0.12, blue: 0.13, alpha: 1.0)),
 
         // Popup

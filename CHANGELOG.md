@@ -4,19 +4,21 @@
 
 ## [Unreleased]
 
-### 内存优化
-
-- 图片捕获 Phase 2 改为**单 worker + 单槽有界队列**：编码跟不上复制速度时捕获线程显式阻塞（背压），不再每张图片开一个线程持有全分辨率 RGBA——快速连续复制大图不再导致后台内存无界增长。
-- 预览窗口关闭时彻底断开 `NSHostingView` → `PreviewContent` → `NSImage` → Rust 预览缓冲的持有链，关闭/切换预览后解码缓冲立即归还，不再随预览会话累积。
-- 撤销删除从最多 10 步改为**只保留最近 1 步**（删除撤销非高频操作，少一步即少一份载荷常驻）；单条仍受 `MAX_UNDO_BYTES`(48MB) 上限保护，超大载荷不得钉住内存。
+## [0.99.26] - 2026-08-27
 
 ### 内存优化
 
-- **补齐「claim 后释放未 mark」的对称治理**：粘贴、撤销、捕获路径从 SQLite/粘贴板读出的临时大缓冲（DB blob、原始图片字节、大文本正文）释放时统一标记页可回收（`madvise(MADV_FREE_REUSABLE)`），不再以脏页滞留在进程 footprint——每次图片粘贴/撤销/捕获后内存即回落，而非等到分配器碰巧复用。
-- **捕获热路径缩略图去浮点中转**：Phase 1 缩略图由 `imageops::resize`（每次捕获分配 `dst_w×src_h×16B` f32 中间缓冲、约 14MB/5K 截图）改走自研两遍 CatmullRom u8 缩放，与预览路径同源；捕获路径大分配清零，缩略图尺寸与视觉不变。
+- **补齐释放侧可回收标记（`madvise(MADV_FREE_REUSABLE)`）**：粘贴、撤销、捕获路径从 SQLite/剪贴板读出的临时大缓冲（DB blob、原始图片字节、大文本正文）释放时统一标记页可回收，不再以脏页滞留在进程 footprint；每次图片粘贴/撤销/捕获后内存即回落。
+- **捕获热路径缩略图去除浮点中转**：Phase 1 缩略图由 `imageops::resize`（每次捕获分配 `dst_w×src_h×16B` f32 中间缓冲、约 14MB/5K 截图）改走自研两遍 CatmullRom u8 缩放，与预览路径同源；捕获热路径大分配清零，缩略图尺寸与视觉不变。
+- **图片捕获 Phase 2 有界背压**：改为单 worker + 单槽有界队列，编码跟不上复制速度时捕获线程显式阻塞，常驻在途最多 2 张全分辨率图，解决连续快速复制大图导致后台内存增长的问题。
+- **预览窗口关闭强制释放解码缓冲**：关闭时彻底断开 `NSHostingView` → `PreviewContent` → `NSImage` → Rust 预览缓冲的持有链，关闭/切换预览后解码缓冲立即归还，不再随预览会话累积。
+- **删除撤销栈缩减**：撤销历史从最多 10 步改为仅保留最近 1 步（删除撤销非高频操作，少一步即少一份载荷常驻）；单条仍受 `MAX_UNDO_BYTES`(48MB) 上限保护，超大载荷不得钉住内存。
 - 大文本正文读取（粘贴/预览/撤销）与图片 blob 纳入同一 claim/mark 契约，行为对称。
+
+### 稳定性
+
 - 修复激活庆祝动画播放中途关闭许可门禁窗口导致的状态泄漏：`celebration` 永久非 nil 曾冻结许可证维护调度并触发 1Hz 空转定时器。
-- 后端启动时清理过期的临时粘贴 PNG（此前仅在图片粘贴时顺手清理）。
+- 后端启动时自动清理过期的临时粘贴 PNG（此前仅在图片粘贴时顺手清理）。
 
 ## [0.99.24] - 2026-08-25
 
@@ -36,10 +38,6 @@
 
 - 修复下载完成后临时文件移动竞态：URLSession 回调返回即删除临时文件，改为在回调内同步移动，避免主线程繁忙时安装包丢失报错。
 - 修复下载进度条不动的假象：进度更新不再被隐式动画插值拖住，改为实时直通刷新。
-
-[Unreleased]: https://github.com/wonaren/copy-attach/compare/v0.99.24...HEAD
-[0.99.24]: https://github.com/wonaren/copy-attach/compare/v0.99.23...v0.99.24
-[0.99.23]: https://github.com/wonaren/copy-attach/compare/v0.99.22...v0.99.23
 
 ## [0.99.22] - 2026-08-24
 
@@ -80,7 +78,10 @@
 - 修复文本捕获并发时历史条目身份错配的问题。
 - 增加 Rust 侧调试日志落盘，便于诊断数据库和 FFI 错误。
 
-[Unreleased]: https://github.com/wonaren/copy-attach/compare/v0.99.22...HEAD
+[Unreleased]: https://github.com/wonaren/copy-attach/compare/v0.99.26...HEAD
+[0.99.26]: https://github.com/wonaren/copy-attach/compare/v0.99.24...v0.99.26
+[0.99.24]: https://github.com/wonaren/copy-attach/compare/v0.99.23...v0.99.24
+[0.99.23]: https://github.com/wonaren/copy-attach/compare/v0.99.22...v0.99.23
 [0.99.22]: https://github.com/wonaren/copy-attach/compare/v0.99.20...v0.99.22
 [0.99.20]: https://github.com/wonaren/copy-attach/compare/v0.99.19...v0.99.20
 [0.99.19]: https://github.com/wonaren/copy-attach/compare/v0.99.13...v0.99.19
