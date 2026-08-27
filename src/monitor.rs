@@ -2,9 +2,12 @@
 //!
 //! Polls the pasteboard via `changeCount`; image capture runs in two phases so
 //! the monitor thread stays responsive while full PNG encoding happens async.
+//! Phase 2 runs on a single worker fed by a single-slot bounded channel: a
+//! full send blocks the capture thread (backpressure) instead of spawning an
+//! unbounded number of threads that each retain a full-resolution RGBA image.
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use arboard::Clipboard;
@@ -18,6 +21,83 @@ use crate::macos;
 
 /// Maximum length of the longest edge for thumbnail generation.
 const THUMBNAIL_MAX_DIM: u32 = 300;
+
+/// A bounded Phase 2 queue. Each pending job owns a full RGBA image, so an
+/// unbounded thread-per-capture design turns clipboard activity into an
+/// unbounded resident-memory queue when PNG encoding falls behind.
+struct ImagePhase2Job {
+    rgba: crate::backend::ImageDecodeBuffer,
+    width: u32,
+    height: u32,
+    hash: u64,
+    thumb_data: Vec<u8>,
+    thumb_w: u32,
+    thumb_h: u32,
+    history: Arc<Mutex<Vec<ClipboardEntry>>>,
+    db: Arc<Mutex<rusqlite::Connection>>,
+    threshold: usize,
+}
+
+static IMAGE_PHASE2_QUEUE: OnceLock<mpsc::SyncSender<ImagePhase2Job>> = OnceLock::new();
+
+fn image_phase2_sender() -> &'static mpsc::SyncSender<ImagePhase2Job> {
+    IMAGE_PHASE2_QUEUE.get_or_init(|| {
+        // One worker and one queued job bound the full-resolution RGBA memory
+        // held outside the active capture. send() deliberately blocks when
+        // full: losing backpressure here would recreate the memory leak.
+        let (tx, rx) = mpsc::sync_channel::<ImagePhase2Job>(1);
+        thread::Builder::new()
+            .name("copyattach-image-phase2".to_string())
+            .spawn(move || {
+                while let Ok(job) = rx.recv() {
+                    persist_image_phase2(job);
+                }
+            })
+            .expect("CopyAttach: failed to start image Phase 2 worker");
+        tx
+    })
+}
+
+fn persist_image_phase2(job: ImagePhase2Job) {
+    let ImagePhase2Job { rgba, width, height, hash: item_hash, thumb_data: thumb_async,
+        thumb_w, thumb_h, history, db, threshold } = job;
+    let mut scratch = crate::backend::ImageEncodeScratchGuard::acquire();
+    let full_png = match crate::image::encode_png_into(width, height, &rgba, &mut scratch) {
+        Some(()) => scratch.as_slice(),
+        None => {
+            crate::debug_log!("CopyAttach: failed to encode full-size PNG for image {width}x{height} — removing broken entry from history");
+            let mut hist = history.lock().unwrap();
+            hist.retain(|e| !matches!(e, ClipboardEntry::Image { hash, .. } if *hash == item_hash));
+            return;
+        }
+    };
+    let db_item = {
+        let hist = history.lock().unwrap();
+        hist.iter().find(|e| matches!(e, ClipboardEntry::Image { hash, .. } if *hash == item_hash)).cloned()
+    };
+    if let Some(db_item) = db_item {
+        let mut conn = match db.lock() {
+            Ok(c) => c,
+            Err(e) => {
+                crate::error_log!("CopyAttach: DB mutex poisoned in Phase 2 image persist: {e}");
+                return;
+            }
+        };
+        match crate::db::persist_entry_to_db(&mut conn, &db_item, None, Some(full_png),
+                                             Some((&thumb_async, thumb_w, thumb_h)), threshold) {
+            Ok(row_id) => {
+                let mut hist = history.lock().unwrap();
+                for entry in hist.iter_mut() {
+                    if let ClipboardEntry::Image { hash, db_id, .. } = entry {
+                        if *hash == item_hash { *db_id = row_id; break; }
+                    }
+                }
+                crate::backend::IMAGE_ENCODING_COUNTER.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(()) => crate::error_log!("CopyAttach: Phase 2 DB insert failed for image {width}x{height} — entry stays with db_id=0"),
+        }
+    }
+}
 
 /// Shared image pipeline: Phase 1 updates memory, Phase 2 encodes and persists.
 /// Uses the pooled decode buffer to avoid per-capture large allocations.
@@ -72,72 +152,23 @@ fn ingest_rgba_image(
             crate::backend::mark_history_changed();
         }
 
-        // Phase 2 (async): full PNG encode -> DB write.
-        let db = db.clone();
-        let history = history.clone();
-        let threshold = cleanup_threshold.load(Ordering::Relaxed);
-        let item_hash = hash;
-        let thumb_async = thumb_data;
-
-        thread::spawn(move || {
-            // Use the pooled scratch buffer to avoid per-capture large allocations.
-            let mut scratch = crate::backend::ImageEncodeScratchGuard::acquire();
-            let full_png = match crate::image::encode_png_into(width, height, &rgba, &mut scratch) {
-                Some(()) => scratch.as_slice(),
-                None => {
-                    crate::debug_log!("CopyAttach: failed to encode full-size PNG for image {width}x{height} — removing broken entry from history");
-                    // Remove the Phase 1 entry: without PNG data it can never be pasted.
-                    let mut hist = history.lock().unwrap();
-                    hist.retain(|e| match e {
-                        ClipboardEntry::Image { hash: h, .. } => *h != item_hash,
-                        _ => true,
-                    });
-                    return;
-                }
-            };
-
-            let db_item = {
-                let hist = history.lock().unwrap();
-                hist.iter().find(|e| match e {
-                    ClipboardEntry::Image { hash: h, .. } => *h == item_hash,
-                    _ => false,
-                }).cloned()
-            };
-
-            if let Some(db_item) = db_item {
-                let mut conn = match db.lock() {
-                    Ok(c) => c,
-                    Err(e) => {
-                        crate::error_log!("CopyAttach: DB mutex poisoned in Phase 2 image persist: {e}");
-                        return;
-                    }
-                };
-                let persisted = crate::db::persist_entry_to_db(
-                    &mut conn, &db_item,
-                    None,
-                    Some(full_png),
-                    Some((&thumb_async, thumb_w, thumb_h)),
-                    threshold,
-                );
-                match persisted {
-                    Ok(row_id) => {
-                        let mut hist = history.lock().unwrap();
-                        for entry in hist.iter_mut() {
-                            if let ClipboardEntry::Image { hash: h, db_id, .. } = entry {
-                                if *h == item_hash {
-                                    *db_id = row_id;
-                                    break;
-                                }
-                            }
-                        }
-                        crate::backend::IMAGE_ENCODING_COUNTER.fetch_add(1, Ordering::Relaxed);
-                    }
-                    Err(()) => {
-                        crate::error_log!("CopyAttach: Phase 2 DB insert failed for image {width}x{height} — entry stays with db_id=0");
-                    }
-                }
-            }
-        });
+        // Phase 2 is asynchronous but bounded. A synchronous send when the
+        // single-slot queue is full provides explicit backpressure instead of
+        // spawning another thread that retains a full-resolution RGBA buffer.
+        let job = ImagePhase2Job {
+            rgba,
+            width,
+            height,
+            hash,
+            thumb_data,
+            thumb_w,
+            thumb_h,
+            history: history.clone(),
+            db: db.clone(),
+            threshold: cleanup_threshold.load(Ordering::Relaxed),
+        };
+        image_phase2_sender().send(job)
+            .expect("CopyAttach: image Phase 2 worker stopped");
     } else {
         // Zero-size image: observe but do not create an entry.
     }

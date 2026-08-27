@@ -79,25 +79,28 @@ fn test_undo_stack_caps() {
     };
 
     // Count cap: 12 small entries trim to the newest DELETE_STACK_LIMIT.
+    // Only the most recent deletion is undoable; older ones are shed
+    // immediately (deleting something else permanently discards the previous
+    // undo).
     let mut stack = Vec::new();
     for i in 0..12 {
         push_deleted(&mut stack, text_entry(i, &"x".repeat(100)), Some("x".repeat(100)));
     }
-    assert_eq!(stack.len(), DELETE_STACK_LIMIT, "count cap keeps newest 10");
+    assert_eq!(stack.len(), DELETE_STACK_LIMIT, "count cap keeps the newest deletion only");
     let oldest_id = match &stack[0].0 {
         ClipboardEntry::Text { id, .. } => *id,
         _ => unreachable!(),
     };
-    assert_eq!(oldest_id, 2, "the two oldest (0, 1) were shed");
+    assert_eq!(oldest_id, 11, "all but the newest deletion (11) were shed");
 
-    // Byte cap: 10 entries × 6 MB = 60 MB exceeds MAX_UNDO_BYTES → shed oldest
-    // until the retained bodies fit (48 MB / 6 MB = 8 entries).
+    // Byte cap still guards the single slot: an oversized paste must not pin
+    // memory even when it is the only undoable deletion.
     let mut stack = Vec::new();
     for i in 0..10 {
         let body = "y".repeat(6 * 1024 * 1024);
         push_deleted(&mut stack, text_entry(i, &body), Some(body));
     }
-    assert_eq!(stack.len(), 8, "byte cap sheds oversized pastes");
+    assert_eq!(stack.len(), 1, "byte cap sheds oversized pastes");
     let retained: usize = stack
         .iter()
         .filter_map(|(_, t)| t.as_ref().map(|s| s.len()))
@@ -107,11 +110,11 @@ fn test_undo_stack_caps() {
         ClipboardEntry::Text { id, .. } => *id,
         _ => unreachable!(),
     };
-    assert_eq!(oldest_id, 2, "entries 0..=1 were shed, 2..=9 retained");
+    assert_eq!(oldest_id, 9, "entries 0..=8 were shed, 9 (newest) retained");
 
-    // Image blobs now count toward the same byte budget: a stack of deleted
-    // images cannot pin unbounded memory. 3 × 20 MB = 60 MB > 48 MB → the
-    // oldest is shed, keeping exactly 2.
+    // Image blobs count toward the same byte budget: a deleted image cannot
+    // pin unbounded memory. 3 × 20 MB = 60 MB > 48 MB → the single slot must
+    // still shed it (nothing undoable rather than pinning 60 MB).
     let image_entry = |i: u64, png: Vec<u8>| ClipboardEntry::Image {
         id: i,
         png_data: png,
@@ -130,7 +133,12 @@ fn test_undo_stack_caps() {
     for i in 0..3 {
         push_deleted(&mut stack, image_entry(i, vec![0u8; 20 * 1024 * 1024]), None);
     }
-    assert_eq!(stack.len(), 2, "image blobs respect the byte cap");
+    assert_eq!(stack.len(), 1, "single slot keeps only the newest image");
+    let oldest_id = match &stack[0].0 {
+        ClipboardEntry::Image { id, .. } => *id,
+        _ => unreachable!(),
+    };
+    assert_eq!(oldest_id, 2, "only the newest deletion (2) is retained");
     let image_bytes: usize = stack
         .iter()
         .map(|(e, _)| match e {
@@ -139,11 +147,6 @@ fn test_undo_stack_caps() {
         })
         .sum();
     assert!(image_bytes <= MAX_UNDO_BYTES, "retained image bytes bounded");
-    let oldest_id = match &stack[0].0 {
-        ClipboardEntry::Image { id, .. } => *id,
-        _ => unreachable!(),
-    };
-    assert_eq!(oldest_id, 1, "the oldest image (0) was shed");
 
     // Mixed: image entries with empty blobs carry no bytes and respect only
     // the count cap.
@@ -171,7 +174,7 @@ fn test_undo_stack_caps() {
     }
     assert_eq!(stack.len(), DELETE_STACK_LIMIT, "images respect count cap too");
     let image_count = stack.iter().filter(|(e, _)| matches!(e, ClipboardEntry::Image { .. })).count();
-    assert_eq!(image_count, DELETE_STACK_LIMIT, "all retained are images; oldest text + oldest image shed");
+    assert_eq!(image_count, DELETE_STACK_LIMIT, "only the newest deletion is retained");
 }
 
 /// Regression: undoing an image deletion must not pin the deleted image's

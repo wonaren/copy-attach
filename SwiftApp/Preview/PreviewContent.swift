@@ -11,6 +11,7 @@ struct PreviewContent: View {
     @Environment(\.appTheme) private var theme
     @Environment(\.colorScheme) private var colorScheme
 
+
     private var currentDbId: Int {
         guard case .image(_, let dbId, _, _, _, _, _, _) = item else { return 0 }
         return dbId
@@ -73,6 +74,12 @@ struct PreviewContent: View {
         // Auto-cancels previous task and restarts when dbId changes
         .task(id: dbId, priority: .userInitiated) {
             await loadImage(dbId: dbId)
+        }
+        .onDisappear {
+            // Break the NSImage -> CGImage -> PreviewBufferBox ownership chain
+            // as soon as this preview content leaves the hosting view.
+            image = nil
+            isLoadingImage = false
         }
     }
 

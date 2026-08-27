@@ -75,8 +75,17 @@ class PreviewWindow: NSPanel {
     }
 
     override func close() {
-        super.close()
+        Self.textHeightCache.removeAll()
+
+        // contentView is not the only owner: hostingView is retained by this
+        // window so it can update previews in place. Detach its root first;
+        // otherwise PreviewContent keeps its NSImage, which keeps the CGImage
+        // provider and Rust preview buffer alive after the window closes.
+        hostingView.rootView = AnyView(EmptyView())
+        hostingView = nil
         self.contentView = nil
+
+        super.close()
         self.alphaValue = 1.0
     }
 

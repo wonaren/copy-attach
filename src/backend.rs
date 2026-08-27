@@ -13,7 +13,7 @@ use crate::ignore::IgnoreRules;
 pub(crate) type DeletedStackEntry = (ClipboardEntry, Option<String>);
 
 /// Max undo slots kept on the stack (newest N deletions).
-pub(crate) const DELETE_STACK_LIMIT: usize = 10;
+pub(crate) const DELETE_STACK_LIMIT: usize = 1;
 
 /// Max bytes the undo stack may retain across text and image payloads.
 pub(crate) const MAX_UNDO_BYTES: usize = 48 * 1024 * 1024;
