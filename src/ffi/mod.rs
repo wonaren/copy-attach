@@ -44,8 +44,12 @@ pub(super) fn vec_to_raw(v: Vec<u8>) -> *mut u8 {
     // Pin capacity == len so `clipboard_free_bytes` can reconstruct the Vec
     // with from_raw_parts(ptr, len, len) without layout mismatch — same
     // contract `clipboard_search_ids` upholds explicitly before handing the
-    // buffer to the C caller.
-    v.shrink_to_fit();
+    // buffer to the C caller. Skip the shrink when capacity already matches
+    // (the common case for rusqlite blobs and packed snapshots): a shrink
+    // would realloc-and-copy a large buffer and double its peak.
+    if v.capacity() != v.len() {
+        v.shrink_to_fit();
+    }
     // The allocator may have handed back a block whose pages are still marked
     // `MADV_FREE_REUSABLE` from a previous scratch buffer (freed-but-marked
     // blocks are reused as-is). Such pages stay kernel-reclaimable — and

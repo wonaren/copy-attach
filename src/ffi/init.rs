@@ -77,8 +77,9 @@ pub extern "C" fn clipboard_init() -> c_int {
     #[cfg(not(feature = "stress-test"))]
     const INIT_LOAD: usize = DEFAULT_CLEANUP_THRESHOLD;
 
+    // `load_history_from_db` already applies `LIMIT ?` with the same bound,
+    // so the returned Vec is at most INIT_LOAD entries.
     let saved = load_history_from_db(&conn, INIT_LOAD);
-    let saved: Vec<ClipboardEntry> = saved.into_iter().take(INIT_LOAD).collect();
     trim_db_history(&conn, INIT_LOAD);
 
     // Prime the entry-id counter above the highest loaded ID so new entries
@@ -125,6 +126,11 @@ pub extern "C" fn clipboard_init() -> c_int {
     // purge only runs when an image paste happens, so a long stretch without
     // one leaves stale files until the OS cleans $TMPDIR.
     super::paste::purge_stale_paste_images();
+
+    // Purge stale materialized undo payloads once at launch: the in-memory
+    // undo stack does not survive a restart, so every file in the directory
+    // is an orphan from a previous process.
+    crate::backend::purge_undo_payload_dir();
 
     // One-time image-hash migration (DefaultHasher → stable FNV-1a,
     // user_version 2 → 3) on a background thread: decoding ~250 MB of stored

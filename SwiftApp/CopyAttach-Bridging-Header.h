@@ -98,6 +98,7 @@ int32_t clipboard_trim_oldest_percent(int32_t percent);
 int32_t clipboard_get_cleanup_threshold(void);
 void clipboard_set_cleanup_threshold(int32_t threshold);
 int64_t clipboard_get_storage_size(void);
+int32_t clipboard_shrink_db_memory(void);
 int32_t clipboard_delete_by_id(uint64_t entry_id);
 int32_t clipboard_undo_delete(void);
 int32_t clipboard_can_undo(void);

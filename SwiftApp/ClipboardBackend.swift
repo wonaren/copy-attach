@@ -39,6 +39,11 @@ class ClipboardBackend {
         c.totalCostLimit = 10 * 1024 * 1024  // 10 MB
         return c
     }()
+    /// Delayed thumbnail-cache release after the popup closes. While the
+    /// popup is open the cache makes scrolling smooth; once it has been closed
+    /// for a while the decoded bitmaps are no longer visible and are released
+    /// so they don't sit in physical memory across a long idle session.
+    private var thumbnailCacheClearTask: Task<Void, Never>?
 
     var favoriteIds: Set<Int> = []
 
@@ -129,6 +134,8 @@ class ClipboardBackend {
     func stop() {
         timer?.invalidate()
         timer = nil
+        thumbnailCacheClearTask?.cancel()
+        thumbnailCacheClearTask = nil
         if let observer = sourceAppObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(observer)
             sourceAppObserver = nil
@@ -143,6 +150,10 @@ class ClipboardBackend {
     @MainActor
     func setPopupVisible(_ visible: Bool) {
         if visible {
+            // Popup is visible again: keep the thumbnail cache warm and cancel
+            // any pending delayed release scheduled by the previous close.
+            thumbnailCacheClearTask?.cancel()
+            thumbnailCacheClearTask = nil
             refreshPermission()
             refresh()
             guard timer == nil else { return }
@@ -158,6 +169,27 @@ class ClipboardBackend {
         } else {
             timer?.invalidate()
             timer = nil
+            // Release unused SQLite page-cache memory back to the OS now that
+            // the monitor is the only DB user and the popup will not search or
+            // load thumbnails again until the next open. Run off the main
+            // actor: the DB lock may briefly wait for a capture transaction.
+            DispatchQueue.global(qos: .utility).async {
+                _ = clipboard_shrink_db_memory()
+            }
+            scheduleThumbnailCacheClear()
+        }
+    }
+
+    /// Release decoded thumbnails 60s after the popup closes. Re-opening the
+    /// popup within that window cancels the release, so a quick toggle never
+    /// pays a re-decode; after 60s the next open re-decodes <300px PNGs
+    /// asynchronously (the same path as a cache miss today).
+    private func scheduleThumbnailCacheClear() {
+        thumbnailCacheClearTask?.cancel()
+        thumbnailCacheClearTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 60_000_000_000)
+            guard !Task.isCancelled else { return }
+            self?.clearThumbnailCache()
         }
     }
 
@@ -354,24 +386,15 @@ class ClipboardBackend {
         let key = NSNumber(value: dbId)
         if let cached = thumbnailCache.object(forKey: key) { return cached }
         let decoded = await Task.detached(priority: .userInitiated) { () -> DecodedImage? in
-            var len: Int32 = 0
-            guard let ptr = clipboard_get_image_thumb_by_db_id(Int64(dbId), &len) else { return nil }
-            // Zero-copy hand-off of the Rust malloc'd buffer (same contract as
-            // `getImageFullByDbId`); the len==0 case still goes through the
-            // FFI free helper because `bytesNoCopy` with count 0 is not
-            // guaranteed to invoke the deallocator.
-            guard len > 0 else {
-                clipboard_free_bytes(ptr, len)
-                return nil
-            }
-            let data = Data(bytesNoCopy: ptr, count: Int(len), deallocator: .custom { raw, size in
-                clipboard_free_bytes(raw.assumingMemoryBound(to: UInt8.self), Int32(size))
-            })
-            guard let image = NSImage(data: data) else {
-                print("[ClipboardBackend] failed to decode thumbnail for dbId=\(dbId): PNG data is \(data.count) bytes but NSImage(data:) returned nil")
-                return nil
-            }
-            return DecodedImage(image: image)
+            // Rust decode pipeline (see ImageDecode): every intermediate is
+            // marked reusable and the delivered RGBA buffer is released via
+            // `clipboard_preview_buffer_release` when the CGImage dies. The
+            // old NSImage(data:) path used ImageIO, whose freed decode
+            // buffers linger in the malloc footprint forever (measured: a
+            // 180-image history session pinned ~40 MB of small-zone dirty
+            // pages after one popup open, never reclaimed by closing the
+            // popup or clearing the cache).
+            ImageDecode.previewImage(dbId: dbId, maxPixel: 300)
         }.value
         guard let decoded else { return nil }
         // cost = decoded RGBA upper bound for a 300px-max-dimension thumbnail
@@ -533,12 +556,16 @@ class ClipboardBackend {
 
     func clearHistory() {
         clipboard_clear_history()
-        // Immediately update local state
-        DispatchQueue.main.async {
-            self.count = 0
-            self.items = []
-            self.itemsGeneration &+= 1
-        }
+        // Rust now also clears the undo stack (full-content payload) during a
+        // clear, so release the Swift-side caches too: every thumbnail key is
+        // an old db_id and is invalid after the DB rows are gone.
+        clearThumbnailCache()
+        // This method runs on the MainActor — update local state synchronously
+        // so the UI never sees a stale list between the clear and the next
+        // popup-open refresh.
+        count = 0
+        items = []
+        itemsGeneration &+= 1
     }
 
     /// Trim the oldest N percent of entries from history and DB.

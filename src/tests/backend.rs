@@ -3,7 +3,7 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize};
 use std::sync::{Arc, Mutex};
 
-use crate::backend::{set_backend, Backend, DELETE_STACK_LIMIT, MAX_UNDO_BYTES, push_deleted};
+use crate::backend::{set_backend, Backend, DELETE_STACK_LIMIT, DeletedStackEntry, MAX_UNDO_BYTES, push_deleted};
 use crate::ffi::{clipboard_delete_by_id, clipboard_undo_delete};
 use crate::ignore::IgnoreRules;
 use crate::types::{ClipboardEntry, SourceApp};
@@ -72,6 +72,10 @@ fn test_clipboard_delete_by_id_returns_zero_on_failure() {
     );
 }
 
+fn mem_slot(entry: ClipboardEntry, payload_bytes: usize) -> DeletedStackEntry {
+    DeletedStackEntry { entry, payload_path: std::path::PathBuf::new(), payload_bytes }
+}
+
 #[test]
 fn test_undo_stack_caps() {
     let text_entry = |id: u64, body: &str| {
@@ -84,10 +88,10 @@ fn test_undo_stack_caps() {
     // undo).
     let mut stack = Vec::new();
     for i in 0..12 {
-        push_deleted(&mut stack, text_entry(i, &"x".repeat(100)), Some("x".repeat(100)));
+        push_deleted(&mut stack, mem_slot(text_entry(i, &"x".repeat(100)), 100));
     }
     assert_eq!(stack.len(), DELETE_STACK_LIMIT, "count cap keeps the newest deletion only");
-    let oldest_id = match &stack[0].0 {
+    let oldest_id = match &stack[0].entry {
         ClipboardEntry::Text { id, .. } => *id,
         _ => unreachable!(),
     };
@@ -98,15 +102,13 @@ fn test_undo_stack_caps() {
     let mut stack = Vec::new();
     for i in 0..10 {
         let body = "y".repeat(6 * 1024 * 1024);
-        push_deleted(&mut stack, text_entry(i, &body), Some(body));
+        let body_len = body.len();
+        push_deleted(&mut stack, mem_slot(text_entry(i, &body), body_len));
     }
     assert_eq!(stack.len(), 1, "byte cap sheds oversized pastes");
-    let retained: usize = stack
-        .iter()
-        .filter_map(|(_, t)| t.as_ref().map(|s| s.len()))
-        .sum();
+    let retained: usize = stack.iter().map(|s| s.payload_bytes).sum();
     assert!(retained <= MAX_UNDO_BYTES, "retained bodies bounded");
-    let oldest_id = match &stack[0].0 {
+    let oldest_id = match &stack[0].entry {
         ClipboardEntry::Text { id, .. } => *id,
         _ => unreachable!(),
     };
@@ -131,31 +133,25 @@ fn test_undo_stack_caps() {
     };
     let mut stack = Vec::new();
     for i in 0..3 {
-        push_deleted(&mut stack, image_entry(i, vec![0u8; 20 * 1024 * 1024]), None);
+        push_deleted(&mut stack, mem_slot(image_entry(i, vec![0u8; 20 * 1024 * 1024]), 20 * 1024 * 1024));
     }
     assert_eq!(stack.len(), 1, "single slot keeps only the newest image");
-    let oldest_id = match &stack[0].0 {
+    let oldest_id = match &stack[0].entry {
         ClipboardEntry::Image { id, .. } => *id,
         _ => unreachable!(),
     };
     assert_eq!(oldest_id, 2, "only the newest deletion (2) is retained");
-    let image_bytes: usize = stack
-        .iter()
-        .map(|(e, _)| match e {
-            ClipboardEntry::Image { png_data, thumb_data, .. } => png_data.len() + thumb_data.len(),
-            _ => 0,
-        })
-        .sum();
+    let image_bytes: usize = stack.iter().map(|s| s.payload_bytes).sum();
     assert!(image_bytes <= MAX_UNDO_BYTES, "retained image bytes bounded");
 
     // Mixed: image entries with empty blobs carry no bytes and respect only
     // the count cap.
     let mut stack = Vec::new();
-    push_deleted(&mut stack, text_entry(0, "small"), Some("small".to_string()));
+    push_deleted(&mut stack, mem_slot(text_entry(0, "small"), "small".len()));
     for i in 1..=11 {
         push_deleted(
             &mut stack,
-            ClipboardEntry::Image {
+            mem_slot(ClipboardEntry::Image {
                 id: i,
                 png_data: Vec::new(),
                 width: 1,
@@ -168,46 +164,77 @@ fn test_undo_stack_caps() {
                 source_name: String::new(),
                 source_bundle_id: String::new(),
                 db_id: i as i64,
-            },
-            None,
+            }, 0),
         );
     }
     assert_eq!(stack.len(), DELETE_STACK_LIMIT, "images respect count cap too");
-    let image_count = stack.iter().filter(|(e, _)| matches!(e, ClipboardEntry::Image { .. })).count();
+    let image_count = stack.iter().filter(|s| matches!(&s.entry, &ClipboardEntry::Image { .. })).count();
     assert_eq!(image_count, DELETE_STACK_LIMIT, "only the newest deletion is retained");
 }
 
 /// Regression: undoing an image deletion must not pin the deleted image's
 /// PNG/thumb allocations inside the in-memory history Vec.
 ///
-/// `clipboard_undo_delete` re-inserts the entry's blobs into a fresh DB row
-/// and then clears them from the entry before it lands in history. The clear
-/// must DROP the buffers, not just zero their length: `Vec::clear()` keeps
-/// capacity, so the restored entry would otherwise carry its multi-MB heap
-/// allocation (invisible to the metadata-only invariant, and out of reach of
-/// `MAX_UNDO_BYTES`) for its whole lifetime in the list.
+/// The undo payload is materialized on disk by `clipboard_delete_by_id`; the
+/// in-memory slot stays metadata-only, and the restored history entry must be
+/// metadata-only as well after `clipboard_undo_delete` re-inserts the blobs
+/// into a fresh DB row.
 #[test]
 fn test_undo_image_restore_releases_blob_capacity() {
     ensure_test_backend();
 
-    // Stage a deleted image entry on the undo stack, exactly like
-    // `clipboard_delete_by_id` leaves it: full png + thumb blobs in hand.
     let b = crate::backend::try_backend().expect("backend initialized");
-    let entry = ClipboardEntry::Image {
-        id: 777_000,
-        png_data: vec![0xAB; 64 * 1024],
-        width: 640,
-        height: 480,
-        thumb_data: vec![0xCD; 512],
-        thumb_width: 160,
-        thumb_height: 120,
-        hash: 0xDEAD_BEEF,
-        timestamp: 0,
-        source_name: "TestApp".to_string(),
-        source_bundle_id: "com.example.test".to_string(),
-        db_id: 0,
+    let png = vec![0xABu8; 64 * 1024];
+    let thumb = vec![0xCDu8; 512];
+
+    // Insert an image row and a matching in-memory entry, then delete it
+    // through the same FFI path the UI uses.
+    let db_id = {
+        let conn = b.db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO clipboard_history
+                (entry_type, png_data, width, height, thumb_data, thumb_width, thumb_height,
+                 hash, timestamp, source_name, source_bundle_id, entry_id)
+             VALUES (1, ?1, 640, 480, ?2, 160, 120, ?3, 0, 'TestApp', 'com.example.test', 777_000)",
+            rusqlite::params![png, thumb, 0xDEAD_BEEFu64 as i64],
+        ).expect("insert image row");
+        conn.last_insert_rowid()
     };
-    b.deleted_stack.lock().unwrap().push((entry, None));
+    {
+        let mut hist = b.history.lock().unwrap();
+        hist.push(ClipboardEntry::Image {
+            id: 777_000,
+            png_data: Vec::new(),
+            width: 640,
+            height: 480,
+            thumb_data: Vec::new(),
+            thumb_width: 160,
+            thumb_height: 120,
+            hash: 0xDEAD_BEEF,
+            timestamp: 0,
+            source_name: "TestApp".to_string(),
+            source_bundle_id: "com.example.test".to_string(),
+            db_id,
+        });
+    }
+
+    assert_eq!(clipboard_delete_by_id(777_000), 1, "delete must succeed");
+
+    // The slot must hold only metadata + a materialized payload file.
+    {
+        let stack = b.deleted_stack.lock().unwrap();
+        assert_eq!(stack.len(), 1, "one undo slot after delete");
+        let slot = &stack[0];
+        match &slot.entry {
+            ClipboardEntry::Image { png_data, thumb_data, .. } => {
+                assert!(png_data.is_empty() && thumb_data.is_empty(),
+                    "undo slot entry must be metadata-only after payload materialization");
+            }
+            other => panic!("expected image slot, got {other:?}"),
+        }
+        assert!(!slot.payload_path.as_os_str().is_empty(), "payload path must be materialized");
+        assert!(slot.payload_path.exists(), "payload file must exist");
+    }
 
     assert_eq!(clipboard_undo_delete(), 1, "undo must succeed");
 
@@ -222,6 +249,7 @@ fn test_undo_image_restore_releases_blob_capacity() {
     assert!(restored.2 && restored.3, "restored entry must hold no blob bytes");
     assert_eq!(restored.0, 0, "png buffer capacity must be released, not cleared");
     assert_eq!(restored.1, 0, "thumb buffer capacity must be released, not cleared");
+    assert!(b.deleted_stack.lock().unwrap().is_empty(), "undo slot consumed");
 }
 
 /// The capture pipeline's decode buffer is pooled: one allocation is reused

@@ -406,7 +406,15 @@ pub extern "C" fn clipboard_snapshot_release(snap: *mut Snapshot) {
         return;
     }
     unsafe {
-        drop(Box::from_raw(snap));
+        let boxed = Box::from_raw(snap);
+        // Release-path symmetry with the claim in `clipboard_snapshot_acquire`:
+        // the rows array was claimed before Swift read it, so its pages must be
+        // marked reusable before the Vec drops.
+        crate::backend::mark_pages_reusable(
+            boxed.0.as_ptr().cast::<u8>(),
+            boxed.0.capacity() * std::mem::size_of::<SnapshotRow>(),
+        );
+        drop(boxed);
     }
 }
 

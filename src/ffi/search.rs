@@ -35,6 +35,12 @@ pub extern "C" fn clipboard_search_ids(query: *const c_char, out_count: *mut c_i
     // Pin capacity == len so `clipboard_free_u64_array` can reconstruct the
     // Vec with from_raw_parts(ptr, len, len) without layout mismatch.
     ids.shrink_to_fit();
+    // Same hand-off contract as `vec_to_raw`: claim any reusable-marked pages
+    // the allocator may have handed back before Swift reads the ids.
+    crate::backend::claim_pages(
+        ids.as_ptr() as *const u8,
+        ids.len() * std::mem::size_of::<u64>(),
+    );
     let ptr = ids.as_mut_ptr();
     std::mem::forget(ids);
     unsafe { *out_count = len as c_int; }

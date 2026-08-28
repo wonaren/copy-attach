@@ -143,6 +143,9 @@ pub extern "C" fn clipboard_get_image_thumb(index: c_int, out_len: *mut c_int) -
         }
     };
 
+    // Same blob-read contract as preview/paste/undo: rusqlite may have grown
+    // this Vec over reusable-marked pages, so claim before reading the bytes.
+    crate::backend::claim_pages(thumb_data.as_ptr(), thumb_data.capacity());
     let len = thumb_data.len() as c_int;
     unsafe { *out_len = len; }
     vec_to_raw(thumb_data)
@@ -165,6 +168,10 @@ pub extern "C" fn clipboard_get_image_full(index: c_int, out_len: *mut c_int) ->
     };
 
     let data = if !png_data.is_empty() {
+        // In-memory blobs are normally empty (metadata-only invariant). A hit
+        // here means an invariant violation was introduced; make it visible
+        // instead of silently doubling peak memory on a full-PNG clone.
+        crate::debug_log!("CopyAttach: full image loaded from in-memory cache ({} bytes) — metadata-only invariant broken", png_data.len());
         png_data
     } else if db_id != 0 {
         match backend().db.lock() {
@@ -190,6 +197,10 @@ pub extern "C" fn clipboard_get_image_full(index: c_int, out_len: *mut c_int) ->
         return std::ptr::null_mut();
     };
 
+    // Same blob-read contract as preview/paste/undo: the DB-loaded Vec (or an
+    // in-memory cached clone) may live on reusable-marked pages, so claim
+    // before reading its bytes.
+    crate::backend::claim_pages(data.as_ptr(), data.capacity());
     let len = data.len() as c_int;
     unsafe { *out_len = len; }
     vec_to_raw(data)
@@ -223,6 +234,8 @@ pub extern "C" fn clipboard_get_image_full_by_db_id(db_id: i64, out_len: *mut c_
         }
     };
 
+    // Same blob-read contract as preview/paste/undo.
+    crate::backend::claim_pages(data.as_ptr(), data.capacity());
     let len = data.len() as c_int;
     unsafe { *out_len = len; }
     vec_to_raw(data)
@@ -256,6 +269,8 @@ pub extern "C" fn clipboard_get_image_thumb_by_db_id(db_id: i64, out_len: *mut c
         }
     };
 
+    // Same blob-read contract as preview/paste/undo.
+    crate::backend::claim_pages(thumb_data.as_ptr(), thumb_data.capacity());
     let len = thumb_data.len() as c_int;
     unsafe { *out_len = len; }
     vec_to_raw(thumb_data)
@@ -481,6 +496,35 @@ pub extern "C" fn clipboard_set_cleanup_threshold(threshold: i32) {
 }
 
 // Storage & Permissions
+
+/// Release unused SQLite page-cache memory back to the OS. Safe to call only
+/// when no transaction is active; the popup-close path invokes this after the
+/// monitor has gone idle, so the next search/thumbnail read simply rebuilds the
+/// (bounded, ≤4MB) cache from disk.
+#[no_mangle]
+pub extern "C" fn clipboard_shrink_db_memory() -> c_int {
+    let b = match try_backend() {
+        Some(b) => b,
+        None => return 0,
+    };
+    let conn = match b.db.lock() {
+        Ok(c) => c,
+        Err(e) => {
+            crate::error_log!("CopyAttach: DB mutex poisoned in shrink_db_memory: {e}");
+            return 0;
+        }
+    };
+    match conn.execute_batch("PRAGMA shrink_memory;") {
+        Ok(()) => {
+            crate::debug_log!("CopyAttach: shrink_db_memory ok");
+            1
+        }
+        Err(e) => {
+            crate::error_log!("CopyAttach: shrink_db_memory failed: {e}");
+            0
+        }
+    }
+}
 
 #[no_mangle]
 pub extern "C" fn clipboard_get_storage_size() -> i64 {

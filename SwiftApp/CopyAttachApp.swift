@@ -25,11 +25,18 @@ struct ClipboardManagerApp: App {
 
 // MARK: - Menu Bar Icon
 
-private func menuBarIcon() -> NSImage? {
+/// Cached template icon for the menu bar. The icon never changes while the
+/// process runs; parsing the SVG again on every Scene body evaluation is
+/// wasted IO and CoreSVG work.
+private let cachedMenuBarIcon: NSImage? = {
     guard let url = Bundle.main.resourceURL?.appendingPathComponent("menubar-stack.svg"),
           let img = NSImage(contentsOf: url) else { return nil }
     img.isTemplate = true
     return img
+}()
+
+private func menuBarIcon() -> NSImage? {
+    cachedMenuBarIcon
 }
 
 /// Menu bar content that dynamically observes hotkey changes

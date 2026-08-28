@@ -1,5 +1,6 @@
 //! Image encoding, decoding, thumbnail generation, and content hashing.
 
+#[cfg(test)]
 use image::imageops::FilterType;
 
 /// Encode raw RGBA bytes into PNG, reusing `output`'s capacity.
@@ -46,6 +47,12 @@ pub(crate) fn decode_png_rgba8_into(png: &[u8], out: &mut Vec<u8>) -> Option<(u3
 }
 
 /// Create a thumbnail with Lanczos3 filtering (highest quality).
+///
+/// Test-only: production capture/preview paths use [`create_thumbnail_fast`]
+/// (in-house two-pass CatmullRom). Keeping this `imageops::resize` path in
+/// release builds would leave the very `dst_w × src_h × 16B` float
+/// intermediate the memory work removed from the hot path.
+#[cfg(test)]
 pub(crate) fn create_thumbnail(
     width: u32, height: u32, rgba_bytes: &[u8], max_dim: u32,
 ) -> Option<(Vec<u8>, u32, u32)> {
@@ -66,7 +73,12 @@ pub(crate) fn create_thumbnail_fast(
         None => return encode_png(width, height, rgba_bytes).map(|d| (d, width, height)),
     };
     let resized = resize_rgba(rgba_bytes, width, height, new_w, new_h)?;
-    encode_png(new_w, new_h, &resized).map(|d| (d, new_w, new_h))
+    let encoded = encode_png(new_w, new_h, &resized).map(|d| (d, new_w, new_h));
+    // Release-path symmetry: `resize_rgba` claims the output pages before
+    // returning, so they must be marked reusable when this transient buffer
+    // drops (the encode above has already read every byte).
+    crate::backend::mark_pages_reusable(resized.as_ptr(), resized.capacity());
+    encoded
 }
 
 /// Keep thumbnail short side >= max_dim / 5 to avoid blurry wide images.
@@ -105,6 +117,7 @@ fn thumbnail_target_dims(width: u32, height: u32, max_dim: u32) -> Option<(u32, 
 }
 
 /// Core thumbnail logic parameterized by resize filter.
+#[cfg(test)]
 fn create_thumbnail_with_filter(
     width: u32, height: u32, rgba_bytes: &[u8], max_dim: u32,
     filter: FilterType,
