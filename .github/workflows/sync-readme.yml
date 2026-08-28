@@ -1,0 +1,71 @@
+# CopyAttach — 同步 README 及文档资源到公共发布仓库
+#
+# 功能:
+#   - push 到 master 且 README.md 或 assets/ 变更时，自动同步到公共仓库 wonaren/copyattach-release
+#   - workflow_dispatch 手动触发：随时将当前文档与资源重推到公共仓库
+#
+# 使用前准备:
+#   - PUBLIC_RELEASE_TOKEN（环境级 secret，src2release-env）:
+#     对 wonaren/copyattach-release 拥有 Contents: Read and write 权限的
+#     fine-grained PAT（与 release 发布流程复用同一个 token）。
+
+name: Sync README to public repo
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'README.md'
+      - 'assets/**'
+  workflow_dispatch:
+
+jobs:
+  sync-readme:
+    name: Sync README & Assets
+    runs-on: ubuntu-latest
+    environment: src2release-env
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Push README and assets to public repo
+        env:
+          GH_TOKEN: ${{ secrets.PUBLIC_RELEASE_TOKEN }}
+          PUBLIC_REPOSITORY: wonaren/copyattach-release
+        run: |
+          set -euo pipefail
+
+          VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          MSG="docs: 同步 README 与文档资源 (v${VERSION})"
+
+          upload_file() {
+            local file="$1"
+            if [ ! -f "$file" ]; then
+              return 0
+            fi
+
+            local content
+            content=$(base64 < "$file" | tr -d '\n')
+            local sha
+            sha=$(gh api "repos/${PUBLIC_REPOSITORY}/contents/${file}" --jq '.sha' 2>/dev/null || true)
+            local body
+            body=$(mktemp)
+
+            if [ -n "$sha" ]; then
+              jq -n --arg msg "$MSG" --arg content "$content" --arg sha "$sha" \
+                '{message: $msg, content: $content, sha: $sha}' > "$body"
+            else
+              jq -n --arg msg "$MSG" --arg content "$content" \
+                '{message: $msg, content: $content}' > "$body"
+            fi
+
+            gh api --method PUT "repos/${PUBLIC_REPOSITORY}/contents/${file}" \
+              --input "$body" > /dev/null
+            echo "Synced ${file} to ${PUBLIC_REPOSITORY}"
+          }
+
+          # 1. 同步 README
+          upload_file "README.md"
+
+          # 2. 同步 README 引用的图片资源（避免公共仓库图标/截图 404）
+          upload_file "assets/icon_inner.svg"
+          upload_file "assets/icon.svg"
