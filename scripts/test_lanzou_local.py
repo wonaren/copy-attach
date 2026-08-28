@@ -93,7 +93,7 @@ def main():
     if not uploaded_id:
         raise SystemExit("上传返回成功，但没有拿到文件 ID")
 
-    print(f"[+] 上传成功: https://wwbvw.lanzouv.com/{uploaded_id}")
+    print(f"[+] 上传成功: https://pan.lanzoub.com/{uploaded_id}")
     if args.password:
         password_code = lzy.set_passwd(uploaded_id, args.password, is_file=True)
         if password_code != LanZouCloud.SUCCESS:
