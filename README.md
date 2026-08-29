@@ -18,7 +18,7 @@
 ---
 
 <p align="center">
-  <a href="https://copyattach.abovepast.shop/">🌐 项目官网 copyattach.abovepast.shop</a>
+  <a href="https://copyattach.abovepast.shop/"><img src="assets/icon_inner.svg" alt="CopyAttach" height="14" style="vertical-align: -1px;"> 项目官网 copyattach.abovepast.shop</a>
   &nbsp;&nbsp;·&nbsp;&nbsp;
   <a href="https://pay.ldxp.cn/shop/F5T5GUPN"><img src="assets/ldxp.svg" alt="链动小铺" height="14" style="vertical-align: -1px;"> 购买许可证</a>
 </p>
