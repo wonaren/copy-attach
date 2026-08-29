@@ -174,7 +174,9 @@ class ClipboardBackend {
             // load thumbnails again until the next open. Run off the main
             // actor: the DB lock may briefly wait for a capture transaction.
             DispatchQueue.global(qos: .utility).async {
-                _ = clipboard_shrink_db_memory()
+                if clipboard_shrink_db_memory() == 0 {
+                    debugLog("shrink_db_memory failed (see Rust log)")
+                }
             }
             scheduleThumbnailCacheClear()
         }
@@ -555,8 +557,11 @@ class ClipboardBackend {
     }
 
     func clearHistory() {
-        clipboard_clear_history()
-        // Rust now also clears the undo stack (full-content payload) during a
+        guard clipboard_clear_history() != 0 else {
+            debugLog("clearHistory: Rust-side clear failed (see Rust log); local state kept")
+            return
+        }
+        // Rust also cleared the undo stack (full-content payload) during a
         // clear, so release the Swift-side caches too: every thumbnail key is
         // an old db_id and is invalid after the DB rows are gone.
         clearThumbnailCache()

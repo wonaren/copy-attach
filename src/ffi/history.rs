@@ -7,25 +7,37 @@ use crate::history::add_to_history;
 use crate::types::ClipboardEntry;
 
 #[no_mangle]
-pub extern "C" fn clipboard_clear_history() {
-    if let Some(b) = try_backend() {
-        {
-            let mut hist = b.history.lock().unwrap();
-            hist.clear();
-            // Clearing history also releases the undo stack: the materialized
-            // payload files are removed with their slots.
-            let mut stack = b.deleted_stack.lock().unwrap();
-            for slot in stack.iter() {
-                remove_undo_payload_file(slot);
-            }
-            stack.clear();
+pub extern "C" fn clipboard_clear_history() -> c_int {
+    let b = match try_backend() {
+        Some(b) => b,
+        None => return 0,
+    };
+
+    // DB delete first: if it fails, the in-memory history stays untouched so
+    // memory and DB remain consistent and the caller sees the failure (0).
+    let conn = match b.db.lock() {
+        Ok(c) => c,
+        Err(e) => {
+            crate::error_log!("CopyAttach: DB mutex poisoned clearing history: {e}");
+            return 0;
         }
-        if let Ok(conn) = b.db.lock() {
-            if let Err(e) = conn.execute("DELETE FROM clipboard_history", []) {
-                crate::error_log!("CopyAttach: failed to clear DB history: {e}");
-            }
-        }
+    };
+    if let Err(e) = conn.execute("DELETE FROM clipboard_history", []) {
+        crate::error_log!("CopyAttach: failed to clear DB history: {e}");
+        return 0;
     }
+    drop(conn);
+
+    // DB clear succeeded: now clear the in-memory history and release the
+    // undo stack (materialized payload files removed with their slots).
+    let mut hist = b.history.lock().unwrap();
+    hist.clear();
+    let mut stack = b.deleted_stack.lock().unwrap();
+    for slot in stack.iter() {
+        remove_undo_payload_file(slot);
+    }
+    stack.clear();
+    1
 }
 
 #[no_mangle]

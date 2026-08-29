@@ -63,13 +63,13 @@ class PreviewWindow: NSPanel {
         guard currentItemId != item.id else { return }
         currentItemId = item.id
 
-        // Cross-fade content during transition
-        let fade = CATransition()
-        fade.duration = 0.15
-        fade.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-        fade.type = .fade
-        hostingView.layer?.add(fade, forKey: kCATransition)
-
+        // No CATransition here: a cross-fade makes CA keep snapshots of both
+        // the old and new frames while the transition runs. Under rapid
+        // arrow-key switching those snapshots accumulate as software-rendered
+        // (Whippet) drawables — measured at ~7 MB per switch on big-image
+        // previews, some of which never got released after close. Direct root
+        // replacement is visually equivalent for 150 ms and keeps the window
+        // to a single backing store.
         hostingView.rootView = AnyView(PreviewContent(item: item).withAppTheme())
         resizeToFitContent(for: item)
     }

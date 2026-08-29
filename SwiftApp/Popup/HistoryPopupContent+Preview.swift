@@ -23,6 +23,12 @@ extension HistoryPopupContent {
         let item = displayItems[itemIndex]
         let popupCenter = NSPoint(x: popup.frame.midX, y: popup.frame.midY)
         guard let previewItem = fullTextItem(item) else { return }
+        // A fresh window per preview session. (A reused window was tried for
+        // small-zone churn savings, but its lifecycle — content detach,
+        // re-mount on an ordered-out window, alpha/fade state — proved too
+        // fragile: previews silently stopped appearing after the first one.
+        // The measured cost of rebuilding is bounded: repeated preview
+        // sessions accumulate nothing beyond a one-time decode-pool resize.)
         let preview = PreviewWindow(item: previewItem, centerAt: popupCenter)
         popup.previewPanel = preview
         preview.orderFront(nil)

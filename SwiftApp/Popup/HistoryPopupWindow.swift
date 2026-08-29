@@ -398,9 +398,18 @@ class HistoryPopupWindow: NSPanel {
         previewPanel?.close()
         previewPanel = nil
         super.close()
-        // Detach but do not destroy: popupHostingView stays alive for the
-        // next session, so SwiftUI reuses its AttributeGraph instead of
-        // re-dirtying a fresh set of small-zone pages on every open.
+        // Detach the view tree, not just the window: contentView is not the
+        // only owner — the window itself retains `popupHostingView`, whose
+        // rootView holds the materialized LazyVStack rows. Across long
+        // sessions those rows keep every scrolled-through thumbnail alive as
+        // NSImage/CGImage (measured: ~273 CGImages ≈ 62 MB resident after an
+        // 11 h session, unreleased by closing the popup). Replacing the root
+        // with EmptyView lets SwiftUI tear the whole row tree down, so the
+        // thumbnails' Rust buffers are released (reusable-marked) instead of
+        // pinning pages until the process exits. The hosting view object
+        // itself is kept for reuse (fonts/layout caches), matching the
+        // PreviewWindow.close() pattern.
+        popupHostingView?.rootView = AnyView(EmptyView())
         self.contentView = nil
         self.alphaValue = 1.0 // reset for next open
     }

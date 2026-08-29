@@ -93,7 +93,7 @@ int32_t clipboard_check_permission(void);
 void clipboard_open_preferences(void);
 
 // ─── History Management ───
-void clipboard_clear_history(void);
+int clipboard_clear_history(void);
 int32_t clipboard_trim_oldest_percent(int32_t percent);
 int32_t clipboard_get_cleanup_threshold(void);
 void clipboard_set_cleanup_threshold(int32_t threshold);

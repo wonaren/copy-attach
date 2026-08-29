@@ -71,10 +71,10 @@ const UNDO_PAYLOAD_VERSION: u32 = 1;
 /// Directory holding materialized undo payloads. The directory lives under the
 /// CopyAttach temp root because an undo stack never survives a restart:
 /// startup purges any stale files.
-pub(crate) fn undo_payload_dir() -> Option<PathBuf> {
+pub(crate) fn undo_payload_dir() -> Result<PathBuf, std::io::Error> {
     let dir = copyattach_temp_root().join("Undo");
-    std::fs::create_dir_all(&dir).ok()?;
-    Some(dir)
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir)
 }
 
 /// Payload read back from an undo file.
@@ -94,8 +94,8 @@ pub(crate) fn write_undo_payload(
     entry: &ClipboardEntry,
     text: Option<&str>,
 ) -> Result<(PathBuf, usize), ()> {
-    let dir = undo_payload_dir().ok_or_else(|| {
-        crate::error_log!("CopyAttach: cannot create undo payload directory");
+    let dir = undo_payload_dir().map_err(|e| {
+        crate::error_log!("CopyAttach: cannot create undo payload directory: {e}");
     })?;
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
