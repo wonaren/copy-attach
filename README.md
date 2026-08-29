@@ -17,6 +17,10 @@
 
 ---
 
+<p align="center">
+  <a href="https://copyattach.abovepast.shop/">🌐 项目官网 copyattach.abovepast.shop</a>
+</p>
+
 CopyAttach 是一个 macOS 剪贴板管理器。它默默记录你复制的一切——文本、代码、链接、图片——然后通过一个快捷键让你在任何应用中快速搜索、预览、粘贴。从渲染帧率到磁盘写入，从内存分配到功耗管理，每个环节都经过精心优化，做到真正的无负担。
 
 ## 特性
