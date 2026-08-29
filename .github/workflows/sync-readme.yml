@@ -1,7 +1,7 @@
 # CopyAttach — 同步 README 及文档资源到公共发布仓库
 #
 # 功能:
-#   - push 到 master 且 README.md 或 assets/ 变更时，自动同步到公共仓库 wonaren/copyattach-release
+#   - push 到 master 后，自动同步 README 与资源到公共仓库 wonaren/copyattach-release
 #   - workflow_dispatch 手动触发：随时将当前文档与资源重推到公共仓库
 #
 # 使用前准备:
@@ -14,9 +14,6 @@ name: Sync README to public repo
 on:
   push:
     branches: [master]
-    paths:
-      - 'README.md'
-      - 'assets/**'
   workflow_dispatch:
 
 jobs:
@@ -69,3 +66,4 @@ jobs:
           # 2. 同步 README 引用的图片资源（避免公共仓库图标/截图 404）
           upload_file "assets/icon_inner.svg"
           upload_file "assets/icon.svg"
+          upload_file "assets/ldxp.svg"

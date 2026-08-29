@@ -19,6 +19,8 @@
 
 <p align="center">
   <a href="https://copyattach.abovepast.shop/">🌐 项目官网 copyattach.abovepast.shop</a>
+  &nbsp;&nbsp;·&nbsp;&nbsp;
+  <a href="https://pay.ldxp.cn/shop/F5T5GUPN"><img src="assets/ldxp.svg" alt="链动小铺" height="14" style="vertical-align: -1px;"> 购买许可证</a>
 </p>
 
 CopyAttach 是一个 macOS 剪贴板管理器。它默默记录你复制的一切——文本、代码、链接、图片——然后通过一个快捷键让你在任何应用中快速搜索、预览、粘贴。从渲染帧率到磁盘写入，从内存分配到功耗管理，每个环节都经过精心优化，做到真正的无负担。
@@ -149,9 +151,10 @@ cargo test
 
 > 默认连接生产许可证服务器；本地开发可用 `LICENSE_ENV=local COPYATTACH_LICENSE_PUBLIC_KEY='<dev 公钥>' ./build.sh` 指向本地 license-server。
 
-## 激活
+## 购买与激活
 
-构建出的应用需通过内置激活流程（试用或激活码）使用：激活码按设备绑定，Lease 离线验证，断网后仍可继续使用。
+- **购买许可证**：前往 [<img src="assets/ldxp.svg" alt="链动小铺" height="14" style="vertical-align: -1px;"> 在线店铺](https://pay.ldxp.cn/shop/F5T5GUPN) 购买激活码。
+- **激活流程**：构建或下载的应用支持免费试用与激活码激活；激活码按设备绑定，Lease 离线验证，断网后仍可继续使用。
 
 ## 许可证
 
