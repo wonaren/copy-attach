@@ -1,0 +1,4 @@
+module CCopyAttach {
+    header "copyattach.h"
+    export *
+}

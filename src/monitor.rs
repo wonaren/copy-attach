@@ -10,14 +10,13 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use arboard::Clipboard;
 
 use crate::backend::{PendingSelfWrite, POLL_INTERVAL_MS};
 use crate::types::ClipboardEntry;
 use crate::image::{create_thumbnail_fast, image_hash};
 use crate::history::add_to_history;
 use crate::ignore::IgnoreRules;
-use crate::macos;
+use crate::platform;
 
 /// Maximum length of the longest edge for thumbnail generation.
 const THUMBNAIL_MAX_DIM: u32 = 300;
@@ -224,24 +223,17 @@ pub(crate) fn clipboard_monitor(
     cleanup_threshold: Arc<AtomicUsize>,
     ignore_rules: Arc<Mutex<IgnoreRules>>,
 ) {
-    let mut cb = loop {
-        match Clipboard::new() {
-            Ok(c) => break c,
-            Err(e) => {
-                crate::error_log!("clipboard-monitor: failed to open clipboard: {e}, retrying in 1s...");
-                if !running.load(Ordering::SeqCst) { return; }
-                thread::sleep(Duration::from_secs(1));
-            }
-        }
-    };
-
+    // No long-lived clipboard handle here: on Windows an open clipboard
+    // handle blocks every other app from writing. All reads go through the
+    // platform layer, which opens a fresh handle per event.
+    //
     // Ignore the pre-existing clipboard state on startup to avoid a duplicate capture.
-    let mut last_change_count: Option<i64> = macos::pasteboard_change_count();
+    let mut last_change_count: Option<i64> = platform::change_count();
 
     while running.load(Ordering::SeqCst) {
         // A new changeCount is a new clipboard use; serialize with our own writes.
         let event_guard = pasteboard_event_lock.lock().unwrap();
-        let observed_change_count = match (macos::pasteboard_change_count(), last_change_count) {
+        let observed_change_count = match (platform::change_count(), last_change_count) {
             (Some(cc), Some(last)) if cc == last => None,
             (Some(cc), _) => {
                 last_change_count = Some(cc);
@@ -287,8 +279,8 @@ pub(crate) fn clipboard_monitor(
         }
 
         // Handle Finder file copies: decode the files instead of the file icon.
-        if macos::pasteboard_has_files() {
-            let paths = macos::pasteboard_file_paths();
+        if platform::has_files() {
+            let paths = platform::file_paths();
             try_ingest_image_files(
                 &paths,
                 &history,
@@ -302,48 +294,23 @@ pub(crate) fn clipboard_monitor(
         let mut captured = false;
 
         if image_allowed {
-            // The guard marks the raw pasteboard bytes' pages reusable on
-            // drop — release-path symmetry with the claim in
-            // `pasteboard_image_data` (the buffer is dead after decoding).
-            if let Some(img_bytes) = macos::pasteboard_image_data().map(crate::backend::MarkBlobReusableOnDrop) {
-                // Fast path for 8-bit RGBA PNGs; generic decoder otherwise.
-                let decoded: Result<(crate::backend::ImageDecodeBuffer, u32, u32), image::ImageError> = {
-                    let mut pooled = crate::backend::ImageDecodeBuffer::acquire();
-                    match crate::image::decode_png_rgba8_into(&img_bytes.0, pooled.as_mut_vec()) {
-                        Some((w, h)) => Ok((pooled, w, h)),
-                        None => {
-                            drop(pooled);
-                            image::load_from_memory(&img_bytes.0).map(|img| {
-                                let rgba = img.to_rgba8();
-                                let (w, h) = rgba.dimensions();
-                                (
-                                    crate::backend::ImageDecodeBuffer::from_vec(rgba.into_raw()),
-                                    w, h,
-                                )
-                            })
-                        }
-                    }
-                };
-                match decoded {
-                    Ok((pixels, w, h)) => {
-                        ingest_rgba_image(
-                            pixels, w, h,
-                            &history,
-                            &db, &src, now, &cleanup_threshold, &ignore_rules,
-                        );
-                        captured = true;
-                    }
-                    Err(e) => {
-                        // Undecodable image data: fail explicitly, don't fabricate a capture.
-                        crate::debug_log!("CopyAttach: pasteboard image data ({} bytes) undecodable: {e}", img_bytes.0.len());
-                    }
-                }
+            // The platform layer reads the smallest full-resolution
+            // representation (macOS) or the translated DIB (Windows) and
+            // decodes it into the pooled RGBA buffer, logging its own
+            // failures explicitly.
+            if let Some((pixels, w, h)) = platform::capture_image() {
+                ingest_rgba_image(
+                    pixels, w, h,
+                    &history,
+                    &db, &src, now, &cleanup_threshold, &ignore_rules,
+                );
+                captured = true;
             }
         }
 
         // Text (always sync: no PNG encoding).
         if !captured {
-            if let Ok(text) = cb.get_text() {
+            if let Some(text) = platform::read_text() {
                 if !text.is_empty() {
                     let trimmed = text.trim();
                     if trimmed.len() >= 2 && !ignore_rules.lock().unwrap().ignores_text(&text) {

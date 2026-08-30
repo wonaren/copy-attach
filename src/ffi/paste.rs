@@ -3,12 +3,10 @@ use std::sync::atomic::Ordering;
 use std::thread;
 use std::time::Duration;
 
-use arboard::Clipboard;
-
 use crate::backend::{backend, try_backend, copyattach_temp_root, mark_history_changed, PendingSelfWrite};
 use crate::db::load_text_by_db_id;
 use crate::history::add_to_history;
-use crate::macos;
+use crate::platform;
 use crate::types::ClipboardEntry;
 use super::to_ffi_cstring;
 
@@ -25,6 +23,7 @@ const PASTE_IMAGE_TTL: Duration = Duration::from_secs(60);
 /// `public.file-url` item that native terminals translate into a path.
 /// For these targets the materialized image path must be written as plain
 /// text so Cmd+V inserts the same path string that drag-and-drop inserts.
+#[cfg(target_os = "macos")]
 const TEXT_PATH_PASTE_BUNDLE_IDS: &[&str] = &[
     "com.microsoft.VSCode",
     "com.microsoft.VSCodeInsiders",
@@ -35,6 +34,7 @@ const TEXT_PATH_PASTE_BUNDLE_IDS: &[&str] = &[
 
 /// Whether an image paste into `bundle_id` must put the temp PNG path on the
 /// pasteboard as `public.utf8-plain-text` instead of `public.file-url`.
+#[cfg(target_os = "macos")]
 fn image_target_needs_text_path(bundle_id: &str) -> bool {
     TEXT_PATH_PASTE_BUNDLE_IDS.contains(&bundle_id)
 }
@@ -49,6 +49,7 @@ fn image_target_needs_text_path(bundle_id: &str) -> bool {
 /// everything, since the previous paste's target may still be reading its file.
 ///
 /// Returns the absolute file path, or `None` (with a log) on failure.
+#[cfg(target_os = "macos")]
 fn write_paste_image_file(png_data: &[u8], entry_id: u64) -> Option<String> {
     let mut dir = copyattach_temp_root();
     dir.push("Paste");
@@ -100,17 +101,14 @@ pub(crate) fn purge_stale_paste_images() {
 /// Loads full image data from DB if needed, writes to system clipboard,
 /// write-through DB, moves item to top of history, then simulates paste.
 fn select_and_paste_impl(mut item: ClipboardEntry) -> c_int {
-    #[cfg(target_os = "macos")]
-    {
-        // Cmd+V simulation needs accessibility permission. Gate BEFORE any
-        // pasteboard write: the write replaces the user's clipboard, so
-        // proceeding without permission would destroy their content on a paste
-        // that can never happen — and the old fall-through still reported
-        // success (1). No permission → explicit failure, clipboard untouched.
-        if !macos::check_permission() {
-            crate::error_log!("CopyAttach: accessibility permission not granted — paste aborted, clipboard untouched");
-            return 0;
-        }
+    // Paste simulation may need an OS permission gate (macOS accessibility).
+    // Gate BEFORE any clipboard write: the write replaces the user's
+    // clipboard, so proceeding without permission would destroy their content
+    // on a paste that can never happen. No permission → explicit failure,
+    // clipboard untouched. (Windows: SendInput needs no gate, returns true.)
+    if !platform::check_permission() {
+        crate::error_log!("CopyAttach: paste permission not granted — paste aborted, clipboard untouched");
+        return 0;
     }
 
     // The entry is moved to the top of history below. Stamp it with the current
@@ -227,30 +225,51 @@ fn select_and_paste_impl(mut item: ClipboardEntry) -> c_int {
                     return 0;
                 }
             };
-            let mut cb = match Clipboard::new() { Ok(c) => c, Err(_) => return 0 };
-            if cb.set_text(&text.0).is_err() { return 0; }
-        }
-        ClipboardEntry::Image { png_data, id, .. } => {
-            if png_data.is_empty() { return 0; }
-            let path = match write_paste_image_file(png_data, *id) {
-                Some(p) => p,
-                None => return 0,
-            };
-            let target_bundle_id = b.source_app.lock()
-                .ok()
-                .map(|src| src.bundle_id.clone())
-                .unwrap_or_default();
-            if image_target_needs_text_path(&target_bundle_id) {
-                crate::debug_log!("CopyAttach: image paste as path text for target {target_bundle_id}");
-                let mut cb = match Clipboard::new() { Ok(c) => c, Err(_) => return 0 };
-                if cb.set_text(&path).is_err() { return 0; }
-            } else if !macos::set_pasteboard_file_url(&path) {
+            if !platform::set_clipboard_text(&text.0) {
+                crate::error_log!("CopyAttach: clipboard text write failed — paste aborted");
                 return 0;
             }
         }
+        ClipboardEntry::Image { png_data, id, .. } => {
+            if png_data.is_empty() { return 0; }
+            #[cfg(target_os = "macos")]
+            {
+                // Image paste uses drag-style file-path mode: the image is
+                // materialized as a temp PNG and only its file URL goes on
+                // the pasteboard (Finder "copy file" semantics). Terminals
+                // translate the URL into the path text (TUI agents like
+                // Claude Code consume exactly this form); chat/notes apps
+                // attach the file. VS Code's integrated terminal is the
+                // exception: its Cmd+V handler only reads plain text, so the
+                // path is written as text for that target.
+                let path = match write_paste_image_file(png_data, *id) {
+                    Some(p) => p,
+                    None => return 0,
+                };
+                let target_bundle_id = b.source_app.lock()
+                    .ok()
+                    .map(|src| src.bundle_id.clone())
+                    .unwrap_or_default();
+                if image_target_needs_text_path(&target_bundle_id) {
+                    crate::debug_log!("CopyAttach: image paste as path text for target {target_bundle_id}");
+                    if !platform::set_clipboard_text(&path) { return 0; }
+                } else if !platform::set_clipboard_file_url(&path) {
+                    return 0;
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                // No file-URL paste convention off macOS: the decoded image
+                // itself goes on the clipboard (CF_DIB on Windows).
+                let _ = id;
+                if !platform::set_clipboard_image(png_data) {
+                    return 0;
+                }
+            }
+        }
     }
-    let change_count = macos::pasteboard_change_count()
-        .expect("CopyAttach: cannot identify self-written pasteboard change");
+    let change_count = platform::change_count()
+        .expect("CopyAttach: cannot identify self-written clipboard change");
     *b.pending_self_write.lock().unwrap() = Some(
         PendingSelfWrite { change_count },
     );
@@ -314,14 +333,10 @@ fn select_and_paste_impl(mut item: ClipboardEntry) -> c_int {
         .map_or(0, |src| src.pid);
 
     thread::sleep(Duration::from_millis(50));
-    #[cfg(target_os = "macos")]
-    {
-        // Permission was already verified up front; here only the key event
-        // can fail.
-        if !macos::simulate_cmd_v(front_pid) {
-            crate::error_log!("CopyAttach: simulate_cmd_v failed");
-            return 0;
-        }
+    // Permission was already verified up front; here only the key event can fail.
+    if !platform::simulate_paste(front_pid) {
+        crate::error_log!("CopyAttach: simulate_paste failed");
+        return 0;
     }
     1
 }
@@ -401,7 +416,7 @@ pub extern "C" fn clipboard_get_text_by_id(entry_id: u64) -> *mut c_char {
     to_ffi_cstring(&guard.0)
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod image_paste_target_tests {
     use super::image_target_needs_text_path;
 

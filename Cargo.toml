@@ -1,6 +1,6 @@
 [package]
 name = "copy-attach"
-version = "0.99.28"
+version = "0.99.29-dev"
 edition = "2021"
 license = "Apache-2.0"
 
@@ -10,13 +10,22 @@ name = "copy_attach"
 
 [dependencies]
 arboard = "3.6"
-objc2 = "0.6"
-objc2-core-graphics = "0.3"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
 base64 = { version = "0.23", optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-core-graphics = "0.3"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_DataExchange",
+    "Win32_UI_Input_KeyboardAndMouse",
+] }
 
 [features]
 default = ["migration"]

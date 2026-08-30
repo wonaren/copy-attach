@@ -114,6 +114,7 @@ COPYATTACH_LICENSE_PUBLIC_KEY='efsKYx9a7urNlr-UXR7b0-Fl9w0mJNKe3RME-OeseOs' \
 | `types.rs` | `ClipboardEntry` 枚举（Text/Image），`SourceApp` 元数据，label 生成 |
 | `image.rs` | PNG/JPEG/GIF/WebP/BMP/TIFF 编解码，CatmullRom 缩略图（最长边 300px），**内容哈希为稳定 FNV-1a 64**（`types::fnv1a`，与 text_hash 同算法同理由——持久化值不依赖 std 不保证跨版本稳定的 `DefaultHasher`） |
 | `backend.rs` | `OnceLock<Backend>` 单例，entry_id（`AtomicU64`），常量（3000 阈值、500ms 轮询间隔），`HISTORY_REVISION`/`IMAGE_ENCODING_COUNTER` 原子计数器，`PendingSelfWrite` 自写抑制，`reload_history_from_db` |
+| `platform/` | **平台抽象层（0.99.29-dev，windows-support 分支）**：统一剪贴板/捕获/粘贴 API（`change_count`/`read_text`/`capture_image`/`set_clipboard_text`/`set_clipboard_image`/`set_clipboard_file_url`/`simulate_paste`/`check_permission`）。cfg 分发三实现：`macos.rs`（原 `src/macos.rs` 平移）、`windows.rs`（`GetClipboardSequenceNumber` + arboard CF_DIB + SendInput Ctrl+V）、`stub.rs`（其他平台显式失败）。**Windows 关键约束：不常驻剪贴板句柄**——arboard 在 Windows 上会独占打开剪贴板直到句柄释放，长期持有会阻塞其他应用写入，所有读写按事件新开句柄。Windows 图片粘贴无 file-url 约定，直接写 CF_DIB |
 | `macos.rs` | NSPasteboard `changeCount` + 文件 URL 读写（`set_pasteboard_file_url`），CGEventPost Cmd+V / Ctrl+V，AXIsProcessTrusted，文件复制检测。cfg-gated，非 macOS 用空桩 |
 | `history.rs` | `add_to_history()` — 去重 + 头部插入，纯函数式（返回新 Vec） |
 | `bench_tests/` | 性能基准测试（cfg-gated on `test` + `stress-test`），目录模块：`thresholds.rs`/`images.rs`/`memory_probe.rs`，共享测量助手在 `mod.rs`。覆盖：历史阈值扩展性、图片捕获/编码/缩略图性能、DB 存储规模测试 |
@@ -237,6 +238,10 @@ SwiftApp/
 - `stress-test` feature：启用应力测试面板（`src/stress.rs`）和 `stress-gen` CLI 二进制。不在默认 features 中，release 构建不包含。
 - `image` crate features：`png`, `jpeg`, `gif`, `webp`, `bmp`, `tiff` — 支持从 Finder 复制多种格式的图片文件。
 - `rand`（dev-dependency）：仅用于 stress-gen 的随机数据生成。
+
+## Windows 前端（`SwiftWin/`，windows-support 分支）
+
+Swift on Windows + 原生 Win32（工具链自带 `WinSDK` 模块），经 SwiftPM `systemLibrary` 目标 `CCopyAttach` 消费与 macOS 相同的 C ABI（声明子集在 `SwiftWin/Sources/CCopyAttach/include/copyattach.h`）。MVP：托盘 + `RegisterHotKey`（Alt+X）+ 无边框弹窗（搜索 Edit 子类化接管键盘 + `LVS_OWNERDATA` 虚拟列表）+ 粘贴/删除/撤销。粘贴目标 = 弹窗弹出前 `GetForegroundWindow()` 捕获的窗口，粘贴前 `SetForegroundWindow` 交还后由 Rust `SendInput` 投递。验证约定：沙盒内 `swiftc -parse` 语法校验；`cargo check --target x86_64-pc-windows-gnu` 验证 Rust 侧；真实构建在 Windows 机器执行 `build-windows.ps1`（详见 `docs/windows.md`）。
 
 ## 构建依赖
 

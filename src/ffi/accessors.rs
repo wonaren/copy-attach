@@ -3,7 +3,6 @@ use std::sync::atomic::Ordering;
 
 use crate::backend::{backend, try_backend, DEFAULT_CLEANUP_THRESHOLD, HISTORY_REVISION, IMAGE_ENCODING_COUNTER};
 use crate::db::load_text_by_db_id;
-use crate::macos;
 use crate::types::ClipboardEntry;
 use super::{to_ffi_cstring, vec_to_raw};
 
@@ -554,16 +553,12 @@ pub extern "C" fn clipboard_get_storage_size() -> i64 {
 
 #[no_mangle]
 pub extern "C" fn clipboard_check_permission() -> c_int {
-    #[cfg(target_os = "macos")]
-    { c_int::from(macos::check_permission()) }
-    #[cfg(not(target_os = "macos"))]
-    { 1 }
+    c_int::from(crate::platform::check_permission())
 }
 
 #[no_mangle]
 pub extern "C" fn clipboard_open_preferences() {
-    #[cfg(target_os = "macos")]
-    macos::open_preferences();
+    crate::platform::open_preferences();
 }
 
 /// Reload in-memory history from the DB using the current cleanup threshold.

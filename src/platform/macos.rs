@@ -1,4 +1,10 @@
-//! macOS-specific pasteboard, paste simulation, and accessibility utilities.
+//! macOS pasteboard, paste simulation, and accessibility implementation.
+//!
+//! Moved from the former top-level `macos` module and extended to the
+//! unified `platform` API. Image capture keeps the macOS-optimized path:
+//! read the smallest full-resolution representation (PNG → TIFF → JPEG →
+//! GIF → WebP → BMP) directly instead of `arboard` (whose macOS backend
+//! reads `public.tiff`, ~22.5 MB per screenshot), then decode.
 
 use std::ffi::c_int;
 use std::process::Command;
@@ -74,7 +80,7 @@ fn nspasteboard_class() -> Option<&'static objc2::runtime::AnyClass> {
 }
 
 /// Lightweight pasteboard change count; wrapped in an autorelease pool.
-pub(crate) fn pasteboard_change_count() -> Option<i64> {
+pub(crate) fn change_count() -> Option<i64> {
     use objc2::rc::autoreleasepool;
     autoreleasepool(|_| unsafe {
         let cls = nspasteboard_class()?;
@@ -88,12 +94,12 @@ pub(crate) fn pasteboard_change_count() -> Option<i64> {
 }
 
 /// Whether the pasteboard contains file URLs (to skip capturing the icon).
-pub(crate) fn pasteboard_has_files() -> bool {
+pub(crate) fn has_files() -> bool {
     unsafe { !pasteboard_file_url_strings().is_empty() }
 }
 
 /// Extract absolute file paths from pasteboard file URLs; skips unusable ones.
-pub(crate) fn pasteboard_file_paths() -> Vec<String> {
+pub(crate) fn file_paths() -> Vec<String> {
     unsafe {
         let url_strings = pasteboard_file_url_strings();
         if url_strings.is_empty() {
@@ -207,7 +213,7 @@ unsafe fn pasteboard_file_url_strings() -> Vec<String> {
 /// Put a single file URL on the pasteboard for the Finder "copy file" convention.
 ///
 /// Clears the pasteboard first; on failure the caller must treat the paste as aborted.
-pub(crate) fn set_pasteboard_file_url(path: &str) -> bool {
+pub(crate) fn set_clipboard_file_url(path: &str) -> bool {
     unsafe {
         let pasteboard_cls = match nspasteboard_class() {
             Some(c) => c,
@@ -280,12 +286,103 @@ pub(crate) fn set_pasteboard_file_url(path: &str) -> bool {
     }
 }
 
+/// Read UTF-8 text from the pasteboard via `arboard`.
+pub(crate) fn read_text() -> Option<String> {
+    match arboard::Clipboard::new() {
+        Ok(mut cb) => cb.get_text().ok(),
+        Err(e) => {
+            crate::error_log!("CopyAttach: failed to open pasteboard for text read: {e}");
+            None
+        }
+    }
+}
+
+/// Capture a full-resolution clipboard image as RGBA, using the direct
+/// pasteboard representation read (not `arboard`) plus the shared decode
+/// pipeline: fast path for 8-bit RGBA PNGs, generic decoder otherwise.
+pub(crate) fn capture_image() -> Option<(crate::backend::ImageDecodeBuffer, u32, u32)> {
+    // The guard marks the raw pasteboard bytes' pages reusable on drop —
+    // release-path symmetry with the claim in `pasteboard_image_data`
+    // (the buffer is dead after decoding).
+    let img_bytes = pasteboard_image_data().map(crate::backend::MarkBlobReusableOnDrop)?;
+    let decoded: Result<(crate::backend::ImageDecodeBuffer, u32, u32), image::ImageError> = {
+        let mut pooled = crate::backend::ImageDecodeBuffer::acquire();
+        match crate::image::decode_png_rgba8_into(&img_bytes.0, pooled.as_mut_vec()) {
+            Some((w, h)) => Ok((pooled, w, h)),
+            None => {
+                drop(pooled);
+                image::load_from_memory(&img_bytes.0).map(|img| {
+                    let rgba = img.to_rgba8();
+                    let (w, h) = rgba.dimensions();
+                    (
+                        crate::backend::ImageDecodeBuffer::from_vec(rgba.into_raw()),
+                        w, h,
+                    )
+                })
+            }
+        }
+    };
+    match decoded {
+        Ok(result) => Some(result),
+        Err(e) => {
+            // Undecodable image data: fail explicitly, don't fabricate a capture.
+            crate::debug_log!("CopyAttach: pasteboard image data ({} bytes) undecodable: {e}", img_bytes.0.len());
+            None
+        }
+    }
+}
+
+/// Write UTF-8 text to the pasteboard via `arboard`.
+pub(crate) fn set_clipboard_text(text: &str) -> bool {
+    let mut cb = match arboard::Clipboard::new() {
+        Ok(c) => c,
+        Err(e) => {
+            crate::error_log!("CopyAttach: failed to open pasteboard for text write: {e}");
+            return false;
+        }
+    };
+    match cb.set_text(text) {
+        Ok(()) => true,
+        Err(e) => {
+            crate::error_log!("CopyAttach: pasteboard text write failed: {e}");
+            false
+        }
+    }
+}
+
+/// Not used on macOS (image paste goes through the file-URL convention in
+/// `ffi::paste`), but part of the unified platform API.
+pub(crate) fn set_clipboard_image(png_data: &[u8]) -> bool {
+    let img = match image::load_from_memory(png_data) {
+        Ok(img) => img.to_rgba8(),
+        Err(e) => {
+            crate::error_log!("CopyAttach: cannot decode paste PNG: {e}");
+            return false;
+        }
+    };
+    let (w, h) = (img.width() as usize, img.height() as usize);
+    let data = img.into_raw();
+    let mut cb = match arboard::Clipboard::new() {
+        Ok(c) => c,
+        Err(e) => {
+            crate::error_log!("CopyAttach: failed to open pasteboard for image write: {e}");
+            return false;
+        }
+    };
+    let arboard_img = arboard::ImageData {
+        width: w,
+        height: h,
+        bytes: std::borrow::Cow::Borrowed(&data),
+    };
+    cb.set_image(arboard_img).is_ok()
+}
+
 /// Simulate Cmd+V key press via `CGEventPostToPid`.
 /// `pid` must be the frontmost application's process identifier (> 0).
 /// Returns `false` if pid is 0 or event creation fails.
-pub(crate) fn simulate_cmd_v(pid: i32) -> bool {
+pub(crate) fn simulate_paste(pid: i32) -> bool {
     if pid <= 0 {
-        crate::error_log!("CopyAttach: simulate_cmd_v: no target PID (frontmost app unknown)");
+        crate::error_log!("CopyAttach: simulate_paste: no target PID (frontmost app unknown)");
         return false;
     }
     let source = CGEventSource::new(CGEventSourceStateID::Private);
@@ -308,18 +405,17 @@ pub(crate) fn simulate_cmd_v(pid: i32) -> bool {
 #[cfg(test)]
 mod paste_tests {
     use super::*;
-    use arboard::Clipboard;
 
     /// Roundtrip file-URL pasteboard write/read, restoring the user's clipboard.
     #[test]
     fn test_set_pasteboard_file_url_roundtrip() {
-        let mut cb = Clipboard::new().unwrap();
+        let mut cb = arboard::Clipboard::new().unwrap();
         let saved_text = cb.get_text().ok();
         let saved_image = cb.get_image().ok();
 
         let path = "/tmp/copyattach-paste-check.png";
-        let ok_set = set_pasteboard_file_url(path);
-        let paths = pasteboard_file_paths();
+        let ok_set = set_clipboard_file_url(path);
+        let paths = file_paths();
 
         if let Some(img) = saved_image {
             cb.set_image(img).unwrap();
@@ -327,7 +423,7 @@ mod paste_tests {
             cb.set_text(text).unwrap();
         }
 
-        assert!(ok_set, "set_pasteboard_file_url must succeed");
+        assert!(ok_set, "set_clipboard_file_url must succeed");
         assert_eq!(
             paths,
             vec![path.to_string()],
