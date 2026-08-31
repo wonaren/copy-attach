@@ -60,21 +60,6 @@ open "CopyAttach.app"
 
 build.sh 流程：读取 `Cargo.toml` 版本号 → 通过 PlistBuddy 同步到 `Info.plist`（只需在 Cargo.toml 中改版本） → `cargo build --release` → sips + iconutil 生成图标 → 拷贝 dylib + 设置 install_name → `swiftc` 编译 SwiftApp 下所有 `.swift`（带 FFI 桥接头，**`-O -whole-module-optimization`——发布必须是优化构建，缺省 `-Onone` 会让 SwiftUI 前端全速跑在未优化代码上**） → codesign（优先用已安装的 Apple Development 身份，无身份时回退 ad-hoc）。
 
-### 沙盒构建限制
-
-在 Claude Code 的沙盒环境中，`./build.sh` 的 Swift 编译阶段可能因 `@Observable` 宏插件失败而中断，典型报错：
-
-```
-external macro implementation type 'ObservationMacros.ObservableMacro' could not be found for macro 'Observable()'
-'/Applications/Xcode.app/.../swift-plugin-server' produced malformed response
-```
-
-这是沙盒/Xcode 插件环境问题，不是代码问题。遇到时**不要每次重复解释**，直接按以下约定处理：
-
-- 沙盒内验证以 `cargo check` / `cargo test` / `cargo clippy` / `swiftc -parse` 为准；完整 `./build.sh` 留给正常 Xcode 环境执行。
-- `./build.sh` 在 Swift 编译前会先删除旧 `CopyAttach.app`，沙盒内失败会留下半成品或没有 App。失败后可清理半成品 `CopyAttach.app`。
-- `./build.sh` 会把 License 参数写入 `SwiftApp/Info.plist`，正常构建结束后会回删；若沙盒内构建中途失败，需手动从 `SwiftApp/Info.plist` 删除 `CopyAttachLicenseServerURL` / `CopyAttachLicenseSigningKeyID` / `CopyAttachLicenseSigningPublicKey` 三个键，保持源码 plist 不含 License 值。
-
 **版本号约定**：每次功能/修复提交都在 `Cargo.toml` 中提升 `version` 并写入提交信息（习惯写法「版本号升至 X.Y.Z」）；开发中的版本带 `-dev` 后缀（如 `0.93.0-dev`），发布版本去掉后缀。`build.sh` 以 `Cargo.toml` 为唯一版本来源同步到 `Info.plist` 的 `CFBundleShortVersionString`。
 
 ### 生产构建（连接生产 License Server）
@@ -269,8 +254,6 @@ CI 发布版（`.github/workflows/build.yml`）的签名步骤同样决定用户
 ## .claude 配置
 
 `.claude/settings.local.json` 包含命令白名单权限。新命令需要时在此文件 `permissions.allow` 数组中添加。
-
-`vision-hook.js`：`UserPromptSubmit` hook，当 prompt 中包含本地图片路径时，自动通过 vision API 转译为文本描述，使 Claude 无需直接读取图片文件即可理解其内容。
 
 ## 安装的 Skills
 

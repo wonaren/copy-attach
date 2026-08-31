@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+## [0.100.0] - 2026-08-31
+
+### 稳定性与更新
+
+- **自动清理更新残留**：启动应用及下载新版本时，自动清理历史遗留的临时安装文件与挂载卷，释放磁盘空间。
+- **更新安装流程更可靠**：更新完成后自动清理临时文件并隔离更新目录，避免冲突，提升自动升级成功率。
+
 ## [0.99.28] - 2026-08-29
 
 ### 内存优化
@@ -103,7 +110,9 @@
 - 修复文本捕获并发时历史条目身份错配的问题。
 - 增加 Rust 侧调试日志落盘，便于诊断数据库和 FFI 错误。
 
-[Unreleased]: https://github.com/wonaren/copy-attach/compare/v0.99.27...HEAD
+[Unreleased]: https://github.com/wonaren/copy-attach/compare/v0.100.0...HEAD
+[0.100.0]: https://github.com/wonaren/copy-attach/compare/v0.99.28...v0.100.0
+[0.99.28]: https://github.com/wonaren/copy-attach/compare/v0.99.27...v0.99.28
 [0.99.27]: https://github.com/wonaren/copy-attach/compare/v0.99.26...v0.99.27
 [0.99.26]: https://github.com/wonaren/copy-attach/compare/v0.99.24...v0.99.26
 [0.99.24]: https://github.com/wonaren/copy-attach/compare/v0.99.23...v0.99.24
