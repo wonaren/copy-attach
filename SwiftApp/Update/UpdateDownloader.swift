@@ -93,6 +93,7 @@ final class UpdateDownloader: NSObject, ObservableObject, URLSessionDownloadDele
         }
         phase = .downloading(0)
         debugLog("[update] start download of v\(version)")
+        Self.cleanupLegacyArtifacts()
         Task { await performDownload(version: version) }
     }
 
@@ -227,8 +228,9 @@ final class UpdateDownloader: NSObject, ObservableObject, URLSessionDownloadDele
     /// to touch this process — SIGTERM terminates it immediately).
     private func install(package: URL, version: String) throws {
         let fm = FileManager.default
+        let myPID = ProcessInfo.processInfo.processIdentifier
         let workDir = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("CopyAttachUpdate-install", isDirectory: true)
+            .appendingPathComponent("CopyAttachUpdate-install-\(myPID)", isDirectory: true)
         try? fm.removeItem(at: workDir)
         try fm.createDirectory(at: workDir, withIntermediateDirectories: true)
 
@@ -248,7 +250,12 @@ final class UpdateDownloader: NSObject, ObservableObject, URLSessionDownloadDele
         let mountPoint = workDir.appendingPathComponent("mnt", isDirectory: true)
         try fm.createDirectory(at: mountPoint, withIntermediateDirectories: true)
         try runAndCheck("/usr/bin/hdiutil", ["attach", "-nobrowse", "-readonly", "-mountpoint", mountPoint.path, dmg.path], "挂载安装包失败")
-        defer { _ = try? runCapture("/usr/bin/hdiutil", ["detach", mountPoint.path, "-quiet"]) }
+        var isMounted = true
+        defer {
+            if isMounted {
+                _ = try? runCapture("/usr/bin/hdiutil", ["detach", mountPoint.path, "-force", "-quiet"])
+            }
+        }
 
         let appSrc = mountPoint.appendingPathComponent("CopyAttach.app")
         guard fm.fileExists(atPath: appSrc.path) else {
@@ -257,10 +264,14 @@ final class UpdateDownloader: NSObject, ObservableObject, URLSessionDownloadDele
 
         let appDest = Bundle.main.bundleURL
         let staging = appDest.deletingLastPathComponent()
-            .appendingPathComponent(".CopyAttach-update-staging-\(ProcessInfo.processInfo.processIdentifier)", isDirectory: true)
+            .appendingPathComponent(".CopyAttach-update-staging-\(myPID)", isDirectory: true)
         try? fm.removeItem(at: staging)
         debugLog("[update] staging new app (\(version)) at \(staging.path)")
         try runAndCheck("/bin/cp", ["-R", appSrc.path, staging.path], "复制新版本失败")
+
+        // Unmount disk image in main flow; fail explicitly if detach fails.
+        try runAndCheck("/usr/bin/hdiutil", ["detach", mountPoint.path, "-quiet"], "卸载安装包失败")
+        isMounted = false
 
         try? fm.removeItem(at: appDest)
         do {
@@ -271,9 +282,9 @@ final class UpdateDownloader: NSObject, ObservableObject, URLSessionDownloadDele
         }
         debugLog("[update] new app installed at \(appDest.path)")
 
-        // Detached relaunch script: kill this process, then open the new app.
+        // Detached relaunch script: kill this process, clean up temp dirs, then open the new app.
         phase = .installing
-        let myPID = ProcessInfo.processInfo.processIdentifier
+        let downloadDir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("CopyAttachUpdate", isDirectory: true)
         let scriptURL = workDir.appendingPathComponent("relaunch.sh")
         let script = """
         #!/bin/bash
@@ -287,6 +298,8 @@ final class UpdateDownloader: NSObject, ObservableObject, URLSessionDownloadDele
         kill -9 \(myPID) 2>/dev/null || true
         open \(Self.shq(appDest.path))
         echo "[update] relaunch issued"
+        rm -rf \(Self.shq(workDir.path)) 2>/dev/null || true
+        rm -rf \(Self.shq(downloadDir.path)) 2>/dev/null || true
         """
         try script.write(to: scriptURL, atomically: true, encoding: .utf8)
         try runAndCheck("/bin/bash", [scriptURL.path], "启动更新脚本失败")
@@ -402,5 +415,63 @@ final class UpdateDownloader: NSObject, ObservableObject, URLSessionDownloadDele
 
     private static func shq(_ value: String) -> String {
         "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    // MARK: - Legacy cleanup
+
+    /// Detaches any lingering disk images and removes temporary update directories.
+    nonisolated static func cleanupLegacyArtifacts() {
+        DispatchQueue.global(qos: .utility).async {
+            let fm = FileManager.default
+            let tmpPath = NSTemporaryDirectory()
+            let tmpURL = URL(fileURLWithPath: tmpPath, isDirectory: true)
+
+            detachStaleUpdateImages()
+
+            if let items = try? fm.contentsOfDirectory(atPath: tmpPath) {
+                for item in items where item.hasPrefix("CopyAttachUpdate") {
+                    let itemURL = tmpURL.appendingPathComponent(item)
+                    try? fm.removeItem(at: itemURL)
+                }
+            }
+        }
+    }
+
+    nonisolated private static func detachStaleUpdateImages() {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/hdiutil")
+        process.arguments = ["info", "-plist"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = Pipe()
+        do {
+            try process.run()
+            process.waitUntilExit()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            guard let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+                  let images = plist["images"] as? [[String: Any]] else { return }
+            for image in images {
+                let imagePath = (image["image-path"] as? String) ?? ""
+                let entities = (image["system-entities"] as? [[String: Any]]) ?? []
+                let isUpdateImage = imagePath.contains("CopyAttachUpdate")
+                for entity in entities {
+                    let mountPoint = (entity["mount-point"] as? String) ?? ""
+                    let devEntry = (entity["dev-entry"] as? String) ?? ""
+                    if isUpdateImage || mountPoint.contains("CopyAttachUpdate") {
+                        let target = !mountPoint.isEmpty ? mountPoint : devEntry
+                        if !target.isEmpty {
+                            debugLog("[update] detaching stale mount: \(target)")
+                            let detachProc = Process()
+                            detachProc.executableURL = URL(fileURLWithPath: "/usr/bin/hdiutil")
+                            detachProc.arguments = ["detach", target, "-force", "-quiet"]
+                            try? detachProc.run()
+                            detachProc.waitUntilExit()
+                        }
+                    }
+                }
+            }
+        } catch {
+            debugLog("[update] failed to query hdiutil info: \(error.localizedDescription)")
+        }
     }
 }

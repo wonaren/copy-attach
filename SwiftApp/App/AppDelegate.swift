@@ -26,6 +26,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // Apply persisted debug-logging preference before startup diagnostics.
         ClipboardBackend.syncDebugLogging()
 
+        // Clean up any stale disk images or temporary folders left by previous updates.
+        UpdateDownloader.cleanupLegacyArtifacts()
+
         debugLog("Starting initialization...")
 
         // Get HotkeyManager setup first (doesn't require Rust backend)
