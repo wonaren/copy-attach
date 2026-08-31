@@ -34,6 +34,7 @@ void clipboard_free_bytes(uint8_t* data, int32_t len);
 // ─── Action ───
 int32_t clipboard_select_and_paste(int32_t index);
 int32_t clipboard_select_and_paste_by_id(uint64_t entry_id);
+int32_t clipboard_select_and_paste_as_path_by_id(uint64_t entry_id);
 
 // ─── Lazy Text Loading (on-demand full text by entry ID) ───
 char* clipboard_get_text_by_id(uint64_t entry_id);

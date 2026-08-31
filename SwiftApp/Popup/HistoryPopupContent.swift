@@ -233,11 +233,12 @@ struct HistoryPopupContent: View {
             }
             return .handled
         }
-        .onKeyPress(.return) {
+        .onKeyPress(keys: [.return], phases: .down) { press in
             if selectedIndex > 0 {
-                selectItem(at: selectedIndex - 1)
+                selectItem(at: selectedIndex - 1, asPath: press.modifiers.contains(.shift))
+                return .handled
             }
-            return .handled
+            return .ignored
         }
         .onKeyPress(.escape) {
             handleEscape()
@@ -498,6 +499,11 @@ struct HistoryPopupContent: View {
                 .focused($isSearchFocused)
                 .font(.system(size: 12.5))
                 .foregroundColor(theme.popupPrimaryText)
+                .onSubmit {
+                    if !displayItems.isEmpty {
+                        selectItem(at: 0, asPath: NSEvent.modifierFlags.contains(.shift))
+                    }
+                }
 
             if !searchText.isEmpty {
                 Button(action: { searchText = "" }) {

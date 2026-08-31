@@ -18,26 +18,6 @@ use super::to_ffi_cstring;
 /// older than this can no longer be in flight and is safe to purge.
 const PASTE_IMAGE_TTL: Duration = Duration::from_secs(60);
 
-/// Bundle identifiers whose Cmd+V handler does not translate a Finder-style
-/// `public.file-url` pasteboard item into path text. VS Code's integrated
-/// terminal reads plain text on paste; its file-resource fallback only
-/// understands VS Code's private `code/file-list` clipboard format, never the
-/// `public.file-url` item that native terminals translate into a path.
-/// For these targets the materialized image path must be written as plain
-/// text so Cmd+V inserts the same path string that drag-and-drop inserts.
-const TEXT_PATH_PASTE_BUNDLE_IDS: &[&str] = &[
-    "com.microsoft.VSCode",
-    "com.microsoft.VSCodeInsiders",
-    "com.microsoft.VSCodeExploration",
-    "com.visualstudio.code.oss",
-    "com.vscodium",
-];
-
-/// Whether an image paste into `bundle_id` must put the temp PNG path on the
-/// pasteboard as `public.utf8-plain-text` instead of `public.file-url`.
-fn image_target_needs_text_path(bundle_id: &str) -> bool {
-    TEXT_PATH_PASTE_BUNDLE_IDS.contains(&bundle_id)
-}
 
 /// Materialize a clipboard image as a PNG file under the per-user temp
 /// directory, mirroring the drag provider's convention (separate `Paste`
@@ -99,7 +79,9 @@ pub(crate) fn purge_stale_paste_images() {
 /// Shared implementation for select-and-paste.
 /// Loads full image data from DB if needed, writes to system clipboard,
 /// write-through DB, moves item to top of history, then simulates paste.
-fn select_and_paste_impl(mut item: ClipboardEntry) -> c_int {
+/// When `as_path` is true and the entry is an Image, its temp PNG path is
+/// placed on the clipboard as plain text instead of `public.file-url`.
+fn select_and_paste_impl(mut item: ClipboardEntry, as_path: bool) -> c_int {
     #[cfg(target_os = "macos")]
     {
         // Cmd+V simulation needs accessibility permission. Gate BEFORE any
@@ -211,13 +193,11 @@ fn select_and_paste_impl(mut item: ClipboardEntry) -> c_int {
     // not fail on an arboard handle it never uses.
     let b = backend();
     let _event_guard = b.pasteboard_event_lock.lock().unwrap();
-    // Image paste uses drag-style file-path mode: the image is materialized
-    // as a temp PNG and only its file URL goes on the pasteboard (Finder
-    // "copy file" semantics). Terminals translate the URL into the path text
-    // (TUI agents like Claude Code consume exactly this form); chat/notes
-    // apps attach the file. VS Code's integrated terminal is the exception:
-    // its Cmd+V handler only reads plain text, so the path is written as text
-    // for that target.
+    // Image paste always uses drag-style file-path mode — the single,
+    // universal convention: the image is materialized as a temp PNG and only
+    // its file URL goes on the pasteboard (Finder "copy file" semantics).
+    // Terminals translate the URL into the path text (TUI agents like Claude
+    // Code consume exactly this form); chat/notes apps attach the file.
     match &db_item.0 {
         ClipboardEntry::Text { .. } => {
             let text = match &full_text {
@@ -236,12 +216,7 @@ fn select_and_paste_impl(mut item: ClipboardEntry) -> c_int {
                 Some(p) => p,
                 None => return 0,
             };
-            let target_bundle_id = b.source_app.lock()
-                .ok()
-                .map(|src| src.bundle_id.clone())
-                .unwrap_or_default();
-            if image_target_needs_text_path(&target_bundle_id) {
-                crate::debug_log!("CopyAttach: image paste as path text for target {target_bundle_id}");
+            if as_path {
                 let mut cb = match Clipboard::new() { Ok(c) => c, Err(_) => return 0 };
                 if cb.set_text(&path).is_err() { return 0; }
             } else if !macos::set_pasteboard_file_url(&path) {
@@ -336,7 +311,7 @@ pub extern "C" fn clipboard_select_and_paste(index: c_int) -> c_int {
             None => return 0,
         }
     };
-    select_and_paste_impl(item)
+    select_and_paste_impl(item, false)
 }
 
 /// Select and paste by stable entry ID (not array index).
@@ -352,7 +327,23 @@ pub extern "C" fn clipboard_select_and_paste_by_id(entry_id: u64) -> c_int {
             None => return 0,
         }
     };
-    select_and_paste_impl(item)
+    select_and_paste_impl(item, false)
+}
+
+/// Select and paste as path text by stable entry ID (e.g. Shift+Enter).
+#[no_mangle]
+pub extern "C" fn clipboard_select_and_paste_as_path_by_id(entry_id: u64) -> c_int {
+    let item = {
+        let hist = backend().history.lock().unwrap();
+        match hist.iter().find(|e| match e {
+            ClipboardEntry::Text { id, .. } => *id == entry_id,
+            ClipboardEntry::Image { id, .. } => *id == entry_id,
+        }).cloned() {
+            Some(i) => i,
+            None => return 0,
+        }
+    };
+    select_and_paste_impl(item, true)
 }
 
 /// Load full text by entry ID (for on-demand preview loading). The body lives
@@ -399,27 +390,4 @@ pub extern "C" fn clipboard_get_text_by_id(entry_id: u64) -> *mut c_char {
     // Transient body: mark its pages reusable once the FFI CString is built.
     let guard = crate::backend::MarkStringReusableOnDrop(text);
     to_ffi_cstring(&guard.0)
-}
-
-#[cfg(test)]
-mod image_paste_target_tests {
-    use super::image_target_needs_text_path;
-
-    #[test]
-    fn vs_code_targets_need_plain_text_paths() {
-        assert!(image_target_needs_text_path("com.microsoft.VSCode"));
-        assert!(image_target_needs_text_path("com.microsoft.VSCodeInsiders"));
-        assert!(image_target_needs_text_path("com.microsoft.VSCodeExploration"));
-        assert!(image_target_needs_text_path("com.visualstudio.code.oss"));
-        assert!(image_target_needs_text_path("com.vscodium"));
-    }
-
-    #[test]
-    fn native_terminals_keep_file_url_paste() {
-        assert!(!image_target_needs_text_path("com.mitchellh.ghostty"));
-        assert!(!image_target_needs_text_path("com.apple.Terminal"));
-        assert!(!image_target_needs_text_path("com.googlecode.iterm2"));
-        assert!(!image_target_needs_text_path("net.kovidgoyal.kitty"));
-        assert!(!image_target_needs_text_path(""));
-    }
 }

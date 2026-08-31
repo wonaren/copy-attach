@@ -30,12 +30,12 @@ extension HistoryPopupContent {
         }
     }
 
-    func selectItem(at index: Int) {
+    func selectItem(at index: Int, asPath: Bool = false) {
         let items = displayItems
         guard index < items.count else { return }
         let item = items[index]
         guard let backendIdx = backend.items.firstIndex(where: { $0.id == item.id }) else { return }
-        if backend.selectAndPaste(at: backendIdx) {
+        if backend.selectAndPaste(at: backendIdx, asPath: asPath) {
             closePreview()
             onClose()
         }

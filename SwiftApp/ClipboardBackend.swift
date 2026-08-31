@@ -426,10 +426,12 @@ class ClipboardBackend {
         return result
     }
 
-    func selectAndPaste(at index: Int) -> Bool {
+    func selectAndPaste(at index: Int, asPath: Bool = false) -> Bool {
         guard index < items.count else { return false }
         let entryId = UInt64(items[index].id)
-        let result = clipboard_select_and_paste_by_id(entryId) != 0
+        let result = (asPath
+            ? clipboard_select_and_paste_as_path_by_id(entryId)
+            : clipboard_select_and_paste_by_id(entryId)) != 0
         if result {
             // History order changed (selected item moved to top) — force UI refresh
             reloadItems()

@@ -286,3 +286,11 @@ fn test_image_decode_buffer_pool_lifecycle() {
     );
     drop(after_big);
 }
+
+#[test]
+fn test_select_and_paste_as_path_by_id_missing_returns_zero() {
+    ensure_test_backend();
+    let result = crate::ffi::clipboard_select_and_paste_as_path_by_id(999_999_999);
+    assert_eq!(result, 0, "nonexistent entry must return 0");
+}
+
