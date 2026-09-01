@@ -57,7 +57,7 @@ extension InlineSettingsView {
                     }
                 }
             }
-            .background(theme.background)
+            .background(theme.cardRowBackground)
             .cornerRadius(8)
             .overlay(RoundedRectangle(cornerRadius: 8).stroke(theme.cardBorder, lineWidth: 1))
 

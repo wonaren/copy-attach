@@ -63,9 +63,6 @@ struct InlineSettingsView: View {
     var body: some View {
         VStack(spacing: 0) {
             tabBar
-            Divider()
-                .frame(height: 1)
-                .background(theme.divider)
             tabContent
         }
         .frame(width: 520, height: 600)
@@ -230,7 +227,7 @@ struct InlineSettingsView: View {
         }
         // Scoped value animation so hover highlights fade like native controls.
         .animation(.easeInOut(duration: 0.15), value: hoveredTab)
-        .padding(.vertical, 10)
+        .padding(.top, 8)
         .background(theme.tabBackground)
     }
 

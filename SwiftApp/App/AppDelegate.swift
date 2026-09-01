@@ -373,11 +373,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         debugLog("Creating settings window...")
         let window = NSWindow(
             contentRect: NSRect(x: 100, y: 100, width: 520, height: 600),
-            styleMask: [.titled, .closable, .miniaturizable],
+            styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
         window.title = "CopyAttach"
+        window.titleVisibility = .visible
+        window.titlebarAppearsTransparent = true
+        window.titlebarSeparatorStyle = .none
+        window.isMovableByWindowBackground = true
         window.isReleasedWhenClosed = false
         window.hidesOnDeactivate = false
         window.delegate = self

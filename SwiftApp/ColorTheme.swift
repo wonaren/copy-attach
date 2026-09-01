@@ -42,19 +42,19 @@ struct AppTheme {
 
     static let dark = AppTheme(
         // Settings
-        background: Color(nsColor: NSColor(calibratedRed: 0.12, green: 0.12, blue: 0.13, alpha: 1.0)),
-        secondaryBackground: Color(nsColor: NSColor(calibratedRed: 0.14, green: 0.14, blue: 0.15, alpha: 1.0)),
-        cardBackground: Color(nsColor: NSColor(calibratedRed: 0.175, green: 0.175, blue: 0.19, alpha: 1.0)),
-        cardBorder: Color(nsColor: NSColor(calibratedRed: 0.24, green: 0.24, blue: 0.26, alpha: 1.0)),
-        divider: Color(nsColor: NSColor(calibratedRed: 0.24, green: 0.24, blue: 0.26, alpha: 1.0)),
-        tabBackground: Color(nsColor: NSColor(calibratedRed: 0.14, green: 0.14, blue: 0.15, alpha: 1.0)),
+        background: Color.clear,
+        secondaryBackground: Color.white.opacity(0.04),
+        cardBackground: Color.white.opacity(0.06),
+        cardBorder: Color.white.opacity(0.10),
+        divider: Color.white.opacity(0.12),
+        tabBackground: Color.clear,
         primaryText: Color(white: 0.9),
         secondaryText: Color(nsColor: NSColor(calibratedRed: 0.6, green: 0.6, blue: 0.62, alpha: 1.0)),
         tertiaryText: Color(nsColor: NSColor(calibratedRed: 0.55, green: 0.55, blue: 0.58, alpha: 1.0)),
         buttonBackground: Color(nsColor: NSColor(calibratedRed: 0.22, green: 0.22, blue: 0.24, alpha: 1.0)),
         buttonBorder: Color(nsColor: NSColor(calibratedRed: 0.45, green: 0.45, blue: 0.48, alpha: 1.0)),
         buttonText: Color(white: 0.85),
-        cardRowBackground: Color(nsColor: NSColor(calibratedRed: 0.12, green: 0.12, blue: 0.13, alpha: 1.0)),
+        cardRowBackground: Color.black.opacity(0.20),
 
         // Popup
         popupBackground: Color.black.opacity(0.8),
@@ -81,19 +81,19 @@ struct AppTheme {
 
     static let light = AppTheme(
         // Settings — Apple-native light window background
-        background: Color(nsColor: NSColor.windowBackgroundColor),
-        secondaryBackground: Color(nsColor: NSColor(calibratedRed: 0.88, green: 0.88, blue: 0.9, alpha: 1.0)),
-        cardBackground: Color(nsColor: NSColor(calibratedRed: 0.975, green: 0.975, blue: 0.98, alpha: 1.0)),
-        cardBorder: Color(nsColor: NSColor(calibratedRed: 0.78, green: 0.78, blue: 0.8, alpha: 1.0)),
-        divider: Color(nsColor: NSColor(calibratedRed: 0.82, green: 0.82, blue: 0.84, alpha: 1.0)),
-        tabBackground: Color(nsColor: NSColor(calibratedRed: 0.88, green: 0.88, blue: 0.9, alpha: 1.0)),
+        background: Color.clear,
+        secondaryBackground: Color.black.opacity(0.03),
+        cardBackground: Color.white.opacity(0.70),
+        cardBorder: Color.black.opacity(0.08),
+        divider: Color.black.opacity(0.08),
+        tabBackground: Color.clear,
         primaryText: Color(white: 0.15),
         secondaryText: Color(nsColor: NSColor(calibratedRed: 0.5, green: 0.5, blue: 0.53, alpha: 1.0)),
         tertiaryText: Color(nsColor: NSColor(calibratedRed: 0.6, green: 0.6, blue: 0.62, alpha: 1.0)),
         buttonBackground: Color(nsColor: NSColor(calibratedRed: 0.85, green: 0.85, blue: 0.87, alpha: 1.0)),
         buttonBorder: Color(nsColor: NSColor(calibratedRed: 0.65, green: 0.65, blue: 0.68, alpha: 1.0)),
         buttonText: Color(white: 0.15),
-        cardRowBackground: Color(nsColor: NSColor.windowBackgroundColor),
+        cardRowBackground: Color.white.opacity(0.60),
 
         // Popup — Spotlight-like light translucent
         popupBackground: Color(nsColor: NSColor(calibratedRed: 0.92, green: 0.92, blue: 0.94, alpha: 0.85)),
