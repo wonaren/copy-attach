@@ -34,6 +34,7 @@ struct InlineSettingsView: View {
     /// Seamless download/install engine (GitHub first, lanzou fallback).
     @StateObject var updater = UpdateDownloader.shared
     @Environment(\.appTheme) var theme
+    @Environment(\.colorScheme) var colorScheme
 
     init(initialTab: Int = 0) {
         _selectedTab = State(initialValue: initialTab)
@@ -83,33 +84,123 @@ struct InlineSettingsView: View {
 
     // MARK: - Tab Bar
     @State private var hoveredTab: Int? = nil
+    @Namespace private var tabGlassNamespace
 
-    private var tabBar: some View {
+    private let tabCornerRadius: CGFloat = 10
+
+    /// Fallback "glass" pill for macOS < 26: hand-layered inner highlight + rim light.
+    @ViewBuilder
+    private var liquidGlassSelectedBackground: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: tabCornerRadius, style: .continuous)
+                .fill(
+                    LinearGradient(
+                        stops: [
+                            .init(color: Color.white.opacity(colorScheme == .dark ? 0.10 : 0.45), location: 0.0),
+                            .init(color: Color.white.opacity(colorScheme == .dark ? 0.03 : 0.15), location: 0.5),
+                            .init(color: Color.clear, location: 1.0)
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                )
+
+            RoundedRectangle(cornerRadius: tabCornerRadius, style: .continuous)
+                .strokeBorder(
+                    LinearGradient(
+                        stops: [
+                            .init(color: Color.white.opacity(colorScheme == .dark ? 0.70 : 0.90), location: 0.0),
+                            .init(color: Color.white.opacity(colorScheme == .dark ? 0.25 : 0.35), location: 0.25),
+                            .init(color: Color.clear, location: 0.55),
+                            .init(color: colorScheme == .dark ? Color.white.opacity(0.20) : Color.black.opacity(0.15), location: 1.0)
+                        ],
+                        startPoint: .topTrailing,
+                        endPoint: .bottomLeading
+                    ),
+                    lineWidth: 1.2
+                )
+        }
+        .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.35 : 0.12), radius: 3, x: 0, y: 1.5)
+    }
+
+    /// Native Liquid Glass material for the selected tab (macOS 26+).
+    /// Neutral tint (Tahoe toolbar-style): the material itself carries the
+    /// selection, so the accent-colored icon/label stays readable on top.
+    @available(macOS 26.0, *)
+    private var selectionGlass: Glass {
+        .regular
+            .tint(Color.white.opacity(colorScheme == .dark ? 0.07 : 0.18))
+            .interactive()
+    }
+
+    @ViewBuilder
+    private func tabItemBackground(for index: Int) -> some View {
+        if selectedTab == index {
+            if #available(macOS 26.0, *) {
+                // Real glass is applied directly to the label (see tabItemLabel),
+                // so nothing is drawn behind it here.
+                EmptyView()
+            } else {
+                liquidGlassSelectedBackground
+                    .transition(
+                        .asymmetric(
+                            insertion: .scale(scale: 0.94).combined(with: .opacity).combined(with: .offset(y: 2)),
+                            removal: .scale(scale: 0.90).combined(with: .opacity).combined(with: .offset(y: 3))
+                        )
+                    )
+            }
+        } else if hoveredTab == index {
+            RoundedRectangle(cornerRadius: tabCornerRadius, style: .continuous)
+                .fill(theme.popupRowHover)
+                .transition(.opacity)
+        }
+    }
+
+    private func tabItemCore(_ i: Int) -> some View {
+        VStack(spacing: 3) {
+            Image(systemName: tabIcons[i])
+                .font(.system(size: 17, weight: .medium))
+                .symbolVariant(selectedTab == i ? .fill : .none)
+                .frame(width: 22, height: 20)
+            Text(tabTitles[i])
+                .font(.system(size: 11, weight: selectedTab == i ? .semibold : .medium))
+                .lineLimit(1)
+        }
+        .frame(width: 68, height: 48)
+    }
+
+    /// On macOS 26+ the glass is applied to the label itself, so the icon and
+    /// text render *on* the glass (crisp, with system vibrancy) instead of
+    /// being seen *through* it. The stable `glassEffectID` lets the single
+    /// glass element morph between tabs inside the `GlassEffectContainer`.
+    @ViewBuilder
+    private func tabItemLabel(_ i: Int) -> some View {
+        if #available(macOS 26.0, *), selectedTab == i {
+            tabItemCore(i)
+                .glassEffect(
+                    selectionGlass,
+                    in: RoundedRectangle(cornerRadius: tabCornerRadius, style: .continuous)
+                )
+                .glassEffectID("tabSelection", in: tabGlassNamespace)
+        } else {
+            tabItemCore(i)
+        }
+    }
+
+    private var tabButtons: some View {
         HStack(spacing: 4) {
             Spacer()
             ForEach(0..<6, id: \.self) { i in
                 Button {
-                    selectedTab = i
-                } label: {
-                    VStack(spacing: 4) {
-                        Image(systemName: tabIcons[i])
-                            .font(.system(size: 15, weight: .medium))
-                        Text(tabTitles[i])
-                            .font(.system(size: 10.5, weight: .medium))
+                    // System-standard smooth curve: bouncy springs visibly
+                    // distort glass shapes while morphing (WWDC25 guidance).
+                    withAnimation(.smooth(duration: 0.3)) {
+                        selectedTab = i
                     }
-                    .frame(width: 72)
-                    .padding(.vertical, 10)
-                    .background(
-                        selectedTab == i
-                        ? Color.accentColor.opacity(0.12)
-                        : hoveredTab == i ? theme.popupRowHover : Color.clear
-                    )
-                    .cornerRadius(8)
-                    .overlay(
-                        selectedTab == i
-                        ? RoundedRectangle(cornerRadius: 8).stroke(Color.accentColor, lineWidth: 1)
-                        : nil
-                    )
+                } label: {
+                    tabItemLabel(i)
+                        .contentShape(RoundedRectangle(cornerRadius: tabCornerRadius, style: .continuous))
+                        .background { tabItemBackground(for: i) }
                 }
                 .buttonStyle(.plain)
                 .foregroundColor(
@@ -125,6 +216,20 @@ struct InlineSettingsView: View {
             }
             Spacer()
         }
+    }
+
+    private var tabBar: some View {
+        Group {
+            if #available(macOS 26.0, *) {
+                GlassEffectContainer {
+                    tabButtons
+                }
+            } else {
+                tabButtons
+            }
+        }
+        // Scoped value animation so hover highlights fade like native controls.
+        .animation(.easeInOut(duration: 0.15), value: hoveredTab)
         .padding(.vertical, 10)
         .background(theme.tabBackground)
     }
@@ -139,6 +244,10 @@ struct InlineSettingsView: View {
             else if selectedTab == 4 { LicenseSettingsView() }
             else { aboutTab }
         }
+        // Native cross-dissolve on section change (System Settings behavior);
+        // animated by the same `.smooth` transaction as the glass pill morph.
+        .id(selectedTab)
+        .transition(.opacity)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
