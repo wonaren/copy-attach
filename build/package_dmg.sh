@@ -10,7 +10,14 @@ OUTPUT_DIR="${2:-build}"
 
 # Read version from Cargo.toml
 VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
-DMG_NAME="${APP_NAME}-${VERSION}.dmg"
+PLATFORM="macos"
+ARCH="$(uname -m)"
+case "$ARCH" in
+    arm64|aarch64) ARCH="arm64" ;;
+    x86_64|amd64) ARCH="x86_64" ;;
+    *) ARCH="${ARCH}" ;;
+esac
+DMG_NAME="${APP_NAME}-${VERSION}-${PLATFORM}-${ARCH}.dmg"
 DMG_PATH="${OUTPUT_DIR}/${DMG_NAME}"
 
 # Ensure the .app exists
