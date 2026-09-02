@@ -263,11 +263,12 @@ jobs:
         env:
           LANZOU_COOKIE: ${{ secrets.LANZOU_COOKIE }}
           VERSION: ${{ needs.build.outputs.version }}
+          DMG_NAME: ${{ needs.build.outputs.dmg_name }}
           NOTES_FILE: ${{ runner.temp }}/release-notes.md
         run: |
           test -n "$LANZOU_COOKIE" || { echo "::error::未配置 LANZOU_COOKIE secret"; exit 1; }
           python3 -m pip install --user -r scripts/requirements-lanzou.txt
-          ZIP_NAME="CopyAttach-v${VERSION}-macOS.zip"
+          ZIP_NAME="${DMG_NAME%.dmg}.zip"
           ZIP_PATH="build/${ZIP_NAME}"
           zip -j "$ZIP_PATH" build/CopyAttach-*.dmg
           python3 scripts/lanzou_uploader.py "$ZIP_PATH" \
