@@ -3,7 +3,8 @@ import Foundation
 import Observation
 import os
 
-/// Swift wrapper around the Rust copy_attach C FFI.
+private let thumbnailDecodeSlots = DispatchSemaphore(value: 4)
+
 @MainActor
 @Observable
 class ClipboardBackend {
@@ -182,17 +183,13 @@ class ClipboardBackend {
         }
     }
 
-    /// Release decoded thumbnails 60s after the popup closes. Re-opening the
-    /// popup within that window cancels the release, so a quick toggle never
-    /// pays a re-decode; after 60s the next open re-decodes <300px PNGs
-    /// asynchronously (the same path as a cache miss today).
+    /// Release decoded thumbnails when the popup closes. The list is not
+    /// visible then, so retaining image objects for 60 seconds only inflates
+    /// footprint and makes repeated sessions look like a leak.
     private func scheduleThumbnailCacheClear() {
         thumbnailCacheClearTask?.cancel()
-        thumbnailCacheClearTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 60_000_000_000)
-            guard !Task.isCancelled else { return }
-            self?.clearThumbnailCache()
-        }
+        thumbnailCacheClearTask = nil
+        clearThumbnailCache()
     }
 
     /// Pushes the persisted capture policy to Rust. The monitor evaluates it
@@ -380,6 +377,18 @@ class ClipboardBackend {
         return thumbnailCache.object(forKey: NSNumber(value: dbId))
     }
 
+    /// Decode outside the main actor with a hard concurrency bound. The
+    /// semaphore wait runs on a worker queue, never in an async task context.
+    private nonisolated static func decodeThumbnail(dbId: Int) async -> DecodedImage? {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                thumbnailDecodeSlots.wait()
+                defer { thumbnailDecodeSlots.signal() }
+                continuation.resume(returning: ImageDecode.previewImage(dbId: dbId, maxPixel: 300))
+            }
+        }
+    }
+
     /// Async full thumbnail load: NSCache hit, else the FFI read + PNG decode
     /// run off the main thread, and the result is cached before returning.
     /// The main thread never performs DB access or image decoding for rows.
@@ -387,17 +396,7 @@ class ClipboardBackend {
         guard dbId != 0 else { return nil }
         let key = NSNumber(value: dbId)
         if let cached = thumbnailCache.object(forKey: key) { return cached }
-        let decoded = await Task.detached(priority: .userInitiated) { () -> DecodedImage? in
-            // Rust decode pipeline (see ImageDecode): every intermediate is
-            // marked reusable and the delivered RGBA buffer is released via
-            // `clipboard_preview_buffer_release` when the CGImage dies. The
-            // old NSImage(data:) path used ImageIO, whose freed decode
-            // buffers linger in the malloc footprint forever (measured: a
-            // 180-image history session pinned ~40 MB of small-zone dirty
-            // pages after one popup open, never reclaimed by closing the
-            // popup or clearing the cache).
-            ImageDecode.previewImage(dbId: dbId, maxPixel: 300)
-        }.value
+        let decoded = await Self.decodeThumbnail(dbId: dbId)
         guard let decoded else { return nil }
         // cost = decoded RGBA upper bound for a 300px-max-dimension thumbnail
         thumbnailCache.setObject(decoded.image, forKey: key, cost: 300 * 300 * 4)

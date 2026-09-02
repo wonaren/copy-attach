@@ -292,13 +292,19 @@ struct ItemRowView: View {
         }
         // Load the thumbnail off the main thread (FFI read + PNG decode).
         // `id: dbId` restarts the task when Phase 2 completes (dbId 0 → rowid)
-        // and auto-cancels it when the row scrolls out of view; a cancelled
-        // task must not publish a result to a dead row.
+        // and auto-cancels it when the row scrolls out of view. The loader is
+        // concurrency-bounded and cancellation prevents publishing an image
+        // into a row that is no longer visible.
         .task(id: dbId) {
             guard dbId != 0 else { return }
             let img = await ClipboardBackend.shared.loadThumbnail(dbId: dbId)
             guard !Task.isCancelled else { return }
             thumbImage = img
+        }
+        .onDisappear {
+            // Release the row's strong image reference immediately. NSCache is
+            // intentionally the only owner after a row leaves the viewport.
+            thumbImage = nil
         }
     }
 }
