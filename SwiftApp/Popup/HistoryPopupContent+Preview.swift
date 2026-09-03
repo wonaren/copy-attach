@@ -65,13 +65,14 @@ extension HistoryPopupContent {
 
     private func fullTextItem(_ item: ClipboardItem) -> ClipboardItem? {
         switch item {
-        case .text(let entryId, _, let timestamp, let label, let sourceName, let sourceBundleId, _):
+        case .text(let entryId, let timestamp, let label, let sourceName, let sourceBundleId, _, _):
             guard let full = item.fullText else {
                 debugLog("fullTextItem: failed to load full text for entry \(entryId)")
                 return nil
             }
-            return .text(entryId: entryId, text: full, timestamp: timestamp,
-                         label: label, sourceName: sourceName, sourceBundleId: sourceBundleId, preview: full)
+            return .text(entryId: entryId, timestamp: timestamp,
+                         label: label, sourceName: sourceName, sourceBundleId: sourceBundleId,
+                         preview: full, displayPreview: ClipboardItem.formatDisplayPreview(full))
         default:
             return item
         }

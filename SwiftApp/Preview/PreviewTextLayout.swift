@@ -24,8 +24,25 @@ enum PreviewTextLayout {
         ]
     }
 
-    /// Measure the rendered height of `text` constrained to `width`.
-    static func measureHeight(_ text: String, width: CGFloat) -> CGFloat {
+    /// Measure the rendered height of `text` constrained to `width` and bounded by `maxHeight`.
+    static func measureHeight(_ text: String, width: CGFloat, maxHeight: CGFloat) -> CGFloat {
+        // Fast path: if quick line estimate exceeds maxHeight, avoid full NSLayoutManager glyph layout
+        let approxLineHeight: CGFloat = 19.0 // 14pt font + 5pt line spacing
+        let maxLinesNeeded = Int(ceil(maxHeight / approxLineHeight)) + 2
+
+        var lineCount = 0
+        text.enumerateLines { _, stop in
+            lineCount += 1
+            if lineCount >= maxLinesNeeded {
+                stop = true
+            }
+        }
+
+        if lineCount >= maxLinesNeeded {
+            return maxHeight
+        }
+
+        // Short text: precise layout
         let textStorage = NSTextStorage()
         let layoutManager = NSLayoutManager()
         let textContainer = NSTextContainer(containerSize: NSSize(width: width, height: .greatestFiniteMagnitude))
@@ -34,6 +51,6 @@ enum PreviewTextLayout {
         textStorage.addLayoutManager(layoutManager)
         textStorage.setAttributedString(NSAttributedString(string: text, attributes: attributes(textColor: .white)))
         _ = layoutManager.glyphRange(for: textContainer)
-        return layoutManager.usedRect(for: textContainer).height
+        return min(layoutManager.usedRect(for: textContainer).height, maxHeight)
     }
 }

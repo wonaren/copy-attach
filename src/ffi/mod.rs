@@ -40,24 +40,17 @@ pub(crate) use history::*;
 pub(crate) use stress::*;
 
 pub(super) fn vec_to_raw(v: Vec<u8>) -> *mut u8 {
-    let mut v = v;
-    // Pin capacity == len so `clipboard_free_bytes` can reconstruct the Vec
-    // with from_raw_parts(ptr, len, len) without layout mismatch — same
-    // contract `clipboard_search_ids` upholds explicitly before handing the
-    // buffer to the C caller. Skip the shrink when capacity already matches
-    // (the common case for rusqlite blobs and packed snapshots): a shrink
-    // would realloc-and-copy a large buffer and double its peak.
-    if v.capacity() != v.len() {
-        v.shrink_to_fit();
-    }
+    let len = v.len();
+    // Convert to boxed slice so allocation layout is strictly bound to `len`,
+    // avoiding allocator-dependent size class mismatches when reconstructed.
+    let boxed = v.into_boxed_slice();
+    let ptr = Box::into_raw(boxed) as *mut u8;
     // The allocator may have handed back a block whose pages are still marked
     // `MADV_FREE_REUSABLE` from a previous scratch buffer (freed-but-marked
     // blocks are reused as-is). Such pages stay kernel-reclaimable — and
     // uncounted — until claimed, so a live buffer read by Swift could be
     // zeroed under memory pressure. Claim before the caller touches it.
-    crate::backend::claim_pages(v.as_ptr(), v.capacity());
-    let ptr = v.as_mut_ptr();
-    std::mem::forget(v);
+    crate::backend::claim_pages(ptr, len);
     ptr
 }
 

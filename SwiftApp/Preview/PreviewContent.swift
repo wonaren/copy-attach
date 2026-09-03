@@ -43,8 +43,8 @@ struct PreviewContent: View {
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
 
             switch item {
-            case .text(_, let text, _, _, _, _, _):
-                LargeTextView(text: text, textColor: previewTextNSColor)
+            case .text(_, _, _, _, _, let preview, _):
+                LargeTextView(text: preview, textColor: previewTextNSColor)
             case .image(_, let dbId, _, _, _, _, _, _):
                 imageContent(dbId: dbId)
             }

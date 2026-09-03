@@ -41,8 +41,8 @@ struct ItemRowView: View {
             appIcon
             VStack(alignment: .leading, spacing: 0) {
                 switch item {
-                case .text(_, _, _, _, _, _, let preview):
-                    textContent(preview)
+                case .text(_, _, _, _, _, _, let displayPreview):
+                    textContent(displayPreview)
                 case .image(_, let dbId, let width, let height, _, _, _, _):
                     imageContent(dbId: dbId, width: width, height: height)
                 }
@@ -130,19 +130,8 @@ struct ItemRowView: View {
         .frame(width: 20, height: 20).foregroundColor(.white)
     }
 
-    private func textContent(_ text: String) -> some View {
-        // `text` is the backend preview, already bounded to 256 scalars; long
-        // entries arrive elided to head……tail, so the cut below always sees the
-        // real ending. Collapsing the bounded preview is cheap — no local cap.
-        let displayText = text.collapsedPreview()
-        let display: String
-        let visualLen = visualWidth(displayText)
-        if visualLen > 50 {
-            let prefix = String(displayText.prefix(whileVisualWidth: 25))
-            let suffix = String(displayText.suffix(whileVisualWidth: 25))
-            display = "\(prefix)……\(suffix)"
-        } else { display = displayText }
-        return coloredLabel(display)
+    private func textContent(_ displayText: String) -> some View {
+        coloredLabel(displayText)
             .font(.system(size: 13, weight: .regular))
             .foregroundColor(textColor(isSelected))
             .lineLimit(1)

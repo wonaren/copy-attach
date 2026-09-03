@@ -90,8 +90,9 @@ pub extern "C" fn clipboard_delete_by_id(entry_id: u64) -> c_int {
 
     // For image entries, load full data from DB before removal.
     // If loading fails (Phase 2 not done, DB error), reject deletion entirely.
-    if let ClipboardEntry::Image { db_id, png_data, thumb_data, thumb_width, thumb_height, .. } = &mut entry {
-        if png_data.is_empty() && *db_id != 0 {
+    let mut undo_image: Option<crate::backend::MarkImageBlobsReusableOnDrop> = None;
+    if let ClipboardEntry::Image { db_id, thumb_width, thumb_height, .. } = &mut entry {
+        if *db_id != 0 {
             let conn = b.db.lock().unwrap_or_else(|e| {
                 panic!("CopyAttach: DB lock poisoned loading image for undo: {e}");
             });
@@ -111,17 +112,16 @@ pub extern "C" fn clipboard_delete_by_id(entry_id: u64) -> c_int {
                     // back: these blobs sit in the undo stack (long-lived).
                     crate::backend::claim_pages(png.as_ptr(), png.capacity());
                     crate::backend::claim_pages(thumb.as_ptr(), thumb.capacity());
-                    *png_data = png;
-                    *thumb_data = thumb;
                     *thumb_width = tw as u32;
                     *thumb_height = th as u32;
+                    undo_image = Some(crate::backend::MarkImageBlobsReusableOnDrop { png, thumb });
                 }
                 Err(e) => {
                     crate::error_log!("CopyAttach: failed to load image data from DB for undo: {e}");
                     return 0;
                 }
             }
-        } else if png_data.is_empty() && *db_id == 0 {
+        } else {
             // Phase 2 async persist has not completed — no image data exists in DB.
             // Reject deletion: the entry stays in history, user can retry later.
             crate::error_log!("CopyAttach: cannot delete image entry {entry_id}: Phase 2 not yet complete (db_id=0)");
@@ -132,8 +132,9 @@ pub extern "C" fn clipboard_delete_by_id(entry_id: u64) -> c_int {
     // Step 3: Materialize the payload to disk before the DB delete removes it.
     // On success the in-memory blobs/body are released immediately; the undo
     // stack keeps only metadata + the file path.
+    let image_slices = undo_image.as_ref().map(|b| (b.png.as_slice(), b.thumb.as_slice()));
     let (payload_path, payload_bytes) =
-        match crate::backend::write_undo_payload(&entry, undo_text.as_deref()) {
+        match crate::backend::write_undo_payload(&entry, undo_text.as_deref(), image_slices) {
             Ok(v) => v,
             Err(()) => {
                 crate::error_log!("CopyAttach: failed to materialize undo payload for entry {entry_id} — delete aborted");
@@ -145,19 +146,10 @@ pub extern "C" fn clipboard_delete_by_id(entry_id: u64) -> c_int {
     // Release the in-memory payload now that it is safely on disk. Both the
     // text body and the image blobs were claimed when loaded, so mark their
     // pages reusable before they drop.
-    match &mut entry {
-        ClipboardEntry::Text { .. } => {
-            if let Some(t) = undo_text.take() {
-                crate::backend::mark_pages_reusable(t.as_ptr(), t.capacity());
-            }
-        }
-        ClipboardEntry::Image { png_data, thumb_data, .. } => {
-            let png = std::mem::take(png_data);
-            let thumb = std::mem::take(thumb_data);
-            crate::backend::mark_pages_reusable(png.as_ptr(), png.capacity());
-            crate::backend::mark_pages_reusable(thumb.as_ptr(), thumb.capacity());
-        }
+    if let Some(t) = undo_text.take() {
+        crate::backend::mark_pages_reusable(t.as_ptr(), t.capacity());
     }
+    drop(undo_image);
 
     // Step 4: Delete from DB. If this fails, remove the materialized payload
     // and leave the history entry intact.

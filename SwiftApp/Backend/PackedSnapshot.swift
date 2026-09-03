@@ -56,14 +56,15 @@ enum PackedSnapshot {
 
             switch entryType {
             case 0:
+                let display = ClipboardItem.formatDisplayPreview(preview)
                 items.append(.text(
                     entryId: id,
-                    text: label,
                     timestamp: timestamp,
                     label: label,
                     sourceName: sourceName,
                     sourceBundleId: sourceBundleId,
-                    preview: preview
+                    preview: preview,
+                    displayPreview: display
                 ))
             case 1:
                 items.append(.image(

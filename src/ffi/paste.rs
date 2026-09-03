@@ -141,52 +141,43 @@ fn select_and_paste_impl(mut item: ClipboardEntry, as_path: bool) -> c_int {
         _ => None,
     };
 
-    let db_item = match &item {
-        ClipboardEntry::Image { db_id, .. } if *db_id != 0 => {
-            let mut loaded = item.clone();
-            if let ClipboardEntry::Image { ref mut png_data, ref mut thumb_data, ref mut thumb_width, ref mut thumb_height, .. } = loaded {
-                let conn = match backend().db.lock() {
-                    Ok(c) => c,
-                    Err(e) => {
-                        crate::error_log!("CopyAttach: DB mutex poisoned in select_and_paste image load: {e}");
-                        return 0;
-                    }
-                };
-                match conn.query_row(
-                    "SELECT png_data, thumb_data, thumb_width, thumb_height FROM clipboard_history WHERE id = ?",
-                    rusqlite::params![*db_id],
-                    |row| Ok((
-                        row.get::<_, Vec<u8>>(0)?,
-                        row.get::<_, Vec<u8>>(1)?,
-                        row.get::<_, i64>(2)?,
-                        row.get::<_, i64>(3)?,
-                    )),
-                ) {
-                    Ok((png, thumb, tw, th)) => {
-                        // Claim any reusable-marked pages the allocator handed
-                        // back: these blobs are written to the pasteboard.
-                        crate::backend::claim_pages(png.as_ptr(), png.capacity());
-                        crate::backend::claim_pages(thumb.as_ptr(), thumb.capacity());
-                        *png_data = png;
-                        *thumb_data = thumb;
-                        *thumb_width = tw as u32;
-                        *thumb_height = th as u32;
-                    }
-                    Err(e) => {
-                        crate::error_log!("CopyAttach: select_and_paste DB load failed for image entry {} (db_id={}): {e} — paste aborted", item.entry_id(), *db_id);
-                        return 0;
-                    }
+    let mut image_blobs: Option<crate::backend::MarkImageBlobsReusableOnDrop> = None;
+    let mut image_thumb_dims: Option<(u32, u32)> = None;
+
+    if let ClipboardEntry::Image { db_id, id, .. } = &item {
+        if *db_id != 0 {
+            let conn = match backend().db.lock() {
+                Ok(c) => c,
+                Err(e) => {
+                    crate::error_log!("CopyAttach: DB mutex poisoned in select_and_paste image load: {e}");
+                    return 0;
+                }
+            };
+            match conn.query_row(
+                "SELECT png_data, thumb_data, thumb_width, thumb_height FROM clipboard_history WHERE id = ?",
+                rusqlite::params![*db_id],
+                |row| Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                )),
+            ) {
+                Ok((png, thumb, tw, th)) => {
+                    // Claim any reusable-marked pages the allocator handed
+                    // back: these blobs are written to the pasteboard.
+                    crate::backend::claim_pages(png.as_ptr(), png.capacity());
+                    crate::backend::claim_pages(thumb.as_ptr(), thumb.capacity());
+                    image_thumb_dims = Some((tw as u32, th as u32));
+                    image_blobs = Some(crate::backend::MarkImageBlobsReusableOnDrop { png, thumb });
+                }
+                Err(e) => {
+                    crate::error_log!("CopyAttach: select_and_paste DB load failed for image entry {} (db_id={}): {e} — paste aborted", id, *db_id);
+                    return 0;
                 }
             }
-            loaded
         }
-        _ => item.clone(),
-    };
-    // The DB-loaded blobs above are transient (re-persisted from slices
-    // below, never stored). The guard marks their pages reusable at scope
-    // end on every return path — release-path symmetry with the claim at
-    // load time.
-    let db_item = crate::backend::MarkEntryBlobsReusableOnDrop(db_item);
+    }
 
     // Text paste needs the arboard clipboard handle; image paste writes the
     // pasteboard directly via NSPasteboard (set_pasteboard_file_url) and must
@@ -198,7 +189,7 @@ fn select_and_paste_impl(mut item: ClipboardEntry, as_path: bool) -> c_int {
     // its file URL goes on the pasteboard (Finder "copy file" semantics).
     // Terminals translate the URL into the path text (TUI agents like Claude
     // Code consume exactly this form); chat/notes apps attach the file.
-    match &db_item.0 {
+    match &item {
         ClipboardEntry::Text { .. } => {
             let text = match &full_text {
                 Some(t) => t,
@@ -210,9 +201,12 @@ fn select_and_paste_impl(mut item: ClipboardEntry, as_path: bool) -> c_int {
             let mut cb = match Clipboard::new() { Ok(c) => c, Err(_) => return 0 };
             if cb.set_text(&text.0).is_err() { return 0; }
         }
-        ClipboardEntry::Image { png_data, id, .. } => {
-            if png_data.is_empty() { return 0; }
-            let path = match write_paste_image_file(png_data, *id) {
+        ClipboardEntry::Image { id, .. } => {
+            let blobs = match &image_blobs {
+                Some(b) if !b.png.is_empty() => b,
+                _ => return 0,
+            };
+            let path = match write_paste_image_file(&blobs.png, *id) {
                 Some(p) => p,
                 None => return 0,
             };
@@ -234,22 +228,14 @@ fn select_and_paste_impl(mut item: ClipboardEntry, as_path: bool) -> c_int {
     if let Some(b) = try_backend() {
         match b.db.lock() {
             Ok(mut conn) => {
-                let png_for_db = match &db_item.0 {
-                    ClipboardEntry::Image { png_data, .. } if !png_data.is_empty() => {
-                        Some(png_data.as_slice())
-                    }
-                    _ => None,
-                };
-                let thumb_for_db = match &db_item.0 {
-                    ClipboardEntry::Image { thumb_data, thumb_width, thumb_height, .. } if !thumb_data.is_empty() => {
-                        Some((thumb_data.as_slice(), *thumb_width, *thumb_height))
-                    }
-                    _ => None,
-                };
+                let png_for_db = image_blobs.as_ref().map(|b| b.png.as_slice());
+                let thumb_for_db = image_blobs.as_ref().and_then(|b| {
+                    image_thumb_dims.map(|(tw, th)| (b.thumb.as_slice(), tw, th))
+                });
 
                 match crate::db::persist_entry_to_db(
                     &mut conn,
-                    &db_item.0,
+                    &item,
                     full_text.as_ref().map(|g| g.0.as_str()),
                     png_for_db,
                     thumb_for_db,

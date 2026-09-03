@@ -173,10 +173,8 @@ pub(crate) fn load_history_from_db(conn: &Connection, threshold: usize) -> Vec<C
             }
             1 => result.push(ClipboardEntry::Image {
                 id,
-                png_data: Vec::new(),
                 width: width.unwrap_or(0) as u32,
                 height: height.unwrap_or(0) as u32,
-                thumb_data: Vec::new(),
                 thumb_width: thumb_width.unwrap_or(0) as u32,
                 thumb_height: thumb_height.unwrap_or(0) as u32,
                 hash: hash as u64,

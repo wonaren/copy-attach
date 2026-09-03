@@ -115,7 +115,7 @@ class PreviewWindow: NSPanel {
         let maxH = screenFrame.height * 0.85
 
         switch item {
-        case .text(let entryId, let text, _, _, _, _, _):
+        case .text(let entryId, _, _, _, _, let text, _):
             let pad: CGFloat = 32
             // Find the longest line in the text to determine adaptive window width.
             // Single-pass, line-at-a-time: the old `components(separatedBy: .newlines)`
@@ -135,7 +135,7 @@ class PreviewWindow: NSPanel {
             }
             let textWidth = min(max(longestLineWidth + pad, 300), maxW)
             let containerW = textWidth - pad
-            let textH = calculateTextHeight(text, width: containerW, entryId: entryId)
+            let textH = calculateTextHeight(text, width: containerW, entryId: entryId, maxHeight: maxH)
             let totalH = min(textH + pad, maxH)
             return NSSize(width: textWidth, height: max(totalH, 100))
 
@@ -152,9 +152,9 @@ class PreviewWindow: NSPanel {
         }
     }
 
-    private static func calculateTextHeight(_ text: String, width: CGFloat, entryId: Int) -> CGFloat {
+    private static func calculateTextHeight(_ text: String, width: CGFloat, entryId: Int, maxHeight: CGFloat) -> CGFloat {
         if let cached = textHeightCache[entryId] { return cached }
-        let height = PreviewTextLayout.measureHeight(text, width: width) + 28
+        let height = PreviewTextLayout.measureHeight(text, width: width, maxHeight: maxHeight) + 28
         if textHeightCache.count >= textHeightCacheMaxEntries,
            let key = textHeightCache.keys.first {
             textHeightCache.removeValue(forKey: key)

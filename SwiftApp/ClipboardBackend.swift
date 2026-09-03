@@ -377,14 +377,22 @@ class ClipboardBackend {
         return thumbnailCache.object(forKey: NSNumber(value: dbId))
     }
 
-    /// Decode outside the main actor with a hard concurrency bound. The
-    /// semaphore wait runs on a worker queue, never in an async task context.
-    private nonisolated static func decodeThumbnail(dbId: Int) async -> DecodedImage? {
+    /// Decode lightweight thumbnail off the main actor with a hard concurrency bound.
+    /// Uses pre-computed 300px thumb blob from SQLite directly instead of decoding full-resolution PNG.
+    private nonisolated static func decodeThumbnail(dbId: Int) async -> NSImage? {
         await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 thumbnailDecodeSlots.wait()
                 defer { thumbnailDecodeSlots.signal() }
-                continuation.resume(returning: ImageDecode.previewImage(dbId: dbId, maxPixel: 300))
+                var len: Int32 = 0
+                guard let ptr = clipboard_get_image_thumb_by_db_id(Int64(dbId), &len), len > 0 else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+                defer { clipboard_free_bytes(ptr, len) }
+                let data = Data(bytes: ptr, count: Int(len))
+                let image = NSImage(data: data)
+                continuation.resume(returning: image)
             }
         }
     }
@@ -396,11 +404,10 @@ class ClipboardBackend {
         guard dbId != 0 else { return nil }
         let key = NSNumber(value: dbId)
         if let cached = thumbnailCache.object(forKey: key) { return cached }
-        let decoded = await Self.decodeThumbnail(dbId: dbId)
-        guard let decoded else { return nil }
+        guard let image = await Self.decodeThumbnail(dbId: dbId) else { return nil }
         // cost = decoded RGBA upper bound for a 300px-max-dimension thumbnail
-        thumbnailCache.setObject(decoded.image, forKey: key, cost: 300 * 300 * 4)
-        return decoded.image
+        thumbnailCache.setObject(image, forKey: key, cost: 300 * 300 * 4)
+        return image
     }
 
     /// Immediately release all cached thumbnails.
@@ -525,10 +532,12 @@ class ClipboardBackend {
                 clipboard_free_string(cStr)
                 return s
             }()
+            let display = ClipboardItem.formatDisplayPreview(preview)
             return .text(
-                entryId: id, text: label, timestamp: timestamp,
+                entryId: id, timestamp: timestamp,
                 label: label, sourceName: sourceName,
-                sourceBundleId: sourceBundleId, preview: preview
+                sourceBundleId: sourceBundleId, preview: preview,
+                displayPreview: display
             )
         case 1:
             let dbId = Int(clipboard_snapshot_get_image_db_id(snap, i))

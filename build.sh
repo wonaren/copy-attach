@@ -63,13 +63,17 @@ install_name_tool -id "@rpath/libcopy_attach.dylib" "${APP_NAME}.app/Contents/Fr
 XCODE_TOOLCHAIN="/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain"
 XCODE_SDK="/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk"
 
-if [ -f "$XCODE_TOOLCHAIN/usr/bin/swiftc" ] && [ -d "$XCODE_SDK" ]; then
+if command -v xcrun >/dev/null 2>&1; then
+    SWIFTC="xcrun swiftc"
+    SDK=""
+    echo "  Using xcrun swiftc"
+elif [ -f "$XCODE_TOOLCHAIN/usr/bin/swiftc" ] && [ -d "$XCODE_SDK" ]; then
     SWIFTC="$XCODE_TOOLCHAIN/usr/bin/swiftc"
     SDK="-sdk $XCODE_SDK"
     echo "  Using Xcode toolchain: $XCODE_TOOLCHAIN"
 else
-    echo "  Xcode not found, using xcrun"
-    SWIFTC="xcrun swiftc"
+    echo "  Xcode not found, using swiftc directly"
+    SWIFTC="swiftc"
     SDK=""
 fi
 
@@ -103,7 +107,8 @@ else
 fi
 
 # Compile with explicit args
-"$SWIFTC" $SDK \
+$SWIFTC $SDK \
+    -module-cache-path /tmp/copyattach_module_cache \
     -target arm64-apple-macosx15.0 \
     -swift-version 6 \
     -O \

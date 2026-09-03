@@ -32,10 +32,8 @@ pub(crate) enum ClipboardEntry {
     Image {
         /// Stable, unique entry identifier (monotonic, survives reordering).
         id: u64,
-        png_data: Vec<u8>,
         width: u32,
         height: u32,
-        thumb_data: Vec<u8>,
         thumb_width: u32,
         thumb_height: u32,
         hash: u64,

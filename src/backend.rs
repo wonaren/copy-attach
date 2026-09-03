@@ -93,6 +93,7 @@ fn undo_io_err(action: &str, path: &Path, e: &std::io::Error) {
 pub(crate) fn write_undo_payload(
     entry: &ClipboardEntry,
     text: Option<&str>,
+    image_blobs: Option<(&[u8], &[u8])>,
 ) -> Result<(PathBuf, usize), ()> {
     let dir = undo_payload_dir().map_err(|e| {
         crate::error_log!("CopyAttach: cannot create undo payload directory: {e}");
@@ -125,7 +126,10 @@ pub(crate) fn write_undo_payload(
             w.write_all(body.as_bytes()).map_err(|e| undo_io_err("write text body", &path, &e))?;
             written += body.len();
         }
-        ClipboardEntry::Image { png_data, thumb_data, .. } => {
+        ClipboardEntry::Image { .. } => {
+            let (png_data, thumb_data) = image_blobs.ok_or_else(|| {
+                crate::error_log!("CopyAttach: cannot materialize image undo payload without image blobs");
+            })?;
             w.write_all(&1u32.to_le_bytes()).map_err(|e| undo_io_err("write kind", &path, &e))?;
             written += 4;
             w.write_all(&(png_data.len() as u64).to_le_bytes()).map_err(|e| undo_io_err("write png length", &path, &e))?;
@@ -381,6 +385,10 @@ const MADV_FREE_REUSABLE: i32 = 7; // "pages can be reused (by anyone)"
 const MADV_FREE_REUSE: i32 = 8; // "caller wants to reuse those pages"
 
 /// Mark page-aligned scratch memory as reusable by the system.
+///
+/// Only whole pages strictly inside the buffer bounds are marked reusable.
+/// Sub-page remainders at the end are rounded down to avoid advising adjacent
+/// heap allocations that might share or sit directly past this buffer.
 pub(crate) fn mark_pages_reusable(ptr: *const u8, byte_len: usize) {
     if byte_len < PAGE_SIZE {
         return;
@@ -391,17 +399,22 @@ pub(crate) fn mark_pages_reusable(ptr: *const u8, byte_len: usize) {
         crate::debug_log!("CopyAttach: mark_pages_reusable SKIP unaligned base=0x{start:x} len={byte_len}");
         return;
     }
-    let end = start + byte_len;
-    let aligned_end = (end + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+    let aligned_len = byte_len & !(PAGE_SIZE - 1);
+    if aligned_len < PAGE_SIZE {
+        return;
+    }
     #[cfg(target_os = "macos")]
     unsafe {
-        madvise(start as *mut core::ffi::c_void, aligned_end - start, MADV_FREE_REUSABLE);
+        madvise(start as *mut core::ffi::c_void, aligned_len, MADV_FREE_REUSABLE);
     }
     #[cfg(not(target_os = "macos"))]
-    let _ = aligned_end;
+    let _ = aligned_len;
 }
 
 /// Claim marked pages back before writing; contents are undefined.
+///
+/// Symmetric with `mark_pages_reusable`: claims only whole pages strictly
+/// within the buffer bounds.
 pub(crate) fn claim_pages(ptr: *const u8, byte_len: usize) {
     if byte_len < PAGE_SIZE {
         return;
@@ -411,14 +424,16 @@ pub(crate) fn claim_pages(ptr: *const u8, byte_len: usize) {
         crate::debug_log!("CopyAttach: claim_pages SKIP unaligned base=0x{start:x} len={byte_len}");
         return;
     }
-    let end = start + byte_len;
-    let aligned_end = (end + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+    let aligned_len = byte_len & !(PAGE_SIZE - 1);
+    if aligned_len < PAGE_SIZE {
+        return;
+    }
     #[cfg(target_os = "macos")]
     unsafe {
-        madvise(start as *mut core::ffi::c_void, aligned_end - start, MADV_FREE_REUSE);
+        madvise(start as *mut core::ffi::c_void, aligned_len, MADV_FREE_REUSE);
     }
     #[cfg(not(target_os = "macos"))]
-    let _ = aligned_end;
+    let _ = aligned_len;
 }
 
 /// Marks a transient blob Vec's pages reusable when dropped. Release-path
@@ -443,18 +458,17 @@ impl Drop for MarkStringReusableOnDrop {
     }
 }
 
-/// Marks an entry's transient image blobs reusable on drop. Used by the
-/// paste path, whose DB-loaded blobs are re-persisted from slices and never
-/// stored — every early return must free their pages, so the guard owns the
-/// entry for the scope.
-pub(crate) struct MarkEntryBlobsReusableOnDrop(pub(crate) ClipboardEntry);
+/// Marks transient image blobs (PNG and thumb) reusable on drop. Used by
+/// paste and delete/undo paths that load blobs from SQLite.
+pub(crate) struct MarkImageBlobsReusableOnDrop {
+    pub(crate) png: Vec<u8>,
+    pub(crate) thumb: Vec<u8>,
+}
 
-impl Drop for MarkEntryBlobsReusableOnDrop {
+impl Drop for MarkImageBlobsReusableOnDrop {
     fn drop(&mut self) {
-        if let ClipboardEntry::Image { png_data, thumb_data, .. } = &self.0 {
-            mark_pages_reusable(png_data.as_ptr(), png_data.capacity());
-            mark_pages_reusable(thumb_data.as_ptr(), thumb_data.capacity());
-        }
+        mark_pages_reusable(self.png.as_ptr(), self.png.capacity());
+        mark_pages_reusable(self.thumb.as_ptr(), self.thumb.capacity());
     }
 }
 

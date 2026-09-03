@@ -157,44 +157,36 @@ pub extern "C" fn clipboard_get_image_thumb(index: c_int, out_len: *mut c_int) -
 pub extern "C" fn clipboard_get_image_full(index: c_int, out_len: *mut c_int) -> *mut u8 {
     if out_len.is_null() { return std::ptr::null_mut(); }
 
-    let (png_data, db_id) = {
+    let db_id = {
         let hist = backend().history.lock().unwrap();
         match hist.get(index as usize) {
-            Some(ClipboardEntry::Image { png_data, db_id, .. }) => {
-                (png_data.clone(), *db_id)
-            }
+            Some(ClipboardEntry::Image { db_id, .. }) => *db_id,
             _ => return std::ptr::null_mut(),
         }
     };
 
-    let data = if !png_data.is_empty() {
-        // In-memory blobs are normally empty (metadata-only invariant). A hit
-        // here means an invariant violation was introduced; make it visible
-        // instead of silently doubling peak memory on a full-PNG clone.
-        crate::debug_log!("CopyAttach: full image loaded from in-memory cache ({} bytes) — metadata-only invariant broken", png_data.len());
-        png_data
-    } else if db_id != 0 {
-        match backend().db.lock() {
-            Ok(conn) => {
-                match conn.query_row(
-                    "SELECT png_data FROM clipboard_history WHERE id = ?",
-                    rusqlite::params![db_id],
-                    |row| row.get(0),
-                ) {
-                    Ok(data) => data,
-                    Err(e) => {
-                        crate::error_log!("CopyAttach: failed to load full image for db_id={db_id}: {e}");
-                        return std::ptr::null_mut();
-                    }
+    if db_id == 0 {
+        return std::ptr::null_mut();
+    }
+
+    let data: Vec<u8> = match backend().db.lock() {
+        Ok(conn) => {
+            match conn.query_row(
+                "SELECT png_data FROM clipboard_history WHERE id = ?",
+                rusqlite::params![db_id],
+                |row| row.get(0),
+            ) {
+                Ok(data) => data,
+                Err(e) => {
+                    crate::error_log!("CopyAttach: failed to load full image for db_id={db_id}: {e}");
+                    return std::ptr::null_mut();
                 }
             }
-            Err(e) => {
-                crate::error_log!("CopyAttach: DB mutex poisoned loading full image for db_id={db_id}: {e}");
-                return std::ptr::null_mut();
-            }
         }
-    } else {
-        return std::ptr::null_mut();
+        Err(e) => {
+            crate::error_log!("CopyAttach: DB mutex poisoned loading full image for db_id={db_id}: {e}");
+            return std::ptr::null_mut();
+        }
     };
 
     // Same blob-read contract as preview/paste/undo: the DB-loaded Vec (or an
@@ -463,10 +455,11 @@ pub extern "C" fn clipboard_free_string(s: *mut c_char) {
 
 #[no_mangle]
 pub extern "C" fn clipboard_free_bytes(data: *mut u8, len: c_int) {
-    if data.is_null() { return; }
+    if data.is_null() || len < 0 { return; }
     // Mark pages reusable before freeing (small/unaligned buffers are no-ops).
     crate::backend::mark_pages_reusable(data, len as usize);
-    unsafe { let _ = Vec::from_raw_parts(data, len as usize, len as usize); }
+    let slice_ptr = std::ptr::slice_from_raw_parts_mut(data, len as usize);
+    unsafe { drop(Box::from_raw(slice_ptr)); }
 }
 
 // Cleanup Threshold

@@ -117,12 +117,10 @@ fn test_undo_stack_caps() {
     // Image blobs count toward the same byte budget: a deleted image cannot
     // pin unbounded memory. 3 × 20 MB = 60 MB > 48 MB → the single slot must
     // still shed it (nothing undoable rather than pinning 60 MB).
-    let image_entry = |i: u64, png: Vec<u8>| ClipboardEntry::Image {
+    let image_entry = |i: u64| ClipboardEntry::Image {
         id: i,
-        png_data: png,
         width: 1,
         height: 1,
-        thumb_data: Vec::new(),
         thumb_width: 0,
         thumb_height: 0,
         hash: i,
@@ -133,7 +131,7 @@ fn test_undo_stack_caps() {
     };
     let mut stack = Vec::new();
     for i in 0..3 {
-        push_deleted(&mut stack, mem_slot(image_entry(i, vec![0u8; 20 * 1024 * 1024]), 20 * 1024 * 1024));
+        push_deleted(&mut stack, mem_slot(image_entry(i), 20 * 1024 * 1024));
     }
     assert_eq!(stack.len(), 1, "single slot keeps only the newest image");
     let oldest_id = match &stack[0].entry {
@@ -153,10 +151,8 @@ fn test_undo_stack_caps() {
             &mut stack,
             mem_slot(ClipboardEntry::Image {
                 id: i,
-                png_data: Vec::new(),
                 width: 1,
                 height: 1,
-                thumb_data: Vec::new(),
                 thumb_width: 0,
                 thumb_height: 0,
                 hash: i,
@@ -204,10 +200,8 @@ fn test_undo_image_restore_releases_blob_capacity() {
         let mut hist = b.history.lock().unwrap();
         hist.push(ClipboardEntry::Image {
             id: 777_000,
-            png_data: Vec::new(),
             width: 640,
             height: 480,
-            thumb_data: Vec::new(),
             thumb_width: 160,
             thumb_height: 120,
             hash: 0xDEAD_BEEF,
@@ -226,10 +220,7 @@ fn test_undo_image_restore_releases_blob_capacity() {
         assert_eq!(stack.len(), 1, "one undo slot after delete");
         let slot = &stack[0];
         match &slot.entry {
-            ClipboardEntry::Image { png_data, thumb_data, .. } => {
-                assert!(png_data.is_empty() && thumb_data.is_empty(),
-                    "undo slot entry must be metadata-only after payload materialization");
-            }
+            ClipboardEntry::Image { .. } => {}
             other => panic!("expected image slot, got {other:?}"),
         }
         assert!(!slot.payload_path.as_os_str().is_empty(), "payload path must be materialized");
@@ -239,16 +230,14 @@ fn test_undo_image_restore_releases_blob_capacity() {
     assert_eq!(clipboard_undo_delete(), 1, "undo must succeed");
 
     let hist = b.history.lock().unwrap();
-    let restored = match hist.first() {
-        Some(ClipboardEntry::Image { png_data, thumb_data, db_id, .. }) => {
+    let restored_id = match hist.first() {
+        Some(ClipboardEntry::Image { db_id, .. }) => {
             assert_ne!(*db_id, 0, "restored entry must point at its new DB row");
-            (png_data.capacity(), thumb_data.capacity(), png_data.is_empty(), thumb_data.is_empty())
+            *db_id
         }
         other => panic!("expected restored image at head of history, got {other:?}"),
     };
-    assert!(restored.2 && restored.3, "restored entry must hold no blob bytes");
-    assert_eq!(restored.0, 0, "png buffer capacity must be released, not cleared");
-    assert_eq!(restored.1, 0, "thumb buffer capacity must be released, not cleared");
+    assert_ne!(restored_id, 0);
     assert!(b.deleted_stack.lock().unwrap().is_empty(), "undo slot consumed");
 }
 

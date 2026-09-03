@@ -27,22 +27,19 @@ pub extern "C" fn clipboard_search_ids(query: *const c_char, out_count: *mut c_i
         Some(Ok(c)) => c,
         _ => return std::ptr::null_mut(),
     };
-    let mut ids = crate::db::search_history(&conn, &q);
+    let ids = crate::db::search_history(&conn, &q);
     let len = ids.len();
     if len == 0 {
         return std::ptr::null_mut();
     }
-    // Pin capacity == len so `clipboard_free_u64_array` can reconstruct the
-    // Vec with from_raw_parts(ptr, len, len) without layout mismatch.
-    ids.shrink_to_fit();
+    let boxed = ids.into_boxed_slice();
+    let ptr = Box::into_raw(boxed) as *mut u64;
     // Same hand-off contract as `vec_to_raw`: claim any reusable-marked pages
     // the allocator may have handed back before Swift reads the ids.
     crate::backend::claim_pages(
-        ids.as_ptr() as *const u8,
-        ids.len() * std::mem::size_of::<u64>(),
+        ptr as *const u8,
+        len * std::mem::size_of::<u64>(),
     );
-    let ptr = ids.as_mut_ptr();
-    std::mem::forget(ids);
     unsafe { *out_count = len as c_int; }
     ptr
 }
@@ -54,5 +51,6 @@ pub extern "C" fn clipboard_free_u64_array(ptr: *mut u64, len: c_int) {
     // reusable before returning it to the allocator so large match sets do not
     // leave freed-but-retained memory in the process footprint.
     crate::backend::mark_pages_reusable(ptr as *const u8, (len as usize) * std::mem::size_of::<u64>());
-    unsafe { let _ = Vec::from_raw_parts(ptr, len as usize, len as usize); }
+    let slice_ptr = std::ptr::slice_from_raw_parts_mut(ptr, len as usize);
+    unsafe { drop(Box::from_raw(slice_ptr)); }
 }

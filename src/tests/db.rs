@@ -383,12 +383,14 @@ fn test_image_hash_migration_recomputes_stable_hash() {
     let rgba = make_test_image_rgba(8, 8, 42);
     let expected = crate::image::image_hash(&rgba, 8, 8);
     let img = make_image(&rgba, 8, 8, 100);
-    let (png, thumb, tw, th) = match &img {
-        ClipboardEntry::Image { png_data, thumb_data, thumb_width, thumb_height, .. } =>
-            (png_data.clone(), thumb_data.clone(), *thumb_width, *thumb_height),
+    let png = crate::image::encode_png(8, 8, &rgba).unwrap();
+    let thumb = crate::image::create_thumbnail(8, 8, &rgba, 100).unwrap();
+    let (tw, th) = match &img {
+        ClipboardEntry::Image { thumb_width, thumb_height, .. } =>
+            (*thumb_width, *thumb_height),
         _ => unreachable!("make_image must produce an image entry"),
     };
-    insert_entry_to_db(&conn, &img, None, Some(&png), Some((&thumb, tw, th))).unwrap();
+    insert_entry_to_db(&conn, &img, None, Some(&png), Some((&thumb.0, tw, th))).unwrap();
     let db_id = conn.last_insert_rowid();
 
     // Simulate the pre-migration generation: an arbitrary DefaultHasher value.

@@ -22,13 +22,22 @@ use crate::macos;
 /// Maximum length of the longest edge for thumbnail generation.
 const THUMBNAIL_MAX_DIM: u32 = 300;
 
-/// A bounded Phase 2 queue. Each pending job owns a full RGBA image, so an
-/// unbounded thread-per-capture design turns clipboard activity into an
-/// unbounded resident-memory queue when PNG encoding falls behind.
+/// Phase 2 image payload: either an already-encoded PNG byte buffer (e.g. native
+/// pasteboard PNG) that can be written straight to DB, or raw uncompressed RGBA pixels
+/// requiring async PNG compression.
+enum ImagePhase2Payload {
+    ExistingPng(Vec<u8>),
+    Rgba {
+        buffer: crate::backend::ImageDecodeBuffer,
+        width: u32,
+        height: u32,
+    },
+}
+
+/// A bounded Phase 2 queue. Bounded by a single worker and a single-slot channel
+/// to prevent unbounded memory retention during rapid captures.
 struct ImagePhase2Job {
-    rgba: crate::backend::ImageDecodeBuffer,
-    width: u32,
-    height: u32,
+    payload: ImagePhase2Payload,
     hash: u64,
     thumb_data: Vec<u8>,
     thumb_w: u32,
@@ -59,16 +68,27 @@ fn image_phase2_sender() -> &'static mpsc::SyncSender<ImagePhase2Job> {
 }
 
 fn persist_image_phase2(job: ImagePhase2Job) {
-    let ImagePhase2Job { rgba, width, height, hash: item_hash, thumb_data: thumb_async,
+    let ImagePhase2Job { payload, hash: item_hash, thumb_data: thumb_async,
         thumb_w, thumb_h, history, db, threshold } = job;
-    let mut scratch = crate::backend::ImageEncodeScratchGuard::acquire();
-    let full_png = match crate::image::encode_png_into(width, height, &rgba, &mut scratch) {
-        Some(()) => scratch.as_slice(),
-        None => {
-            crate::debug_log!("CopyAttach: failed to encode full-size PNG for image {width}x{height} — removing broken entry from history");
-            let mut hist = history.lock().unwrap();
-            hist.retain(|e| !matches!(e, ClipboardEntry::Image { hash, .. } if *hash == item_hash));
-            return;
+    let _existing_guard;
+    let mut scratch_guard;
+    let full_png = match payload {
+        ImagePhase2Payload::ExistingPng(png) => {
+            // Already compressed PNG: write directly to DB, avoiding re-encoding CPU & scratch memory.
+            _existing_guard = crate::backend::MarkBlobReusableOnDrop(png);
+            _existing_guard.0.as_slice()
+        }
+        ImagePhase2Payload::Rgba { buffer, width, height } => {
+            scratch_guard = crate::backend::ImageEncodeScratchGuard::acquire();
+            match crate::image::encode_png_into(width, height, &buffer, &mut scratch_guard) {
+                Some(()) => scratch_guard.as_slice(),
+                None => {
+                    crate::debug_log!("CopyAttach: failed to encode full-size PNG for image {width}x{height} — removing broken entry from history");
+                    let mut hist = history.lock().unwrap();
+                    hist.retain(|e| !matches!(e, ClipboardEntry::Image { hash, .. } if *hash == item_hash));
+                    return;
+                }
+            }
         }
     };
     let db_item = {
@@ -94,18 +114,19 @@ fn persist_image_phase2(job: ImagePhase2Job) {
                 }
                 crate::backend::IMAGE_ENCODING_COUNTER.fetch_add(1, Ordering::Relaxed);
             }
-            Err(()) => crate::error_log!("CopyAttach: Phase 2 DB insert failed for image {width}x{height} — entry stays with db_id=0"),
+            Err(()) => crate::error_log!("CopyAttach: Phase 2 DB insert failed for image hash {item_hash} — entry stays with db_id=0"),
         }
     }
 }
 
-/// Shared image pipeline: Phase 1 updates memory, Phase 2 encodes and persists.
+/// Shared image pipeline: Phase 1 updates memory, Phase 2 encodes (or persists pre-encoded PNG).
 /// Uses the pooled decode buffer to avoid per-capture large allocations.
 #[allow(clippy::too_many_arguments)]
 fn ingest_rgba_image(
     rgba: crate::backend::ImageDecodeBuffer,
     width: u32,
     height: u32,
+    raw_png: Option<Vec<u8>>,
     history: &Arc<Mutex<Vec<ClipboardEntry>>>,
     db: &Arc<Mutex<rusqlite::Connection>>,
     src: &crate::types::SourceApp,
@@ -129,10 +150,8 @@ fn ingest_rgba_image(
 
         let item = ClipboardEntry::Image {
             id: crate::backend::new_entry_id(),
-            png_data: Vec::new(),
             width,
             height,
-            thumb_data: Vec::new(),
             thumb_width: thumb_w,
             thumb_height: thumb_h,
             hash,
@@ -152,13 +171,19 @@ fn ingest_rgba_image(
             crate::backend::mark_history_changed();
         }
 
+        let payload = if let Some(png) = raw_png {
+            // Drop rgba buffer immediately in Phase 1 so its pages return to the scratch pool
+            drop(rgba);
+            ImagePhase2Payload::ExistingPng(png)
+        } else {
+            ImagePhase2Payload::Rgba { buffer: rgba, width, height }
+        };
+
         // Phase 2 is asynchronous but bounded. A synchronous send when the
         // single-slot queue is full provides explicit backpressure instead of
         // spawning another thread that retains a full-resolution RGBA buffer.
         let job = ImagePhase2Job {
-            rgba,
-            width,
-            height,
+            payload,
             hash,
             thumb_data,
             thumb_w,
@@ -205,7 +230,7 @@ fn try_ingest_image_files(
 
         crate::debug_log!("CopyAttach: captured image file: {path} ({w}x{h})");
         ingest_rgba_image(
-            pixels, w, h,
+            pixels, w, h, None,
             history, db, src, now, cleanup_threshold, ignore_rules,
         );
         return true;
@@ -302,18 +327,20 @@ pub(crate) fn clipboard_monitor(
         let mut captured = false;
 
         if image_allowed {
-            // The guard marks the raw pasteboard bytes' pages reusable on
-            // drop — release-path symmetry with the claim in
-            // `pasteboard_image_data` (the buffer is dead after decoding).
-            if let Some(img_bytes) = macos::pasteboard_image_data().map(crate::backend::MarkBlobReusableOnDrop) {
-                // Fast path for 8-bit RGBA PNGs; generic decoder otherwise.
+            // Read image representations. If it's already a valid PNG, we pass it directly
+            // to Phase 2 to avoid duplicate re-encoding, while still decoding RGBA for thumbnail.
+            if let Some(img_bytes) = macos::pasteboard_image_data() {
+                let mut is_native_png = false;
                 let decoded: Result<(crate::backend::ImageDecodeBuffer, u32, u32), image::ImageError> = {
                     let mut pooled = crate::backend::ImageDecodeBuffer::acquire();
-                    match crate::image::decode_png_rgba8_into(&img_bytes.0, pooled.as_mut_vec()) {
-                        Some((w, h)) => Ok((pooled, w, h)),
+                    match crate::image::decode_png_rgba8_into(&img_bytes, pooled.as_mut_vec()) {
+                        Some((w, h)) => {
+                            is_native_png = true;
+                            Ok((pooled, w, h))
+                        }
                         None => {
                             drop(pooled);
-                            image::load_from_memory(&img_bytes.0).map(|img| {
+                            image::load_from_memory(&img_bytes).map(|img| {
                                 let rgba = img.to_rgba8();
                                 let (w, h) = rgba.dimensions();
                                 (
@@ -326,16 +353,22 @@ pub(crate) fn clipboard_monitor(
                 };
                 match decoded {
                     Ok((pixels, w, h)) => {
+                        let raw_png = if is_native_png {
+                            Some(img_bytes)
+                        } else {
+                            crate::backend::mark_pages_reusable(img_bytes.as_ptr(), img_bytes.capacity());
+                            None
+                        };
                         ingest_rgba_image(
-                            pixels, w, h,
+                            pixels, w, h, raw_png,
                             &history,
                             &db, &src, now, &cleanup_threshold, &ignore_rules,
                         );
                         captured = true;
                     }
                     Err(e) => {
-                        // Undecodable image data: fail explicitly, don't fabricate a capture.
-                        crate::debug_log!("CopyAttach: pasteboard image data ({} bytes) undecodable: {e}", img_bytes.0.len());
+                        crate::backend::mark_pages_reusable(img_bytes.as_ptr(), img_bytes.capacity());
+                        crate::debug_log!("CopyAttach: pasteboard image data ({} bytes) undecodable: {e}", img_bytes.len());
                     }
                 }
             }
@@ -343,13 +376,15 @@ pub(crate) fn clipboard_monitor(
 
         // Text (always sync: no PNG encoding).
         if !captured {
-            if let Ok(text) = cb.get_text() {
+            if let Ok(raw_text) = cb.get_text() {
+                let text_guard = crate::backend::MarkStringReusableOnDrop(raw_text);
+                let text = &text_guard.0;
                 if !text.is_empty() {
                     let trimmed = text.trim();
-                    if trimmed.len() >= 2 && !ignore_rules.lock().unwrap().ignores_text(&text) {
+                    if trimmed.len() >= 2 && !ignore_rules.lock().unwrap().ignores_text(text) {
                         let item = ClipboardEntry::text_entry(
                             crate::backend::new_entry_id(),
-                            &text,
+                            text,
                             now,
                             src.name,
                             src.bundle_id,
@@ -377,7 +412,7 @@ pub(crate) fn clipboard_monitor(
                                 match crate::db::persist_entry_to_db(
                                     &mut conn,
                                     &item_for_db,
-                                    Some(&text),
+                                    Some(text),
                                     None,
                                     None,
                                     cleanup_threshold.load(Ordering::Relaxed),

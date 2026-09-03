@@ -8,7 +8,7 @@
 use crate::backend::new_entry_id;
 use crate::db::{ensure_history_table, insert_entry_to_db};
 use crate::history::add_to_history;
-use crate::image::{create_thumbnail, encode_png, image_hash};
+use crate::image::{create_thumbnail, image_hash};
 use crate::types::ClipboardEntry;
 use rusqlite::Connection;
 
@@ -33,14 +33,11 @@ fn make_text(text: &str, ts: u64) -> ClipboardEntry {
 
 fn make_image(data: &[u8], w: u32, h: u32, ts: u64) -> ClipboardEntry {
     let hash = image_hash(data, w, h);
-    let png = encode_png(w, h, data).unwrap();
     let thumb = create_thumbnail(w, h, data, 100).unwrap();
     ClipboardEntry::Image {
         id: new_entry_id(),
-        png_data: png,
         width: w,
         height: h,
-        thumb_data: thumb.0,
         thumb_width: thumb.1,
         thumb_height: thumb.2,
         hash,

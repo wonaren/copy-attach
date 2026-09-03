@@ -449,10 +449,8 @@ mod tests {
             },
             ClipboardEntry::Image {
                 id: 9,
-                png_data: Vec::new(),
                 width: 3840,
                 height: 2160,
-                thumb_data: Vec::new(),
                 thumb_width: 300,
                 thumb_height: 169,
                 hash: 2,
