@@ -401,10 +401,11 @@ class ClipboardBackend {
     /// run off the main thread, and the result is cached before returning.
     /// The main thread never performs DB access or image decoding for rows.
     func loadThumbnail(dbId: Int) async -> NSImage? {
-        guard dbId != 0 else { return nil }
+        guard dbId != 0, !Task.isCancelled else { return nil }
         let key = NSNumber(value: dbId)
         if let cached = thumbnailCache.object(forKey: key) { return cached }
         guard let image = await Self.decodeThumbnail(dbId: dbId) else { return nil }
+        guard !Task.isCancelled else { return nil }
         // cost = decoded RGBA upper bound for a 300px-max-dimension thumbnail
         thumbnailCache.setObject(image, forKey: key, cost: 300 * 300 * 4)
         return image
