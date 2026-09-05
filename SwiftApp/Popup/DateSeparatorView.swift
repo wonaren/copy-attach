@@ -6,14 +6,13 @@ import SwiftUI
 /// Kept outside any View to avoid `@MainActor` isolation — these are called
 /// from background search tasks as well as the main thread.
 enum DayGroup {
-    private static func dayComponents(for timestamp: UInt64) -> DateComponents {
-        let date = Date(timeIntervalSince1970: TimeInterval(timestamp))
-        let components = Calendar.current.dateComponents([.era, .year, .month, .day], from: date)
+    private static func dayComponents(for date: Date, calendar: Calendar) -> DateComponents {
+        let components = calendar.dateComponents([.era, .year, .month, .day], from: date)
         guard components.era != nil,
               components.year != nil,
               components.month != nil,
               components.day != nil else {
-            preconditionFailure("Unable to derive calendar day for timestamp \(timestamp)")
+            preconditionFailure("Unable to derive calendar day for date \(date)")
         }
         return components
     }
@@ -28,7 +27,8 @@ enum DayGroup {
     /// The Int.min namespace is reserved for separators, while entry IDs are
     /// positive. Encoding calendar components avoids timestamp truncation.
     static func separatorID(for timestamp: UInt64) -> Int {
-        let components = dayComponents(for: timestamp)
+        let date = Date(timeIntervalSince1970: TimeInterval(timestamp))
+        let components = dayComponents(for: date, calendar: Calendar.current)
         let era = Int64(components.era!)
         let year = Int64(components.year!)
         let month = Int64(components.month!)
@@ -43,7 +43,7 @@ enum DayGroup {
     static func labelParts(for timestamp: UInt64) -> (date: String, relative: String?) {
         let date = Date(timeIntervalSince1970: TimeInterval(timestamp))
         let cal = Calendar.current
-        let comps = dayComponents(for: timestamp)
+        let comps = dayComponents(for: date, calendar: cal)
         let nowYear = cal.component(.year, from: Date())
         let dateText: String
         if comps.year == nowYear {

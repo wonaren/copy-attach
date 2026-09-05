@@ -137,10 +137,8 @@ pub fn inject_into_db(
 
             let entry = ClipboardEntry::Image {
                 id: new_entry_id(),
-                png_data: Vec::new(), // not kept in memory
                 width: w,
                 height: h,
-                thumb_data: Vec::new(),
                 thumb_width: thumb_w,
                 thumb_height: thumb_h,
                 hash,

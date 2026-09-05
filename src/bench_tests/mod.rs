@@ -27,12 +27,9 @@ fn estimate_vec_heap(hist: &[ClipboardEntry]) -> usize {
                 preview.capacity() + label.capacity() + source_name.capacity() + source_bundle_id.capacity()
             }
             ClipboardEntry::Image {
-                png_data, thumb_data, source_name, source_bundle_id, ..
+                source_name, source_bundle_id, ..
             } => {
-                png_data.capacity()
-                    + thumb_data.capacity()
-                    + source_name.capacity()
-                    + source_bundle_id.capacity()
+                source_name.capacity() + source_bundle_id.capacity()
             }
         })
         .sum();

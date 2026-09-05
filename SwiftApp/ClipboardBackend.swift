@@ -33,11 +33,11 @@ class ClipboardBackend {
     private var lastHistoryRevision: UInt64 = 0
     private let thumbnailCache: NSCache<NSNumber, NSImage> = {
         let c = NSCache<NSNumber, NSImage>()
-        // Decoded thumbnails are ~360 KB each (300px RGBA). 10 MB keeps ~2-3
-        // screens of rows cached for smooth scrolling without letting a large
-        // image history pin tens of MB of decoded bitmaps; a re-decode on
-        // scroll-back is a <300px PNG read + fast decode.
-        c.totalCostLimit = 10 * 1024 * 1024  // 10 MB
+        // Downsampled thumbnails are ~100 KB each (≤160px RGBA). 4 MB keeps ~40
+        // rows cached for smooth scrolling without letting decoded bitmaps inflate
+        // the small zone footprint.
+        c.countLimit = 60
+        c.totalCostLimit = 4 * 1024 * 1024  // 4 MB
         return c
     }()
     /// Delayed thumbnail-cache release after the popup closes. While the
@@ -377,32 +377,58 @@ class ClipboardBackend {
         return thumbnailCache.object(forKey: NSNumber(value: dbId))
     }
 
-    /// Prevents concurrent rows from decoding the same thumbnail repeatedly.
-    /// The slot also bounds CPU wakeups during a fast scroll.
-    private nonisolated static func decodeThumbnail(dbId: Int) async -> DecodedImage? {
+    /// Decode lightweight thumbnail off the main actor with a hard concurrency bound.
+    /// Uses pre-computed 300px thumb blob from SQLite directly and downsamples to ≤160px
+    /// (matching Retina display size for row icons) while bypassing ImageIO's resident cache.
+    private nonisolated static func decodeThumbnail(dbId: Int) async -> NSImage? {
         await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 thumbnailDecodeSlots.wait()
                 defer { thumbnailDecodeSlots.signal() }
                 autoreleasepool {
-                    continuation.resume(returning: ImageDecode.previewImage(dbId: dbId, maxPixel: 300))
+                    var len: Int32 = 0
+                    guard let ptr = clipboard_get_image_thumb_by_db_id(Int64(dbId), &len), len > 0 else {
+                        continuation.resume(returning: nil)
+                        return
+                    }
+                    defer { clipboard_free_bytes(ptr, len) }
+                    let data = Data(bytesNoCopy: ptr, count: Int(len), deallocator: .none)
+
+                    guard let source = CGImageSourceCreateWithData(data as CFData, nil) else {
+                        continuation.resume(returning: nil)
+                        return
+                    }
+                    // Bounded 160px thumbnail (ample for 60x48pt rows on 2x Retina).
+                    // Disabling ImageIO cache prevents resident unmapped dirty pages from accumulating.
+                    let options: [CFString: Any] = [
+                        kCGImageSourceCreateThumbnailFromImageAlways: true,
+                        kCGImageSourceShouldCache: false,
+                        kCGImageSourceThumbnailMaxPixelSize: 160
+                    ]
+                    guard let cgThumb = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
+                        continuation.resume(returning: nil)
+                        return
+                    }
+                    let size = NSSize(width: cgThumb.width, height: cgThumb.height)
+                    let image = NSImage(cgImage: cgThumb, size: size)
+                    continuation.resume(returning: image)
                 }
             }
         }
     }
 
-    /// Async full thumbnail load: the Rust FFI read and bounded decode run off
-    /// the main thread, and the resulting image is cached before returning.
+    /// Async full thumbnail load: NSCache hit, else the FFI read + PNG decode
+    /// run off the main thread, and the result is cached before returning.
     /// The main thread never performs DB access or image decoding for rows.
     func loadThumbnail(dbId: Int) async -> NSImage? {
         guard dbId != 0, !Task.isCancelled else { return nil }
         let key = NSNumber(value: dbId)
         if let cached = thumbnailCache.object(forKey: key) { return cached }
-        let decoded = await Self.decodeThumbnail(dbId: dbId)
-        guard !Task.isCancelled, let decoded else { return nil }
-        // cost = decoded RGBA upper bound for a 300px-max-dimension thumbnail
-        thumbnailCache.setObject(decoded.image, forKey: key, cost: 300 * 300 * 4)
-        return decoded.image
+        guard let image = await Self.decodeThumbnail(dbId: dbId) else { return nil }
+        guard !Task.isCancelled else { return nil }
+        // cost = decoded RGBA upper bound for a 160px-max-dimension thumbnail (~100 KB)
+        thumbnailCache.setObject(image, forKey: key, cost: 160 * 160 * 4)
+        return image
     }
 
     /// Immediately release all cached thumbnails.

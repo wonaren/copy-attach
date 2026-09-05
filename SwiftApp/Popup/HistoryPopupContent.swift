@@ -61,7 +61,7 @@ final class ContextMenuItemTarget: NSObject {
 struct HistoryPopupContent: View {
     let onClose: () -> Void
 
-    @State var backend = ClipboardBackend.shared
+    var backend: ClipboardBackend { ClipboardBackend.shared }
     @State var selectedIndex: Int = 0  // 0 = search bar, 1+ = items
     @State var showPreview: Bool = false
     @State private var isControlPressed: Bool = false
@@ -132,13 +132,13 @@ struct HistoryPopupContent: View {
             return memo
         }
         let base = effectiveSearchText.isEmpty ? backend.items : searchResults
+        // base (both backend.items and searchResults) is already sorted by
+        // timestamp descending from the backend/DB. Re-sorting is redundant.
         let sorted: [ClipboardItem]
         if filterMode == .all {
-            sorted = base.sorted { $0.timestamp > $1.timestamp }
-        } else {
             sorted = base
-                .filter { matches($0, filterMode: filterMode) }
-                .sorted { $0.timestamp > $1.timestamp }
+        } else {
+            sorted = base.filter { matches($0, filterMode: filterMode) }
         }
         var rows: [PopupRow] = []
         rows.reserveCapacity(sorted.count * 2)
@@ -291,6 +291,8 @@ struct HistoryPopupContent: View {
             }
         }
         .onDisappear {
+            isSearchFocused = false
+            isContainerFocused = false
             closePreview()
         }
         .onReceive(NotificationCenter.default.publisher(for: escapeKeyNotification)) { _ in
@@ -389,18 +391,13 @@ struct HistoryPopupContent: View {
             guard let direction = note.object as? String else { return }
             switchFilterTab(direction: direction)
         }
-        .onChange(of: filterMode) { _, newMode in
+        .onChange(of: filterMode) { _, _ in
             closePreview()
             // A tab switch re-anchors the selection to the new list's first
             // row. The list transition is a single composited fade, not a
             // transition per row, so a large history stays cheap to render.
             if selectedIndex != 0 {
                 selectedIndex = displayItems.isEmpty ? 0 : 1
-                guard !displayItems.isEmpty else { return }
-                DispatchQueue.main.async {
-                    guard self.filterMode == newMode, self.selectedIndex > 0 else { return }
-                    self.scrollTarget = self.scrollTargetForItem(at: 0)
-                }
             }
         }
         .onChange(of: searchText) { _, newValue in

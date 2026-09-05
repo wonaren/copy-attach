@@ -339,6 +339,11 @@ class HistoryPopupWindow: NSPanel {
         let preview = previewPanel
         previewPanel = nil
 
+        // Drop first responder before fading out so the active text insertion
+        // cursor (NSTextInsertionIndicator in macOS 15+) stops its 120Hz
+        // CADisplayLink UpdateCycle ticks immediately.
+        self.makeFirstResponder(nil)
+
         NSAnimationContext.runAnimationGroup({ ctx in
             ctx.duration = 0.12
             ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
@@ -393,17 +398,24 @@ class HistoryPopupWindow: NSPanel {
         closeGuaranteeTimer = nil
         previewPanel?.close()
         previewPanel = nil
+
+        // Drop first responder before ordering out so the active text cursor
+        // (NSTextInsertionIndicator) stops its 120Hz CADisplayLink UpdateCycle ticks.
+        self.makeFirstResponder(nil)
+
         super.close()
-        // Destroy the hosting view entirely: rootView=EmptyView does NOT
-        // release the old view tree's AttributeGraph — State storages,
-        // DisplayList nodes and their retained CGImages survive across the
-        // rootView swap (measured: 40-74 StoredLocation<NSImage?> lingered
-        // after EmptyView, accumulating ~2 MB per session over 19 h).
-        // Setting popupHostingView = nil lets NSHostingView.deinit tear the
-        // entire graph down; show() recreates a fresh one (~3 ms for 540
-        // rows, negligible vs the 200 ms fade-in).
+        self.orderOut(nil)
+
+        // Detach the hosting view from the window so all AppKit rendering and
+        // layout stops, but RETAIN the hosting view instance so its AttributeGraph
+        // memory pages in MALLOC_SMALL are reused on the next show() rather than
+        // abandoned as dirty pages and re-allocated from scratch.
+        // Replace its rootView with EmptyView to release views, models, and images.
         self.contentView = nil
-        popupHostingView = nil
-        self.alphaValue = 1.0 // reset for next open
+        popupHostingView?.rootView = AnyView(EmptyView())
+        // Do NOT set self.alphaValue = 1.0 after close: setting alpha after close
+        // re-dirties window properties in WindowServer. show() already sets
+        // self.alphaValue = 0 before ordering front and fading in.
+        self.alphaValue = 0
     }
 }

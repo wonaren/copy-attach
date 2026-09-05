@@ -60,10 +60,29 @@ enum ClipboardItem: Identifiable {
 
     /// Pure formatting helper to turn raw preview text into bounded single-line display text.
     static func formatDisplayPreview(_ preview: String) -> String {
-        let collapsed = preview.components(separatedBy: .newlines)
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
-            .joined(separator: "⏎")
+        guard !preview.isEmpty else { return "" }
+        // Single-pass newline collapse without intermediate array allocations.
+        // Breaks early at 60 characters since visual width is capped at 50.
+        var collapsed = ""
+        collapsed.reserveCapacity(min(preview.utf8.count, 64))
+        var wasWhitespaceOrNewline = false
+        for ch in preview {
+            if ch.isNewline {
+                if !wasWhitespaceOrNewline && !collapsed.isEmpty {
+                    collapsed.append("⏎")
+                    wasWhitespaceOrNewline = true
+                }
+            } else if ch.isWhitespace {
+                if !wasWhitespaceOrNewline && !collapsed.isEmpty {
+                    collapsed.append(" ")
+                    wasWhitespaceOrNewline = true
+                }
+            } else {
+                collapsed.append(ch)
+                wasWhitespaceOrNewline = false
+            }
+            if collapsed.count >= 60 { break }
+        }
         if visualWidth(collapsed) > 50 {
             let prefix = String(collapsed.prefix(whileVisualWidth: 25))
             let suffix = String(collapsed.suffix(whileVisualWidth: 25))

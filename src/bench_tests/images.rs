@@ -148,10 +148,8 @@ fn benchmark_images() {
         for i in 0..threshold {
             let item = ClipboardEntry::Image {
                 id: new_entry_id(),
-                png_data: Vec::new(),
                 width: 1920,
                 height: 1080,
-                thumb_data: Vec::new(),
                 thumb_width: 500,
                 thumb_height: 281,
                 hash: i as u64 + 1,
@@ -171,10 +169,8 @@ fn benchmark_images() {
         for j in 0..SS_SAMPLES {
             let item = ClipboardEntry::Image {
                 id: new_entry_id(),
-                png_data: Vec::new(),
                 width: 1920,
                 height: 1080,
-                thumb_data: Vec::new(),
                 thumb_width: 500,
                 thumb_height: 281,
                 hash: (threshold + j) as u64 + 1,

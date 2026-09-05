@@ -22,7 +22,9 @@ extension HistoryPopupContent {
         pendingFilterMode = target
         filterSwitchGeneration &+= 1
         let generation = filterSwitchGeneration
-        scrollTarget = selectedIndex > 0 ? listTopAnchorID : scrollTarget
+        // Pre-scroll to top anchor before switching filter to prevent LazyVStack
+        // height-estimation race condition when list size changes.
+        scrollTarget = listTopAnchorID
 
         DispatchQueue.main.async {
             guard self.filterSwitchGeneration == generation,
