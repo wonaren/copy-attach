@@ -27,9 +27,8 @@ class HistoryPopupWindow: NSPanel {
     /// can cancel a pending guarantee when the window is re-shown before it fires.
     private var closeGuaranteeTimer: Timer?
 
-    /// Reused SwiftUI hosting view across popup sessions. The root is detached
-    /// on close so row state and decoded images are released. The hosting view
-    /// itself is retained for AppKit allocation reuse.
+    /// The hosting view is released on close so the SwiftUI view graph, state
+    /// storage, and image references have an unambiguous lifetime per session.
     private var popupHostingView: PopupHostingView?
 
     // MARK: - Drag anti-occlusion parking (智能防遮挡)
@@ -406,16 +405,11 @@ class HistoryPopupWindow: NSPanel {
         super.close()
         self.orderOut(nil)
 
-        // Detach the hosting view from the window so all AppKit rendering and
-        // layout stops, but RETAIN the hosting view instance so its AttributeGraph
-        // memory pages in MALLOC_SMALL are reused on the next show() rather than
-        // abandoned as dirty pages and re-allocated from scratch.
-        // Replace its rootView with EmptyView to release views, models, and images.
+        // Release the hosting view itself. Replacing rootView with EmptyView is
+        // not a complete lifecycle boundary for SwiftUI's internal graph, so
+        // the window must not retain the session's view graph across opens.
         self.contentView = nil
-        popupHostingView?.rootView = AnyView(EmptyView())
-        // Do NOT set self.alphaValue = 1.0 after close: setting alpha after close
-        // re-dirties window properties in WindowServer. show() already sets
-        // self.alphaValue = 0 before ordering front and fading in.
-        self.alphaValue = 0
+        popupHostingView = nil
+
     }
 }

@@ -419,34 +419,38 @@ struct HistoryPopupContent: View {
             let hasCJK = newValue.unicodeScalars.contains { $0.value > 0x2E80 }
             let debounceNs: UInt64 = hasCJK ? 150_000_000 : 80_000_000
 
-            searchTask = Task { [items = backend.items] in
-                try? await Task.sleep(nanoseconds: debounceNs)
-                guard !Task.isCancelled else { return }
+        let query = newValue
+        searchTask = Task { [items = backend.items] in
+            do {
+                try await Task.sleep(nanoseconds: debounceNs)
+                try Task.checkCancellation()
 
                 // Full-text matching runs in Rust against the FTS5 index (the
                 // in-memory history no longer holds full text). Label and
                 // source-name matching stay here — the backend never had them
                 // for the list row, and images are findable only via their
                 // generated label ("Image (WxH)") / source name.
-                let filtered = await Task.detached(priority: .userInitiated) { [items, backend] in
-                    let matchIds = backend.searchIds(newValue)
+                let filtered: [ClipboardItem] = await Task.detached(priority: .userInitiated) { [items, backend, query] in
+                    guard !Task.isCancelled else { return [ClipboardItem]() }
+                    let matchIds = backend.searchIds(query)
                     return items.filter {
                         matchIds.contains($0.id) ||
-                        $0.label.localizedCaseInsensitiveContains(newValue) ||
-                        $0.sourceName.localizedCaseInsensitiveContains(newValue) ||
+                        $0.label.localizedCaseInsensitiveContains(query) ||
+                        $0.sourceName.localizedCaseInsensitiveContains(query) ||
                         DayGroup.label(for: $0.timestamp)
-                            .localizedCaseInsensitiveContains(newValue)
+                            .localizedCaseInsensitiveContains(query)
                     }
                 }.value
 
                 // Task.detached is not auto-cancelled with this task — if the
-                // query changed while the search ran, discard the stale result
-                // instead of overwriting the newer search's output.
-                guard !Task.isCancelled else { return }
+                // query changed while it ran, discard the stale result instead
+                // of overwriting the newer search's output.
+                try Task.checkCancellation()
 
                 await MainActor.run {
+                    guard !Task.isCancelled, self.searchText == query else { return }
                     withAnimation(.easeInOut(duration: 0.25)) {
-                        effectiveSearchText = newValue
+                        effectiveSearchText = query
                         searchResults = filtered
                         searchResultsGeneration &+= 1
                     }
@@ -454,7 +458,12 @@ struct HistoryPopupContent: View {
                         scrollTarget = scrollTargetForItem(at: 0)
                     }
                 }
+            } catch is CancellationError {
+                return
+            } catch {
+                return
             }
+        }
         }
         .onChange(of: selectedIndex) { _, newValue in
             if newValue == 0 && !backend.items.isEmpty {

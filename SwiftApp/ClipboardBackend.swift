@@ -40,12 +40,6 @@ class ClipboardBackend {
         c.totalCostLimit = 4 * 1024 * 1024  // 4 MB
         return c
     }()
-    /// Delayed thumbnail-cache release after the popup closes. While the
-    /// popup is open the cache makes scrolling smooth; once it has been closed
-    /// for a while the decoded bitmaps are no longer visible and are released
-    /// so they don't sit in physical memory across a long idle session.
-    private var thumbnailCacheClearTask: Task<Void, Never>?
-
     var favoriteIds: Set<Int> = []
 
     private let favoritesKey = "FavoriteIds"
@@ -135,8 +129,7 @@ class ClipboardBackend {
     func stop() {
         timer?.invalidate()
         timer = nil
-        thumbnailCacheClearTask?.cancel()
-        thumbnailCacheClearTask = nil
+        clearThumbnailCache()
         if let observer = sourceAppObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(observer)
             sourceAppObserver = nil
@@ -151,10 +144,7 @@ class ClipboardBackend {
     @MainActor
     func setPopupVisible(_ visible: Bool) {
         if visible {
-            // Popup is visible again: keep the thumbnail cache warm and cancel
-            // any pending delayed release scheduled by the previous close.
-            thumbnailCacheClearTask?.cancel()
-            thumbnailCacheClearTask = nil
+            // Keep decoded thumbnails warm for the duration of this popup session.
             refreshPermission()
             refresh()
             guard timer == nil else { return }
@@ -179,16 +169,13 @@ class ClipboardBackend {
                     debugLog("shrink_db_memory failed (see Rust log)")
                 }
             }
-            scheduleThumbnailCacheClear()
+            releaseThumbnailCacheAfterPopupCloses()
         }
     }
 
-    /// Release decoded thumbnails when the popup closes. The list is not
-    /// visible then, so retaining image objects for 60 seconds only inflates
-    /// footprint and makes repeated sessions look like a leak.
-    private func scheduleThumbnailCacheClear() {
-        thumbnailCacheClearTask?.cancel()
-        thumbnailCacheClearTask = nil
+    /// The list is no longer visible after close, so release decoded thumbnails
+    /// immediately. The next session can repopulate this bounded cache.
+    private func releaseThumbnailCacheAfterPopupCloses() {
         clearThumbnailCache()
     }
 
@@ -383,8 +370,17 @@ class ClipboardBackend {
     private nonisolated static func decodeThumbnail(dbId: Int) async -> NSImage? {
         await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
-                thumbnailDecodeSlots.wait()
+                while thumbnailDecodeSlots.wait(timeout: .now() + 0.05) == .timedOut {
+                    if Task.isCancelled {
+                        continuation.resume(returning: nil)
+                        return
+                    }
+                }
                 defer { thumbnailDecodeSlots.signal() }
+                guard !Task.isCancelled else {
+                    continuation.resume(returning: nil)
+                    return
+                }
                 autoreleasepool {
                     var len: Int32 = 0
                     guard let ptr = clipboard_get_image_thumb_by_db_id(Int64(dbId), &len), len > 0 else {
