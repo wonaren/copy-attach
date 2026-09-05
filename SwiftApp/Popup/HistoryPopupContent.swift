@@ -75,6 +75,10 @@ struct HistoryPopupContent: View {
     let listTopAnchorID = 0
 
     @State var filterMode: FilterMode = .all
+    /// Invalidates queued tab switches so a fast gesture produces one render.
+    @State var filterSwitchGeneration = 0
+    @State var listTransitionOpacity: Double = 1
+
 
     /// True while a right-click is waiting for the one-shot row-frame snapshot.
     @State var contextMenuArmed = false
@@ -173,24 +177,6 @@ struct HistoryPopupContent: View {
     private let popupWidth: CGFloat = 500
     private let popupHeight: CGFloat = 720
 
-    /// Base duration for the smallest filter change.
-    let filterSwitchBaseDuration: TimeInterval = 0.15
-    /// Extra seconds per unit of visible change (rows entering or leaving),
-    /// saturating once the change exceeds what fits on screen.
-    let filterSwitchPerChange: TimeInterval = 0.011
-    /// Per-direction cap on counted change (offscreen rows add no motion).
-    let filterSwitchChangeCap = 6
-    /// Hard ceiling for filter content animation.
-    let filterSwitchMaxDuration: TimeInterval = 0.28
-
-    /// Filter changes fade/scale rows in place; survivors stay pinned.
-    private var filterRowTransition: AnyTransition {
-        .asymmetric(
-            insertion: .opacity.combined(with: .scale(scale: 0.96)),
-            removal: .opacity.combined(with: .scale(scale: 0.96))
-        )
-    }
-
     var popupWindow: HistoryPopupWindow? {
         NSApp.windows.first(where: { $0 is HistoryPopupWindow }) as? HistoryPopupWindow
     }
@@ -269,6 +255,8 @@ struct HistoryPopupContent: View {
             searchTask?.cancel()
             searchTask = nil
             filterMode = .all
+            filterSwitchGeneration &+= 1
+            listTransitionOpacity = 1
             showPreview = false
             scrollTarget = nil
             contextMenuArmed = false
@@ -401,15 +389,18 @@ struct HistoryPopupContent: View {
             guard let direction = note.object as? String else { return }
             switchFilterTab(direction: direction, animated: true)
         }
-        .onChange(of: filterMode) { _, _ in
+        .onChange(of: filterMode) { _, newMode in
             closePreview()
             // A tab switch re-anchors the selection to the new list's first
-            // row: the new tab is a different filter of the same data pool, so
-            // the old row number has no meaning there. An empty new list falls
-            // back to the search bar; a search-bar-focused switch (selectedIndex
-            // == 0) keeps the search focus.
+            // row. The list transition is a single composited fade, not a
+            // transition per row, so a large history stays cheap to render.
             if selectedIndex != 0 {
                 selectedIndex = displayItems.isEmpty ? 0 : 1
+                guard !displayItems.isEmpty else { return }
+                DispatchQueue.main.async {
+                    guard self.filterMode == newMode, self.selectedIndex > 0 else { return }
+                    self.scrollTarget = self.scrollTargetForItem(at: 0)
+                }
             }
         }
         .onChange(of: searchText) { _, newValue in
@@ -596,8 +587,7 @@ struct HistoryPopupContent: View {
 
     /// The region that reacts to the filter mode: the item list + bottom bar,
     /// or the per-tab empty state. Rows keep their `entry_id` identity across
-    /// filter changes — survivors stay put, changed rows dissolve in place and
-    /// the list collapses (`filterRowTransition`).
+    /// filter changes.
     @ViewBuilder
     private var filterPageContent: some View {
         if displayItems.isEmpty && !effectiveSearchText.isEmpty {
@@ -613,6 +603,7 @@ struct HistoryPopupContent: View {
                 itemsList
                 bottomBar
             }
+            .opacity(listTransitionOpacity)
         }
     }
 
@@ -654,7 +645,6 @@ struct HistoryPopupContent: View {
                         DateSeparatorView(timestamp: timestamp)
                             .padding(.top, isFirst ? 2 : 8)
                             .padding(.bottom, 1)
-                            .transition(filterRowTransition)
                             .id(row.id)
                     case .item(let index, let item):
                         let shortcut: String? = isCommandPressed && index < 9 ? "⌘\(index + 1)" : nil
@@ -698,7 +688,6 @@ struct HistoryPopupContent: View {
                             }
                         }
                         .id(item.id)
-                        .transition(filterRowTransition)
                     }
                 }
                 }
