@@ -4,8 +4,8 @@ import SwiftUI
 
 extension HistoryPopupContent {
     /// Switch to a specific filter tab. Rapid requests are coalesced before
-    /// the next layout pass. The list update stays immediate so LazyVStack
-    /// does not retain transition graphs for every entering/leaving row.
+    /// the next layout pass. The original row transition is enabled only for
+    /// this one short update, then removed so it cannot accumulate state.
     func switchToFilterTab(_ target: FilterMode, animated: Bool) {
         guard target != filterMode else { return }
         filterSwitchGeneration &+= 1
@@ -16,24 +16,23 @@ extension HistoryPopupContent {
             guard self.filterSwitchGeneration == generation,
                   target != self.filterMode else { return }
             guard animated else {
+                self.animateFilterRows = false
                 self.filterMode = target
-                self.listTransitionOpacity = 1
                 return
             }
 
-            // Animate one composited list layer instead of every row. This
-            // keeps the transition elegant while avoiding per-row retained
-            // transition graphs and excessive GPU work during fast swipes.
-            withAnimation(.easeOut(duration: 0.08)) {
-                self.listTransitionOpacity = 0.72
+            self.filterAnimationGeneration &+= 1
+            let animationGeneration = self.filterAnimationGeneration
+            self.animateFilterRows = true
+            withAnimation(.easeOut(duration: 0.20)) {
+                self.filterMode = target
             }
-            self.filterMode = target
-            DispatchQueue.main.async {
-                guard self.filterSwitchGeneration == generation,
-                      self.filterMode == target else { return }
-                withAnimation(.easeOut(duration: 0.16)) {
-                    self.listTransitionOpacity = 1
-                }
+
+            // Transition state is useful only while the diff is settling. It
+            // must not remain attached to the list between tab switches.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.24) {
+                guard self.filterAnimationGeneration == animationGeneration else { return }
+                self.animateFilterRows = false
             }
         }
     }

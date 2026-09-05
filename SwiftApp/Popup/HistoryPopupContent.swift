@@ -77,7 +77,8 @@ struct HistoryPopupContent: View {
     @State var filterMode: FilterMode = .all
     /// Invalidates queued tab switches so a fast gesture produces one render.
     @State var filterSwitchGeneration = 0
-    @State var listTransitionOpacity: Double = 1
+    @State var filterAnimationGeneration = 0
+    @State var animateFilterRows = false
 
 
     /// True while a right-click is waiting for the one-shot row-frame snapshot.
@@ -177,6 +178,17 @@ struct HistoryPopupContent: View {
     private let popupWidth: CGFloat = 500
     private let popupHeight: CGFloat = 720
 
+    /// Only rows near the viewport receive this transition. Keeping the
+    /// transition off the rest of a large filtered list prevents SwiftUI from
+    /// retaining hundreds of transition graphs during a fast tab switch.
+    private var filterRowTransition: AnyTransition {
+        guard animateFilterRows else { return .identity }
+        return .asymmetric(
+            insertion: .opacity.combined(with: .scale(scale: 0.96)),
+            removal: .opacity.combined(with: .scale(scale: 0.96))
+        )
+    }
+
     var popupWindow: HistoryPopupWindow? {
         NSApp.windows.first(where: { $0 is HistoryPopupWindow }) as? HistoryPopupWindow
     }
@@ -256,7 +268,8 @@ struct HistoryPopupContent: View {
             searchTask = nil
             filterMode = .all
             filterSwitchGeneration &+= 1
-            listTransitionOpacity = 1
+            filterAnimationGeneration &+= 1
+            animateFilterRows = false
             showPreview = false
             scrollTarget = nil
             contextMenuArmed = false
@@ -603,7 +616,6 @@ struct HistoryPopupContent: View {
                 itemsList
                 bottomBar
             }
-            .opacity(listTransitionOpacity)
         }
     }
 
@@ -645,6 +657,7 @@ struct HistoryPopupContent: View {
                         DateSeparatorView(timestamp: timestamp)
                             .padding(.top, isFirst ? 2 : 8)
                             .padding(.bottom, 1)
+                            .transition(filterRowTransition)
                             .id(row.id)
                     case .item(let index, let item):
                         let shortcut: String? = isCommandPressed && index < 9 ? "⌘\(index + 1)" : nil
@@ -688,6 +701,7 @@ struct HistoryPopupContent: View {
                             }
                         }
                         .id(item.id)
+                        .transition(filterRowTransition)
                     }
                 }
                 }
