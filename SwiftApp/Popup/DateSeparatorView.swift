@@ -6,21 +6,54 @@ import SwiftUI
 /// Kept outside any View to avoid `@MainActor` isolation — these are called
 /// from background search tasks as well as the main thread.
 enum DayGroup {
+    private static func dayComponents(for timestamp: UInt64) -> DateComponents {
+        let date = Date(timeIntervalSince1970: TimeInterval(timestamp))
+        let components = Calendar.current.dateComponents([.era, .year, .month, .day], from: date)
+        guard components.era != nil,
+              components.year != nil,
+              components.month != nil,
+              components.day != nil else {
+            preconditionFailure("Unable to derive calendar day for timestamp \(timestamp)")
+        }
+        return components
+    }
+
     /// "7月21日 今天" / "7月20日 昨天" / "7月19日" / "2025年12月23日"
     static func label(for timestamp: UInt64) -> String {
+        let parts = labelParts(for: timestamp)
+        return parts.relative.map { "\(parts.date) \($0)" } ?? parts.date
+    }
+
+    /// Stable identity for a calendar day, independent of its first entry.
+    /// The Int.min namespace is reserved for separators, while entry IDs are
+    /// positive. Encoding calendar components avoids timestamp truncation.
+    static func separatorID(for timestamp: UInt64) -> Int {
+        let components = dayComponents(for: timestamp)
+        let era = Int64(components.era!)
+        let year = Int64(components.year!)
+        let month = Int64(components.month!)
+        let day = Int64(components.day!)
+        let key = era * 1_000_000_000 + year * 10_000 + month * 100 + day
+        precondition(key > 0 && key <= Int64(Int.max), "Calendar day ID overflow")
+        return Int(Int64.min + key)
+    }
+
+    /// Split the date and relative-day label so the separator can preserve its
+    /// identity while updating only the text that actually changed.
+    static func labelParts(for timestamp: UInt64) -> (date: String, relative: String?) {
         let date = Date(timeIntervalSince1970: TimeInterval(timestamp))
         let cal = Calendar.current
-        let comps = cal.dateComponents([.year, .month, .day], from: date)
+        let comps = dayComponents(for: timestamp)
         let nowYear = cal.component(.year, from: Date())
-        let dateStr: String
+        let dateText: String
         if comps.year == nowYear {
-            dateStr = "\(comps.month ?? 0)月\(comps.day ?? 0)日"
+            dateText = "\(comps.month!)月\(comps.day!)日"
         } else {
-            dateStr = "\(comps.year ?? 0)年\(comps.month ?? 0)月\(comps.day ?? 0)日"
+            dateText = "\(comps.year!)年\(comps.month!)月\(comps.day!)日"
         }
-        if cal.isDateInToday(date) { return "\(dateStr) 今天" }
-        if cal.isDateInYesterday(date) { return "\(dateStr) 昨天" }
-        return dateStr
+        if cal.isDateInToday(date) { return (dateText, "今天") }
+        if cal.isDateInYesterday(date) { return (dateText, "昨天") }
+        return (dateText, nil)
     }
 
     /// True when both Unix-second timestamps fall on the same calendar day
@@ -42,10 +75,18 @@ struct DateSeparatorView: View {
     @Environment(\.appTheme) private var theme
 
     var body: some View {
+        let parts = DayGroup.labelParts(for: timestamp)
         HStack(spacing: 6) {
-            Text(DayGroup.label(for: timestamp))
+            Text(parts.date)
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundColor(theme.popupSecondaryText)
+                .contentTransition(.numericText())
+            if let relative = parts.relative {
+                Text(relative)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(theme.popupSecondaryText)
+                    .transition(.opacity)
+            }
             Rectangle()
                 .fill(theme.popupRowBorder)
                 .frame(height: 0.5)

@@ -3,44 +3,37 @@ import SwiftUI
 // MARK: - Tab Switching & Filtering
 
 extension HistoryPopupContent {
-    /// Switch to a specific filter tab. Rapid requests are coalesced before
-    /// the next layout pass. The original row transition is enabled only for
-    /// this one short update, then removed so it cannot accumulate state.
-    func switchToFilterTab(_ target: FilterMode, animated: Bool) {
-        guard target != filterMode else { return }
+    /// Queues the latest requested tab for the next run-loop turn. The pending
+    /// mode is part of the state machine so rapid gestures are composed from
+    /// the latest request instead of repeatedly reading the old committed mode.
+    /// The list updates immediately; only the count uses numeric text motion.
+    func switchToFilterTab(_ target: FilterMode) {
+        let current = pendingFilterMode ?? filterMode
+        guard target != current else { return }
+
+        // Reversing a queued switch cancels it instead of enqueueing a second
+        // state change. This keeps a rapid left/right gesture lossless.
+        if target == filterMode {
+            pendingFilterMode = nil
+            filterSwitchGeneration &+= 1
+            return
+        }
+
+        pendingFilterMode = target
         filterSwitchGeneration &+= 1
         let generation = filterSwitchGeneration
         scrollTarget = selectedIndex > 0 ? listTopAnchorID : scrollTarget
 
         DispatchQueue.main.async {
             guard self.filterSwitchGeneration == generation,
-                  target != self.filterMode else { return }
-            guard animated else {
-                self.animateFilterRows = false
-                self.filterMode = target
-                return
-            }
-
-            self.filterAnimationGeneration &+= 1
-            let animationGeneration = self.filterAnimationGeneration
-            self.animateFilterRows = true
-            withAnimation(.easeOut(duration: 0.20)) {
-                self.filterMode = target
-            }
-
-            // Transition state is useful only while the diff is settling. It
-            // must not remain attached to the list between tab switches.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.24) {
-                guard self.filterAnimationGeneration == animationGeneration else { return }
-                self.animateFilterRows = false
-            }
+                  self.pendingFilterMode == target else { return }
+            self.filterMode = target
+            self.pendingFilterMode = nil
         }
     }
 
-    /// Whether an entry satisfies a filter tab's predicate. Single source of
-    /// truth for the filter definitions — the display memo
-    /// (`HistoryPopupContent.currentDisplayMemo`) and the tab-switch
-    /// measurement both derive from it, so they can't drift apart.
+    /// Whether an entry satisfies a filter tab's predicate. This is the single
+    /// source of truth used by the display memo.
     func matches(_ item: ClipboardItem, filterMode mode: FilterMode) -> Bool {
         switch mode {
         case .all: true
@@ -53,9 +46,10 @@ extension HistoryPopupContent {
     /// Shared tab switch used by the trackpad swipe and the ←/→ shortcuts:
     /// direction "left" = previous tab, "right" = next tab (same convention as
     /// the arrow keys).
-    func switchFilterTab(direction: String, animated: Bool) {
+    func switchFilterTab(direction: String) {
         let modes = FilterMode.allCases
-        guard let idx = modes.firstIndex(of: filterMode) else { return }
+        let current = pendingFilterMode ?? filterMode
+        guard let idx = modes.firstIndex(of: current) else { return }
         let target: FilterMode
         if direction == "left" {
             guard idx > 0 else { return }
@@ -64,6 +58,6 @@ extension HistoryPopupContent {
             guard idx < modes.count - 1 else { return }
             target = modes[idx + 1]
         }
-        switchToFilterTab(target, animated: animated)
+        switchToFilterTab(target)
     }
 }

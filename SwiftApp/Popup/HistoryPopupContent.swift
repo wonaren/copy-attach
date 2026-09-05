@@ -29,9 +29,9 @@ private enum PopupRow: Identifiable {
     var id: Int {
         switch self {
         case .separator(let timestamp, _):
-            // Negative ids: -timestamp-1 so id is never 0 and always
-            // distinct from positive entry_ids. (timestamp=0 → -1)
-            return -Int(Int64(bitPattern: timestamp)) - 1
+            // Stable across filters: changing the first entry of a day must
+            // not replace or animate the date separator itself.
+            return DayGroup.separatorID(for: timestamp)
         case .item(_, let item):
             return item.id
         }
@@ -75,11 +75,10 @@ struct HistoryPopupContent: View {
     let listTopAnchorID = 0
 
     @State var filterMode: FilterMode = .all
+    /// Latest requested mode while a switch is waiting for the next run loop.
+    @State var pendingFilterMode: FilterMode?
     /// Invalidates queued tab switches so a fast gesture produces one render.
     @State var filterSwitchGeneration = 0
-    @State var filterAnimationGeneration = 0
-    @State var animateFilterRows = false
-
 
     /// True while a right-click is waiting for the one-shot row-frame snapshot.
     @State var contextMenuArmed = false
@@ -178,17 +177,6 @@ struct HistoryPopupContent: View {
     private let popupWidth: CGFloat = 500
     private let popupHeight: CGFloat = 720
 
-    /// Only rows near the viewport receive this transition. Keeping the
-    /// transition off the rest of a large filtered list prevents SwiftUI from
-    /// retaining hundreds of transition graphs during a fast tab switch.
-    private var filterRowTransition: AnyTransition {
-        guard animateFilterRows else { return .identity }
-        return .asymmetric(
-            insertion: .opacity.combined(with: .scale(scale: 0.96)),
-            removal: .opacity.combined(with: .scale(scale: 0.96))
-        )
-    }
-
     var popupWindow: HistoryPopupWindow? {
         NSApp.windows.first(where: { $0 is HistoryPopupWindow }) as? HistoryPopupWindow
     }
@@ -249,12 +237,12 @@ struct HistoryPopupContent: View {
         }
         .onKeyPress(.leftArrow) {
             guard selectedIndex > 0 else { return .ignored }
-            switchFilterTab(direction: "left", animated: true)
+            switchFilterTab(direction: "left")
             return .handled
         }
         .onKeyPress(.rightArrow) {
             guard selectedIndex > 0 else { return .ignored }
-            switchFilterTab(direction: "right", animated: true)
+            switchFilterTab(direction: "right")
             return .handled
         }
         .onAppear {
@@ -267,9 +255,8 @@ struct HistoryPopupContent: View {
             searchTask?.cancel()
             searchTask = nil
             filterMode = .all
+            pendingFilterMode = nil
             filterSwitchGeneration &+= 1
-            filterAnimationGeneration &+= 1
-            animateFilterRows = false
             showPreview = false
             scrollTarget = nil
             contextMenuArmed = false
@@ -396,11 +383,11 @@ struct HistoryPopupContent: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: arrowKeyFromSearchNotification)) { note in
             guard let direction = note.object as? String else { return }
-            switchFilterTab(direction: direction, animated: true)
+            switchFilterTab(direction: direction)
         }
         .onReceive(NotificationCenter.default.publisher(for: popupSwipeNotification)) { note in
             guard let direction = note.object as? String else { return }
-            switchFilterTab(direction: direction, animated: true)
+            switchFilterTab(direction: direction)
         }
         .onChange(of: filterMode) { _, newMode in
             closePreview()
@@ -559,7 +546,7 @@ struct HistoryPopupContent: View {
         HStack(spacing: 8) {
             ForEach(FilterMode.allCases, id: \.self) { mode in
                 Button(action: {
-                    switchToFilterTab(mode, animated: true)
+                    switchToFilterTab(mode)
                 }) {
                     Image(systemName: mode.icon)
                         .font(.system(size: 13, weight: .medium))
@@ -657,7 +644,8 @@ struct HistoryPopupContent: View {
                         DateSeparatorView(timestamp: timestamp)
                             .padding(.top, isFirst ? 2 : 8)
                             .padding(.bottom, 1)
-                            .transition(filterRowTransition)
+                            // Date separators keep their stable day identity;
+                            // only their text is allowed to update.
                             .id(row.id)
                     case .item(let index, let item):
                         let shortcut: String? = isCommandPressed && index < 9 ? "⌘\(index + 1)" : nil
@@ -701,7 +689,6 @@ struct HistoryPopupContent: View {
                             }
                         }
                         .id(item.id)
-                        .transition(filterRowTransition)
                     }
                 }
                 }
@@ -748,21 +735,27 @@ struct HistoryPopupContent: View {
         let hasSeparator = itemIndex == 0
             || !DayGroup.isSameDay(items[itemIndex - 1].timestamp, items[itemIndex].timestamp)
         if hasSeparator {
-            return -Int(Int64(bitPattern: items[itemIndex].timestamp)) - 1
+            return DayGroup.separatorID(for: items[itemIndex].timestamp)
         }
         return items[itemIndex].id
     }
 
     // MARK: - Bottom Bar (item count + shortcuts, single row)
 
+    /// Item count is the only animated feedback for tab filtering. The list
+    /// and date separators retain their identities and update immediately.
     private var bottomBar: some View {
         let memo = currentDisplayMemo
         return HStack(spacing: 0) {
             // --- Left: item count stats ---
-            Text("\(memo.items.count) 项")
+            Text("\(memo.items.count)")
                 .font(.system(size: 10, weight: .medium))
                 .foregroundColor(theme.popupSecondaryText)
                 .contentTransition(.numericText())
+                .animation(.easeOut(duration: 0.18), value: memo.items.count)
+            Text(" 项")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundColor(theme.popupSecondaryText)
             if !effectiveSearchText.isEmpty {
                 Text("/ \(backend.items.count) 项")
                     .font(.system(size: 10))

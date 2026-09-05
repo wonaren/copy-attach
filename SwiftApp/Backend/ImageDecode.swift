@@ -77,19 +77,17 @@ enum ImageDecode {
                    max(Int(displayLongest * scale), zoomHeadroomPx))
     }
 
-    /// Decode the stored image for `dbId` as an on-screen preview, bounded to
-    /// display resolution. Animated GIFs are returned through `NSImage(data:)`
-    /// unchanged (they are small by nature, and the Rust path would flatten
-    /// them to their first frame). Returns nil when undecodable.
+    /// Decode the stored image for `dbId` as a bounded preview. The Rust path
+    /// avoids ImageIO's full-resolution thumbnail decode and returns an image
+    /// whose pixel buffer has a hard longest-edge limit.
     static func previewImage(dbId: Int, maxPixel: Int) -> DecodedImage? {
         guard dbId != 0 else { return nil }
         var len: Int32 = 0, w: Int32 = 0, h: Int32 = 0, isGif: Int32 = 0
         let ptr = clipboard_decode_preview_by_db_id(Int64(dbId), Int32(maxPixel),
                                                     &len, &w, &h, &isGif)
 
-        // Animated GIF: the Rust backend already flagged it and intentionally
-        // returns no decoded buffer; hand the stored blob to NSImage directly
-        // to preserve animation and avoid decoding a throwaway first frame.
+        // Animated GIFs are preserved through NSImage because the Rust path
+        // intentionally does not flatten animated content.
         if isGif != 0 {
             guard let data = ClipboardBackend.getImageFullByDbId(dbId),
                   let image = NSImage(data: data) else { return nil }

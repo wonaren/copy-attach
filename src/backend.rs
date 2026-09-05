@@ -384,6 +384,15 @@ const MADV_FREE_REUSABLE: i32 = 7; // "pages can be reused (by anyone)"
 #[cfg(target_os = "macos")]
 const MADV_FREE_REUSE: i32 = 8; // "caller wants to reuse those pages"
 
+#[cfg(target_os = "macos")]
+fn advise_pages(ptr: *const u8, byte_len: usize, advice: i32, operation: &str) {
+    let result = unsafe { madvise(ptr as *mut core::ffi::c_void, byte_len, advice) };
+    if result != 0 {
+        let error = std::io::Error::last_os_error();
+        crate::debug_log!("CopyAttach: madvise {operation} failed len={byte_len}: {error}");
+    }
+}
+
 /// Mark page-aligned scratch memory as reusable by the system.
 ///
 /// Only whole pages strictly inside the buffer bounds are marked reusable.
@@ -404,9 +413,7 @@ pub(crate) fn mark_pages_reusable(ptr: *const u8, byte_len: usize) {
         return;
     }
     #[cfg(target_os = "macos")]
-    unsafe {
-        madvise(start as *mut core::ffi::c_void, aligned_len, MADV_FREE_REUSABLE);
-    }
+    advise_pages(ptr, aligned_len, MADV_FREE_REUSABLE, "FREE_REUSABLE");
     #[cfg(not(target_os = "macos"))]
     let _ = aligned_len;
 }
@@ -429,9 +436,7 @@ pub(crate) fn claim_pages(ptr: *const u8, byte_len: usize) {
         return;
     }
     #[cfg(target_os = "macos")]
-    unsafe {
-        madvise(start as *mut core::ffi::c_void, aligned_len, MADV_FREE_REUSE);
-    }
+    advise_pages(ptr, aligned_len, MADV_FREE_REUSE, "FREE_REUSE");
     #[cfg(not(target_os = "macos"))]
     let _ = aligned_len;
 }
