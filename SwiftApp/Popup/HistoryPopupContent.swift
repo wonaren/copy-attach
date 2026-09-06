@@ -458,8 +458,6 @@ struct HistoryPopupContent: View {
                         scrollTarget = scrollTargetForItem(at: 0)
                     }
                 }
-            } catch is CancellationError {
-                return
             } catch {
                 return
             }

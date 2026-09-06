@@ -169,14 +169,8 @@ class ClipboardBackend {
                     debugLog("shrink_db_memory failed (see Rust log)")
                 }
             }
-            releaseThumbnailCacheAfterPopupCloses()
+            clearThumbnailCache()
         }
-    }
-
-    /// The list is no longer visible after close, so release decoded thumbnails
-    /// immediately. The next session can repopulate this bounded cache.
-    private func releaseThumbnailCacheAfterPopupCloses() {
-        clearThumbnailCache()
     }
 
     /// Pushes the persisted capture policy to Rust. The monitor evaluates it
