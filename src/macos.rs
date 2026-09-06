@@ -89,12 +89,14 @@ pub(crate) fn pasteboard_change_count() -> Option<i64> {
 
 /// Whether the pasteboard contains file URLs (to skip capturing the icon).
 pub(crate) fn pasteboard_has_files() -> bool {
-    unsafe { !pasteboard_file_url_strings().is_empty() }
+    use objc2::rc::autoreleasepool;
+    autoreleasepool(|_| unsafe { !pasteboard_file_url_strings().is_empty() })
 }
 
 /// Extract absolute file paths from pasteboard file URLs; skips unusable ones.
 pub(crate) fn pasteboard_file_paths() -> Vec<String> {
-    unsafe {
+    use objc2::rc::autoreleasepool;
+    autoreleasepool(|_| unsafe {
         let url_strings = pasteboard_file_url_strings();
         if url_strings.is_empty() {
             return vec![];
@@ -144,7 +146,7 @@ pub(crate) fn pasteboard_file_paths() -> Vec<String> {
             paths.push(path);
         }
         paths
-    }
+    })
 }
 
 /// Internal helper: extract raw `file://` URL strings from pasteboard items.
@@ -208,7 +210,8 @@ unsafe fn pasteboard_file_url_strings() -> Vec<String> {
 ///
 /// Clears the pasteboard first; on failure the caller must treat the paste as aborted.
 pub(crate) fn set_pasteboard_file_url(path: &str) -> bool {
-    unsafe {
+    use objc2::rc::autoreleasepool;
+    autoreleasepool(|_| unsafe {
         let pasteboard_cls = match nspasteboard_class() {
             Some(c) => c,
             None => {
@@ -277,7 +280,7 @@ pub(crate) fn set_pasteboard_file_url(path: &str) -> bool {
             crate::error_log!("CopyAttach: setString:forType: failed for file URL {path}");
         }
         ok
-    }
+    })
 }
 
 /// Simulate Cmd+V key press via `CGEventPostToPid`.
