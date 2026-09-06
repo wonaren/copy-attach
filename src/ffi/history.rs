@@ -93,9 +93,13 @@ pub extern "C" fn clipboard_delete_by_id(entry_id: u64) -> c_int {
     let mut undo_image: Option<crate::backend::MarkImageBlobsReusableOnDrop> = None;
     if let ClipboardEntry::Image { db_id, thumb_width, thumb_height, .. } = &mut entry {
         if *db_id != 0 {
-            let conn = b.db.lock().unwrap_or_else(|e| {
-                panic!("CopyAttach: DB lock poisoned loading image for undo: {e}");
-            });
+            let conn = match b.db.lock() {
+                Ok(c) => c,
+                Err(e) => {
+                    crate::error_log!("CopyAttach: DB lock poisoned loading image for undo: {e}");
+                    return 0;
+                }
+            };
             let loaded = conn.query_row(
                 "SELECT png_data, thumb_data, thumb_width, thumb_height FROM clipboard_history WHERE id = ?",
                 rusqlite::params![*db_id],
@@ -272,11 +276,15 @@ pub extern "C" fn clipboard_undo_delete() -> c_int {
         }
     }
 
-    // DB lock failure is fatal — entry has already been popped from the stack.
-    // Panic so the crash report reveals the poisoning rather than silently losing data.
-    let conn = b.db.lock().unwrap_or_else(|e| {
-        panic!("CopyAttach: DB lock poisoned during undo: {e}");
-    });
+    let conn = match b.db.lock() {
+        Ok(c) => c,
+        Err(e) => {
+            crate::error_log!("CopyAttach: DB lock poisoned during undo: {e}");
+            let mut stack = b.deleted_stack.lock().unwrap();
+            stack.push(slot);
+            return 0;
+        }
+    };
 
     let insert_result = match &payload {
         UndoPayload::Text(body) => {

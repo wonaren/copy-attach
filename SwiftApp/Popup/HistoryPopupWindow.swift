@@ -72,12 +72,18 @@ class HistoryPopupWindow: NSPanel {
     /// the same window (see HistoryPopupContent), so the two stay in sync.
     private static let fadeInDuration: TimeInterval = 0.2
 
+    /// Generation token to discard stale async close animation completions
+    /// if the window is re-shown before the fade-out finishes.
+    private var closeSessionGeneration: UInt64 = 0
+
     private init() {
         // Match show() — use visibleFrame so first-open position matches
         // subsequent repositioning. Using frame.size (full screen) would
         // place the popup at a different y (menu bar not accounted for),
         // misaligning it with the preview window which uses visibleFrame.
-        let screenFrame = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 800, height: 600)
+        let mouseLoc = NSEvent.mouseLocation
+        let targetScreen = NSScreen.screens.first(where: { NSMouseInRect(mouseLoc, $0.frame, false) }) ?? NSScreen.main
+        let screenFrame = targetScreen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 800, height: 600)
         // Match HistoryPopupContent.popupWidth/popupHeight (500×720). The window
         // must equal the content size so the hosting view's content-driven resize
         // is a no-op and the popup never shifts off-center after placement.
@@ -109,14 +115,19 @@ class HistoryPopupWindow: NSPanel {
 
     override var canBecomeKey: Bool { return true }
 
-    /// Re-centers the window on the visible frame of the main screen.
+    /// Re-centers the window on the visible frame of the screen where the mouse cursor resides,
+    /// clamped within the visible area so menus and docks never clip the window on compact screens.
     private func centerOnScreen() {
-        if let screen = NSScreen.main {
+        let mouseLoc = NSEvent.mouseLocation
+        let targetScreen = NSScreen.screens.first(where: { NSMouseInRect(mouseLoc, $0.frame, false) }) ?? NSScreen.main
+        if let screen = targetScreen {
             let screenFrame = screen.visibleFrame
             let windowFrame = self.frame
-            let x = screenFrame.origin.x + (screenFrame.size.width - windowFrame.size.width) / 2
-            let y = screenFrame.origin.y + (screenFrame.size.height - windowFrame.size.height) / 2
-            self.setFrameOrigin(NSPoint(x: x, y: y))
+            let rawX = screenFrame.origin.x + (screenFrame.size.width - windowFrame.size.width) / 2
+            let rawY = screenFrame.origin.y + (screenFrame.size.height - windowFrame.size.height) / 2
+            let clampedX = max(screenFrame.minX, min(rawX, screenFrame.maxX - windowFrame.size.width))
+            let clampedY = max(screenFrame.minY, min(rawY, screenFrame.maxY - windowFrame.size.height))
+            self.setFrameOrigin(NSPoint(x: clampedX, y: clampedY))
         }
     }
 
@@ -129,6 +140,7 @@ class HistoryPopupWindow: NSPanel {
 
     func show() {
         debugLog("HistoryPopupWindow.show() called")
+        closeSessionGeneration &+= 1
 
         // Start the popup-driven UI poll (0.5s refresh of pure FFI atomics)
         // and refresh the accessibility-permission state while we're at it.
@@ -338,6 +350,9 @@ class HistoryPopupWindow: NSPanel {
         let preview = previewPanel
         previewPanel = nil
 
+        closeSessionGeneration &+= 1
+        let session = closeSessionGeneration
+
         // Drop first responder before fading out so the active text insertion
         // cursor (NSTextInsertionIndicator in macOS 15+) stops its 120Hz
         // CADisplayLink UpdateCycle ticks immediately.
@@ -348,7 +363,10 @@ class HistoryPopupWindow: NSPanel {
             ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
             self.animator().alphaValue = 0
         }, completionHandler: { [weak self] in
-            MainActor.assumeIsolated { self?.close() }
+            MainActor.assumeIsolated {
+                guard let self = self, self.closeSessionGeneration == session else { return }
+                self.close()
+            }
         })
 
         if let pv = preview {
@@ -367,6 +385,7 @@ class HistoryPopupWindow: NSPanel {
         let guarantee = Timer(timeInterval: 0.4, repeats: false) { [weak self] _ in
             guard let self = self else { return }
             MainActor.assumeIsolated {
+                guard self.closeSessionGeneration == session else { return }
                 self.closeGuaranteeTimer = nil
                 if self.isVisible {
                     debugLog("closeWithAnimation: forcing close (animation stalled)")

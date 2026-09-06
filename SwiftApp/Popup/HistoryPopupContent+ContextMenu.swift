@@ -183,6 +183,11 @@ extension HistoryPopupContent {
     private func saveImageItem(_ item: ClipboardItem) {
         guard case .image(_, _, _, _, let timestamp, _, _, _) = item,
               let data = item.imageData else { return }
+        // Dismiss popup cleanly before presenting modal save panel to prevent
+        // didResignKey from firing an asynchronous teardown while the modal runs.
+        closePreview()
+        onClose()
+
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.png]
         panel.canCreateDirectories = true
@@ -190,6 +195,7 @@ extension HistoryPopupContent {
         formatter.dateFormat = "yyyy-MM-dd-HHmmss"
         let date = Date(timeIntervalSince1970: TimeInterval(timestamp))
         panel.nameFieldStringValue = "CopyAttach-\(formatter.string(from: date)).png"
+        NSApp.activate(ignoringOtherApps: true)
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
             try data.write(to: url)

@@ -175,6 +175,14 @@ class PopupHostingView: NSHostingView<AnyView> {
                   let self = self,
                   self.window?.isKeyWindow == true,
                   !self.isMenuTracking else { return event }
+
+            // If the search field editor (NSTextView) is actively composing text with an IME
+            // (e.g. Chinese/Japanese marked text with candidate window), allow the input method
+            // to consume Escape to cancel composition instead of closing the popup.
+            if let textView = self.window?.firstResponder as? NSTextView, textView.hasMarkedText() {
+                return event
+            }
+
             NotificationCenter.default.post(name: escapeKeyNotification, object: nil)
             return nil
         }

@@ -5,7 +5,7 @@ import SwiftUI
 
 class PreviewWindow: NSPanel {
     private let centerAnchor: NSPoint
-    private var hostingView: NSHostingView<AnyView>!
+    private var hostingView: NSHostingView<AnyView>?
     private var currentItemId: Int = 0
 
     /// Cache text heights per entryId so arrow-key navigation doesn't re-layout.
@@ -19,7 +19,8 @@ class PreviewWindow: NSPanel {
     override var canBecomeKey: Bool { false }
 
     init(item: ClipboardItem, centerAt screenCenter: NSPoint) {
-        let screenFrame = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 800, height: 600)
+        let targetScreen = NSScreen.screens.first(where: { NSPointInRect(screenCenter, $0.frame) }) ?? NSScreen.main
+        let screenFrame = targetScreen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 800, height: 600)
         let size = Self.contentSize(for: item, screenFrame: screenFrame)
         let x = screenCenter.x - size.width / 2
         let y = screenCenter.y - size.height / 2
@@ -70,7 +71,7 @@ class PreviewWindow: NSPanel {
         // previews, some of which never got released after close. Direct root
         // replacement is visually equivalent for 150 ms and keeps the window
         // to a single backing store.
-        hostingView.rootView = AnyView(PreviewContent(item: item).withAppTheme())
+        hostingView?.rootView = AnyView(PreviewContent(item: item).withAppTheme())
         resizeToFitContent(for: item)
     }
 
@@ -81,7 +82,7 @@ class PreviewWindow: NSPanel {
         // window so it can update previews in place. Detach its root first;
         // otherwise PreviewContent keeps its NSImage, which keeps the CGImage
         // provider and Rust preview buffer alive after the window closes.
-        hostingView.rootView = AnyView(EmptyView())
+        hostingView?.rootView = AnyView(EmptyView())
         hostingView = nil
         self.contentView = nil
 
@@ -92,7 +93,8 @@ class PreviewWindow: NSPanel {
     // MARK: - Window resizing
 
     private func resizeToFitContent(for item: ClipboardItem) {
-        guard let screenFrame = NSScreen.main?.visibleFrame, screenFrame.width > 0 else { return }
+        let targetScreen = NSScreen.screens.first(where: { NSPointInRect(centerAnchor, $0.frame) }) ?? NSScreen.main
+        guard let screenFrame = targetScreen?.visibleFrame, screenFrame.width > 0 else { return }
         let newSize = Self.contentSize(for: item, screenFrame: screenFrame)
         let oldSize = self.frame.size
         guard abs(newSize.width - oldSize.width) > 2 || abs(newSize.height - oldSize.height) > 2 else { return }
@@ -140,6 +142,9 @@ class PreviewWindow: NSPanel {
             return NSSize(width: textWidth, height: max(totalH, 100))
 
         case .image(_, _, let w, let h, _, _, _, _):
+            guard w > 0, h > 0 else {
+                return NSSize(width: 320, height: 240)
+            }
             // Cap display height at 720; don't upscale images shorter than that.
             let capH: CGFloat = 720
             let displayH = CGFloat(h) < capH ? CGFloat(h) : capH

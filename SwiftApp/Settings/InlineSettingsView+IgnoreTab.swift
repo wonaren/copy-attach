@@ -75,6 +75,15 @@ extension InlineSettingsView {
     private var filterRulesCard: some View {
         settingsCard {
             cardTitle(icon: "line.3.horizontal.decrease", text: "按类型与特点忽略")
+            settingToggleRow(
+                icon: "lock.shield",
+                iconColor: .blue,
+                title: "忽略密码与敏感内容",
+                desc: "自动过滤 1Password、Bitwarden、钥匙串等密码管理器标记为敏感或临时（Concealed/Transient）的剪贴板内容。",
+                isOn: $ignoreSensitive
+            )
+            .onChange(of: ignoreSensitive) { _, _ in persistIgnoreRules() }
+            sectionDivider().padding(.vertical, 4)
             settingToggleRow(icon: "textformat", iconColor: .accentColor, title: "忽略文本", desc: "不记录任何纯文本剪贴板内容。", isOn: $ignoreTextClipboardType)
                 .onChange(of: ignoreTextClipboardType) { _, _ in persistIgnoreRules() }
             sectionDivider().padding(.vertical, 4)
@@ -135,6 +144,7 @@ extension InlineSettingsView {
 
     private func persistIgnoreRules() {
         UserDefaults.standard.set(ignoredAppBundleIDs, forKey: "IgnoredAppBundleIDs")
+        UserDefaults.standard.set(ignoreSensitive, forKey: "IgnoreSensitiveClipboard")
         UserDefaults.standard.set(ignoreTextClipboardType, forKey: "IgnoreTextClipboardType")
         UserDefaults.standard.set(ignoreImageClipboardType, forKey: "IgnoreImageClipboardType")
         UserDefaults.standard.set(ignoreShortText, forKey: "IgnoreShortText")

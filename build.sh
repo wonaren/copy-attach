@@ -65,8 +65,8 @@ XCODE_SDK="/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/
 
 if command -v xcrun >/dev/null 2>&1; then
     SWIFTC="xcrun swiftc"
-    SDK=""
-    echo "  Using xcrun swiftc"
+    SDK="-sdk $(xcrun --show-sdk-path)"
+    echo "  Using xcrun swiftc with SDK: $(xcrun --show-sdk-path)"
 elif [ -f "$XCODE_TOOLCHAIN/usr/bin/swiftc" ] && [ -d "$XCODE_SDK" ]; then
     SWIFTC="$XCODE_TOOLCHAIN/usr/bin/swiftc"
     SDK="-sdk $XCODE_SDK"
@@ -108,7 +108,9 @@ fi
 
 # Compile with explicit args
 $SWIFTC $SDK \
+    -disable-sandbox \
     -module-cache-path /tmp/copyattach_module_cache \
+    -Xcc -fmodules-cache-path=/tmp/copyattach_clang_cache \
     -target arm64-apple-macosx15.0 \
     -swift-version 6 \
     -O \

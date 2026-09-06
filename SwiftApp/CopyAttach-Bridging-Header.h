@@ -85,7 +85,7 @@ void clipboard_preview_buffer_release(uint8_t* ptr, int32_t len);
 // ─── Source App ───
 void clipboard_set_source_app(const char* name, const char* bundle_id, int32_t pid);
 // Newline-delimited application bundle IDs; 0 disables the text-length rule.
-int32_t clipboard_set_ignore_rules(const char* app_bundle_ids, int32_t ignore_text, int32_t ignore_images, int32_t min_text_characters);
+int32_t clipboard_set_ignore_rules(const char* app_bundle_ids, int32_t ignore_text, int32_t ignore_images, int32_t min_text_characters, int32_t ignore_sensitive);
 char* clipboard_get_item_source_name(int32_t index);
 char* clipboard_get_item_source_bundle_id(int32_t index);
 

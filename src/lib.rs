@@ -59,6 +59,7 @@ mod macos {
     pub(crate) fn pasteboard_change_count() -> Option<i64> { None }
     pub(crate) fn pasteboard_has_files() -> bool { false }
     pub(crate) fn pasteboard_file_paths() -> Vec<String> { vec![] }
+    pub(crate) fn pasteboard_has_sensitive_content() -> bool { false }
 }
 
 mod monitor;

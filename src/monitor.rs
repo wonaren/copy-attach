@@ -311,6 +311,12 @@ pub(crate) fn clipboard_monitor(
             continue;
         }
 
+        // Sensitive content filtering (passwords, concealed, transient types from 1Password, Bitwarden, Keychain, etc.)
+        if ignore_rules.lock().unwrap().ignores_sensitive() && macos::pasteboard_has_sensitive_content() {
+            crate::debug_log!("CopyAttach: skipped sensitive clipboard content (Concealed/Transient type detected)");
+            continue;
+        }
+
         // Handle Finder file copies: decode the files instead of the file icon.
         if macos::pasteboard_has_files() {
             let paths = macos::pasteboard_file_paths();

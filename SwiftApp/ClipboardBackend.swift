@@ -183,8 +183,9 @@ class ClipboardBackend {
         let ignoreShortText = UserDefaults.standard.bool(forKey: "IgnoreShortText")
         let shortTextThreshold = UserDefaults.standard.integer(forKey: "ShortTextThreshold")
         let minimum = ignoreShortText ? max(shortTextThreshold, 1) : 0
+        let ignoreSensitive = UserDefaults.standard.object(forKey: "IgnoreSensitiveClipboard") as? Bool ?? true
         let result = payload.withCString {
-            clipboard_set_ignore_rules($0, ignoreText ? 1 : 0, ignoreImages ? 1 : 0, Int32(minimum))
+            clipboard_set_ignore_rules($0, ignoreText ? 1 : 0, ignoreImages ? 1 : 0, Int32(minimum), ignoreSensitive ? 1 : 0)
         }
         if result == 0 {
             debugLog("Failed to apply clipboard ignore rules")

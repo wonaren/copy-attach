@@ -200,8 +200,6 @@ class HotkeyManager {
                         self?.onHotkeyPressed?()
                     }
                 }
-            } else if keyCode == self.config.keyCode {
-                debugLog("NSEvent keyCode matched but flags differed: eventFlags=\(pressedFlags.rawValue) configFlags=\(configFlags.rawValue)")
             }
         }
 
@@ -270,6 +268,14 @@ class HotkeyManager {
 
         let hasModifier = flags.contains(.command) || flags.contains(.option) ||
                           flags.contains(.control) || flags.contains(.shift)
+
+        // Pressing Escape (keyCode 53) without modifiers cancels recording.
+        if keyCode == 53 && !hasModifier {
+            debugLog("Hotkey recording cancelled by user pressing Escape")
+            stopRecording()
+            return
+        }
+
         guard hasModifier else { return }
 
         let newConfig = HotkeyConfig(keyCode: keyCode, flags: flags.rawValue)

@@ -22,6 +22,19 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         Self.shared = self
 
+        // Single-instance enforcement: LSUIElement agent app has no Dock icon, so user may re-launch from Spotlight.
+        let bundleID = Bundle.main.bundleIdentifier ?? "com.example.copyattach"
+        let currentPID = ProcessInfo.processInfo.processIdentifier
+        let runningApps = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+        if runningApps.contains(where: { $0.processIdentifier != currentPID }) {
+            debugLog("Another instance of CopyAttach is already running; activating existing instance and terminating duplicate.")
+            if let existing = runningApps.first(where: { $0.processIdentifier != currentPID }) {
+                existing.activate()
+            }
+            NSApp.terminate(nil)
+            return
+        }
+
         // Route Rust stderr into the debug log (the agent has no terminal).
         redirectStderrToDebugLog()
 
@@ -64,6 +77,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         firstLaunchDone = true
         debugLog("Initialization complete")
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        // Trigger popup when launched from Spotlight, Launchpad, or Finder while already running.
+        togglePopup()
+        return true
     }
 
     func applicationWillTerminate(_ notification: Notification) {

@@ -17,6 +17,7 @@ struct InlineSettingsView: View {
         return Double(saved >= 100 ? saved : 3000)
     }()
     @State var ignoredAppBundleIDs = UserDefaults.standard.stringArray(forKey: "IgnoredAppBundleIDs") ?? []
+    @State var ignoreSensitive = UserDefaults.standard.object(forKey: "IgnoreSensitiveClipboard") as? Bool ?? true
     @State var ignoreTextClipboardType = UserDefaults.standard.bool(forKey: "IgnoreTextClipboardType")
     @State var ignoreImageClipboardType = UserDefaults.standard.bool(forKey: "IgnoreImageClipboardType")
     @State var ignoreShortText = UserDefaults.standard.bool(forKey: "IgnoreShortText")

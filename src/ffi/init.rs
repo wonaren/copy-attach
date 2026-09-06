@@ -320,6 +320,7 @@ pub extern "C" fn clipboard_set_ignore_rules(
     ignore_text: c_int,
     ignore_images: c_int,
     min_text_characters: c_int,
+    ignore_sensitive: c_int,
 ) -> c_int {
     if app_bundle_ids.is_null() || min_text_characters < 0 {
         return 0;
@@ -336,6 +337,7 @@ pub extern "C" fn clipboard_set_ignore_rules(
             0 => None,
             value => Some(value as usize),
         },
+        ignore_sensitive != 0,
     );
     match crate::backend::try_backend() {
         Some(backend) => {

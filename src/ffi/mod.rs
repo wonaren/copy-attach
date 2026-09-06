@@ -58,11 +58,16 @@ pub(super) fn vec_to_raw(v: Vec<u8>) -> *mut u8 {
 /// an interior null byte, truncate at the first null and log a warning instead
 /// of silently returning an empty string.
 fn to_ffi_cstring(s: &str) -> *mut c_char {
-    if let Ok(cs) = CString::new(s) { cs.into_raw() } else {
+    let raw = if let Ok(cs) = CString::new(s) { cs.into_raw() } else {
         let null_pos = s.find('\0').unwrap_or(s.len());
         crate::debug_log!("CopyAttach: FFI string contains interior null byte at offset {} (len={}), truncating",
                   null_pos, s.len());
         let truncated: String = s.chars().take_while(|&c| c != '\0').collect();
         CString::new(truncated).unwrap_or_default().into_raw()
+    };
+    if !raw.is_null() {
+        let len = unsafe { std::ffi::CStr::from_ptr(raw) }.to_bytes_with_nul().len();
+        crate::backend::claim_pages(raw as *const u8, len);
     }
+    raw
 }
