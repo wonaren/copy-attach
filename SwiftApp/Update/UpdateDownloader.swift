@@ -155,19 +155,26 @@ final class UpdateDownloader: NSObject, ObservableObject, URLSessionDownloadDele
     /// version → direct link on NFD's CDN. The direct hop is a plain HTTPS
     /// download with progress reporting.
     private func downloadFromLanzou(version: String) async throws -> URL {
-        let wantedName = "CopyAttach-v\(version)-macOS.zip"
-
         // 1) folder listing (password-protected share)
         let listURL = URL(string: "\(Self.nfdBase)/v2/getFileList?url=\(Self.urlEncode(Self.lanzouShareURL.absoluteString))&pwd=\(Self.lanzouPassword)")!
         let listJSON = try await fetchJSON(listURL)
         guard let files = listJSON["data"] as? [[String: Any]] else {
             throw UpdateError.lanzou("蓝奏云文件列表解析失败")
         }
-        guard let entry = files.first(where: { ($0["fileName"] as? String) == wantedName }),
+        #if arch(arm64)
+        let excludedArch = "x86_64"
+        #else
+        let excludedArch = "arm64"
+        #endif
+        guard let entry = files.first(where: {
+            guard let name = $0["fileName"] as? String else { return false }
+            return name.hasSuffix(".zip") && name.contains(version) && !name.contains(excludedArch)
+        }),
+              let fileName = entry["fileName"] as? String,
               let fileID = entry["fileId"] as? String else {
-            throw UpdateError.lanzou("蓝奏云上未找到 \(wantedName)")
+            throw UpdateError.lanzou("蓝奏云上未找到版本 \(version) 的安装包")
         }
-        debugLog("[update] lanzou (NFD) found: \(wantedName)")
+        debugLog("[update] lanzou (NFD) found: \(fileName)")
 
         // 2) resolve the direct link
         let fileURL = Self.lanzouFileBase + fileID  // fileID may carry ?webpage=…
