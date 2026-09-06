@@ -421,7 +421,7 @@ fn advise_pages(ptr: *const u8, byte_len: usize, advice: i32, operation: &str) -
 fn log_skip_unaligned(what: &str, start: usize, byte_len: usize) {
     static COUNT: AtomicU64 = AtomicU64::new(0);
     let n = COUNT.fetch_add(1, Ordering::Relaxed);
-    if n < 4 || n % 256 == 0 {
+    if n < 4 || n.is_multiple_of(256) {
         crate::debug_log!("CopyAttach: {what} SKIP unaligned base=0x{start:x} len={byte_len} (occurrence #{})", n + 1);
     }
 }
