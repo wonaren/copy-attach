@@ -6,7 +6,12 @@
 
 // ─── Lifecycle ───
 int32_t clipboard_set_runtime_entitlement(int32_t state);
+// 1 = running, 0 = retryable failure, -1 = database corrupt (call
+// clipboard_recover_corrupt_db and re-init, or quit).
 int32_t clipboard_init(void);
+// Moves history.db (+ -wal/-shm) aside as history.db.corrupt-<secs>. Only
+// valid after clipboard_init returned -1. Returns 1 on success.
+int32_t clipboard_recover_corrupt_db(void);
 void clipboard_cleanup(void);
 // Debug logging toggle: default is debug-build-on / release-build-off.
 // Settings UI can override at runtime.

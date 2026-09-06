@@ -43,6 +43,10 @@ Phase 1 同步 hash + 缩略图（最长边 300px）→ 更新内存。Phase 2 �
 
 **释放侧对称（0.99.26-dev）**：claim 过的大缓冲释放前必须 `mark_pages_reusable`，否则脏页滞留 footprint——paste/undo 的 DB blob、`pasteboard_image_data` 原始字节、大文本 String（`load_text_by_db_id` 源头统一 claim）分别由 `MarkEntryBlobsReusableOnDrop`/`MarkBlobReusableOnDrop`/`MarkStringReusableOnDrop`（backend.rs）守卫覆盖全部返回路径。实测 A/B：捕获 2880×1800 截图后旧构建后台 79.6MB 永久钉住，新构建峰值 48.4MB → 空闲 28–32MB 稳定、连续捕获零累积。
 
+**init 失败分级（0.100.12-dev）**：`clipboard_init` 返回 1/0/-1——`-1` 仅在 `SQLITE_CORRUPT`/`SQLITE_NOTADB` 时返回，表示永久性失败；Swift 侧收到 -1 置 `databaseCorrupt`、停止 5s 重试循环，弹 NSAlert「备份并重建 / 退出」，热键按下也会重弹该对话框而非显示空列表。`clipboard_recover_corrupt_db` 把 `history.db{,-wal,-shm}` 整组改名为 `history.db.corrupt-<secs>{,-wal,-shm}`——WAL/SHM 必须一起移走，否则旧 WAL 会回放到新库上再次损坏。仅在 init 返回 -1 后调用（此时无 backend 持有连接）。
+
+**单实例检查时机（0.100.12-dev）**：SwiftUI 在任何 `NSApplicationDelegate` 回调之前就求值 `MenuBarExtra` body，`HotkeyManager.shared` 随之注册 Carbon 热键；因此单实例检查放在 `applicationDidFinishLaunching`/`WillFinishLaunching` 都太晚——重复实例会先注册热键，导致主实例（或自身）报 `-9878 eventHotKeyExistsErr`。现放在 `App.init()`（`AppDelegate.terminateIfDuplicateInstance`），实测重复实例在 `HotkeyManager init started` 之前退出。Carbon 注册遇 -9878 退避重试 5 次（0.5s 递增），耗尽后若 `AXIsProcessTrusted()` 为 false（NSEvent 兜底同样失效）才弹提示。
+
 **池缓冲禁止 realloc 增长 + 失败不入池（0.100.11-dev）**：实测（244 次 EINVAL 日志 + 现场复现）libmalloc 就地扩展大块时会把旧映射与新页拼接为多 vm_map entry，拼出的映射对 `MADV_FREE_REUSABLE/REUSE` 报 `Invalid argument`；旧实现忽略返回值并把该块原样收回池，导致一次偶发失败后**整个进程生命周期内解码/编码池的 madvise 全部失效**（40MB 脏页常驻，「大图后内存不回落」的根因）。契约：① `decode_png_rgba8_into` / `encode_png_into` 在容量不足时整块 `Vec::with_capacity` 新分配（首次分配永远是单一映射）而非 `resize`/Cursor 倍增；② `mark_pages_reusable`/`claim_pages` 回传 `bool`，标记失败的缓冲不入池、认领失败的缓冲弃用不写入。验证：1.9MB→48MB→192MB 三级增长零失败，峰值 232MB → 空闲 42MB。
 
 `claim_pages/mark_pages_reusable SKIP unaligned` 日志（rusqlite 读出的 18-25KB 缩略图 blob 从小区块原地增长、基址非页对齐）为良性：小 zone 共享页从未被标记，跳过即正确行为。

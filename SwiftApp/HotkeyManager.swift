@@ -33,6 +33,11 @@ class HotkeyManager {
 
     // Carbon hotkey reference
     private var carbonHotKeyRef: EventHotKeyRef?
+    /// Retry bookkeeping for eventHotKeyExistsErr (-9878): a previous
+    /// instance that is still tearing down may hold the combo for a moment.
+    private var carbonRetryAttempts = 0
+    private var carbonRetryTask: Task<Void, Never>?
+    private static let carbonRetryMax = 5
 
     // NSEvent global monitor
     private var nsEventMonitor: Any?
@@ -161,14 +166,54 @@ class HotkeyManager {
         )
 
         if status == noErr {
+            carbonRetryAttempts = 0
             debugLog("Carbon hotkey registered: '\(config.displayString)'")
-        } else {
-            debugLog("Carbon RegisterEventHotKey failed: \(status)")
-            carbonHotKeyRef = nil
+            return
+        }
+        carbonHotKeyRef = nil
+        errorLog("Carbon RegisterEventHotKey failed: \(status) for '\(config.displayString)'")
+
+        // eventHotKeyExistsErr: another process owns this combo. If it is a
+        // previous CopyAttach instance mid-exit, the combo frees within a
+        // second — retry with backoff before giving up.
+        guard status == OSStatus(eventHotKeyExistsErr) else { return }
+        guard carbonRetryAttempts < Self.carbonRetryMax else {
+            carbonRetryAttempts = 0
+            let axTrusted = AXIsProcessTrusted()
+            errorLog("Carbon hotkey '\(config.displayString)' is held by another app; NSEvent fallback active=\(axTrusted)")
+            if !axTrusted { presentHotkeyConflictAlert() }
+            return
+        }
+        carbonRetryAttempts += 1
+        let delay = Double(carbonRetryAttempts) * 0.5
+        debugLog("Carbon hotkey busy; retry \(carbonRetryAttempts)/\(Self.carbonRetryMax) in \(delay)s")
+        carbonRetryTask?.cancel()
+        carbonRetryTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(delay))
+            guard !Task.isCancelled, let self, self.carbonHotKeyRef == nil else { return }
+            self.registerCarbon()
+        }
+    }
+
+    /// Both mechanisms are dead: Carbon lost the combo and the NSEvent
+    /// global monitor cannot see keys without Accessibility. Silence here
+    /// would leave the user with a hotkey that simply does nothing.
+    private func presentHotkeyConflictAlert() {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "快捷键 \(config.displayString) 被其他应用占用"
+        alert.informativeText = "另一个应用已注册相同的全局快捷键，CopyAttach 无法响应。请在偏好设置中更换快捷键，或退出占用该快捷键的应用后重新打开 CopyAttach。"
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "打开偏好设置")
+        alert.addButton(withTitle: "稍后")
+        if alert.runModal() == .alertFirstButtonReturn {
+            AppDelegate.shared?.openSettings()
         }
     }
 
     private func unregisterCarbon() {
+        carbonRetryTask?.cancel()
+        carbonRetryTask = nil
         if let ref = carbonHotKeyRef {
             UnregisterEventHotKey(ref)
             carbonHotKeyRef = nil

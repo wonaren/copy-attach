@@ -402,10 +402,28 @@ fn advise_pages(ptr: *const u8, byte_len: usize, advice: i32, operation: &str) -
     let result = unsafe { madvise(ptr as *mut core::ffi::c_void, byte_len, advice) };
     if result != 0 {
         let error = std::io::Error::last_os_error();
-        crate::debug_log!("CopyAttach: madvise {operation} failed len={byte_len}: {error}");
+        // A rejected madvise means the footprint contract broke for this
+        // buffer. The first occurrence per process is a real defect signal
+        // and must survive with debug logging off; repeats stay verbose-only.
+        static REPORTED: AtomicBool = AtomicBool::new(false);
+        if !REPORTED.swap(true, Ordering::SeqCst) {
+            crate::error_log!("CopyAttach: madvise {operation} failed len={byte_len}: {error} (first occurrence; buffer will not be pooled)");
+        } else {
+            crate::debug_log!("CopyAttach: madvise {operation} failed len={byte_len}: {error}");
+        }
         return false;
     }
     true
+}
+
+/// `SKIP unaligned` is benign (small-zone blobs) but 1000+ lines per day
+/// bury real signals; log the first few then every 256th.
+fn log_skip_unaligned(what: &str, start: usize, byte_len: usize) {
+    static COUNT: AtomicU64 = AtomicU64::new(0);
+    let n = COUNT.fetch_add(1, Ordering::Relaxed);
+    if n < 4 || n % 256 == 0 {
+        crate::debug_log!("CopyAttach: {what} SKIP unaligned base=0x{start:x} len={byte_len} (occurrence #{})", n + 1);
+    }
 }
 
 /// Mark page-aligned scratch memory as reusable by the system.
@@ -428,7 +446,7 @@ pub(crate) fn mark_pages_reusable(ptr: *const u8, byte_len: usize) -> bool {
     let start = ptr as usize;
     if !start.is_multiple_of(PAGE_SIZE) {
         // Unaligned blocks share pages with other allocations; never mark them.
-        crate::debug_log!("CopyAttach: mark_pages_reusable SKIP unaligned base=0x{start:x} len={byte_len}");
+        log_skip_unaligned("mark_pages_reusable", start, byte_len);
         return true;
     }
     let aligned_len = byte_len & !(PAGE_SIZE - 1);
@@ -456,7 +474,7 @@ pub(crate) fn claim_pages(ptr: *const u8, byte_len: usize) -> bool {
     }
     let start = ptr as usize;
     if !start.is_multiple_of(PAGE_SIZE) {
-        crate::debug_log!("CopyAttach: claim_pages SKIP unaligned base=0x{start:x} len={byte_len}");
+        log_skip_unaligned("claim_pages", start, byte_len);
         return true;
     }
     let aligned_len = byte_len & !(PAGE_SIZE - 1);

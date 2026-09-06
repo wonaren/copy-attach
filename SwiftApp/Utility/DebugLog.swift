@@ -1,5 +1,7 @@
 import Foundation
 
+private let debugLogPath = "/tmp/copyattach_debug.log"
+
 func debugLog(_ message: String) {
     // Respect the same debug-logging switch as Rust: debug builds default on,
     // release/distribution builds default off, and the settings UI can enable
@@ -12,17 +14,28 @@ func debugLog(_ message: String) {
     } else {
         guard clipboard_is_debug_logging() != 0 else { return }
     }
-    let logLine = "[ClipboardManager] \(Date()) \(message)\n"
+    appendLogLine("[ClipboardManager] \(Date()) \(message)")
+}
+
+/// Always-on counterpart of Rust's `error_log!`: real failures (hotkey lost,
+/// backend refused to start) must be observable in release builds even when
+/// the user has verbose logging off. Keep it rare — it is not rate limited.
+func errorLog(_ message: String) {
+    appendLogLine("[ClipboardManager] \(Date()) ERROR \(message)")
+}
+
+private func appendLogLine(_ line: String) {
+    let logLine = line + "\n"
     // stderr is dup2'd onto the debug log file by AppDelegate at launch, so
     // Rust's eprintln interleaves here too; write to the file directly to
-    // stay independent of that redirect (debugLog may run before it).
-    if let handle = try? FileHandle(forWritingTo: URL(fileURLWithPath: "/tmp/copyattach_debug.log")) {
+    // stay independent of that redirect (logging may run before it).
+    if let handle = try? FileHandle(forWritingTo: URL(fileURLWithPath: debugLogPath)) {
         handle.seekToEndOfFile()
         if let data = logLine.data(using: .utf8) {
             handle.write(data)
         }
         handle.closeFile()
     } else {
-        try? logLine.write(toFile: "/tmp/copyattach_debug.log", atomically: true, encoding: .utf8)
+        try? logLine.write(toFile: debugLogPath, atomically: true, encoding: .utf8)
     }
 }

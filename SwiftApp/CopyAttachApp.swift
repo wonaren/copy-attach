@@ -8,6 +8,12 @@ struct ClipboardManagerApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @AppStorage("ShowMenuBarIcon") private var showMenuBarIcon = true
 
+    init() {
+        // Earliest custom code in the process — before SwiftUI evaluates the
+        // Scene body and HotkeyManager registers the global hotkey.
+        AppDelegate.terminateIfDuplicateInstance()
+    }
+
     var body: some Scene {
         // Menu bar
         MenuBarExtra(isInserted: $showMenuBarIcon) {

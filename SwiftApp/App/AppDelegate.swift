@@ -12,6 +12,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var stressWindowController: StressTestWindowController?
     private var firstLaunchDone = false
     private var backendStarted = false
+    /// Set when clipboard_init returned -1; blocks the retry loop until the
+    /// user recovers via the dialog.
+    private var databaseCorrupt = false
+    private var corruptDialogShowing = false
     /// Last backend start attempt, for retry cooldown.
     private var lastBackendStartAttempt: Date?
     /// True while a maintenance tick's async body is running.
@@ -19,21 +23,25 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// Retained token for the app-level local key monitor.
     private var localKeyDownMonitor: Any?
 
-    func applicationDidFinishLaunching(_ notification: Notification) {
-        Self.shared = self
-
-        // Single-instance enforcement: LSUIElement agent app has no Dock icon, so user may re-launch from Spotlight.
+    /// Single-instance enforcement. Must run before anything else in the
+    /// process: SwiftUI evaluates the MenuBarExtra body (and thus
+    /// `HotkeyManager.shared`, which registers the Carbon hotkey) before any
+    /// NSApplicationDelegate callback fires, so it is called from `App.init`.
+    /// A duplicate that registered first would steal the combo from the
+    /// surviving instance (-9878).
+    static func terminateIfDuplicateInstance() {
         let bundleID = Bundle.main.bundleIdentifier ?? "com.example.copyattach"
         let currentPID = ProcessInfo.processInfo.processIdentifier
-        let runningApps = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
-        if runningApps.contains(where: { $0.processIdentifier != currentPID }) {
-            debugLog("Another instance of CopyAttach is already running; activating existing instance and terminating duplicate.")
-            if let existing = runningApps.first(where: { $0.processIdentifier != currentPID }) {
-                existing.activate()
-            }
-            NSApp.terminate(nil)
-            return
-        }
+        let others = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+            .filter { $0.processIdentifier != currentPID }
+        guard let existing = others.first else { return }
+        errorLog("Another CopyAttach instance (pid \(existing.processIdentifier)) is running; activating it and terminating duplicate")
+        existing.activate()
+        exit(0)
+    }
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        Self.shared = self
 
         // Route Rust stderr into the debug log (the agent has no terminal).
         redirectStderrToDebugLog()
@@ -137,14 +145,60 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         lastBackendStartAttempt = Date()
         debugLog("License permits core features; starting Rust backend")
-        backendStarted = ClipboardBackend.shared.start()
-        if !backendStarted { debugLog("Rust backend failed to initialize") }
+        switch ClipboardBackend.shared.start() {
+        case .started:
+            backendStarted = true
+        case .retryable:
+            debugLog("Rust backend failed to initialize; will retry")
+        case .corruptDatabase:
+            // Permanent: retrying is pointless and silently showing an empty
+            // popup hides the failure. Stop the retry loop and ask the user.
+            databaseCorrupt = true
+            lastBackendStartAttempt = nil
+            debugLog("Rust backend refused to start: database corrupt")
+            presentCorruptDatabaseDialog()
+        }
+    }
+
+    /// Corrupt-DB recovery dialog. Runs modally; re-entrancy guarded so a
+    /// hotkey press while the sheet is up cannot stack a second one.
+    @MainActor
+    private func presentCorruptDatabaseDialog() {
+        guard !corruptDialogShowing else { return }
+        corruptDialogShowing = true
+        defer { corruptDialogShowing = false }
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "剪贴板历史数据库已损坏"
+        alert.informativeText = "CopyAttach 无法读取历史记录数据库，剪贴板监控已停止。\n\n选择「备份并重建」会把损坏的文件保留为 history.db.corrupt-… 并新建空数据库；选择「退出」可先手动处理该文件。\n\n位置：~/Library/Application Support/CopyAttach/"
+        alert.alertStyle = .critical
+        alert.addButton(withTitle: "备份并重建")
+        alert.addButton(withTitle: "退出")
+        if alert.runModal() == .alertFirstButtonReturn {
+            if clipboard_recover_corrupt_db() == 1 {
+                databaseCorrupt = false
+                // If the fresh DB still fails, startBackendIfNeeded re-arms
+                // either the retry loop (retryable) or `databaseCorrupt`
+                // (next hotkey press re-presents this dialog).
+                startBackendIfNeeded()
+            } else {
+                let fail = NSAlert()
+                fail.messageText = "无法移动损坏的数据库文件"
+                fail.informativeText = "请退出 CopyAttach 后手动删除或移走 ~/Library/Application Support/CopyAttach/history.db。"
+                fail.alertStyle = .critical
+                fail.addButton(withTitle: "退出")
+                fail.runModal()
+                NSApp.terminate(nil)
+            }
+        } else {
+            NSApp.terminate(nil)
+        }
     }
 
     /// Retry a failed backend start on a 5s cooldown.
     @MainActor
     private func retryBackendStartIfNeeded() {
-        guard !backendStarted,
+        guard !backendStarted, !databaseCorrupt,
               LicenseManager.shared.state.permitsCoreFeatures else { return }
         if let last = lastBackendStartAttempt,
            Date().timeIntervalSince(last) < 5 { return }
@@ -279,6 +333,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return
         }
         let popup = HistoryPopupWindow.shared
+        if databaseCorrupt {
+            presentCorruptDatabaseDialog()
+            return
+        }
         if popup.isVisible {
             popup.close()
         } else {

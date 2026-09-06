@@ -4,10 +4,53 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use crate::backend::{set_backend, Backend, DEFAULT_CLEANUP_THRESHOLD};
-use crate::db::{ensure_history_table, load_history_from_db, migrate_from_json_to_db, open_db, seed_first_launch_tips, trim_db_history};
+use crate::db::{ensure_history_table, get_persist_dir, load_history_from_db, migrate_from_json_to_db, open_db, seed_first_launch_tips, trim_db_history};
 use crate::ignore::IgnoreRules;
 use crate::monitor::clipboard_monitor;
 use crate::types::ClipboardEntry;
+
+/// SQLITE_CORRUPT / SQLITE_NOTADB: the file is not a usable database. No
+/// retry can fix this; only backing the file up and starting fresh can.
+fn is_corruption_error(e: &rusqlite::Error) -> bool {
+    matches!(e, rusqlite::Error::SqliteFailure(ffi, _)
+        if matches!(ffi.code, rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase))
+}
+
+/// Move a corrupt `history.db` (plus WAL/SHM sidecars) aside as
+/// `history.db.corrupt-<unix-secs>` so the next `clipboard_init` starts
+/// with a fresh database. The user keeps the old file for manual salvage.
+/// Returns 1 on success, 0 if the main file could not be renamed. Must only
+/// be called while no backend holds a connection (i.e. after init returned -1).
+#[no_mangle]
+pub extern "C" fn clipboard_recover_corrupt_db() -> c_int {
+    let Some(dir) = get_persist_dir() else {
+        crate::error_log!("CopyAttach: recover_corrupt_db: persist dir unavailable");
+        return 0;
+    };
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let main = dir.join("history.db");
+    let backup = dir.join(format!("history.db.corrupt-{stamp}"));
+    if let Err(e) = std::fs::rename(&main, &backup) {
+        crate::error_log!("CopyAttach: recover_corrupt_db: rename {} failed: {e}", main.display());
+        return 0;
+    }
+    // Sidecars carry pages of the same corrupt image; a stale WAL replayed
+    // onto a fresh file would re-corrupt it. Their absence is normal.
+    for suffix in ["-wal", "-shm"] {
+        let side = dir.join(format!("history.db{suffix}"));
+        if side.exists() {
+            let side_backup = dir.join(format!("history.db.corrupt-{stamp}{suffix}"));
+            if let Err(e) = std::fs::rename(&side, &side_backup) {
+                crate::error_log!("CopyAttach: recover_corrupt_db: rename {} failed: {e}", side.display());
+            }
+        }
+    }
+    crate::error_log!("CopyAttach: corrupt database moved to {}", backup.display());
+    1
+}
 
 /// Set only after Swift has cryptographically verified a device-bound lease.
 /// Invalid values are rejected instead of being treated as licensed.
@@ -59,6 +102,13 @@ pub extern "C" fn clipboard_init() -> c_int {
     };
 
     if let Err(e) = ensure_history_table(&conn) {
+        if is_corruption_error(&e) {
+            // Permanent failure: retrying cannot help and the user must
+            // decide (back up + rebuild, or quit). Distinct code so Swift
+            // stops the retry loop and surfaces a dialog.
+            crate::error_log!("CopyAttach: database is corrupt, init aborted: {e}");
+            return -1;
+        }
         crate::error_log!("CopyAttach: failed to create table: {e}");
         return 0;
     }

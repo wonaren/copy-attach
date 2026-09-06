@@ -74,15 +74,21 @@ class ClipboardBackend {
         loadFavorites()
     }
 
-    func start() -> Bool {
+    enum StartResult { case started, retryable, corruptDatabase }
+
+    func start() -> StartResult {
         // Apply the debug-logging preference BEFORE init: init-time diagnostics
         // (DB open, schema ensure, migration) are the ones most needed in a
         // release build; syncing afterwards would silently drop them.
         Self.syncDebugLogging()
         let result = clipboard_init()
+        if result == -1 {
+            print("[ClipboardBackend] init failed: database corrupt")
+            return .corruptDatabase
+        }
         guard result != 0 else {
             print("[ClipboardBackend] init failed (result: \(result)) — Rust backend not available")
-            return false
+            return .retryable
         }
         print("[ClipboardBackend] init result: \(result)")
         permissionGranted = checkPermission()
@@ -123,7 +129,7 @@ class ClipboardBackend {
         // One-time initial sync; live updates resume when the popup opens.
         refresh()
 
-        return true
+        return .started
     }
 
     func stop() {
