@@ -8,6 +8,16 @@ pub(crate) fn encode_png_into(width: u32, height: u32, rgba_bytes: &[u8], output
     use image::{ImageBuffer, Rgba};
     let img = ImageBuffer::<Rgba<u8>, &[u8]>::from_raw(width, height, rgba_bytes)?;
     output.clear();
+    // Same rule as `decode_png_rgba8_into`: never let the pooled buffer grow
+    // through a realloc chain (the spliced mapping rejects madvise). PNG output
+    // never exceeds the raw RGBA size, so a single whole allocation of that
+    // size is an upper bound; pages the encoder never touches stay clean.
+    if output.capacity() < rgba_bytes.len() {
+        let fresh: Vec<u8> = Vec::with_capacity(rgba_bytes.len());
+        crate::backend::claim_pages(fresh.as_ptr(), fresh.capacity());
+        let old = std::mem::replace(output, fresh);
+        crate::backend::mark_pages_reusable(old.as_ptr(), old.capacity());
+    }
     img.write_to(&mut std::io::Cursor::new(output), image::ImageFormat::Png).ok()?;
     Some(())
 }
@@ -38,6 +48,17 @@ pub(crate) fn decode_png_rgba8_into(png: &[u8], out: &mut Vec<u8>) -> Option<(u3
         return None;
     }
     let needed = (w as usize) * (h as usize) * 4;
+    if out.capacity() < needed {
+        // Never grow the pooled buffer via realloc: libmalloc extends large
+        // blocks in place across several VM entries and the resulting mapping
+        // rejects MADV_FREE_REUSABLE/REUSE (EINVAL), which would defeat the
+        // idle-pool footprint contract. A fresh whole allocation is always a
+        // single mapping; claim it before the decoder writes.
+        let fresh: Vec<u8> = Vec::with_capacity(needed);
+        crate::backend::claim_pages(fresh.as_ptr(), fresh.capacity());
+        let old = std::mem::replace(out, fresh);
+        crate::backend::mark_pages_reusable(old.as_ptr(), old.capacity());
+    }
     if out.len() < needed {
         out.resize(needed, 0);
     }

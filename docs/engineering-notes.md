@@ -43,6 +43,8 @@ Phase 1 同步 hash + 缩略图（最长边 300px）→ 更新内存。Phase 2 �
 
 **释放侧对称（0.99.26-dev）**：claim 过的大缓冲释放前必须 `mark_pages_reusable`，否则脏页滞留 footprint——paste/undo 的 DB blob、`pasteboard_image_data` 原始字节、大文本 String（`load_text_by_db_id` 源头统一 claim）分别由 `MarkEntryBlobsReusableOnDrop`/`MarkBlobReusableOnDrop`/`MarkStringReusableOnDrop`（backend.rs）守卫覆盖全部返回路径。实测 A/B：捕获 2880×1800 截图后旧构建后台 79.6MB 永久钉住，新构建峰值 48.4MB → 空闲 28–32MB 稳定、连续捕获零累积。
 
+**池缓冲禁止 realloc 增长 + 失败不入池（0.100.11-dev）**：实测（244 次 EINVAL 日志 + 现场复现）libmalloc 就地扩展大块时会把旧映射与新页拼接为多 vm_map entry，拼出的映射对 `MADV_FREE_REUSABLE/REUSE` 报 `Invalid argument`；旧实现忽略返回值并把该块原样收回池，导致一次偶发失败后**整个进程生命周期内解码/编码池的 madvise 全部失效**（40MB 脏页常驻，「大图后内存不回落」的根因）。契约：① `decode_png_rgba8_into` / `encode_png_into` 在容量不足时整块 `Vec::with_capacity` 新分配（首次分配永远是单一映射）而非 `resize`/Cursor 倍增；② `mark_pages_reusable`/`claim_pages` 回传 `bool`，标记失败的缓冲不入池、认领失败的缓冲弃用不写入。验证：1.9MB→48MB→192MB 三级增长零失败，峰值 232MB → 空闲 42MB。
+
 `claim_pages/mark_pages_reusable SKIP unaligned` 日志（rusqlite 读出的 18-25KB 缩略图 blob 从小区块原地增长、基址非页对齐）为良性：小 zone 共享页从未被标记，跳过即正确行为。
 
 ### 预览解码（0.99.17-dev）

@@ -326,10 +326,16 @@ pub(crate) struct ImageEncodeScratchGuard<'a> {
 
 impl<'a> ImageEncodeScratchGuard<'a> {
     pub(crate) fn acquire() -> Self {
-        let guard = IMAGE_ENCODE_SCRATCH.lock().unwrap();
+        let mut guard = IMAGE_ENCODE_SCRATCH.lock().unwrap();
         crate::debug_log!("CopyAttach: encode_scratch acquire cap={}", guard.capacity());
         // Claim pages back before the encoder writes into the pooled buffer.
-        claim_pages(guard.as_ptr(), guard.capacity());
+        // A failed claim leaves pages in an unknown reclaimable state, so the
+        // buffer must not be written to: drop it and let the encoder allocate.
+        if !claim_pages(guard.as_ptr(), guard.capacity()) {
+            crate::debug_log!("CopyAttach: encode_scratch claim failed cap={} release",
+                guard.capacity());
+            *guard = Vec::new();
+        }
         ImageEncodeScratchGuard { guard }
     }
 }
@@ -361,7 +367,14 @@ impl Drop for ImageEncodeScratchGuard<'_> {
             // pooled pages, and those must still stop counting.
             crate::debug_log!("CopyAttach: encode_scratch drop cap={} mark_reusable",
                 self.guard.capacity());
-            mark_pages_reusable(self.guard.as_ptr(), self.guard.capacity());
+            if !mark_pages_reusable(self.guard.as_ptr(), self.guard.capacity()) {
+                // The mapping rejects madvise (EINVAL from a realloc-spliced
+                // region). Pooling it would pin dirty pages for the process
+                // lifetime and make every later mark/claim fail too.
+                crate::debug_log!("CopyAttach: encode_scratch drop cap={} unmarkable release",
+                    self.guard.capacity());
+                *self.guard = Vec::new();
+            }
         }
     }
 }
@@ -385,12 +398,14 @@ const MADV_FREE_REUSABLE: i32 = 7; // "pages can be reused (by anyone)"
 const MADV_FREE_REUSE: i32 = 8; // "caller wants to reuse those pages"
 
 #[cfg(target_os = "macos")]
-fn advise_pages(ptr: *const u8, byte_len: usize, advice: i32, operation: &str) {
+fn advise_pages(ptr: *const u8, byte_len: usize, advice: i32, operation: &str) -> bool {
     let result = unsafe { madvise(ptr as *mut core::ffi::c_void, byte_len, advice) };
     if result != 0 {
         let error = std::io::Error::last_os_error();
         crate::debug_log!("CopyAttach: madvise {operation} failed len={byte_len}: {error}");
+        return false;
     }
+    true
 }
 
 /// Mark page-aligned scratch memory as reusable by the system.
@@ -398,47 +413,63 @@ fn advise_pages(ptr: *const u8, byte_len: usize, advice: i32, operation: &str) {
 /// Only whole pages strictly inside the buffer bounds are marked reusable.
 /// Sub-page remainders at the end are rounded down to avoid advising adjacent
 /// heap allocations that might share or sit directly past this buffer.
-pub(crate) fn mark_pages_reusable(ptr: *const u8, byte_len: usize) {
+///
+/// Returns `false` only when the kernel rejected the advice (EINVAL on a
+/// mapping that `vm_map_reusable_pages` cannot handle, e.g. a block that
+/// libmalloc grew in place across several VM entries). Callers that pool the
+/// buffer must release it in that case: such a mapping keeps rejecting every
+/// later mark/claim, and pooling it pins the dirty pages for the process
+/// lifetime. Small or unaligned blocks are skipped and return `true` — there
+/// is nothing to mark and pooling them is harmless.
+pub(crate) fn mark_pages_reusable(ptr: *const u8, byte_len: usize) -> bool {
     if byte_len < PAGE_SIZE {
-        return;
+        return true;
     }
     let start = ptr as usize;
     if !start.is_multiple_of(PAGE_SIZE) {
         // Unaligned blocks share pages with other allocations; never mark them.
         crate::debug_log!("CopyAttach: mark_pages_reusable SKIP unaligned base=0x{start:x} len={byte_len}");
-        return;
+        return true;
     }
     let aligned_len = byte_len & !(PAGE_SIZE - 1);
     if aligned_len < PAGE_SIZE {
-        return;
+        return true;
     }
     #[cfg(target_os = "macos")]
-    advise_pages(ptr, aligned_len, MADV_FREE_REUSABLE, "FREE_REUSABLE");
+    return advise_pages(ptr, aligned_len, MADV_FREE_REUSABLE, "FREE_REUSABLE");
     #[cfg(not(target_os = "macos"))]
-    let _ = aligned_len;
+    {
+        let _ = aligned_len;
+        true
+    }
 }
 
 /// Claim marked pages back before writing; contents are undefined.
 ///
 /// Symmetric with `mark_pages_reusable`: claims only whole pages strictly
-/// within the buffer bounds.
-pub(crate) fn claim_pages(ptr: *const u8, byte_len: usize) {
+/// within the buffer bounds. Returns `false` when the kernel rejected the
+/// claim; the caller must then treat the buffer as unusable (its pages may
+/// still be reclaimable while live) and allocate afresh.
+pub(crate) fn claim_pages(ptr: *const u8, byte_len: usize) -> bool {
     if byte_len < PAGE_SIZE {
-        return;
+        return true;
     }
     let start = ptr as usize;
     if !start.is_multiple_of(PAGE_SIZE) {
         crate::debug_log!("CopyAttach: claim_pages SKIP unaligned base=0x{start:x} len={byte_len}");
-        return;
+        return true;
     }
     let aligned_len = byte_len & !(PAGE_SIZE - 1);
     if aligned_len < PAGE_SIZE {
-        return;
+        return true;
     }
     #[cfg(target_os = "macos")]
-    advise_pages(ptr, aligned_len, MADV_FREE_REUSE, "FREE_REUSE");
+    return advise_pages(ptr, aligned_len, MADV_FREE_REUSE, "FREE_REUSE");
     #[cfg(not(target_os = "macos"))]
-    let _ = aligned_len;
+    {
+        let _ = aligned_len;
+        true
+    }
 }
 
 /// Marks a transient blob Vec's pages reusable when dropped. Release-path
@@ -493,11 +524,17 @@ pub(crate) struct ImageDecodeBuffer {
 impl ImageDecodeBuffer {
     /// Take the pooled buffer (or a fresh one) and claim its pages for writing.
     pub(crate) fn acquire() -> Self {
-        let buf = IMAGE_DECODE_SCRATCH.lock().unwrap().take().unwrap_or_default();
+        let mut buf = IMAGE_DECODE_SCRATCH.lock().unwrap().take().unwrap_or_default();
         if buf.capacity() > 0 {
             crate::debug_log!("CopyAttach: decode_scratch acquire cap={}", buf.capacity());
         }
-        claim_pages(buf.as_ptr(), buf.capacity());
+        if !claim_pages(buf.as_ptr(), buf.capacity()) {
+            // Unclaimable pages may be reclaimed while live; never decode
+            // into them. The decoder will allocate a fresh block.
+            crate::debug_log!("CopyAttach: decode_scratch claim failed cap={} release",
+                buf.capacity());
+            buf = Vec::new();
+        }
         ImageDecodeBuffer { buf: Some(buf) }
     }
 
@@ -519,10 +556,17 @@ impl Drop for ImageDecodeBuffer {
                 let mut pool = IMAGE_DECODE_SCRATCH.lock().unwrap();
                 if pool.is_none() {
                     // Idle pooled buffer: remove its pages from the footprint.
+                    // Only a successfully marked buffer goes back to the pool;
+                    // an unmarkable mapping would fail forever and pin its
+                    // dirty pages until process exit.
                     crate::debug_log!("CopyAttach: decode_scratch drop cap={} mark_reusable",
                         buf.capacity());
-                    mark_pages_reusable(buf.as_ptr(), buf.capacity());
-                    *pool = Some(buf);
+                    if mark_pages_reusable(buf.as_ptr(), buf.capacity()) {
+                        *pool = Some(buf);
+                    } else {
+                        crate::debug_log!("CopyAttach: decode_scratch drop cap={} unmarkable release",
+                            buf.capacity());
+                    }
                 } else {
                     crate::debug_log!("CopyAttach: decode_scratch drop cap={} pool_busy release",
                         buf.capacity());
