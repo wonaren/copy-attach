@@ -7,6 +7,7 @@
 ### 稳定性与异常修复
 
 - **更新包下载匹配修复**：优化蓝奏云更新包文件名匹配规则，适配带架构标识的安装包，解决国内网络下更新失败的问题。
+- **调试日志时区校准**：调试与错误日志时间戳统一使用 UTC+8（东八区）格式，便于诊断与问题排查。
 
 ## [0.101.0] - 2026-09-06
 
@@ -164,7 +165,11 @@
 - 修复文本捕获并发时历史条目身份错配的问题。
 - 增加 Rust 侧调试日志落盘，便于诊断数据库和 FFI 错误。
 
-[Unreleased]: https://github.com/wonaren/copy-attach/compare/v0.100.0...HEAD
+[Unreleased]: https://github.com/wonaren/copy-attach/compare/v0.101.0...HEAD
+[0.101.0]: https://github.com/wonaren/copy-attach/compare/v0.100.3...v0.101.0
+[0.100.3]: https://github.com/wonaren/copy-attach/compare/v0.100.2...v0.100.3
+[0.100.2]: https://github.com/wonaren/copy-attach/compare/v0.100.1...v0.100.2
+[0.100.1]: https://github.com/wonaren/copy-attach/compare/v0.100.0...v0.100.1
 [0.100.0]: https://github.com/wonaren/copy-attach/compare/v0.99.28...v0.100.0
 [0.99.28]: https://github.com/wonaren/copy-attach/compare/v0.99.27...v0.99.28
 [0.99.27]: https://github.com/wonaren/copy-attach/compare/v0.99.26...v0.99.27

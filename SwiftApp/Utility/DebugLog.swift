@@ -2,6 +2,13 @@ import Foundation
 
 private let debugLogPath = "/tmp/copyattach_debug.log"
 
+private let logDateFormatter: DateFormatter = {
+    let f = DateFormatter()
+    f.dateFormat = "yyyy-MM-dd HH:mm:ss +0800"
+    f.timeZone = TimeZone(secondsFromGMT: 28800)
+    return f
+}()
+
 func debugLog(_ message: String) {
     // Respect the same debug-logging switch as Rust: debug builds default on,
     // release/distribution builds default off, and the settings UI can enable
@@ -14,14 +21,14 @@ func debugLog(_ message: String) {
     } else {
         guard clipboard_is_debug_logging() != 0 else { return }
     }
-    appendLogLine("[ClipboardManager] \(Date()) \(message)")
+    appendLogLine("[ClipboardManager] \(logDateFormatter.string(from: Date())) \(message)")
 }
 
 /// Always-on counterpart of Rust's `error_log!`: real failures (hotkey lost,
 /// backend refused to start) must be observable in release builds even when
 /// the user has verbose logging off. Keep it rare — it is not rate limited.
 func errorLog(_ message: String) {
-    appendLogLine("[ClipboardManager] \(Date()) ERROR \(message)")
+    appendLogLine("[ClipboardManager] \(logDateFormatter.string(from: Date())) ERROR \(message)")
 }
 
 private func appendLogLine(_ line: String) {
