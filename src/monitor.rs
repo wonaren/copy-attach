@@ -155,6 +155,7 @@ fn ingest_rgba_image(
             thumb_width: thumb_w,
             thumb_height: thumb_h,
             hash,
+            custom_label: String::new(),
             timestamp: now,
             source_name: src.name.clone(),
             source_bundle_id: src.bundle_id.clone(),

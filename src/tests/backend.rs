@@ -124,6 +124,7 @@ fn test_undo_stack_caps() {
         thumb_width: 0,
         thumb_height: 0,
         hash: i,
+        custom_label: String::new(),
         timestamp: 0,
         source_name: String::new(),
         source_bundle_id: String::new(),
@@ -156,6 +157,7 @@ fn test_undo_stack_caps() {
                 thumb_width: 0,
                 thumb_height: 0,
                 hash: i,
+                custom_label: String::new(),
                 timestamp: 0,
                 source_name: String::new(),
                 source_bundle_id: String::new(),
@@ -205,6 +207,7 @@ fn test_undo_image_restore_releases_blob_capacity() {
             thumb_width: 160,
             thumb_height: 120,
             hash: 0xDEAD_BEEF,
+            custom_label: String::new(),
             timestamp: 0,
             source_name: "TestApp".to_string(),
             source_bundle_id: "com.example.test".to_string(),
@@ -281,5 +284,65 @@ fn test_select_and_paste_as_path_by_id_missing_returns_zero() {
     ensure_test_backend();
     let result = crate::ffi::clipboard_select_and_paste_as_path_by_id(999_999_999);
     assert_eq!(result, 0, "nonexistent entry must return 0");
+}
+
+#[test]
+fn test_clipboard_set_custom_label_ffi() {
+    ensure_test_backend();
+    let b = crate::backend::try_backend().expect("backend initialized");
+
+    let entry_id = crate::backend::new_entry_id();
+    {
+        let conn = b.db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO clipboard_history (entry_type, text, hash, timestamp, source_name, source_bundle_id, entry_id)
+             VALUES (0, 'content-for-label-test', 98765, 100, 'App', 'com.app', ?1)",
+            rusqlite::params![entry_id as i64],
+        ).unwrap();
+    }
+    {
+        let mut hist = b.history.lock().unwrap();
+        hist.push(ClipboardEntry::Text {
+            id: entry_id,
+            preview: "content-for-label-test".to_string(),
+            label: "content-for-label-test".to_string(),
+            custom_label: String::new(),
+            text_hash: 98765,
+            timestamp: 100,
+            source_name: "App".to_string(),
+            source_bundle_id: "com.app".to_string(),
+            db_id: 0,
+        });
+    }
+
+    let c_label = std::ffi::CString::new("My FFI Remark").unwrap();
+    let ret = crate::ffi::clipboard_set_custom_label(entry_id, c_label.as_ptr());
+    assert_eq!(ret, 1, "custom label update must succeed");
+
+    // In-memory check
+    {
+        let hist = b.history.lock().unwrap();
+        let entry = hist.iter().find(|e| e.entry_id() == entry_id).unwrap();
+        assert_eq!(entry.custom_label(), "My FFI Remark");
+    }
+
+    // SQLite check
+    {
+        let conn = b.db.lock().unwrap();
+        let stored: String = conn.query_row(
+            "SELECT custom_label FROM clipboard_history WHERE entry_id = ?1",
+            rusqlite::params![entry_id as i64],
+            |r| r.get(0),
+        ).unwrap();
+        assert_eq!(stored, "My FFI Remark");
+    }
+
+    // Nonexistent entry must return 0
+    let ret_nonexistent = crate::ffi::clipboard_set_custom_label(888_888_888, c_label.as_ptr());
+    assert_eq!(ret_nonexistent, 0);
+
+    // Null pointer must return 0
+    let ret_null = crate::ffi::clipboard_set_custom_label(entry_id, std::ptr::null());
+    assert_eq!(ret_null, 0);
 }
 

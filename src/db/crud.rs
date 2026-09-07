@@ -94,7 +94,8 @@ pub(crate) fn load_history_from_db(conn: &Connection, threshold: usize) -> Vec<C
         "SELECT id, entry_id, entry_type, preview, label, hash,
                 width, height,
                 thumb_width, thumb_height,
-                timestamp, source_name, source_bundle_id
+                timestamp, source_name, source_bundle_id,
+                custom_label
          FROM clipboard_history
          ORDER BY id DESC
          LIMIT ?"
@@ -121,7 +122,8 @@ pub(crate) fn load_history_from_db(conn: &Connection, threshold: usize) -> Vec<C
             row.get::<_, Option<i64>>(9)?,
             row.get::<_, i64>(10)?,
             row.get::<_, String>(11)?,
-            row.get::<_, String>(12)?))
+            row.get::<_, String>(12)?,
+            row.get::<_, Option<String>>(13)?.unwrap_or_default()))
     }) {
         Ok(r) => r,
         Err(e) => {
@@ -136,7 +138,8 @@ pub(crate) fn load_history_from_db(conn: &Connection, threshold: usize) -> Vec<C
         let (entry_type, db_id, entry_id, preview, label, hash,
              width, height,
              thumb_width, thumb_height,
-             timestamp, source_name, source_bundle_id) = match row {
+             timestamp, source_name, source_bundle_id,
+             custom_label) = match row {
             Ok(r) => r,
             Err(e) => {
                 crate::error_log!("CopyAttach: row read error at index {}: {}", result.len() + skipped as usize + 1, e);
@@ -164,6 +167,7 @@ pub(crate) fn load_history_from_db(conn: &Connection, threshold: usize) -> Vec<C
                     id,
                     preview,
                     label,
+                    custom_label,
                     text_hash: hash as u64,
                     timestamp: timestamp as u64,
                     source_name,
@@ -178,6 +182,7 @@ pub(crate) fn load_history_from_db(conn: &Connection, threshold: usize) -> Vec<C
                 thumb_width: thumb_width.unwrap_or(0) as u32,
                 thumb_height: thumb_height.unwrap_or(0) as u32,
                 hash: hash as u64,
+                custom_label,
                 timestamp: timestamp as u64,
                 source_name,
                 source_bundle_id,
@@ -207,7 +212,7 @@ pub(crate) fn insert_entry_to_db(
     image_thumb: Option<(&[u8], u32, u32)>,
 ) -> Result<(), ()> {
     let result = match entry {
-        ClipboardEntry::Text { timestamp, source_name, source_bundle_id, id, preview, label, text_hash, .. } => {
+        ClipboardEntry::Text { timestamp, source_name, source_bundle_id, id, preview, label, custom_label, text_hash, .. } => {
             let full = match text {
                 Some(t) => t,
                 None => {
@@ -215,7 +220,7 @@ pub(crate) fn insert_entry_to_db(
                     return Err(());
                 }
             };
-            // Preview/label/text-hash are persisted alongside the body so the
+            // Preview/label/custom_label/text-hash are persisted alongside the body so the
             // cold-start load never reads the full `text` column. The hash
             // column doubles as the text dedup hash (image rows store the
             // content hash there).
@@ -224,17 +229,18 @@ pub(crate) fn insert_entry_to_db(
                     (entry_type, text, png_data, width, height,
                      thumb_data, thumb_width, thumb_height, hash,
                      timestamp, source_name, source_bundle_id, entry_id,
-                     preview, label)
-                 VALUES (0, ?1, NULL, NULL, NULL, NULL, NULL, NULL, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                     preview, label, custom_label)
+                 VALUES (0, ?1, NULL, NULL, NULL, NULL, NULL, NULL, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 rusqlite::params![
                     full, *text_hash as i64, *timestamp as i64,
                     source_name, source_bundle_id, *id as i64,
-                    preview, label,
+                    preview, label, custom_label,
                 ],
             ).map(|_| ()).map_err(|e| { crate::error_log!("CopyAttach: failed to insert text entry: {e}"); })
         }
         ClipboardEntry::Image { width, height,
                                 thumb_width: _, thumb_height: _, hash,
+                                custom_label,
                                 timestamp, source_name, source_bundle_id, id, .. } => {
             let png = if let Some(data) = image_png { data } else {
                 crate::error_log!("CopyAttach: cannot insert image entry: missing png_data");
@@ -248,14 +254,16 @@ pub(crate) fn insert_entry_to_db(
                 "INSERT INTO clipboard_history
                     (entry_type, text, png_data, width, height,
                      thumb_data, thumb_width, thumb_height, hash,
-                     timestamp, source_name, source_bundle_id, entry_id)
-                 VALUES (1, NULL, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                     timestamp, source_name, source_bundle_id, entry_id,
+                     custom_label)
+                 VALUES (1, NULL, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 rusqlite::params![
                     png, i64::from(*width), i64::from(*height),
                     thumb_data, i64::from(tw), i64::from(th),
                     *hash as i64, *timestamp as i64,
                     source_name, source_bundle_id,
                     *id as i64,
+                    custom_label,
                 ],
             ).map(|_| ()).map_err(|e| { crate::error_log!("CopyAttach: failed to insert image entry: {e}"); })
         }
@@ -350,4 +358,20 @@ pub(crate) fn persist_entry_to_db(
         crate::error_log!("CopyAttach: failed to commit write transaction: {e}");
     })?;
     Ok(row_id)
+}
+
+/// Update the custom label / remark for an entry by its stable `entry_id`.
+pub(crate) fn update_entry_custom_label(
+    conn: &Connection,
+    entry_id: u64,
+    custom_label: &str,
+) -> Result<(), ()> {
+    conn.execute(
+        "UPDATE clipboard_history SET custom_label = ?1 WHERE entry_id = ?2",
+        rusqlite::params![custom_label, entry_id as i64],
+    )
+    .map(|_| ())
+    .map_err(|e| {
+        crate::error_log!("CopyAttach: failed to update custom_label for entry {entry_id}: {e}");
+    })
 }

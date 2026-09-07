@@ -9,6 +9,10 @@ struct ItemRowView: View {
     let isDeleteModifierPressed: Bool
     let shortcutHint: String?
     let isFavorite: Bool
+    let isEditingRemark: Bool
+    @Binding var editingText: String
+    let onCommitRemark: (String) -> Void
+    let onCancelRemark: () -> Void
     let selectionNamespace: Namespace.ID
     @State private var isHovering = false
     /// The row's decoded thumbnail once loaded (async, off-main). Also keeps
@@ -41,13 +45,75 @@ struct ItemRowView: View {
             appIcon
             VStack(alignment: .leading, spacing: 0) {
                 switch item {
-                case .text(_, _, _, _, _, _, let displayPreview):
-                    textContent(displayPreview)
-                case .image(_, let dbId, let width, let height, _, _, _, _):
-                    imageContent(dbId: dbId, width: width, height: height)
+                case .text(_, _, let customLabel, _, _, _, _, let displayPreview):
+                    if isEditingRemark {
+                        HStack(spacing: 4) {
+                            InlineRemarkField(
+                                text: $editingText,
+                                placeholder: item.hasCustomLabel ? item.customLabel : "添加备注...",
+                                onCommit: onCommitRemark,
+                                onCancel: onCancelRemark
+                            )
+                        }
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1)
+                        .background(
+                            RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                .fill(Color.black.opacity(0.25))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                        .strokeBorder(Color.white.opacity(0.4), lineWidth: 1)
+                                )
+                        )
+                    } else {
+                        textContent(!customLabel.isEmpty ? customLabel : displayPreview)
+                    }
+                case .image(_, let dbId, let width, let height, _, let customLabel, _, _, _):
+                    if isEditingRemark {
+                        HStack(spacing: 4) {
+                            Image(systemName: "photo.fill")
+                                .font(.system(size: 11))
+                                .foregroundColor(Color(nsColor: .systemOrange))
+                            InlineRemarkField(
+                                text: $editingText,
+                                placeholder: item.hasCustomLabel ? item.customLabel : "添加图片备注...",
+                                onCommit: onCommitRemark,
+                                onCancel: onCancelRemark
+                            )
+                        }
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1)
+                        .background(
+                            RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                .fill(Color.black.opacity(0.25))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                        .strokeBorder(Color.white.opacity(0.4), lineWidth: 1)
+                                )
+                        )
+                    } else if !customLabel.isEmpty {
+                        let markColor = (isSelected && isDeleteModifierPressed) ? Color.white : Color(nsColor: .systemOrange)
+                        HStack(spacing: 5) {
+                            Image(systemName: "photo.fill")
+                                .font(.system(size: 11.5))
+                                .foregroundColor(markColor)
+                                .help(width > 0 && height > 0 ? "图片 (\(width)×\(height))" : "图片")
+                            textContent(customLabel, color: markColor)
+                        }
+                    } else {
+                        imageContent(dbId: dbId, width: width, height: height)
+                    }
                 }
             }
             Spacer(minLength: 2)
+            if item.hasCustomLabel {
+                Image(systemName: "tag.fill")
+                    .font(.system(size: 9.5))
+                    .foregroundColor(Color(nsColor: .systemTeal))
+                    .frame(width: 14, alignment: .center)
+                    .help("备注: \(item.customLabel)")
+                    .transition(.scale.combined(with: .opacity))
+            }
             if isFavorite {
                 Image(systemName: "star.fill")
                     .font(.system(size: 10))
@@ -130,10 +196,10 @@ struct ItemRowView: View {
         .frame(width: 20, height: 20).foregroundColor(.white)
     }
 
-    private func textContent(_ displayText: String) -> some View {
+    private func textContent(_ displayText: String, color: Color? = nil) -> some View {
         coloredLabel(displayText)
             .font(.system(size: 13, weight: .regular))
-            .foregroundColor(textColor(isSelected))
+            .foregroundColor(color ?? textColor(isSelected))
             .lineLimit(1)
             .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -306,5 +372,85 @@ private extension String {
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
             .joined(separator: "⏎")
+    }
+}
+
+// MARK: - Inline Remark Editor Field (Native AppKit NSTextField for perfect focus & key containment)
+
+struct InlineRemarkField: NSViewRepresentable {
+    @Binding var text: String
+    let placeholder: String
+    let onCommit: (String) -> Void
+    let onCancel: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+
+    func makeNSView(context: Context) -> NSTextField {
+        let field = NSTextField()
+        field.isBordered = false
+        field.drawsBackground = false
+        field.focusRingType = .none
+        field.font = .systemFont(ofSize: 13, weight: .regular)
+        field.textColor = .white
+        field.placeholderString = placeholder
+        field.stringValue = text
+        field.delegate = context.coordinator
+        field.cell?.wraps = false
+        field.cell?.isScrollable = true
+        field.maximumNumberOfLines = 1
+
+        DispatchQueue.main.async {
+            if let window = field.window {
+                window.makeFirstResponder(field)
+                field.currentEditor()?.selectAll(nil)
+            }
+        }
+        return field
+    }
+
+    func updateNSView(_ nsView: NSTextField, context: Context) {
+        if nsView.stringValue != text && nsView.currentEditor() == nil {
+            nsView.stringValue = text
+        }
+    }
+
+    class Coordinator: NSObject, NSTextFieldDelegate {
+        var parent: InlineRemarkField
+        var didCommitOrCancel = false
+
+        init(_ parent: InlineRemarkField) {
+            self.parent = parent
+        }
+
+        func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+            if commandSelector == #selector(NSResponder.insertNewline(_:)) ||
+               commandSelector == #selector(NSResponder.insertTab(_:)) {
+                if !didCommitOrCancel {
+                    didCommitOrCancel = true
+                    control.window?.makeFirstResponder(control.window?.contentView)
+                    parent.onCommit(control.stringValue)
+                }
+                return true
+            } else if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
+                if !didCommitOrCancel {
+                    didCommitOrCancel = true
+                    control.window?.makeFirstResponder(control.window?.contentView)
+                    parent.onCancel()
+                }
+                return true
+            }
+            return false
+        }
+
+        func controlTextDidEndEditing(_ obj: Notification) {
+            guard let field = obj.object as? NSTextField else { return }
+            if !didCommitOrCancel {
+                didCommitOrCancel = true
+                field.window?.makeFirstResponder(field.window?.contentView)
+                parent.onCommit(field.stringValue)
+            }
+        }
     }
 }

@@ -1,4 +1,4 @@
-use std::ffi::c_int;
+use std::ffi::{c_char, c_int, CStr};
 use std::sync::atomic::Ordering;
 
 use crate::backend::{push_deleted, remove_undo_payload_file, try_backend, UndoPayload};
@@ -381,6 +381,57 @@ pub extern "C" fn clipboard_last_restored_id() -> u64 {
         Some(b) => b.last_restored_id.load(Ordering::SeqCst),
         None => 0,
     }
+}
+
+/// Update the custom label / remark for an entry by its stable `entry_id`.
+/// Pass an empty string to clear the custom label.
+/// Returns 1 on success, 0 on failure (entry not found or DB error).
+#[no_mangle]
+pub extern "C" fn clipboard_set_custom_label(entry_id: u64, label: *const c_char) -> c_int {
+    if label.is_null() {
+        return 0;
+    }
+    let label_str = unsafe { CStr::from_ptr(label) }.to_string_lossy();
+    let b = match try_backend() {
+        Some(b) => b,
+        None => return 0,
+    };
+
+    // Update in-memory entry under history lock
+    {
+        let mut hist = match b.history.lock() {
+            Ok(h) => h,
+            Err(_) => return 0,
+        };
+        let found = hist.iter_mut().find(|e| e.entry_id() == entry_id);
+        let entry = match found {
+            Some(e) => e,
+            None => {
+                crate::error_log!("CopyAttach: set_custom_label: entry {entry_id} not found");
+                return 0;
+            }
+        };
+        match entry {
+            ClipboardEntry::Text { custom_label, .. }
+            | ClipboardEntry::Image { custom_label, .. } => {
+                *custom_label = label_str.to_string();
+            }
+        }
+    }
+
+    // Write-through to SQLite DB
+    {
+        let conn = match b.db.lock() {
+            Ok(c) => c,
+            Err(_) => return 0,
+        };
+        if crate::db::update_entry_custom_label(&conn, entry_id, &label_str).is_err() {
+            return 0;
+        }
+    }
+
+    crate::backend::mark_history_changed();
+    1
 }
 
 /// Trim the oldest N percent of entries from both in-memory history and DB.

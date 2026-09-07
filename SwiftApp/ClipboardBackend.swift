@@ -433,6 +433,21 @@ class ClipboardBackend {
         thumbnailCache.removeAllObjects()
     }
 
+    func setCustomLabel(entryId: Int, label: String) -> Bool {
+        let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        let ok = trimmed.withCString { cStr in
+            clipboard_set_custom_label(UInt64(entryId), cStr) != 0
+        }
+        if ok {
+            if let idx = items.firstIndex(where: { $0.id == entryId }) {
+                items[idx] = items[idx].withUpdatedCustomLabel(trimmed)
+                itemsGeneration &+= 1
+                reloadGeneration.withLock { $0 &+= 1 }
+            }
+        }
+        return ok
+    }
+
     func deleteEntry(at index: Int) -> Bool {
         guard index < items.count else { return false }
         let entryId = items[index].id
@@ -529,6 +544,12 @@ class ClipboardBackend {
             clipboard_free_string(cStr)
             return s
         }()
+        let customLabel: String = {
+            guard let cStr = clipboard_snapshot_item_custom_label(snap, i) else { return "" }
+            let s = String(cString: cStr)
+            clipboard_free_string(cStr)
+            return s
+        }()
         let sourceName: String = {
             guard let cStr = clipboard_snapshot_item_source_name(snap, i) else { return "" }
             let s = String(cString: cStr)
@@ -553,6 +574,7 @@ class ClipboardBackend {
             let display = ClipboardItem.formatDisplayPreview(preview)
             return .text(
                 entryId: id, timestamp: timestamp,
+                customLabel: customLabel,
                 label: label, sourceName: sourceName,
                 sourceBundleId: sourceBundleId, preview: preview,
                 displayPreview: display
@@ -563,8 +585,8 @@ class ClipboardBackend {
             let h = Int(clipboard_snapshot_get_image_height(snap, i))
             return .image(
                 entryId: id, dbId: dbId, width: w, height: h,
-                timestamp: timestamp, label: label,
-                sourceName: sourceName, sourceBundleId: sourceBundleId
+                timestamp: timestamp, customLabel: customLabel,
+                label: label, sourceName: sourceName, sourceBundleId: sourceBundleId
             )
         default:
             return nil

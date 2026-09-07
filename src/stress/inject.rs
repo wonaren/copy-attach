@@ -142,6 +142,7 @@ pub fn inject_into_db(
                 thumb_width: thumb_w,
                 thumb_height: thumb_h,
                 hash,
+                custom_label: String::new(),
                 timestamp: idx,
                 source_name: String::from("StressTest"),
                 source_bundle_id: String::from("com.stresstest"),

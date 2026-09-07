@@ -79,6 +79,14 @@ extension HistoryPopupContent {
                 self.selectedIndex = max(0, self.maxIndex)
             }
         }
+        let hasRemark = item.hasCustomLabel
+        addContextMenuItem(to: menu,
+                           title: hasRemark ? "编辑备注…" : "添加备注…",
+                           symbol: "pencil.line") {
+            guard let idx = self.currentIndex(of: item.id) else { return }
+            self.selectedIndex = idx + 1
+            self.startInlineEditing(for: item)
+        }
         addContextMenuItem(to: menu, title: "删除", symbol: "trash", destructive: true) {
             guard let idx = self.currentIndex(of: item.id) else { return }
             self.deleteItem(at: idx)
@@ -181,8 +189,8 @@ extension HistoryPopupContent {
 
     /// Save an image entry to a user-chosen location as a PNG file.
     private func saveImageItem(_ item: ClipboardItem) {
-        guard case .image(_, _, _, _, let timestamp, _, _, _) = item,
-              let data = item.imageData else { return }
+        guard item.isImage, let data = item.imageData else { return }
+        let timestamp = item.timestamp
         // Dismiss popup cleanly before presenting modal save panel to prevent
         // didResignKey from firing an asynchronous teardown while the modal runs.
         closePreview()

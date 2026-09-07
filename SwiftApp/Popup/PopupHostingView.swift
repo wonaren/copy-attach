@@ -10,6 +10,7 @@ let commandNumberNotification = Notification.Name("PopupCommandNumberPressed")
 let focusSearchNotification = Notification.Name("PopupFocusSearch")
 let undoKeyNotification = Notification.Name("PopupUndoKeyPressed")
 let favoriteToggleNotification = Notification.Name("PopupFavoriteToggle")
+let startInlineEditNotification = Notification.Name("PopupStartInlineEdit")
 let arrowKeyFromSearchNotification = Notification.Name("PopupArrowKeyFromSearch")
 let focusSearchAndBackspaceNotification = Notification.Name("PopupFocusSearchAndBackspace")
 let escapeKeyNotification = Notification.Name("PopupEscapeKeyPressed")
@@ -346,6 +347,11 @@ class PopupHostingView: NSHostingView<AnyView> {
         if isMenuTracking {
             return super.performKeyEquivalent(with: event)
         }
+        // When an editable text view is focused (search field or inline remark editor),
+        // let the text system handle Command+Z for text undo rather than clipboard undo.
+        if let textView = window?.firstResponder as? NSTextView, textView.isEditable {
+            return super.performKeyEquivalent(with: event)
+        }
         if event.keyCode == 6 && event.modifierFlags.contains(.command) &&
             !event.modifierFlags.contains(.option) &&
             !event.modifierFlags.contains(.control) &&
@@ -368,13 +374,27 @@ class PopupHostingView: NSHostingView<AnyView> {
             !event.modifierFlags.contains(.command) &&
             !event.modifierFlags.contains(.control) &&
             !event.modifierFlags.contains(.shift) {
-            // Let the event pass through when the search bar is focused
+            // Let the event pass through when an editable field is focused
             // so the user can type characters like π via Opt+P.
             if let textView = window?.firstResponder as? NSTextView, textView.isEditable {
                 super.keyDown(with: event)
                 return
             }
             NotificationCenter.default.post(name: favoriteToggleNotification, object: nil)
+            return
+        }
+
+        // Option + R: toggle inline remark editing (must intercept before text input
+        // system converts it to ® character)
+        if event.keyCode == 15 && event.modifierFlags.contains(.option) &&
+            !event.modifierFlags.contains(.command) &&
+            !event.modifierFlags.contains(.control) &&
+            !event.modifierFlags.contains(.shift) {
+            if let textView = window?.firstResponder as? NSTextView, textView.isEditable {
+                super.keyDown(with: event)
+                return
+            }
+            NotificationCenter.default.post(name: startInlineEditNotification, object: nil)
             return
         }
 
@@ -419,8 +439,12 @@ class PopupHostingView: NSHostingView<AnyView> {
             }
         }
 
-        // Command + Z: undo deletion
+        // Command + Z: undo deletion (only when an editable text view is not focused)
         if event.keyCode == 6 && event.modifierFlags.contains(.command) {
+            if let textView = window?.firstResponder as? NSTextView, textView.isEditable {
+                super.keyDown(with: event)
+                return
+            }
             NotificationCenter.default.post(name: undoKeyNotification, object: nil)
             return
         }
@@ -428,6 +452,13 @@ class PopupHostingView: NSHostingView<AnyView> {
         // Printable character while on an item: switch focus to search bar
         // and re-send the event so the search field's IME can process it
         // (e.g. Chinese/Japanese IME composition).
+        // Let it pass through untouched when an editable text field is already focused
+        // (such as inline remark editing).
+        if let textView = window?.firstResponder as? NSTextView, textView.isEditable {
+            super.keyDown(with: event)
+            return
+        }
+
         if let chars = event.characters,
            let first = chars.first,
            !event.modifierFlags.contains(.command),

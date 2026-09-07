@@ -5,7 +5,9 @@ import SwiftUI
 
 extension HistoryPopupContent {
     func handleEscape() {
-        if showPreview {
+        if editingItemId != nil {
+            cancelInlineEditing()
+        } else if showPreview {
             closePreview()
         } else {
             searchText = ""
@@ -65,12 +67,13 @@ extension HistoryPopupContent {
 
     private func fullTextItem(_ item: ClipboardItem) -> ClipboardItem? {
         switch item {
-        case .text(let entryId, let timestamp, let label, let sourceName, let sourceBundleId, _, _):
+        case .text(let entryId, let timestamp, let customLabel, let label, let sourceName, let sourceBundleId, _, _):
             guard let full = item.fullText else {
                 debugLog("fullTextItem: failed to load full text for entry \(entryId)")
                 return nil
             }
             return .text(entryId: entryId, timestamp: timestamp,
+                         customLabel: customLabel,
                          label: label, sourceName: sourceName, sourceBundleId: sourceBundleId,
                          preview: full, displayPreview: ClipboardItem.formatDisplayPreview(full))
         default:

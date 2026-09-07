@@ -41,6 +41,7 @@ fn make_image(data: &[u8], w: u32, h: u32, ts: u64) -> ClipboardEntry {
         thumb_width: thumb.1,
         thumb_height: thumb.2,
         hash,
+        custom_label: String::new(),
         timestamp: ts,
         source_name: String::new(),
         source_bundle_id: String::new(),

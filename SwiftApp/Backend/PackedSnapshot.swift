@@ -10,9 +10,9 @@ import Foundation
 /// lets the caller release the buffer through `clipboard_free_bytes`.
 enum PackedSnapshot {
     fileprivate static let magic: [UInt8] = Array("CSNP".utf8)
-    fileprivate static let version: UInt32 = 1
+    fileprivate static let version: UInt32 = 2
     fileprivate static let headerLength = 16
-    fileprivate static let rowHeaderLength = 52
+    fileprivate static let rowHeaderLength = 56
 
     static func decodeItems(from ptr: UnsafeRawPointer, length: Int) -> [ClipboardItem]? {
         guard length >= headerLength else { return nil }
@@ -36,15 +36,18 @@ enum PackedSnapshot {
             let dbId = Int(readInt64(ptr, at: offset + 20))
             let width = Int(readInt32(ptr, at: offset + 28))
             let height = Int(readInt32(ptr, at: offset + 32))
-            let labelLength = Int(readUInt32(ptr, at: offset + 36))
-            let sourceNameLength = Int(readUInt32(ptr, at: offset + 40))
-            let sourceBundleIdLength = Int(readUInt32(ptr, at: offset + 44))
-            let previewLength = Int(readUInt32(ptr, at: offset + 48))
+            let customLabelLength = Int(readUInt32(ptr, at: offset + 36))
+            let labelLength = Int(readUInt32(ptr, at: offset + 40))
+            let sourceNameLength = Int(readUInt32(ptr, at: offset + 44))
+            let sourceBundleIdLength = Int(readUInt32(ptr, at: offset + 48))
+            let previewLength = Int(readUInt32(ptr, at: offset + 52))
 
-            let stringBytes = labelLength + sourceNameLength + sourceBundleIdLength + previewLength
+            let stringBytes = customLabelLength + labelLength + sourceNameLength + sourceBundleIdLength + previewLength
             guard stringBytes >= 0, offset <= length - rowHeaderLength - stringBytes else { return nil }
 
             var span = offset + rowHeaderLength
+            let customLabel = readString(ptr, at: span, byteCount: customLabelLength)
+            span += customLabelLength
             let label = readString(ptr, at: span, byteCount: labelLength)
             span += labelLength
             let sourceName = readString(ptr, at: span, byteCount: sourceNameLength)
@@ -60,6 +63,7 @@ enum PackedSnapshot {
                 items.append(.text(
                     entryId: id,
                     timestamp: timestamp,
+                    customLabel: customLabel,
                     label: label,
                     sourceName: sourceName,
                     sourceBundleId: sourceBundleId,
@@ -73,6 +77,7 @@ enum PackedSnapshot {
                     width: width,
                     height: height,
                     timestamp: timestamp,
+                    customLabel: customLabel,
                     label: label,
                     sourceName: sourceName,
                     sourceBundleId: sourceBundleId

@@ -47,7 +47,8 @@ pub(crate) fn ensure_history_table(conn: &Connection) -> Result<(), rusqlite::Er
             source_name     TEXT NOT NULL DEFAULT '',
             source_bundle_id TEXT NOT NULL DEFAULT '',
             preview         TEXT NOT NULL DEFAULT '',
-            label           TEXT NOT NULL DEFAULT ''
+            label           TEXT NOT NULL DEFAULT '',
+            custom_label    TEXT NOT NULL DEFAULT ''
         );"
     )?;
     // Add entry_id to old DBs; ignore duplicate-column errors if it already exists.
@@ -78,6 +79,19 @@ pub(crate) fn ensure_history_table(conn: &Connection) -> Result<(), rusqlite::Er
             .is_ok();
         if !has_column {
             crate::error_log!("CopyAttach: failed to add preview/label columns: {e}");
+            return Err(e);
+        }
+    }
+
+    // Add custom_label to old DBs; same guarded ALTER pattern as preview/label.
+    if let Err(e) = conn.execute_batch(
+        "ALTER TABLE clipboard_history ADD COLUMN custom_label TEXT NOT NULL DEFAULT '';"
+    ) {
+        let has_column: bool = conn
+            .prepare("SELECT custom_label FROM clipboard_history LIMIT 0")
+            .is_ok();
+        if !has_column {
+            crate::error_log!("CopyAttach: failed to add custom_label column: {e}");
             return Err(e);
         }
     }

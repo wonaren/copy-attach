@@ -117,7 +117,7 @@ class PreviewWindow: NSPanel {
         let maxH = screenFrame.height * 0.85
 
         switch item {
-        case .text(let entryId, _, _, _, _, let text, _):
+        case .text(let entryId, _, _, _, _, _, let text, _):
             let pad: CGFloat = 32
             // Find the longest line in the text to determine adaptive window width.
             // Single-pass, line-at-a-time: the old `components(separatedBy: .newlines)`
@@ -141,7 +141,7 @@ class PreviewWindow: NSPanel {
             let totalH = min(textH + pad, maxH)
             return NSSize(width: textWidth, height: max(totalH, 100))
 
-        case .image(_, _, let w, let h, _, _, _, _):
+        case .image(_, _, let w, let h, _, _, _, _, _):
             guard w > 0, h > 0 else {
                 return NSSize(width: 320, height: 240)
             }

@@ -1,41 +1,62 @@
 import Foundation
 
 enum ClipboardItem: Identifiable {
-    case text(entryId: Int, timestamp: UInt64, label: String, sourceName: String, sourceBundleId: String, preview: String, displayPreview: String)
-    case image(entryId: Int, dbId: Int, width: Int, height: Int, timestamp: UInt64, label: String, sourceName: String, sourceBundleId: String)
+    case text(entryId: Int, timestamp: UInt64, customLabel: String, label: String, sourceName: String, sourceBundleId: String, preview: String, displayPreview: String)
+    case image(entryId: Int, dbId: Int, width: Int, height: Int, timestamp: UInt64, customLabel: String, label: String, sourceName: String, sourceBundleId: String)
 
     var id: Int {
         switch self {
-        case .text(let entryId, _, _, _, _, _, _): return entryId
-        case .image(let entryId, _, _, _, _, _, _, _): return entryId
+        case .text(let entryId, _, _, _, _, _, _, _): return entryId
+        case .image(let entryId, _, _, _, _, _, _, _, _): return entryId
         }
+    }
+
+    var customLabel: String {
+        switch self {
+        case .text(_, _, let customLabel, _, _, _, _, _): return customLabel
+        case .image(_, _, _, _, _, let customLabel, _, _, _): return customLabel
+        }
+    }
+
+    var hasCustomLabel: Bool {
+        !customLabel.isEmpty
+    }
+
+    /// Primary display title for the list row.
+    /// Prioritizes user-defined custom remark/label when present;
+    /// otherwise falls back to content display preview for text or default label for image.
+    var displayTitle: String {
+        if hasCustomLabel {
+            return customLabel
+        }
+        return isText ? displayPreview : label
     }
 
     var label: String {
         switch self {
-        case .text(_, _, let label, _, _, _, _): return label
-        case .image(_, _, _, _, _, let label, _, _): return label
+        case .text(_, _, _, let label, _, _, _, _): return label
+        case .image(_, _, _, _, _, _, let label, _, _): return label
         }
     }
 
     var timestamp: UInt64 {
         switch self {
-        case .text(_, let ts, _, _, _, _, _): return ts
-        case .image(_, _, _, _, let ts, _, _, _): return ts
+        case .text(_, let ts, _, _, _, _, _, _): return ts
+        case .image(_, _, _, _, let ts, _, _, _, _): return ts
         }
     }
 
     var sourceName: String {
         switch self {
-        case .text(_, _, _, let sn, _, _, _): return sn
-        case .image(_, _, _, _, _, _, let sn, _): return sn
+        case .text(_, _, _, _, let sn, _, _, _): return sn
+        case .image(_, _, _, _, _, _, _, let sn, _): return sn
         }
     }
 
     var sourceBundleId: String {
         switch self {
-        case .text(_, _, _, _, let sbid, _, _): return sbid
-        case .image(_, _, _, _, _, _, _, let sbid): return sbid
+        case .text(_, _, _, _, _, let sbid, _, _): return sbid
+        case .image(_, _, _, _, _, _, _, _, let sbid): return sbid
         }
     }
 
@@ -44,7 +65,7 @@ enum ClipboardItem: Identifiable {
     /// `clipboard_get_text_by_id` for preview/drag.
     var preview: String {
         switch self {
-        case .text(_, _, _, _, _, let preview, _): return preview
+        case .text(_, _, _, _, _, _, let preview, _): return preview
         case .image: return ""
         }
     }
@@ -53,7 +74,7 @@ enum ClipboardItem: Identifiable {
     /// Calculated once during snapshot decode to avoid per-render string churn in ItemRowView.
     var displayPreview: String {
         switch self {
-        case .text(_, _, _, _, _, _, let display): return display
+        case .text(_, _, _, _, _, _, _, let display): return display
         case .image: return ""
         }
     }
@@ -95,15 +116,34 @@ enum ClipboardItem: Identifiable {
     /// bounded preview, so paste/drag/copy/preview all fetch the real content
     /// through this single path. nil when the load fails.
     var fullText: String? {
-        guard case .text(let entryId, _, _, _, _, _, _) = self else { return nil }
+        guard case .text(let entryId, _, _, _, _, _, _, _) = self else { return nil }
         return ClipboardBackend.getTextByEntryId(entryId)
     }
 
     /// Load the entry's full PNG data on demand. nil while the image is still
     /// encoding (no persisted db_id yet) or when the load fails.
     var imageData: Data? {
-        guard case .image(_, let dbId, _, _, _, _, _, _) = self, dbId != 0 else { return nil }
+        guard case .image(_, let dbId, _, _, _, _, _, _, _) = self, dbId != 0 else { return nil }
         return ClipboardBackend.getImageFullByDbId(dbId)
+    }
+
+    /// Return a copy of this item with an updated custom label.
+    func withUpdatedCustomLabel(_ newCustomLabel: String) -> ClipboardItem {
+        switch self {
+        case .text(let entryId, let timestamp, _, let label, let sourceName, let sourceBundleId, let preview, let displayPreview):
+            return .text(
+                entryId: entryId, timestamp: timestamp,
+                customLabel: newCustomLabel, label: label,
+                sourceName: sourceName, sourceBundleId: sourceBundleId,
+                preview: preview, displayPreview: displayPreview
+            )
+        case .image(let entryId, let dbId, let width, let height, let timestamp, _, let label, let sourceName, let sourceBundleId):
+            return .image(
+                entryId: entryId, dbId: dbId, width: width, height: height,
+                timestamp: timestamp, customLabel: newCustomLabel,
+                label: label, sourceName: sourceName, sourceBundleId: sourceBundleId
+            )
+        }
     }
 
     var isText: Bool {
@@ -114,5 +154,12 @@ enum ClipboardItem: Identifiable {
     var isImage: Bool {
         if case .image = self { return true }
         return false
+    }
+
+    var imageDimensions: (width: Int, height: Int)? {
+        if case .image(_, _, let width, let height, _, _, _, _, _) = self {
+            return (width, height)
+        }
+        return nil
     }
 }

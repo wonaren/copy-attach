@@ -96,6 +96,10 @@ struct HistoryPopupContent: View {
     /// Bumped whenever `searchResults` is replaced, to invalidate the display memo.
     @State private var searchResultsGeneration = 0
 
+    /// ID of the entry currently undergoing inline remark editing (nil if none).
+    @State var editingItemId: Int? = nil
+    @State var editingText: String = ""
+
     // MARK: - Display-list memo
     //
     // Memoize derived rows/counts per data generation to avoid repeated O(n)
@@ -173,6 +177,43 @@ struct HistoryPopupContent: View {
     /// The highest valid selectedIndex (search bar + item count).
     var maxIndex: Int { displayItems.count }
 
+    func startInlineEditing(for item: ClipboardItem) {
+        if showPreview { closePreview() }
+        editingItemId = item.id
+        editingText = item.customLabel
+    }
+
+    func commitInlineEditing(entryId: Int, newText: String) {
+        guard editingItemId == entryId else { return }
+        editingItemId = nil
+        let trimmed = newText.trimmingCharacters(in: .whitespacesAndNewlines)
+        _ = backend.setCustomLabel(entryId: entryId, label: trimmed)
+        if !effectiveSearchText.isEmpty {
+            if let sIdx = searchResults.firstIndex(where: { $0.id == entryId }) {
+                searchResults[sIdx] = searchResults[sIdx].withUpdatedCustomLabel(trimmed)
+                searchResultsGeneration &+= 1
+            }
+        }
+        restoreContainerFocus()
+    }
+
+    func cancelInlineEditing() {
+        editingItemId = nil
+        restoreContainerFocus()
+    }
+
+    private func restoreContainerFocus() {
+        isSearchFocused = false
+        isContainerFocused = true
+        DispatchQueue.main.async {
+            self.isSearchFocused = false
+            self.isContainerFocused = true
+            if let window = self.popupWindow, let contentView = window.contentView {
+                window.makeFirstResponder(contentView)
+            }
+        }
+    }
+
     // Design Tokens
     private let popupWidth: CGFloat = 500
     private let popupHeight: CGFloat = 720
@@ -208,18 +249,21 @@ struct HistoryPopupContent: View {
         .focusEffectDisabled()
         .focused($isContainerFocused)
         .onKeyPress(.upArrow) {
+            guard editingItemId == nil else { return .ignored }
             if selectedIndex > 0 {
                 selectedIndex -= 1
             }
             return .handled
         }
         .onKeyPress(.downArrow) {
+            guard editingItemId == nil else { return .ignored }
             if selectedIndex < maxIndex {
                 selectedIndex += 1
             }
             return .handled
         }
         .onKeyPress(keys: [.return], phases: .down) { press in
+            guard editingItemId == nil else { return .ignored }
             if selectedIndex > 0 {
                 selectItem(at: selectedIndex - 1, asPath: press.modifiers.contains(.shift))
                 return .handled
@@ -231,16 +275,19 @@ struct HistoryPopupContent: View {
             return .handled
         }
         .onKeyPress(.space) {
+            guard editingItemId == nil else { return .ignored }
             if selectedIndex == 0 { return .ignored }
             togglePreview()
             return .handled
         }
         .onKeyPress(.leftArrow) {
+            guard editingItemId == nil else { return .ignored }
             guard selectedIndex > 0 else { return .ignored }
             switchFilterTab(direction: "left")
             return .handled
         }
         .onKeyPress(.rightArrow) {
+            guard editingItemId == nil else { return .ignored }
             guard selectedIndex > 0 else { return .ignored }
             switchFilterTab(direction: "right")
             return .handled
@@ -262,6 +309,8 @@ struct HistoryPopupContent: View {
             contextMenuArmed = false
             pendingContextMenuRequest = nil
             displayMemoBox.memo = nil
+            editingItemId = nil
+            editingText = ""
             openingScale = 1.10
             isControlPressed = NSEvent.modifierFlags.contains(.control)
             isCommandPressed = NSEvent.modifierFlags.contains(.command)
@@ -370,6 +419,14 @@ struct HistoryPopupContent: View {
             pendingContextMenuRequest = request
             contextMenuArmed = true
         }
+        .onReceive(NotificationCenter.default.publisher(for: startInlineEditNotification)) { _ in
+            if selectedIndex > 0 {
+                let itemIdx = selectedIndex - 1
+                if itemIdx < displayItems.count {
+                    startInlineEditing(for: displayItems[itemIdx])
+                }
+            }
+        }
         .onReceive(NotificationCenter.default.publisher(for: favoriteToggleNotification)) { _ in
             if selectedIndex > 0 {
                 let itemIdx = selectedIndex - 1
@@ -392,6 +449,7 @@ struct HistoryPopupContent: View {
             switchFilterTab(direction: direction)
         }
         .onChange(of: filterMode) { _, _ in
+            editingItemId = nil
             closePreview()
             // A tab switch re-anchors the selection to the new list's first
             // row. The list transition is a single composited fade, not a
@@ -401,6 +459,7 @@ struct HistoryPopupContent: View {
             }
         }
         .onChange(of: searchText) { _, newValue in
+            editingItemId = nil
             selectedIndex = 0
             searchTask?.cancel()
             if newValue.isEmpty {
@@ -435,6 +494,7 @@ struct HistoryPopupContent: View {
                     let matchIds = backend.searchIds(query)
                     return items.filter {
                         matchIds.contains($0.id) ||
+                        $0.customLabel.localizedCaseInsensitiveContains(query) ||
                         $0.label.localizedCaseInsensitiveContains(query) ||
                         $0.sourceName.localizedCaseInsensitiveContains(query) ||
                         DayGroup.label(for: $0.timestamp)
@@ -659,6 +719,14 @@ struct HistoryPopupContent: View {
                             isDeleteModifierPressed: isControlPressed,
                             shortcutHint: shortcut,
                             isFavorite: backend.favoriteIds.contains(item.id),
+                            isEditingRemark: editingItemId == item.id,
+                            editingText: $editingText,
+                            onCommitRemark: { newText in
+                                commitInlineEditing(entryId: item.id, newText: newText)
+                            },
+                            onCancelRemark: {
+                                cancelInlineEditing()
+                            },
                             selectionNamespace: selectionNamespace
                         )
                         // Rows exclusively own drag gestures. PopupHostingView
@@ -671,10 +739,12 @@ struct HistoryPopupContent: View {
                         }
                         .contentShape(Rectangle())
                         .onTapGesture {
+                            if editingItemId == item.id { return }
                             let itemIdx = index + 1
                             if selectedIndex == itemIdx {
                                 selectItem(at: index)
                             } else {
+                                if editingItemId != nil { cancelInlineEditing() }
                                 selectedIndex = itemIdx
                             }
                         }

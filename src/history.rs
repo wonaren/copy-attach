@@ -4,40 +4,53 @@ use crate::types::ClipboardEntry;
 
 /// Insert `item` at the head of the history Vec and remove any duplicate
 /// entries of the same type (matching text hash for text entries, hash for
-/// images). Preserves the old entry's stable ID on dedup so Swift-side
-/// favorites (stored by `entry_id`) survive background re-capture.
+/// images). Preserves the old entry's stable ID and custom label on dedup so
+/// Swift-side favorites and user-defined remarks survive background re-capture.
 /// Returns the updated Vec (the caller must assign it back to the history slot).
 pub(crate) fn add_to_history(
     mut history: Vec<ClipboardEntry>,
     mut item: ClipboardEntry,
-) -> Vec<ClipboardEntry> {    let preserved_id = match &item {
+) -> Vec<ClipboardEntry> {
+    let (preserved_id, preserved_label) = match &item {
         ClipboardEntry::Text { text_hash, .. } => {
-            let old_id = history.iter().find_map(|e| match e {
-                ClipboardEntry::Text { text_hash: h, id, .. } if h == text_hash => Some(*id),
+            let old = history.iter().find_map(|e| match e {
+                ClipboardEntry::Text { text_hash: h, id, custom_label, .. } if h == text_hash => {
+                    Some((*id, custom_label.clone()))
+                }
                 _ => None,
             });
             history.retain(|e| match e {
                 ClipboardEntry::Text { text_hash: h, .. } => h != text_hash,
                 _ => true,
             });
-            old_id
+            (old.as_ref().map(|(id, _)| *id), old.map(|(_, l)| l))
         }
         ClipboardEntry::Image { hash, .. } => {
-            let old_id = history.iter().find_map(|e| match e {
-                ClipboardEntry::Image { hash: h, id, .. } if h == hash => Some(*id),
+            let old = history.iter().find_map(|e| match e {
+                ClipboardEntry::Image { hash: h, id, custom_label, .. } if h == hash => {
+                    Some((*id, custom_label.clone()))
+                }
                 _ => None,
             });
             history.retain(|e| match e {
                 ClipboardEntry::Image { hash: h, .. } => h != hash,
                 _ => true,
             });
-            old_id
+            (old.as_ref().map(|(id, _)| *id), old.map(|(_, l)| l))
         }
     };
     if let Some(old_id) = preserved_id {
         match &mut item {
             ClipboardEntry::Text { id, .. } => *id = old_id,
             ClipboardEntry::Image { id, .. } => *id = old_id,
+        }
+    }
+    if let Some(old_label) = preserved_label {
+        if !old_label.is_empty() {
+            match &mut item {
+                ClipboardEntry::Text { custom_label, .. } => *custom_label = old_label,
+                ClipboardEntry::Image { custom_label, .. } => *custom_label = old_label,
+            }
         }
     }
     history.insert(0, item);

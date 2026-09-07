@@ -21,6 +21,8 @@ pub(crate) enum ClipboardEntry {
         preview: String,
         /// First non-empty line of the original text (≤60 scalars).
         label: String,
+        /// User-defined remark/memo. Empty when no remark is set.
+        custom_label: String,
         /// Content hash for in-memory dedup.
         text_hash: u64,
         timestamp: u64,
@@ -37,6 +39,8 @@ pub(crate) enum ClipboardEntry {
         thumb_width: u32,
         thumb_height: u32,
         hash: u64,
+        /// User-defined remark/memo. Empty when no remark is set.
+        custom_label: String,
         timestamp: u64,
         source_name: String,
         source_bundle_id: String,
@@ -74,6 +78,13 @@ impl ClipboardEntry {
     pub(crate) fn source_bundle_id(&self) -> &str {
         match self {
             ClipboardEntry::Text { source_bundle_id, .. } | ClipboardEntry::Image { source_bundle_id, .. } => source_bundle_id,
+        }
+    }
+
+    pub(crate) fn custom_label(&self) -> &str {
+        match self {
+            ClipboardEntry::Text { custom_label, .. }
+            | ClipboardEntry::Image { custom_label, .. } => custom_label,
         }
     }
 
@@ -143,6 +154,7 @@ impl ClipboardEntry {
             id,
             preview: bounded_preview(full_text),
             label: label_from_text(full_text),
+            custom_label: String::new(),
             text_hash: text_hash(full_text),
             timestamp,
             source_name,

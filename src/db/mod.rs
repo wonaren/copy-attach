@@ -23,7 +23,7 @@ pub(crate) use schema::{METADATA_VERSION, migrate_one_image_row};
 pub(crate) use schema::FTS_MAX_INDEXED_TEXT_LEN;
 #[cfg(feature = "migration")]
 pub(crate) use schema::get_persist_dir;
-pub(crate) use crud::{insert_entry_to_db, load_history_from_db, persist_entry_to_db, seed_first_launch_tips, trim_db_history};
+pub(crate) use crud::{insert_entry_to_db, load_history_from_db, persist_entry_to_db, seed_first_launch_tips, trim_db_history, update_entry_custom_label};
 pub(crate) use migration::migrate_from_json_to_db;
 /// Test-only entry point (temp-dir parameterized); the production lib resolves
 /// the real persist dir inside `migrate_from_json_to_db`.

@@ -152,3 +152,26 @@ fn test_text_hash_is_stable_fnv1a() {
     assert_eq!(crate::types::text_hash("a"), 0xaf63_dc4c_8601_ec8c);
     assert_eq!(crate::types::text_hash("foobar"), 0x8594_4171_f739_67e8);
 }
+
+#[test]
+fn test_add_to_history_preserves_custom_label_on_recapture() {
+    let mut hist = Vec::new();
+    let mut entry1 = make_text("api-key-secret-12345", 100);
+    let original_id = entry1.entry_id();
+    if let ClipboardEntry::Text { ref mut custom_label, .. } = entry1 {
+        *custom_label = "Production API Key".to_string();
+    }
+    hist = add_to_history(hist, entry1);
+    assert_eq!(hist[0].custom_label(), "Production API Key");
+    assert_eq!(hist[0].entry_id(), original_id);
+
+    // Re-capturing the identical text later (fresh entry, no custom_label initially)
+    let entry2 = make_text("api-key-secret-12345", 200);
+    let new_id = entry2.entry_id();
+    assert_ne!(original_id, new_id);
+
+    hist = add_to_history(hist, entry2);
+    assert_eq!(hist.len(), 1, "deduplicated to 1 entry");
+    assert_eq!(hist[0].entry_id(), original_id, "preserved original stable ID");
+    assert_eq!(hist[0].custom_label(), "Production API Key", "preserved custom label across re-capture");
+}

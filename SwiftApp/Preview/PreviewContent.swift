@@ -13,13 +13,13 @@ struct PreviewContent: View {
 
 
     private var currentDbId: Int {
-        guard case .image(_, let dbId, _, _, _, _, _, _) = item else { return 0 }
+        guard case .image(_, let dbId, _, _, _, _, _, _, _) = item else { return 0 }
         return dbId
     }
 
     /// Stored pixel dimensions of the image item (capture-time decode size).
     private var imagePixelSize: (w: Int, h: Int) {
-        guard case .image(_, _, let w, let h, _, _, _, _) = item else { return (0, 0) }
+        guard case .image(_, _, let w, let h, _, _, _, _, _) = item else { return (0, 0) }
         return (w, h)
     }
 
@@ -43,10 +43,10 @@ struct PreviewContent: View {
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
 
             switch item {
-            case .text(_, _, _, _, _, let preview, _):
-                LargeTextView(text: preview, textColor: previewTextNSColor)
-            case .image(_, let dbId, _, _, _, _, _, _):
-                imageContent(dbId: dbId)
+            case .text:
+                LargeTextView(text: item.preview, textColor: previewTextNSColor)
+            case .image:
+                imageContent(dbId: currentDbId)
             }
         }
     }

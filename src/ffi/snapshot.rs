@@ -12,6 +12,7 @@ pub(crate) struct SnapshotRow {
     pub(crate) id: i64,
     pub(crate) timestamp: i64,
     pub(crate) label: String,
+    pub(crate) custom_label: String,
     pub(crate) source_name: String,
     pub(crate) source_bundle_id: String,
     pub(crate) preview: String, // text entries only; empty for images
@@ -36,6 +37,7 @@ impl SnapshotRow {
             id: entry.entry_id() as i64,
             timestamp: entry.timestamp() as i64,
             label: entry.label(),
+            custom_label: entry.custom_label().to_string(),
             source_name: entry.source_name().to_string(),
             source_bundle_id: entry.source_bundle_id().to_string(),
             preview,
@@ -80,21 +82,22 @@ pub extern "C" fn clipboard_snapshot_acquire() -> *mut Snapshot {
 // serializes the whole snapshot into a single caller-owned byte buffer:
 //
 //   header  : 4 bytes "CSNP", u32 version, u32 row_count, u32 flags
-//   per row : 52-byte fixed header (all integers little-endian)
+//   per row : 56-byte fixed header (all integers little-endian)
 //             i32 entry_type, i64 id, i64 timestamp, i64 db_id,
 //             i32 width, i32 height,
+//             u32 custom_label_len,
 //             u32 label_len, u32 source_name_len, u32 source_bundle_id_len,
 //             u32 preview_len
-//             followed by the four UTF-8 byte spans in that order
+//             followed by the five UTF-8 byte spans: custom_label, label, source_name, source_bundle_id, preview
 //
-// Text rows carry label + source metadata + bounded preview. Image rows carry
-// the synthesized "Image (WxH)" label + source metadata and an empty preview.
+// Text rows carry custom_label + label + source metadata + bounded preview. Image rows carry
+// custom_label + the synthesized "Image (WxH)" label + source metadata and an empty preview.
 // The caller owns the returned buffer and releases it with
 // `clipboard_free_bytes` (which marks its pages reusable before freeing).
 
 pub(crate) const PACKED_SNAPSHOT_MAGIC: &[u8; 4] = b"CSNP";
-pub(crate) const PACKED_SNAPSHOT_VERSION: u32 = 1;
-pub(crate) const PACKED_ROW_HEADER_LEN: usize = 52;
+pub(crate) const PACKED_SNAPSHOT_VERSION: u32 = 2;
+pub(crate) const PACKED_ROW_HEADER_LEN: usize = 56;
 
 fn push_u32(out: &mut Vec<u8>, value: u32) {
     out.extend_from_slice(&value.to_le_bytes());
@@ -154,22 +157,24 @@ pub(crate) fn encode_snapshot_packed(hist: &[ClipboardEntry]) -> Vec<u8> {
         match entry {
             ClipboardEntry::Text {
                 label,
+                custom_label,
                 source_name,
                 source_bundle_id,
                 preview,
                 ..
             } => {
-                total += label.len() + source_name.len() + source_bundle_id.len() + preview.len();
+                total += custom_label.len() + label.len() + source_name.len() + source_bundle_id.len() + preview.len();
             }
             ClipboardEntry::Image {
                 width,
                 height,
+                custom_label,
                 source_name,
                 source_bundle_id,
                 ..
             } => {
                 total +=
-                    image_label_len(*width, *height) + source_name.len() + source_bundle_id.len();
+                    custom_label.len() + image_label_len(*width, *height) + source_name.len() + source_bundle_id.len();
             }
         }
     }
@@ -186,6 +191,7 @@ pub(crate) fn encode_snapshot_packed(hist: &[ClipboardEntry]) -> Vec<u8> {
                 id,
                 timestamp,
                 label,
+                custom_label,
                 source_name,
                 source_bundle_id,
                 preview,
@@ -197,10 +203,12 @@ pub(crate) fn encode_snapshot_packed(hist: &[ClipboardEntry]) -> Vec<u8> {
                 push_i64(&mut out, 0);
                 push_i32(&mut out, 0);
                 push_i32(&mut out, 0);
+                push_u32(&mut out, custom_label.len() as u32);
                 push_u32(&mut out, label.len() as u32);
                 push_u32(&mut out, source_name.len() as u32);
                 push_u32(&mut out, source_bundle_id.len() as u32);
                 push_u32(&mut out, preview.len() as u32);
+                out.extend_from_slice(custom_label.as_bytes());
                 out.extend_from_slice(label.as_bytes());
                 out.extend_from_slice(source_name.as_bytes());
                 out.extend_from_slice(source_bundle_id.as_bytes());
@@ -210,6 +218,7 @@ pub(crate) fn encode_snapshot_packed(hist: &[ClipboardEntry]) -> Vec<u8> {
                 id,
                 width,
                 height,
+                custom_label,
                 timestamp,
                 source_name,
                 source_bundle_id,
@@ -223,10 +232,12 @@ pub(crate) fn encode_snapshot_packed(hist: &[ClipboardEntry]) -> Vec<u8> {
                 push_i64(&mut out, *db_id);
                 push_i32(&mut out, *width as i32);
                 push_i32(&mut out, *height as i32);
+                push_u32(&mut out, custom_label.len() as u32);
                 push_u32(&mut out, label_len as u32);
                 push_u32(&mut out, source_name.len() as u32);
                 push_u32(&mut out, source_bundle_id.len() as u32);
                 push_u32(&mut out, 0);
+                out.extend_from_slice(custom_label.as_bytes());
                 push_image_label(&mut out, *width, *height);
                 out.extend_from_slice(source_name.as_bytes());
                 out.extend_from_slice(source_bundle_id.as_bytes());
@@ -307,6 +318,30 @@ pub extern "C" fn clipboard_snapshot_item_label(
     let snap = unsafe { &*snap };
     match snap.0.get(index as usize) {
         Some(row) => to_ffi_cstring(&row.label),
+        None => std::ptr::null_mut(),
+    }
+}
+
+/// Custom label (user-defined remark) for a snapshot item.
+/// Caller must free with `clipboard_free_string()`.
+/// Returns null when no custom label is set.
+#[no_mangle]
+pub extern "C" fn clipboard_snapshot_item_custom_label(
+    snap: *const Snapshot,
+    index: c_int,
+) -> *mut c_char {
+    if snap.is_null() {
+        return std::ptr::null_mut();
+    }
+    let snap = unsafe { &*snap };
+    match snap.0.get(index as usize) {
+        Some(row) => {
+            if row.custom_label.is_empty() {
+                std::ptr::null_mut()
+            } else {
+                to_ffi_cstring(&row.custom_label)
+            }
+        }
         None => std::ptr::null_mut(),
     }
 }
@@ -441,6 +476,7 @@ mod tests {
                 id: 7,
                 preview: "head……tail\u{0}with nul".to_string(),
                 label: "汉字 label".to_string(),
+                custom_label: "备注 text".to_string(),
                 text_hash: 1,
                 timestamp: 111,
                 source_name: "Xcode".to_string(),
@@ -454,6 +490,7 @@ mod tests {
                 thumb_width: 300,
                 thumb_height: 169,
                 hash: 2,
+                custom_label: String::new(),
                 timestamp: 222,
                 source_name: "Finder".to_string(),
                 source_bundle_id: "com.apple.finder".to_string(),
@@ -471,11 +508,14 @@ mod tests {
         assert_eq!(read_i64(&packed, at + 4), 7);
         assert_eq!(read_i64(&packed, at + 12), 111);
         assert_eq!(read_i64(&packed, at + 20), 0);
-        let label_len = read_u32(&packed, at + 36) as usize;
-        let source_len = read_u32(&packed, at + 40) as usize;
-        let bundle_len = read_u32(&packed, at + 44) as usize;
-        let preview_len = read_u32(&packed, at + 48) as usize;
+        let custom_label_len = read_u32(&packed, at + 36) as usize;
+        let label_len = read_u32(&packed, at + 40) as usize;
+        let source_len = read_u32(&packed, at + 44) as usize;
+        let bundle_len = read_u32(&packed, at + 48) as usize;
+        let preview_len = read_u32(&packed, at + 52) as usize;
         let mut span = at + PACKED_ROW_HEADER_LEN;
+        assert_eq!(&packed[span..span + custom_label_len], "备注 text".as_bytes());
+        span += custom_label_len;
         assert_eq!(&packed[span..span + label_len], "汉字 label".as_bytes());
         span += label_len;
         assert_eq!(&packed[span..span + source_len], b"Xcode");
@@ -494,14 +534,16 @@ mod tests {
         assert_eq!(read_i64(&packed, at + 20), 42);
         assert_eq!(read_i32(&packed, at + 28), 3840);
         assert_eq!(read_i32(&packed, at + 32), 2160);
-        let label_len = read_u32(&packed, at + 36) as usize;
+        let custom_label_len = read_u32(&packed, at + 36) as usize;
+        assert_eq!(custom_label_len, 0);
+        let label_len = read_u32(&packed, at + 40) as usize;
         span = at + PACKED_ROW_HEADER_LEN;
         assert_eq!(
             &packed[span..span + label_len],
             "Image (3840×2160)".as_bytes()
         );
         span += label_len;
-        assert_eq!(read_u32(&packed, at + 40) as usize, "Finder".len());
+        assert_eq!(read_u32(&packed, at + 44) as usize, "Finder".len());
         assert_eq!(&packed[span..span + "Finder".len()], b"Finder");
     }
 
@@ -521,6 +563,7 @@ mod tests {
                 id: i,
                 preview: "head……tail 一段用于测量打包快照的中文预览文本".to_string(),
                 label: "label text entry".to_string(),
+                custom_label: String::new(),
                 text_hash: i,
                 timestamp: 1_000_000 + i,
                 source_name: "Xcode".to_string(),

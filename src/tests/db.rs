@@ -434,3 +434,35 @@ fn test_image_hash_migration_undecodable_row_fails_explicitly() {
     ).unwrap();
     assert_eq!(stored, 12345, "old hash left untouched when the PNG cannot be decoded");
 }
+
+#[test]
+fn test_custom_label_persistence_and_update() {
+    let mut conn = test_db();
+    let entry_id = crate::backend::new_entry_id();
+    let entry = ClipboardEntry::Text {
+        id: entry_id,
+        preview: "test-content".to_string(),
+        label: "test-content".to_string(),
+        custom_label: "My Note".to_string(),
+        text_hash: crate::types::text_hash("test-content"),
+        timestamp: 1000,
+        source_name: "App".to_string(),
+        source_bundle_id: "com.app".to_string(),
+        db_id: 0,
+    };
+    persist_entry_to_db(&mut conn, &entry, Some("test-content"), None, None, 3000).unwrap();
+
+    let loaded = load_history_from_db(&conn, 3000);
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(loaded[0].custom_label(), "My Note");
+
+    // Update custom label
+    crate::db::update_entry_custom_label(&conn, entry_id, "Updated Remark").unwrap();
+    let reloaded = load_history_from_db(&conn, 3000);
+    assert_eq!(reloaded[0].custom_label(), "Updated Remark");
+
+    // Clear custom label
+    crate::db::update_entry_custom_label(&conn, entry_id, "").unwrap();
+    let cleared = load_history_from_db(&conn, 3000);
+    assert_eq!(cleared[0].custom_label(), "");
+}
