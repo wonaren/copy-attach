@@ -257,9 +257,11 @@ class ClipboardBackend {
         let wasGranted = permissionGranted
         permissionGranted = checkPermission()
         if !wasGranted && permissionGranted {
-            // Permission newly granted — bring settings window to front
-            // so the user sees the updated "已授权" state without
-            // having to manually switch back after closing System Settings.
+            // Permission newly granted:
+            // 1. Re-register global hotkeys so shortcuts work immediately
+            HotkeyManager.shared.reregisterHotkeys()
+            // 2. Bring settings window to front so the user sees the updated "已授权" state
+            // without having to manually switch back after closing System Settings.
             AppDelegate.shared?.focusSettingsWindow()
         }
     }

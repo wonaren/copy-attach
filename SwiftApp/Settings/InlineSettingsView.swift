@@ -68,6 +68,20 @@ struct InlineSettingsView: View {
         }
         .frame(width: 520, height: 600)
         .background(theme.background)
+        .task(id: backend.permissionGranted) {
+            // Actively poll while permission is ungranted so that toggling the
+            // switch in System Settings immediately updates the UI without
+            // requiring the user to manually click back or reopen settings.
+            guard !backend.permissionGranted else { return }
+            while !Task.isCancelled && !backend.permissionGranted {
+                try? await Task.sleep(nanoseconds: 600_000_000)
+                if Task.isCancelled { break }
+                backend.refreshPermission()
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            backend.refreshPermission()
+        }
     }
 
     var textCount: Int { backend.items.filter { $0.isText }.count }

@@ -274,7 +274,7 @@ class HotkeyManager {
         unregisterNSEvent()
     }
 
-    private func reregisterHotkeys() {
+    func reregisterHotkeys() {
         unregisterBoth()
         registerBoth()
     }

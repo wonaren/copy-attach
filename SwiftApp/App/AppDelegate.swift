@@ -289,6 +289,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     // MARK: - NSWindowDelegate
 
+    func windowDidBecomeKey(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow, window === settingsWindow else { return }
+        ClipboardBackend.shared.refreshPermission()
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        ClipboardBackend.shared.refreshPermission()
+    }
+
     func windowWillClose(_ notification: Notification) {
         guard let window = notification.object as? NSWindow else { return }
         if window === licenseGateWindow {
@@ -464,7 +473,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.titleVisibility = .visible
         window.titlebarAppearsTransparent = true
         window.titlebarSeparatorStyle = .none
-        window.isMovableByWindowBackground = true
+        // Must be false: enabling background movement steals mouse drags before
+        // SwiftUI can start an item drag (such as dragging the app icon to the
+        // Accessibility pane in System Settings), causing the entire window to move.
+        // The window remains draggable by its title bar (same as HistoryPopupWindow).
+        window.isMovableByWindowBackground = false
         window.isReleasedWhenClosed = false
         window.hidesOnDeactivate = false
         window.delegate = self

@@ -106,7 +106,7 @@ checksum = "3d7b894f5411737b7867f4827955924d7c254fc9f4d91a6aad6b097804b1018b"
 
 [[package]]
 name = "copy-attach"
-version = "0.101.3-dev"
+version = "0.101.4-dev"
 dependencies = [
  "arboard",
  "base64",

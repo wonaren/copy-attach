@@ -86,6 +86,7 @@ extension InlineSettingsView {
                         .resizable()
                         .frame(width: 52, height: 52)
                         .clipShape(RoundedRectangle(cornerRadius: 11))
+                        .contentShape(RoundedRectangle(cornerRadius: 11))
                         .overlay(
                             RoundedRectangle(cornerRadius: 11)
                                 .stroke(Color.white.opacity(0.15), lineWidth: 1)
@@ -98,6 +99,7 @@ extension InlineSettingsView {
                                 .padding(3)
                                 .background(Circle().fill(Color.accentColor))
                                 .offset(x: 5, y: -5)
+                                .allowsHitTesting(false)
                         }
                         .scaleEffect(isHoveringDragIcon ? 1.05 : 1.0)
                         .onHover { hovering in
