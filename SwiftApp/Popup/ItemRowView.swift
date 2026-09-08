@@ -411,6 +411,9 @@ struct InlineRemarkField: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: NSTextField, context: Context) {
+        // Keep the coordinator's copy current: it captures the binding and the
+        // commit/cancel closures, which must reflect the latest render.
+        context.coordinator.parent = self
         if nsView.stringValue != text && nsView.currentEditor() == nil {
             nsView.stringValue = text
         }
@@ -422,6 +425,39 @@ struct InlineRemarkField: NSViewRepresentable {
 
         init(_ parent: InlineRemarkField) {
             self.parent = parent
+        }
+
+        /// Cap the remark while it is being typed or pasted. Counting scalars
+        /// (not grapheme clusters) keeps this exactly aligned with the Rust
+        /// `MAX_CUSTOM_LABEL_SCALARS` check, which would otherwise reject a
+        /// field the UI considered legal (emoji / combining marks).
+        func control(_ control: NSControl,
+                     textView: NSTextView,
+                     shouldChangeTextIn affectedCharRange: NSRange,
+                     replacementString: String?) -> Bool {
+            guard let replacement = replacementString else { return true }
+            // AppKit delivers this on the main thread; the SDK's
+            // NSControlTextEditingDelegate is not MainActor-annotated, so the
+            // contract is stated explicitly.
+            return MainActor.assumeIsolated {
+                let current = textView.string as NSString
+                // IME composition can report a range past the current string; the
+                // cap is a guard, so let the text system handle anything unexpected.
+                guard affectedCharRange.location != NSNotFound,
+                      affectedCharRange.location + affectedCharRange.length <= current.length else {
+                    return true
+                }
+                let proposed = current.replacingCharacters(in: affectedCharRange, with: replacement)
+                return proposed.unicodeScalars.count <= ClipboardBackend.maxCustomLabelScalars
+            }
+        }
+
+        /// Mirror the field's live text back into the binding, so callers that
+        /// commit on a path other than Enter (switching rows / tabs / search)
+        /// have the text the user actually typed.
+        func controlTextDidChange(_ obj: Notification) {
+            guard let field = obj.object as? NSTextField else { return }
+            parent.text = field.stringValue
         }
 
         func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {

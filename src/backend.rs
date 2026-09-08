@@ -252,18 +252,69 @@ pub(crate) fn set_debug_logging(enabled: bool) {
 
 /// Backing implementation for `debug_log!`; writes unconditionally to stderr.
 pub(crate) fn debug_log_fmt(args: std::fmt::Arguments<'_>) {
-    use std::io::Write;
-    let mut err = std::io::stderr();
-    let _ = err.write_fmt(args);
-    let _ = err.write_all(b"\n");
+    write_log_line(args);
 }
 
 /// Backing implementation for `error_log!`; always writes to stderr.
 pub(crate) fn error_log_fmt(args: std::fmt::Arguments<'_>) {
+    write_log_line(args);
+}
+
+/// One log line: `<timestamp> <message>\n`.
+///
+/// Both log macros share it so every Rust line carries the same UTC+8 stamp as
+/// the Swift side's `DebugLog` (`yyyy-MM-dd HH:mm:ss +0800`). Without a stamp,
+/// Rust-side errors were impossible to place on a timeline against the Swift
+/// lines around them.
+fn write_log_line(args: std::fmt::Arguments<'_>) {
     use std::io::Write;
     let mut err = std::io::stderr();
+    let _ = err.write_all(log_timestamp().as_bytes());
+    let _ = err.write_all(b" ");
     let _ = err.write_fmt(args);
     let _ = err.write_all(b"\n");
+}
+
+/// Current time stamped as UTC+8, matching the Swift formatter.
+fn log_timestamp() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format_log_timestamp(secs)
+}
+
+/// Format Unix seconds as `yyyy-MM-dd HH:mm:ss +0800`.
+///
+/// The offset is fixed rather than taken from the system timezone: the log is a
+/// support artifact that gets compared across machines, and a fixed offset
+/// makes two reports directly comparable (the stamp spells out `+0800`, so a
+/// reader in another timezone can still convert).
+pub(crate) fn format_log_timestamp(unix_secs: u64) -> String {
+    const UTC8_OFFSET_SECS: u64 = 8 * 3600;
+    let shifted = unix_secs + UTC8_OFFSET_SECS;
+    let (y, m, d) = civil_from_days((shifted / 86_400) as i64);
+    let sod = shifted % 86_400;
+    format!(
+        "{y:04}-{m:02}-{d:02} {:02}:{:02}:{:02} +0800",
+        sod / 3600,
+        (sod % 3600) / 60,
+        sod % 60
+    )
+}
+
+/// Days since 1970-01-01 → (year, month, day); Howard Hinnant's civil_from_days.
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097; // [0, 146096]
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
+    let m = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32; // [1, 12]
+    (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
 // CopyAttach temp-file convention

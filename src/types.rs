@@ -8,6 +8,15 @@ pub(crate) struct SourceApp {
     pub(crate) pid: i32,
 }
 
+/// Upper bound on a user-authored remark, in Unicode scalars.
+///
+/// The remark is copied into every packed snapshot, every `ClipboardItem`, and
+/// every keystroke's search pass, so it must stay a small bounded payload like
+/// `preview` / `label`. The Swift input field enforces the same bound
+/// (`InlineRemarkField.maxRemarkScalars`); this constant is the FFI contract
+/// check that rejects a caller that ignores it.
+pub(crate) const MAX_CUSTOM_LABEL_SCALARS: usize = 200;
+
 /// A clipboard history entry.
 ///
 /// `id` is stable across reordering; `db_id` points to SQLite for on-demand

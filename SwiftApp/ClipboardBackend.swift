@@ -10,6 +10,12 @@ private let thumbnailDecodeSlots = DispatchSemaphore(value: 4)
 class ClipboardBackend {
     static let shared = ClipboardBackend()
 
+    /// Upper bound on a user-authored remark, in Unicode scalars. Mirrors Rust's
+    /// `MAX_CUSTOM_LABEL_SCALARS` (the FFI rejects anything longer); the remark
+    /// travels in every packed snapshot, so it must stay a bounded payload.
+    /// `nonisolated` so AppKit text-field delegates can read it off the actor.
+    nonisolated static let maxCustomLabelScalars = 200
+
     var count: Int = 0
     var items: [ClipboardItem] = []
     var permissionGranted: Bool = false
@@ -437,6 +443,13 @@ class ClipboardBackend {
 
     func setCustomLabel(entryId: Int, label: String) -> Bool {
         let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Mirrors Rust's MAX_CUSTOM_LABEL_SCALARS. The input field already caps
+        // typing/pasting; this guard turns any bypass into an explicit failure
+        // instead of a silent one.
+        guard trimmed.unicodeScalars.count <= Self.maxCustomLabelScalars else {
+            errorLog("setCustomLabel: remark for entry \(entryId) exceeds \(Self.maxCustomLabelScalars) scalars — rejected")
+            return false
+        }
         let ok = trimmed.withCString { cStr in
             clipboard_set_custom_label(UInt64(entryId), cStr) != 0
         }
@@ -446,6 +459,9 @@ class ClipboardBackend {
                 itemsGeneration &+= 1
                 reloadGeneration.withLock { $0 &+= 1 }
             }
+        } else {
+            // Rust logs the concrete reason (unknown id, missing row, DB error).
+            errorLog("setCustomLabel: backend rejected the remark for entry \(entryId) — see Rust log")
         }
         return ok
     }

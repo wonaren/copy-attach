@@ -161,19 +161,34 @@ final class UpdateDownloader: NSObject, ObservableObject, URLSessionDownloadDele
         guard let files = listJSON["data"] as? [[String: Any]] else {
             throw UpdateError.lanzou("蓝奏云文件列表解析失败")
         }
+        // Architecture selection, strictest first. A bare `contains(version)`
+        // also matched a longer version sharing the prefix (v0.101.4 vs
+        // v0.101.40), and excluding only the *other* arch silently accepted an
+        // unmarked build — which can be the wrong architecture entirely.
         #if arch(arm64)
-        let excludedArch = "x86_64"
+        let wantedArch = "arm64"
+        let otherArch = "x86_64"
         #else
-        let excludedArch = "arm64"
+        let wantedArch = "x86_64"
+        let otherArch = "arm64"
         #endif
-        guard let entry = files.first(where: {
-            guard let name = $0["fileName"] as? String else { return false }
-            return name.hasSuffix(".zip") && name.contains(version) && !name.contains(excludedArch)
-        }),
-              let fileName = entry["fileName"] as? String,
-              let fileID = entry["fileId"] as? String else {
-            throw UpdateError.lanzou("蓝奏云上未找到版本 \(version) 的安装包")
+        // The trailing separator is what kills the version-prefix ambiguity.
+        let versionTokens = ["v\(version)-", "\(version)-"]
+        let candidates: [(name: String, id: String)] = files.compactMap { file in
+            guard let name = file["fileName"] as? String,
+                  let id = file["fileId"] as? String,
+                  name.lowercased().hasSuffix(".zip"),
+                  versionTokens.contains(where: { name.contains($0) }) else { return nil }
+            return (name, id)
         }
+        let chosen = candidates.first { $0.name.contains(wantedArch) }
+            ?? candidates.first { !$0.name.contains(otherArch) }
+        guard let entry = chosen else {
+            let seen = candidates.map(\.name).prefix(5).joined(separator: ", ")
+            throw UpdateError.lanzou("蓝奏云上未找到版本 \(version) 的 \(wantedArch) 安装包（候选：\(seen.isEmpty ? "无" : seen)）")
+        }
+        let fileName = entry.name
+        let fileID = entry.id
         debugLog("[update] lanzou (NFD) found: \(fileName)")
 
         // 2) resolve the direct link

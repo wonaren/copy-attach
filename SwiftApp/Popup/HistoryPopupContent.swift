@@ -183,18 +183,37 @@ struct HistoryPopupContent: View {
         editingText = item.customLabel
     }
 
-    func commitInlineEditing(entryId: Int, newText: String) {
+    func commitInlineEditing(entryId: Int, newText: String, restoreFocus: Bool = true) {
         guard editingItemId == entryId else { return }
         editingItemId = nil
         let trimmed = newText.trimmingCharacters(in: .whitespacesAndNewlines)
-        _ = backend.setCustomLabel(entryId: entryId, label: trimmed)
-        if !effectiveSearchText.isEmpty {
-            if let sIdx = searchResults.firstIndex(where: { $0.id == entryId }) {
-                searchResults[sIdx] = searchResults[sIdx].withUpdatedCustomLabel(trimmed)
-                searchResultsGeneration &+= 1
+        // A failed save must not look like a success: the row would silently
+        // revert while the user believes the remark is stored.
+        let saved = backend.setCustomLabel(entryId: entryId, label: trimmed)
+        if saved {
+            if !effectiveSearchText.isEmpty {
+                if let sIdx = searchResults.firstIndex(where: { $0.id == entryId }) {
+                    searchResults[sIdx] = searchResults[sIdx].withUpdatedCustomLabel(trimmed)
+                    searchResultsGeneration &+= 1
+                }
             }
+        } else {
+            errorLog("commitInlineEditing: remark for entry \(entryId) was not saved")
+            NSSound.beep()
         }
-        restoreContainerFocus()
+        if restoreFocus { restoreContainerFocus() }
+    }
+
+    /// Commit whatever is being edited, if anything. Every path that ends the
+    /// edit for a reason other than an explicit Escape must go through here:
+    /// switching rows/tabs/search used to discard the text, so the same edit was
+    /// kept or lost depending on how the user left the field.
+    ///
+    /// `restoreFocus: false` for callers that hand focus somewhere else right
+    /// after (the search field), where restoring the container would steal it.
+    func commitPendingInlineEdit(restoreFocus: Bool = true) {
+        guard let entryId = editingItemId else { return }
+        commitInlineEditing(entryId: entryId, newText: editingText, restoreFocus: restoreFocus)
     }
 
     func cancelInlineEditing() {
@@ -356,6 +375,9 @@ struct HistoryPopupContent: View {
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: deleteKeyNotification)) { _ in
+            // Inline remark editing owns the keyboard: ⌃⌫ belongs to the text
+            // field, never to the entry underneath it.
+            guard editingItemId == nil else { return }
             // When the search bar is focused (selectedIndex == 0), delete the
             // first visible item in the filtered results so ⌃⌫ still works
             // while the user is typing a search query.
@@ -378,7 +400,10 @@ struct HistoryPopupContent: View {
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: commandNumberNotification)) { note in
-            guard let number = note.object as? Int,
+            // ⌘1-⌘9 pastes a result and must stay available while searching,
+            // but not while a remark is being edited.
+            guard editingItemId == nil,
+                  let number = note.object as? Int,
                   number >= 1 && number <= displayItems.count else { return }
             selectItem(at: number - 1)
         }
@@ -449,7 +474,9 @@ struct HistoryPopupContent: View {
             switchFilterTab(direction: direction)
         }
         .onChange(of: filterMode) { _, _ in
-            editingItemId = nil
+            // Leaving the current list keeps the edit — a tab switch is not a
+            // cancel gesture (Escape is).
+            commitPendingInlineEdit()
             closePreview()
             // A tab switch re-anchors the selection to the new list's first
             // row. The list transition is a single composited fade, not a
@@ -459,7 +486,9 @@ struct HistoryPopupContent: View {
             }
         }
         .onChange(of: searchText) { _, newValue in
-            editingItemId = nil
+            // Focus belongs to the search field right after this; restoring the
+            // container would take it back asynchronously.
+            commitPendingInlineEdit(restoreFocus: false)
             selectedIndex = 0
             searchTask?.cancel()
             if newValue.isEmpty {
@@ -744,7 +773,9 @@ struct HistoryPopupContent: View {
                             if selectedIndex == itemIdx {
                                 selectItem(at: index)
                             } else {
-                                if editingItemId != nil { cancelInlineEditing() }
+                                // Switching rows keeps the edit (Escape is the
+                                // only way to discard it).
+                                commitPendingInlineEdit()
                                 selectedIndex = itemIdx
                             }
                         }

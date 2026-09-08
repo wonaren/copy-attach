@@ -22,16 +22,6 @@ enum ClipboardItem: Identifiable {
         !customLabel.isEmpty
     }
 
-    /// Primary display title for the list row.
-    /// Prioritizes user-defined custom remark/label when present;
-    /// otherwise falls back to content display preview for text or default label for image.
-    var displayTitle: String {
-        if hasCustomLabel {
-            return customLabel
-        }
-        return isText ? displayPreview : label
-    }
-
     var label: String {
         switch self {
         case .text(_, _, _, let label, _, _, _, _): return label
@@ -154,12 +144,5 @@ enum ClipboardItem: Identifiable {
     var isImage: Bool {
         if case .image = self { return true }
         return false
-    }
-
-    var imageDimensions: (width: Int, height: Int)? {
-        if case .image(_, _, let width, let height, _, _, _, _, _) = self {
-            return (width, height)
-        }
-        return nil
     }
 }

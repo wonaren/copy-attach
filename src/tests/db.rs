@@ -466,3 +466,58 @@ fn test_custom_label_persistence_and_update() {
     let cleared = load_history_from_db(&conn, 3000);
     assert_eq!(cleared[0].custom_label(), "");
 }
+
+/// The capture path's DB invariant: re-copying the same text must keep the
+/// remark in SQLite, not just in memory.
+///
+/// `add_to_history` preserves the label on dedup and the monitor persists
+/// `hist[0]` (the merged entry), so the new row carries the old remark and the
+/// superseded row is deleted. This test pins that composition — a memory-only
+/// assertion would pass while the remark silently disappeared on restart.
+#[test]
+fn test_recapture_persists_preserved_custom_label() {
+    let mut conn = test_db();
+    let text = "shared-body-for-recapture";
+
+    let first = ClipboardEntry::Text {
+        id: new_entry_id(),
+        preview: text.to_string(),
+        label: text.to_string(),
+        custom_label: "Production Key".to_string(),
+        text_hash: crate::types::text_hash(text),
+        timestamp: 1000,
+        source_name: "App".to_string(),
+        source_bundle_id: "com.app".to_string(),
+        db_id: 0,
+    };
+    persist_entry_to_db(&mut conn, &first, Some(text), None, None, 3000).unwrap();
+    let first_id = first.entry_id();
+
+    // A genuine re-copy: fresh entry, no remark of its own.
+    let recaptured = ClipboardEntry::Text {
+        id: new_entry_id(),
+        preview: text.to_string(),
+        label: text.to_string(),
+        custom_label: String::new(),
+        text_hash: crate::types::text_hash(text),
+        timestamp: 2000,
+        source_name: "App".to_string(),
+        source_bundle_id: "com.app".to_string(),
+        db_id: 0,
+    };
+    let merged = crate::history::add_to_history(vec![first], recaptured);
+    assert_eq!(merged.len(), 1);
+    assert_eq!(merged[0].entry_id(), first_id, "stable id survives recapture");
+    assert_eq!(merged[0].custom_label(), "Production Key");
+
+    persist_entry_to_db(&mut conn, &merged[0], Some(text), None, None, 3000).unwrap();
+
+    let loaded = load_history_from_db(&conn, 3000);
+    assert_eq!(loaded.len(), 1, "recapture must leave exactly one row");
+    assert_eq!(
+        loaded[0].custom_label(),
+        "Production Key",
+        "the remark must survive recapture in the DB, not only in memory"
+    );
+    assert_eq!(loaded[0].entry_id(), first_id);
+}

@@ -123,7 +123,7 @@ pub(crate) fn load_history_from_db(conn: &Connection, threshold: usize) -> Vec<C
             row.get::<_, i64>(10)?,
             row.get::<_, String>(11)?,
             row.get::<_, String>(12)?,
-            row.get::<_, Option<String>>(13)?.unwrap_or_default()))
+            row.get::<_, String>(13)?))
     }) {
         Ok(r) => r,
         Err(e) => {
@@ -361,17 +361,28 @@ pub(crate) fn persist_entry_to_db(
 }
 
 /// Update the custom label / remark for an entry by its stable `entry_id`.
+///
+/// A zero-row update is a failure, not a success: the caller's in-memory entry
+/// and its DB row are required to agree, so silently "succeeding" against a
+/// missing row would leave the remark memory-only and lose it on restart.
 pub(crate) fn update_entry_custom_label(
     conn: &Connection,
     entry_id: u64,
     custom_label: &str,
 ) -> Result<(), ()> {
-    conn.execute(
-        "UPDATE clipboard_history SET custom_label = ?1 WHERE entry_id = ?2",
-        rusqlite::params![custom_label, entry_id as i64],
-    )
-    .map(|_| ())
-    .map_err(|e| {
-        crate::error_log!("CopyAttach: failed to update custom_label for entry {entry_id}: {e}");
-    })
+    let changed = conn
+        .execute(
+            "UPDATE clipboard_history SET custom_label = ?1 WHERE entry_id = ?2",
+            rusqlite::params![custom_label, entry_id as i64],
+        )
+        .map_err(|e| {
+            crate::error_log!("CopyAttach: failed to update custom_label for entry {entry_id}: {e}");
+        })?;
+    if changed == 0 {
+        crate::error_log!(
+            "CopyAttach: custom_label update matched no row for entry {entry_id} (DB/memory out of sync)"
+        );
+        return Err(());
+    }
+    Ok(())
 }

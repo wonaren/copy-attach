@@ -344,5 +344,114 @@ fn test_clipboard_set_custom_label_ffi() {
     // Null pointer must return 0
     let ret_null = crate::ffi::clipboard_set_custom_label(entry_id, std::ptr::null());
     assert_eq!(ret_null, 0);
+
+    // Over-long label is a caller contract violation: rejected, and neither the
+    // in-memory entry nor the DB row may change.
+    let long_label = std::ffi::CString::new(
+        "x".repeat(crate::types::MAX_CUSTOM_LABEL_SCALARS + 1),
+    ).unwrap();
+    assert_eq!(
+        crate::ffi::clipboard_set_custom_label(entry_id, long_label.as_ptr()),
+        0,
+        "label over the scalar cap must be rejected"
+    );
+    {
+        let hist = b.history.lock().unwrap();
+        let entry = hist.iter().find(|e| e.entry_id() == entry_id).unwrap();
+        assert_eq!(entry.custom_label(), "My FFI Remark");
+    }
+    {
+        let conn = b.db.lock().unwrap();
+        let stored: String = conn.query_row(
+            "SELECT custom_label FROM clipboard_history WHERE entry_id = ?1",
+            rusqlite::params![entry_id as i64],
+            |r| r.get(0),
+        ).unwrap();
+        assert_eq!(stored, "My FFI Remark");
+    }
+
+    // A label exactly at the cap is accepted.
+    let at_cap = std::ffi::CString::new("y".repeat(crate::types::MAX_CUSTOM_LABEL_SCALARS)).unwrap();
+    assert_eq!(
+        crate::ffi::clipboard_set_custom_label(entry_id, at_cap.as_ptr()),
+        1,
+        "label at the scalar cap must be accepted"
+    );
+
+    // An id present in the DB but absent from the in-memory history is rejected
+    // before any write — the history is the authority on what may be labelled.
+    let db_only_id = crate::backend::new_entry_id();
+    {
+        let conn = b.db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO clipboard_history (entry_type, text, hash, timestamp, source_name, source_bundle_id, entry_id)
+             VALUES (0, 'db-only', 98766, 100, 'App', 'com.app', ?1)",
+            rusqlite::params![db_only_id as i64],
+        ).unwrap();
+    }
+    assert_eq!(
+        crate::ffi::clipboard_set_custom_label(db_only_id, c_label.as_ptr()),
+        0,
+        "an entry unknown to the history must be rejected"
+    );
+    {
+        let conn = b.db.lock().unwrap();
+        let stored: String = conn.query_row(
+            "SELECT custom_label FROM clipboard_history WHERE entry_id = ?1",
+            rusqlite::params![db_only_id as i64],
+            |r| r.get(0),
+        ).unwrap();
+        assert_eq!(stored, "", "rejected id must leave the DB row untouched");
+        conn.execute(
+            "DELETE FROM clipboard_history WHERE entry_id IN (?1, ?2)",
+            rusqlite::params![entry_id as i64, db_only_id as i64],
+        ).unwrap();
+    }
+    {
+        let mut hist = b.history.lock().unwrap();
+        hist.retain(|e| e.entry_id() != entry_id);
+    }
+}
+
+#[test]
+fn test_update_entry_custom_label_requires_existing_row() {
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    crate::db::ensure_history_table(&conn).unwrap();
+
+    assert!(
+        crate::db::update_entry_custom_label(&conn, 4242, "ghost").is_err(),
+        "updating a label with no matching row must fail, not report success"
+    );
+
+    conn.execute(
+        "INSERT INTO clipboard_history (entry_type, text, hash, timestamp, source_name, source_bundle_id, entry_id)
+         VALUES (0, 'body', 1, 1, 'App', 'com.app', 4242)",
+        [],
+    ).unwrap();
+    crate::db::update_entry_custom_label(&conn, 4242, "real").unwrap();
+    let stored: String = conn.query_row(
+        "SELECT custom_label FROM clipboard_history WHERE entry_id = 4242",
+        [],
+        |r| r.get(0),
+    ).unwrap();
+    assert_eq!(stored, "real");
+}
+
+#[test]
+fn test_log_timestamp_is_utc_plus_8() {
+    assert_eq!(crate::backend::format_log_timestamp(0), "1970-01-01 08:00:00 +0800");
+    assert_eq!(
+        crate::backend::format_log_timestamp(951_782_400),
+        "2000-02-29 08:00:00 +0800",
+        "leap day must survive the civil-date conversion"
+    );
+    assert_eq!(
+        crate::backend::format_log_timestamp(1_000_000_000),
+        "2001-09-09 09:46:40 +0800"
+    );
+    assert_eq!(
+        crate::backend::format_log_timestamp(1_757_340_675),
+        "2025-09-08 22:11:15 +0800"
+    );
 }
 

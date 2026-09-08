@@ -8,6 +8,13 @@ extension HistoryPopupContent {
         guard index < items.count else { return }
         let item = items[index]
         guard let backendIdx = backend.items.firstIndex(where: { $0.id == item.id }) else { return }
+        // The row is about to disappear: drop the inline editor first, otherwise
+        // `editingItemId` would stay set with no row rendering a field, and every
+        // popup shortcut is gated behind it being nil.
+        if editingItemId == item.id {
+            editingItemId = nil
+            editingText = ""
+        }
         closePreview()
         var deleted = false
         withAnimation(.easeInOut(duration: 0.2)) {

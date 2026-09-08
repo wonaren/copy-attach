@@ -385,41 +385,44 @@ pub extern "C" fn clipboard_last_restored_id() -> u64 {
 
 /// Update the custom label / remark for an entry by its stable `entry_id`.
 /// Pass an empty string to clear the custom label.
-/// Returns 1 on success, 0 on failure (entry not found or DB error).
+/// Rejects labels longer than `MAX_CUSTOM_LABEL_SCALARS` (caller contract).
+/// Returns 1 on success, 0 on failure (entry not found, over-long label, DB error).
+///
+/// Order matters: the DB row is written first, so a DB failure leaves the
+/// in-memory entry untouched — the same ordering `clipboard_trim_oldest_percent`
+/// documents. A failure is never reported as success: memory and DB must agree.
 #[no_mangle]
 pub extern "C" fn clipboard_set_custom_label(entry_id: u64, label: *const c_char) -> c_int {
     if label.is_null() {
         return 0;
     }
-    let label_str = unsafe { CStr::from_ptr(label) }.to_string_lossy();
+    let label_str = unsafe { CStr::from_ptr(label) }.to_string_lossy().into_owned();
+    if label_str.chars().count() > crate::types::MAX_CUSTOM_LABEL_SCALARS {
+        crate::error_log!(
+            "CopyAttach: set_custom_label: label for entry {entry_id} exceeds {} scalars — rejected",
+            crate::types::MAX_CUSTOM_LABEL_SCALARS
+        );
+        return 0;
+    }
     let b = match try_backend() {
         Some(b) => b,
         None => return 0,
     };
 
-    // Update in-memory entry under history lock
+    // The history owns the entry set: an id the in-memory history doesn't know
+    // is rejected before any write, so a stale/unknown id can never touch a row.
     {
-        let mut hist = match b.history.lock() {
+        let hist = match b.history.lock() {
             Ok(h) => h,
             Err(_) => return 0,
         };
-        let found = hist.iter_mut().find(|e| e.entry_id() == entry_id);
-        let entry = match found {
-            Some(e) => e,
-            None => {
-                crate::error_log!("CopyAttach: set_custom_label: entry {entry_id} not found");
-                return 0;
-            }
-        };
-        match entry {
-            ClipboardEntry::Text { custom_label, .. }
-            | ClipboardEntry::Image { custom_label, .. } => {
-                *custom_label = label_str.to_string();
-            }
+        if !hist.iter().any(|e| e.entry_id() == entry_id) {
+            crate::error_log!("CopyAttach: set_custom_label: entry {entry_id} not found");
+            return 0;
         }
     }
 
-    // Write-through to SQLite DB
+    // DB first: on failure nothing in memory has changed.
     {
         let conn = match b.db.lock() {
             Ok(c) => c,
@@ -427,6 +430,26 @@ pub extern "C" fn clipboard_set_custom_label(entry_id: u64, label: *const c_char
         };
         if crate::db::update_entry_custom_label(&conn, entry_id, &label_str).is_err() {
             return 0;
+        }
+    }
+
+    // Memory write-through.
+    {
+        let mut hist = match b.history.lock() {
+            Ok(h) => h,
+            Err(_) => return 0,
+        };
+        match hist.iter_mut().find(|e| e.entry_id() == entry_id) {
+            Some(ClipboardEntry::Text { custom_label, .. })
+            | Some(ClipboardEntry::Image { custom_label, .. }) => *custom_label = label_str,
+            None => {
+                // The entry was deleted between the DB write and this lock. The
+                // delete removed the row too, so there is nothing to diverge.
+                crate::error_log!(
+                    "CopyAttach: set_custom_label: entry {entry_id} vanished after DB write"
+                );
+                return 0;
+            }
         }
     }
 
