@@ -121,7 +121,7 @@ pub extern "C" fn clipboard_delete_by_id(entry_id: u64) -> c_int {
                     undo_image = Some(crate::backend::MarkImageBlobsReusableOnDrop { png, thumb });
                 }
                 Err(e) => {
-                    crate::error_log!("CopyAttach: failed to load image data from DB for undo: {e}");
+                    crate::error_log!("CopyAttach: failed to load image data from DB for undo (entry {entry_id}, db_id={db_id}): {e}");
                     return 0;
                 }
             }

@@ -225,43 +225,51 @@ fn select_and_paste_impl(mut item: ClipboardEntry, as_path: bool) -> c_int {
     );
     drop(_event_guard);
 
-    if let Some(b) = try_backend() {
-        match b.db.lock() {
-            Ok(mut conn) => {
-                let png_for_db = image_blobs.as_ref().map(|b| b.png.as_slice());
-                let thumb_for_db = image_blobs.as_ref().and_then(|b| {
-                    image_thumb_dims.map(|(tw, th)| (b.thumb.as_slice(), tw, th))
-                });
+    // The DB write-through and the in-memory write-through must happen under
+    // ONE DB lock. Releasing it in between lets a concurrent same-content
+    // insert (monitor capture or image Phase 2) dedup the row we just
+    // committed before our memory update lands, leaving the entry pointing at
+    // a deleted row — a ghost the UI can neither preview, paste, nor delete.
+    // Every other DB writer (monitor text capture, Phase 2, undo) already
+    // holds the DB lock across its memory write; this path was the only one
+    // that did not.
+    let b = backend();
+    let mut db_guard = match b.db.lock() {
+        Ok(c) => Some(c),
+        Err(e) => {
+            crate::error_log!("CopyAttach: DB mutex poisoned in select_and_paste persist: {e} — entry stays with db_id=0");
+            None
+        }
+    };
+    if let Some(conn) = db_guard.as_mut() {
+        let png_for_db = image_blobs.as_ref().map(|b| b.png.as_slice());
+        let thumb_for_db = image_blobs.as_ref().and_then(|b| {
+            image_thumb_dims.map(|(tw, th)| (b.thumb.as_slice(), tw, th))
+        });
 
-                match crate::db::persist_entry_to_db(
-                    &mut conn,
-                    &item,
-                    full_text.as_ref().map(|g| g.0.as_str()),
-                    png_for_db,
-                    thumb_for_db,
-                    b.cleanup_threshold.load(Ordering::Relaxed),
-                ) {
-                    Ok(new_row_id) => {
-                        match &mut item {
-                            ClipboardEntry::Image { ref mut db_id, .. } |
-                            ClipboardEntry::Text { ref mut db_id, .. } => {
-                                *db_id = new_row_id;
-                            }
-                        }
-                    }
-                    Err(()) => {
-                        crate::error_log!("CopyAttach: select_and_paste DB insert failed — entry stays with db_id=0");
+        match crate::db::persist_entry_to_db(
+            conn,
+            &item,
+            full_text.as_ref().map(|g| g.0.as_str()),
+            png_for_db,
+            thumb_for_db,
+            b.cleanup_threshold.load(Ordering::Relaxed),
+        ) {
+            Ok(new_row_id) => {
+                match &mut item {
+                    ClipboardEntry::Image { ref mut db_id, .. } |
+                    ClipboardEntry::Text { ref mut db_id, .. } => {
+                        *db_id = new_row_id;
                     }
                 }
             }
-            Err(e) => {
-                crate::error_log!("CopyAttach: DB mutex poisoned in select_and_paste persist: {e} — entry stays with db_id=0");
+            Err(()) => {
+                crate::error_log!("CopyAttach: select_and_paste DB insert failed — entry stays with db_id=0");
             }
         }
     }
 
     {
-        let b = backend();
         let mut hist = b.history.lock().unwrap();
         *hist = add_to_history(std::mem::take(&mut *hist), item);
         while hist.len() > b.cleanup_threshold.load(Ordering::Relaxed) {
@@ -269,6 +277,9 @@ fn select_and_paste_impl(mut item: ClipboardEntry, as_path: bool) -> c_int {
         }
         mark_history_changed();
     }
+    // Release the DB lock before the 50ms paste delay so the capture monitor
+    // is never blocked on it.
+    drop(db_guard);
 
     let front_pid = try_backend()
         .and_then(|b| b.source_app.lock().ok())
