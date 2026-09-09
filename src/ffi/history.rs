@@ -60,6 +60,9 @@ pub extern "C" fn clipboard_delete_by_id(entry_id: u64) -> c_int {
         Some(e) => e,
         None => return 0,
     };
+    // The entry's full identity: a concurrent re-capture preserves entry_id but
+    // gets a different row, so the removal below must match both (Step 5).
+    let target_db_id = entry.db_id();
 
     // Step 2: Load full content for undo BEFORE the DB delete removes it.
     // Text bodies live only in SQLite (the in-memory entry carries just a
@@ -205,13 +208,12 @@ pub extern "C" fn clipboard_delete_by_id(entry_id: u64) -> c_int {
         }
     }
 
-    // Step 5: DB delete succeeded. Now remove from history.
+    // Step 5: DB delete succeeded. Remove exactly the entry whose row was
+    // deleted — by identity, never by entry_id alone (see
+    // history::remove_deleted_entry).
     {
         let mut hist = b.history.lock().unwrap();
-        hist.retain(|e| match e {
-            ClipboardEntry::Text { id, .. } => *id != entry_id,
-            ClipboardEntry::Image { id, .. } => *id != entry_id,
-        });
+        crate::history::remove_deleted_entry(&mut hist, entry_id, target_db_id);
     }
 
     // Step 6: Push the metadata-only slot (with its on-disk payload) onto the

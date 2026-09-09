@@ -81,3 +81,21 @@ pub(crate) fn assign_db_id_by_text_hash(
         }
     }
 }
+
+/// Remove exactly the entry whose DB row a delete just removed, identified by
+/// entry_id AND db_id.
+///
+/// entry_id alone is not identity: add_to_history preserves a re-captured
+/// entry's stable id, so a capture landing between the DB delete and this
+/// removal adopts the deleted entry's id. Removing by id alone would delete
+/// that fresh capture too — it disappears from the list while its row stays
+/// behind as an orphan (until a later same-content dedup or a restart).
+/// The deleted row's id pins the entry that was actually deleted; the
+/// re-capture already points at a different (newer) row.
+pub(crate) fn remove_deleted_entry(
+    history: &mut Vec<ClipboardEntry>,
+    entry_id: u64,
+    db_id: i64,
+) {
+    history.retain(|e| !(e.entry_id() == entry_id && e.db_id() == db_id));
+}

@@ -65,6 +65,15 @@ impl ClipboardEntry {
         }
     }
 
+    /// SQLite row this entry's payload lives in (0 = not persisted yet).
+    /// Paired with entry_id() it is the entry's full identity: a re-capture
+    /// keeps the stable id but always points at a new row.
+    pub(crate) fn db_id(&self) -> i64 {
+        match self {
+            ClipboardEntry::Text { db_id, .. } | ClipboardEntry::Image { db_id, .. } => *db_id,
+        }
+    }
+
     pub(crate) fn timestamp(&self) -> u64 {
         match self {
             ClipboardEntry::Text { timestamp, .. } | ClipboardEntry::Image { timestamp, .. } => *timestamp,

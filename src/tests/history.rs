@@ -1,6 +1,6 @@
 // History ordering and dedup tests — `add_to_history` semantics.
 
-use crate::history::{add_to_history, assign_db_id_by_text_hash};
+use crate::history::{add_to_history, assign_db_id_by_text_hash, remove_deleted_entry};
 use crate::types::ClipboardEntry;
 use super::{make_image, make_test_image_rgba, make_text};
 
@@ -174,4 +174,69 @@ fn test_add_to_history_preserves_custom_label_on_recapture() {
     assert_eq!(hist.len(), 1, "deduplicated to 1 entry");
     assert_eq!(hist[0].entry_id(), original_id, "preserved original stable ID");
     assert_eq!(hist[0].custom_label(), "Production API Key", "preserved custom label across re-capture");
+}
+
+/// Regression for the delete/recapture collision: a capture landing between
+/// the DB delete and the in-memory removal adopts the deleted entry's stable
+/// id (add_to_history preserves it). Removing by entry_id alone would delete
+/// that fresh capture too — it vanishes from the list while its row stays
+/// behind as an orphan. Identity is (entry_id, db_id): the deleted row pins
+/// the entry that was actually deleted, the re-capture points at a new row.
+#[test]
+fn test_remove_deleted_entry_keeps_concurrent_recapture() {
+    let mut hist = Vec::new();
+    let mut deleted = make_text("delete-me", 100);
+    if let ClipboardEntry::Text { db_id, .. } = &mut deleted {
+        *db_id = 7;
+    }
+    let deleted_id = deleted.entry_id();
+    hist = add_to_history(hist, deleted);
+
+    // The delete already removed row 7; the concurrent re-capture preserved
+    // the id but was assigned row 42.
+    let mut recaptured = make_text("delete-me", 200);
+    if let ClipboardEntry::Text { id, db_id, .. } = &mut recaptured {
+        *id = deleted_id;
+        *db_id = 42;
+    }
+    hist = add_to_history(hist, recaptured);
+    assert_eq!(hist.len(), 1);
+
+    remove_deleted_entry(&mut hist, deleted_id, 7);
+
+    assert_eq!(hist.len(), 1, "the fresh capture must survive the delete");
+    assert_eq!(hist[0].db_id(), 42);
+}
+
+/// The plain case: the entry still points at the deleted row, so it is removed.
+#[test]
+fn test_remove_deleted_entry_removes_the_deleted_row() {
+    let mut hist = Vec::new();
+    let mut entry = make_text("delete-me", 100);
+    if let ClipboardEntry::Text { db_id, .. } = &mut entry {
+        *db_id = 7;
+    }
+    let id = entry.entry_id();
+    hist = add_to_history(hist, entry);
+
+    remove_deleted_entry(&mut hist, id, 7);
+
+    assert!(hist.is_empty(), "the entry pointing at the deleted row goes");
+}
+
+/// A stale call must never touch a neighbouring entry.
+#[test]
+fn test_remove_deleted_entry_no_match_is_noop() {
+    let mut hist = Vec::new();
+    let mut entry = make_text("keep-me", 100);
+    if let ClipboardEntry::Text { db_id, .. } = &mut entry {
+        *db_id = 7;
+    }
+    hist = add_to_history(hist, entry);
+    let id = hist[0].entry_id();
+
+    remove_deleted_entry(&mut hist, id, 999);
+
+    assert_eq!(hist.len(), 1);
+    assert_eq!(hist[0].db_id(), 7);
 }
