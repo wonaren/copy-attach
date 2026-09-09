@@ -191,11 +191,6 @@ extension HistoryPopupContent {
     private func saveImageItem(_ item: ClipboardItem) {
         guard item.isImage, let data = item.imageData else { return }
         let timestamp = item.timestamp
-        // Dismiss popup cleanly before presenting modal save panel to prevent
-        // didResignKey from firing an asynchronous teardown while the modal runs.
-        closePreview()
-        onClose()
-
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.png]
         panel.canCreateDirectories = true
@@ -203,8 +198,20 @@ extension HistoryPopupContent {
         formatter.dateFormat = "yyyy-MM-dd-HHmmss"
         let date = Date(timeIntervalSince1970: TimeInterval(timestamp))
         panel.nameFieldStringValue = "CopyAttach-\(formatter.string(from: date)).png"
+        // The save panel is a modal window of this app: it takes key status
+        // from the nonactivating popup, and the popup must survive that focus
+        // transfer — it stays behind the panel and remains the session the
+        // user returns to. `isPresentingModalPanel` suppresses the resign-key
+        // dismissal for exactly this window; key status is handed back after
+        // the modal loop ends.
+        let popup = popupWindow
+        popup?.isPresentingModalPanel = true
+        defer { popup?.isPresentingModalPanel = false }
+
         NSApp.activate(ignoringOtherApps: true)
-        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let response = panel.runModal()
+        if let popup, popup.isVisible { popup.makeKey() }
+        guard response == .OK, let url = panel.url else { return }
         do {
             try data.write(to: url)
         } catch {

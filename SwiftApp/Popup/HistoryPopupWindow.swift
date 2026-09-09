@@ -14,6 +14,13 @@ class HistoryPopupWindow: NSPanel {
     /// deliberate click outside the popup dismisses it normally.
     private var itemDragInProgress = false
     private var awaitingPostDragInteraction = false
+
+    /// True while this popup presents a modal panel of its own (the right-click
+    /// 「另存为…」 NSSavePanel). The modal window necessarily takes key status
+    /// from this nonactivating panel; that resign-key is a focus transfer, not
+    /// a dismissal — the popup is deliberately retained behind the panel and
+    /// regains key when the modal loop ends.
+    var isPresentingModalPanel = false
     /// Polls `NSEvent.pressedMouseButtons` to detect the end of a drag
     /// (mouse up). Event monitors never see the mouse-up of a drag session:
     /// while dragging, the run loop runs in NSEventTrackingRunLoopMode, which
@@ -247,6 +254,12 @@ class HistoryPopupWindow: NSPanel {
     }
 
     @objc private func didResignKey(_ notification: Notification) {
+        // Our own modal panel is key now: the popup stays behind it (see
+        // `isPresentingModalPanel`) instead of being dismissed.
+        if isPresentingModalPanel {
+            debugLog("Popup resigned key for a modal panel; retaining popup")
+            return
+        }
         if itemDragInProgress || awaitingPostDragInteraction {
             if Self.closePopupAfterDragEnabled {
                 // The drag left the popup and focus moved elsewhere (a drop
