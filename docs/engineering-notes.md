@@ -90,6 +90,7 @@ Phase 1 同步 hash + 缩略图（最长边 300px）→ 更新内存。Phase 2 �
 - **开启（对齐 Spotlight）**：窗口 alpha 淡入 0.2s easeOut，`show()` 在 `orderFrontRegardless()` 后同步执行——刻意不放进 `DispatchQueue.main.async`（async 实测排在 SwiftUI 首帧渲染之后，启动死区 ~40-90ms）；内容侧 `scaleEffect` 1.10→1.0，`spring(response: 0.2, dampingFraction: 0.85)`。**淡入看门狗**：若窗口首帧事务未提交时动画被静默丢弃，弹窗会以 alpha 0 常驻屏幕（可稳定复现）——`show()` 在 `fadeInDuration + 0.1s` 后校验 `isVisible && closeGuaranteeTimer == nil && alphaValue < 0.5`，命中则 snap 到可见；焦点延迟 `openDuration + 0.05`。
 - **关闭**：普通失焦/点击外部走 `closeWithAnimation()`（popup 0.12s fade 与 preview 0.1s fade 独立并行，另有 `.common` + `.eventTracking` 双模式 Timer 0.4s 保证关闭必然执行——CA completion 在事件跟踪模式下不可靠）；拖拽后自动关闭走直接 `close()`。
 - **选中高亮**：`matchedGeometryEffect(id: "itemSelectionHighlight")` 在行间滑动；hover 静态填充；删除模式（⌃⌫）高亮变红。
+- **行文本 = 有界 preview 的 head……tail**：Rust `bounded_preview` 已把长文本折成 `前 180 标量……后 74 标量`（`PREVIEW_SCALARS=256`），Swift `ClipboardItem.formatDisplayPreview` 再按视觉宽度切成 `25……25`。**折叠必须遍历整段 preview**：0.100.8 为省分配加的 `collapsed.count >= 60 { break }` 会在切分之前砍掉尾部窗口，导致行尾显示的其实是头部中段（"首尾字符"退化成"首部中段"）。行内分配本身有界（preview ≤256 标量，且每次快照解码只算一次），所以提前退出换不来任何可测收益；空白分隔符延迟到下一个可见字符才落地（`pendingSeparator`），否则复制来的源文件几乎都以换行结尾，尾窗口会被一个 `⏎` 吃掉 2 个视觉宽度；预览面板传全文的那次调用已改为沿用列表的 displayPreview（面板只渲染 `item.preview` 全文，从不读该字段）。
 - **Escape 三层拦截**：SwiftUI `.onKeyPress(.escape)` → PopupHostingView NSEvent local monitor（NSTextView 第一响应者时）→ Notification 转发。优先关预览，否则关弹窗。
 - FocusState 双管理：isSearchFocused（selectedIndex=0）和 isContainerFocused（selectedIndex>0），解决 TextField focus 接管后 onKeyPress 失效。
 

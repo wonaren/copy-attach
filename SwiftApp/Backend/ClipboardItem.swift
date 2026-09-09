@@ -70,29 +70,35 @@ enum ClipboardItem: Identifiable {
     }
 
     /// Pure formatting helper to turn raw preview text into bounded single-line display text.
+    ///
+    /// Contract: `preview` is the snapshot's bounded preview — ≤256 scalars, already
+    /// elided to `head……tail` by Rust (`bounded_preview`) when the text is longer. The
+    /// head/tail split below therefore lands on the entry's real beginning and real end.
+    ///
+    /// The collapse is one streaming pass (no intermediate arrays). It must consume the
+    /// whole preview: an early exit clipped the tail window before the split, so the
+    /// "tail" was drawn from the middle of the head instead of the text's ending.
     static func formatDisplayPreview(_ preview: String) -> String {
         guard !preview.isEmpty else { return "" }
-        // Single-pass newline collapse without intermediate array allocations.
-        // Breaks early at 60 characters since visual width is capped at 50.
         var collapsed = ""
-        collapsed.reserveCapacity(min(preview.utf8.count, 64))
-        var wasWhitespaceOrNewline = false
+        collapsed.reserveCapacity(min(preview.utf8.count, 256))
+        // Separators are deferred until the next visible character: a run of
+        // whitespace only means something *between* two runs of text. Emitting
+        // eagerly would spend the tail window on a trailing "⏎"/" " — the normal
+        // case for copied source files — instead of on real characters.
+        var pendingSeparator: Character?
         for ch in preview {
             if ch.isNewline {
-                if !wasWhitespaceOrNewline && !collapsed.isEmpty {
-                    collapsed.append("⏎")
-                    wasWhitespaceOrNewline = true
-                }
+                if !collapsed.isEmpty { pendingSeparator = "⏎" }
             } else if ch.isWhitespace {
-                if !wasWhitespaceOrNewline && !collapsed.isEmpty {
-                    collapsed.append(" ")
-                    wasWhitespaceOrNewline = true
-                }
+                if !collapsed.isEmpty, pendingSeparator == nil { pendingSeparator = " " }
             } else {
+                if let separator = pendingSeparator {
+                    collapsed.append(separator)
+                    pendingSeparator = nil
+                }
                 collapsed.append(ch)
-                wasWhitespaceOrNewline = false
             }
-            if collapsed.count >= 60 { break }
         }
         if visualWidth(collapsed) > 50 {
             let prefix = String(collapsed.prefix(whileVisualWidth: 25))

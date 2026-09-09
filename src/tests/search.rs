@@ -216,6 +216,17 @@ fn test_snapshot_row_text_bounded_preview() {
 }
 
 #[test]
+fn test_snapshot_row_text_bounded_preview_keeps_tail() {
+    // Semantic tripwire for the list row: it renders head……tail, so the bounded
+    // preview must end with the entry's real ending. A head-only preview makes
+    // the row print a middle fragment where the ending should be.
+    let text = format!("{}结尾标记", "填充内容".repeat(100));
+    let row = SnapshotRow::from_entry(&make_text(&text, 300));
+    assert!(row.preview.ends_with("结尾标记"), "preview lost the tail: {}", row.preview);
+    assert!(row.preview.chars().count() <= 256);
+}
+
+#[test]
 fn test_snapshot_row_image() {
     let img_data = make_test_image_rgba(1920, 1080, 128);
     let i = make_image(&img_data, 1920, 1080, 300);

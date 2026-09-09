@@ -67,15 +67,18 @@ extension HistoryPopupContent {
 
     private func fullTextItem(_ item: ClipboardItem) -> ClipboardItem? {
         switch item {
-        case .text(let entryId, let timestamp, let customLabel, let label, let sourceName, let sourceBundleId, _, _):
+        case .text(let entryId, let timestamp, let customLabel, let label, let sourceName, let sourceBundleId, _, let displayPreview):
             guard let full = item.fullText else {
                 debugLog("fullTextItem: failed to load full text for entry \(entryId)")
                 return nil
             }
+            // `preview` becomes the full text (LargeTextView renders it), but the row's
+            // display form is carried over: the preview panel never renders it, and
+            // recomputing it here would scan the whole document to produce nothing.
             return .text(entryId: entryId, timestamp: timestamp,
                          customLabel: customLabel,
                          label: label, sourceName: sourceName, sourceBundleId: sourceBundleId,
-                         preview: full, displayPreview: ClipboardItem.formatDisplayPreview(full))
+                         preview: full, displayPreview: displayPreview)
         default:
             return item
         }
