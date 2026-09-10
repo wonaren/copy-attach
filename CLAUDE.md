@@ -38,7 +38,7 @@ open "CopyAttach.app"
 ```
 
 **版本号与 CHANGELOG 约定**：
-- **版本号**：唯一版本源在 `Cargo.toml` 的 `version` 字段，`build.sh` 自动同步到 `Info.plist` 的 `CFBundleShortVersionString`。开发版本带 `-dev` 后缀（如 `0.93.0-dev`），发布版本去掉后缀。每次功能/修复提交都提升版本号并写入提交信息。
+- **版本号**：唯一版本源在 `Cargo.toml` 的 `version` 字段，`build.sh` 自动注入到产物 `CopyAttach.app/Contents/Info.plist` 的 `CFBundleShortVersionString`（保持源码 `SwiftApp/Info.plist` 干净无脏 diff）。开发版本带 `-dev` 后缀（如 `0.93.0-dev`），发布版本去掉后缀。每次功能/修复提交都提升版本号并写入提交信息。
 - **CHANGELOG 规范**：内容必须**纯面向用户且简洁凝练**。
 
 ### 生产构建

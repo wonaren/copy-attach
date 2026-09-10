@@ -132,7 +132,7 @@ COPYATTACH_LICENSE_PUBLIC_KEY='efsKYx9a7urNlr-UXR7b0-Fl9w0mJNKe3RME-OeseOs' \
 ./build.sh
 ```
 
-参数写入 App bundle 的 `Info.plist`（`CopyAttachLicenseServerURL/KeyID/PublicKey`），源码里的 `Info.plist` 不保留（构建后回删）；`LicenseConfiguration`（`LicenseLeaseVerifier.swift`）保留同一套生产值作为回退。协议细节见 `docs/licensing-protocol.md`。
+参数写入 App bundle 的 `Info.plist`（`CopyAttachLicenseServerURL/KeyID/PublicKey`），直接注入产物包（源码里的 `Info.plist` 保持干净不修改）；`LicenseConfiguration`（`LicenseLeaseVerifier.swift`）保留同一套生产值作为回退。协议细节见 `docs/licensing-protocol.md`。
 
 ## 签名与分发
 

@@ -9,7 +9,7 @@
 # 检查项：
 #   1. Cargo.toml 版本号为干净的 X.Y.Z（-dev 后缀已去掉）
 #   2. Cargo.lock 根包版本与 Cargo.toml 一致（bump 后需跑过 cargo check / build）
-#   3. SwiftApp/Info.plist 的 CFBundleShortVersionString 与 Cargo.toml 一致（build.sh 会写入源码 plist，未重新构建时会残留旧版本）
+#   3. 本地构建产物 CopyAttach.app 的版本号与 Cargo.toml 一致（若存在产物；版本号由 build.sh 自动注入产物）
 #   4. CHANGELOG.md 有「## [X.Y.Z] - 日期」章节，且位于最顶部
 #   5. [Unreleased] 章节为空（开发条目已全部移入发布章节）
 #   6. 章节日期合法且不晚于今天
@@ -94,16 +94,19 @@ if [[ -f Cargo.lock ]]; then
   fi
 fi
 
-# ---------- 3. SwiftApp/Info.plist 同步 ----------
-if [[ -f SwiftApp/Info.plist ]]; then
-  PLIST_VERSION=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" SwiftApp/Info.plist 2>/dev/null || true)
+# ---------- 3. 本地构建产物 Info.plist 版本同步校验 ----------
+APP_PLIST="CopyAttach.app/Contents/Info.plist"
+if [[ -f "${APP_PLIST}" ]]; then
+  PLIST_VERSION=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" "${APP_PLIST}" 2>/dev/null || true)
   if [[ -z "${PLIST_VERSION}" ]]; then
-    warn "SwiftApp/Info.plist 中读不到 CFBundleShortVersionString（无法校验）"
+    warn "CopyAttach.app/Contents/Info.plist 中读不到 CFBundleShortVersionString"
   elif [[ "${PLIST_VERSION}" != "${VERSION}" ]]; then
-    fail "SwiftApp/Info.plist 版本（${PLIST_VERSION}）与 Cargo.toml（${VERSION}）不一致——请执行 ./build.sh 同步，或手动 PlistBuddy 更新"
+    fail "本地构建产物 CopyAttach.app 版本（${PLIST_VERSION}）与 Cargo.toml（${VERSION}）不一致——请重新执行 ./build.sh"
   else
-    ok "SwiftApp/Info.plist 版本一致（${PLIST_VERSION}）"
+    ok "本地构建产物 CopyAttach.app 版本一致（${PLIST_VERSION}）"
   fi
+else
+  ok "未检测到本地构建产物（build.sh 会在构建时自动向产物注入版本号）"
 fi
 
 if [[ "${DEV_MODE}" -eq 1 ]]; then

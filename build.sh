@@ -4,14 +4,15 @@ set -e
 
 cd "$(dirname "$0")"
 
+export PATH="$HOME/.cargo/bin:$PATH"
+
 APP_NAME="CopyAttach"
 SWIFT_SRC="SwiftApp"
 
 echo "==> Building Rust backend library…"
 
-# Read version from Cargo.toml and sync to Info.plist
+# Read version from Cargo.toml
 CARGO_VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
-/usr/libexec/PlistBuddy -c "Set CFBundleShortVersionString ${CARGO_VERSION}" "${SWIFT_SRC}/Info.plist" 2>/dev/null || true
 
 # Build with optional stress-test feature (set STRESS=1 to enable)
 CARGO_FEATURES=""
@@ -92,19 +93,6 @@ else
     LICENSE_SIGNING_KEY_ID="${COPYATTACH_LICENSE_KEY_ID:-production-2026-08}"
     COPYATTACH_LICENSE_PUBLIC_KEY="${COPYATTACH_LICENSE_PUBLIC_KEY:-efsKYx9a7urNlr-UXR7b0-Fl9w0mJNKe3RME-OeseOs}"
 fi
-/usr/libexec/PlistBuddy -c "Delete CopyAttachLicenseServerURL" "${SWIFT_SRC}/Info.plist" 2>/dev/null || true
-/usr/libexec/PlistBuddy -c "Add CopyAttachLicenseServerURL string ${LICENSE_SERVER_URL}" "${SWIFT_SRC}/Info.plist"
-/usr/libexec/PlistBuddy -c "Delete CopyAttachLicenseSigningKeyID" "${SWIFT_SRC}/Info.plist" 2>/dev/null || true
-/usr/libexec/PlistBuddy -c "Add CopyAttachLicenseSigningKeyID string ${LICENSE_SIGNING_KEY_ID}" "${SWIFT_SRC}/Info.plist"
-/usr/libexec/PlistBuddy -c "Delete CopyAttachLicenseSigningPublicKey" "${SWIFT_SRC}/Info.plist" 2>/dev/null || true
-/usr/libexec/PlistBuddy -c "Add CopyAttachLicenseSigningPublicKey string ${COPYATTACH_LICENSE_PUBLIC_KEY}" "${SWIFT_SRC}/Info.plist"
-if [ "$LICENSE_ENV" = "local" ]; then
-    /usr/libexec/PlistBuddy -c "Delete NSAppTransportSecurity" "${SWIFT_SRC}/Info.plist" 2>/dev/null || true
-    /usr/libexec/PlistBuddy -c "Add NSAppTransportSecurity dict" "${SWIFT_SRC}/Info.plist"
-    /usr/libexec/PlistBuddy -c "Add NSAppTransportSecurity:NSAllowsLocalNetworking bool true" "${SWIFT_SRC}/Info.plist"
-else
-    /usr/libexec/PlistBuddy -c "Delete NSAppTransportSecurity" "${SWIFT_SRC}/Info.plist" 2>/dev/null || true
-fi
 
 # Compile with explicit args
 $SWIFTC $SDK \
@@ -130,15 +118,24 @@ $SWIFTC $SDK \
     -Xlinker -rpath -Xlinker "/usr/local/lib" \
     $(find "${SWIFT_SRC}" -name '*.swift' | sort)
 
-# Copy Info.plist
-cp "${SWIFT_SRC}/Info.plist" "${APP_NAME}.app/Contents/"
-
-# Keep generated environment-specific values out of the tracked source plist.
-# The app bundle already contains the configured copy above.
-/usr/libexec/PlistBuddy -c "Delete CopyAttachLicenseServerURL" "${SWIFT_SRC}/Info.plist" 2>/dev/null || true
-/usr/libexec/PlistBuddy -c "Delete CopyAttachLicenseSigningKeyID" "${SWIFT_SRC}/Info.plist" 2>/dev/null || true
-/usr/libexec/PlistBuddy -c "Delete CopyAttachLicenseSigningPublicKey" "${SWIFT_SRC}/Info.plist" 2>/dev/null || true
-/usr/libexec/PlistBuddy -c "Delete NSAppTransportSecurity" "${SWIFT_SRC}/Info.plist" 2>/dev/null || true
+# Copy and configure Info.plist in app bundle.
+# Keep the tracked source plist (${SWIFT_SRC}/Info.plist) completely clean and unmodified.
+TARGET_PLIST="${APP_NAME}.app/Contents/Info.plist"
+cp "${SWIFT_SRC}/Info.plist" "${TARGET_PLIST}"
+/usr/libexec/PlistBuddy -c "Set CFBundleShortVersionString ${CARGO_VERSION}" "${TARGET_PLIST}" 2>/dev/null || true
+/usr/libexec/PlistBuddy -c "Delete CopyAttachLicenseServerURL" "${TARGET_PLIST}" 2>/dev/null || true
+/usr/libexec/PlistBuddy -c "Add CopyAttachLicenseServerURL string ${LICENSE_SERVER_URL}" "${TARGET_PLIST}"
+/usr/libexec/PlistBuddy -c "Delete CopyAttachLicenseSigningKeyID" "${TARGET_PLIST}" 2>/dev/null || true
+/usr/libexec/PlistBuddy -c "Add CopyAttachLicenseSigningKeyID string ${LICENSE_SIGNING_KEY_ID}" "${TARGET_PLIST}"
+/usr/libexec/PlistBuddy -c "Delete CopyAttachLicenseSigningPublicKey" "${TARGET_PLIST}" 2>/dev/null || true
+/usr/libexec/PlistBuddy -c "Add CopyAttachLicenseSigningPublicKey string ${COPYATTACH_LICENSE_PUBLIC_KEY}" "${TARGET_PLIST}"
+if [ "$LICENSE_ENV" = "local" ]; then
+    /usr/libexec/PlistBuddy -c "Delete NSAppTransportSecurity" "${TARGET_PLIST}" 2>/dev/null || true
+    /usr/libexec/PlistBuddy -c "Add NSAppTransportSecurity dict" "${TARGET_PLIST}"
+    /usr/libexec/PlistBuddy -c "Add NSAppTransportSecurity:NSAllowsLocalNetworking bool true" "${TARGET_PLIST}"
+else
+    /usr/libexec/PlistBuddy -c "Delete NSAppTransportSecurity" "${TARGET_PLIST}" 2>/dev/null || true
+fi
 
 # Copy bridging header for reference
 cp "${SWIFT_SRC}/CopyAttach-Bridging-Header.h" "${APP_NAME}.app/Contents/Resources/"
