@@ -21,10 +21,10 @@ extension InlineSettingsView {
             HStack(spacing: 10) {
                 Image(systemName: backend.permissionGranted ? "checkmark.shield.fill" : "exclamationmark.shield.fill")
                     .font(.system(size: 18))
-                    .foregroundColor(backend.permissionGranted ? .green : .orange)
+                    .foregroundColor(backend.permissionGranted ? Color(nsColor: .systemGreen) : Color(nsColor: .systemOrange))
                 Text(backend.permissionGranted ? "辅助功能：已授权" : "辅助功能：未授权")
                     .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(backend.permissionGranted ? .green : .orange)
+                    .foregroundColor(backend.permissionGranted ? Color(nsColor: .systemGreen) : Color(nsColor: .systemOrange))
             }
             if !backend.permissionGranted {
                 Text("应用需要辅助功能权限才能使用全局快捷键和自动粘贴")
@@ -57,11 +57,11 @@ extension InlineSettingsView {
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(backend.permissionGranted ? Color.green.opacity(0.08) : Color.orange.opacity(0.08))
+        .background(backend.permissionGranted ? Color(nsColor: .systemGreen).opacity(0.10) : Color(nsColor: .systemOrange).opacity(0.10))
         .cornerRadius(12)
         .overlay(
             RoundedRectangle(cornerRadius: 12)
-                .stroke(backend.permissionGranted ? Color.green.opacity(0.2) : Color.orange.opacity(0.2), lineWidth: 1)
+                .stroke(backend.permissionGranted ? Color(nsColor: .systemGreen).opacity(0.28) : Color(nsColor: .systemOrange).opacity(0.28), lineWidth: 1)
         )
         .animation(.spring(response: 0.3, dampingFraction: 0.72), value: showDragGuide)
         .animation(.spring(response: 0.3, dampingFraction: 0.72), value: backend.permissionGranted)
@@ -151,7 +151,7 @@ extension InlineSettingsView {
             cardTitle(icon: "gearshape.2", text: "其它设置")
             settingToggleRow(
                 icon: launchAtLogin ? "power.circle.fill" : "power.circle",
-                iconColor: launchAtLogin ? .green : .secondary,
+                iconColor: launchAtLogin ? Color(nsColor: .systemGreen) : theme.secondaryText,
                 title: "开机启动",
                 desc: "在 macOS 系统启动时自动开启 CopyAttach。",
                 isOn: $launchAtLogin
@@ -173,7 +173,7 @@ extension InlineSettingsView {
             sectionDivider().padding(.vertical, 4)
             settingToggleRow(
                 icon: runInBackground ? "circle.fill" : "circle",
-                iconColor: runInBackground ? .green : .secondary,
+                iconColor: runInBackground ? Color(nsColor: .systemGreen) : theme.secondaryText,
                 title: "后台运行",
                 desc: "关闭主窗口后，保持应用在后台状态栏运行。",
                 isOn: $runInBackground
@@ -184,7 +184,7 @@ extension InlineSettingsView {
             sectionDivider().padding(.vertical, 4)
             settingToggleRow(
                 icon: closePopupAfterDrag ? "hand.draw.fill" : "hand.draw",
-                iconColor: closePopupAfterDrag ? Color.accentColor : .secondary,
+                iconColor: closePopupAfterDrag ? Color.accentColor : theme.secondaryText,
                 title: "拖拽后自动关闭弹窗",
                 desc: "将历史条目拖拽到其他应用后自动关闭弹窗；关闭此开关可连续拖拽多个条目。",
                 isOn: $closePopupAfterDrag
@@ -195,7 +195,7 @@ extension InlineSettingsView {
             sectionDivider().padding(.vertical, 4)
             settingToggleRow(
                 icon: "ant.circle.fill",
-                iconColor: debugLogging ? .orange : .secondary,
+                iconColor: debugLogging ? Color(nsColor: .systemOrange) : theme.secondaryText,
                 title: "调试日志",
                 desc: "开发/诊断时输出日志到 /tmp/copyattach_debug.log；分发版默认关闭以节省资源。",
                 isOn: $debugLogging
@@ -211,7 +211,7 @@ extension InlineSettingsView {
             cardTitle(icon: "menubar.rectangle", text: "菜单栏图标状态设置")
             settingToggleRow(
                 icon: "dot.square",
-                iconColor: showMenuBarIcon ? Color.accentColor : .secondary,
+                iconColor: showMenuBarIcon ? Color.accentColor : theme.secondaryText,
                 title: "显示菜单栏图标",
                 desc: "控制 CopyAttach 图标在 macOS 右上角状态栏的显隐。",
                 isOn: $showMenuBarIcon

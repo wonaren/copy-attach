@@ -48,7 +48,7 @@ struct LicenseSettingsView: View {
                 }
 
                 Text("未开始试用或未激活时，CopyAttach 不会监控剪贴板。关闭此窗口将退出程序。许可证验证不会上传任何剪贴板内容。")
-                    .font(.system(size: 11)).foregroundColor(theme.tertiaryText).lineSpacing(2)
+                    .font(.system(size: 11)).foregroundColor(theme.secondaryText).lineSpacing(2)
             }
             .padding(24)
         }
@@ -84,7 +84,7 @@ struct LicenseSettingsView: View {
                     .buttonStyle(.borderedProminent).disabled(normalizedKey.isEmpty || manager.isWorking)
             }
             Text("密钥仅用于本次激活；激活成功后保存的是绑定本设备的签名凭证。")
-                .font(.system(size: 10.5)).foregroundColor(theme.tertiaryText)
+                .font(.system(size: 10.5)).foregroundColor(theme.secondaryText)
         }
         .padding(16).background(theme.cardBackground).cornerRadius(12)
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(theme.cardBorder, lineWidth: 1))
@@ -107,7 +107,7 @@ struct LicenseSettingsView: View {
     private var statusIcon: String {
         switch manager.state { case .trialActive: return "clock.badge.checkmark"; case .licensed: return "checkmark.seal.fill"; case .subscriptionActive: return "timer"; case .loading: return "hourglass"; default: return "exclamationmark.shield" }
     }
-    private var statusColor: Color { switch manager.state { case .trialActive: return .orange; case .licensed: return .green; case .subscriptionActive: return .blue; default: return .secondary } }
+    private var statusColor: Color { switch manager.state { case .trialActive: return Color(nsColor: .systemOrange); case .licensed: return Color(nsColor: .systemGreen); case .subscriptionActive: return Color(nsColor: .systemBlue); default: return theme.secondaryText } }
     private var statusTitle: String {
         switch manager.state {
         case .loading: return "正在检查许可证"

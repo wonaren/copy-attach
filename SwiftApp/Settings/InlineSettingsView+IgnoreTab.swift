@@ -25,7 +25,7 @@ extension InlineSettingsView {
                 if ignoredAppBundleIDs.isEmpty {
                     Text("未设置应用规则")
                         .font(.system(size: 11))
-                        .foregroundColor(theme.tertiaryText)
+                        .foregroundColor(theme.secondaryText)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 10)
                 } else {
@@ -40,7 +40,7 @@ extension InlineSettingsView {
                                     .foregroundColor(theme.primaryText)
                                 Text(bundleID)
                                     .font(.system(size: 10))
-                                    .foregroundColor(theme.tertiaryText)
+                                    .foregroundColor(theme.secondaryText)
                             }
                             Spacer()
                             Button {
@@ -48,7 +48,7 @@ extension InlineSettingsView {
                                 persistIgnoreRules()
                             } label: {
                                 Image(systemName: "xmark.circle.fill")
-                                    .foregroundColor(theme.tertiaryText)
+                                    .foregroundColor(theme.secondaryText)
                             }
                             .buttonStyle(.plain)
                         }
@@ -77,7 +77,7 @@ extension InlineSettingsView {
             cardTitle(icon: "line.3.horizontal.decrease", text: "按类型与特点忽略")
             settingToggleRow(
                 icon: "lock.shield",
-                iconColor: .blue,
+                iconColor: Color(nsColor: .systemBlue),
                 title: "忽略密码与敏感内容",
                 desc: "自动过滤 1Password、Bitwarden、钥匙串等密码管理器标记为敏感或临时（Concealed/Transient）的剪贴板内容。",
                 isOn: $ignoreSensitive
@@ -87,7 +87,7 @@ extension InlineSettingsView {
             settingToggleRow(icon: "textformat", iconColor: .accentColor, title: "忽略文本", desc: "不记录任何纯文本剪贴板内容。", isOn: $ignoreTextClipboardType)
                 .onChange(of: ignoreTextClipboardType) { _, _ in persistIgnoreRules() }
             sectionDivider().padding(.vertical, 4)
-            settingToggleRow(icon: "photo", iconColor: .green, title: "忽略图片", desc: "不读取、编码或存储图片剪贴板内容。", isOn: $ignoreImageClipboardType)
+            settingToggleRow(icon: "photo", iconColor: Color(nsColor: .systemGreen), title: "忽略图片", desc: "不读取、编码或存储图片剪贴板内容。", isOn: $ignoreImageClipboardType)
                 .onChange(of: ignoreImageClipboardType) { _, _ in persistIgnoreRules() }
             sectionDivider().padding(.vertical, 4)
 

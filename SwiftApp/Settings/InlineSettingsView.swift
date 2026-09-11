@@ -219,8 +219,8 @@ struct InlineSettingsView: View {
                     selectedTab == i
                     ? Color.accentColor
                     : hoveredTab == i
-                    ? theme.secondaryText
-                    : theme.tertiaryText
+                    ? theme.primaryText
+                    : theme.secondaryText
                 )
                 .onHover { hovering in
                     hoveredTab = hovering ? i : nil
@@ -326,7 +326,7 @@ struct InlineSettingsView: View {
                     .foregroundColor(theme.primaryText)
                 Text(desc)
                     .font(.system(size: 10.5))
-                    .foregroundColor(theme.tertiaryText)
+                    .foregroundColor(theme.secondaryText)
             }
             Spacer()
             Toggle("", isOn: isOn)

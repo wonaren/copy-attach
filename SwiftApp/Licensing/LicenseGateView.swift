@@ -52,7 +52,7 @@ struct LicenseGateView: View {
             VStack(spacing: 10) {
                 Image(systemName: activatedIcon)
                     .font(.system(size: 52))
-                    .foregroundColor(.green)
+                    .foregroundColor(Color(nsColor: .systemGreen))
                 Text(title).font(.system(size: 22, weight: .bold)).foregroundColor(theme.primaryText)
                 Text(detail).font(.system(size: 12.5)).foregroundColor(theme.secondaryText)
                     .multilineTextAlignment(.center).lineSpacing(3).frame(maxWidth: 390)
@@ -61,7 +61,7 @@ struct LicenseGateView: View {
             Divider()
             HStack {
                 Text("关闭此窗口后继续使用 CopyAttach，可在菜单栏访问全部功能。")
-                    .font(.system(size: 10.5)).foregroundColor(theme.tertiaryText)
+                    .font(.system(size: 10.5)).foregroundColor(theme.secondaryText)
                 Spacer()
                 Button("完成") { AppDelegate.shared?.closeLicenseGate() }
                     .buttonStyle(.borderedProminent)

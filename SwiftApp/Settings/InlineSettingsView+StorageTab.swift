@@ -33,7 +33,7 @@ extension InlineSettingsView {
                     .foregroundColor(theme.primaryText)
                 Text("(\(backend.items.count) / \(Int(cleanupThreshold)))")
                     .font(.system(size: 11, weight: .medium, design: .monospaced))
-                    .foregroundColor(theme.tertiaryText)
+                    .foregroundColor(theme.secondaryText)
                 Spacer()
             }
             .padding(.bottom, 12)
@@ -48,7 +48,7 @@ extension InlineSettingsView {
                             HStack(spacing: 0) {
                                 Color.accentColor
                                     .frame(width: w * textPct)
-                                Color.green
+                                Color(nsColor: .systemGreen)
                                     .frame(width: w * imagePct)
                                 Spacer(minLength: 0)
                             }
@@ -68,7 +68,7 @@ extension InlineSettingsView {
                                 .font(.system(size: 10)).foregroundColor(theme.secondaryText)
                         }
                         HStack(spacing: 5) {
-                            Circle().fill(Color.green).frame(width: 8, height: 8)
+                            Circle().fill(Color(nsColor: .systemGreen)).frame(width: 8, height: 8)
                             Text("图片项目 (\(imageCount))")
                                 .font(.system(size: 10)).foregroundColor(theme.secondaryText)
                         }
@@ -83,7 +83,7 @@ extension InlineSettingsView {
                         .foregroundColor(theme.primaryText)
                     Text("共 \(backend.items.count) 个剪贴板历史项目")
                         .font(.system(size: 11))
-                        .foregroundColor(theme.tertiaryText)
+                        .foregroundColor(theme.secondaryText)
                 }
                 .frame(width: 140)
                 .padding(.leading, 16)

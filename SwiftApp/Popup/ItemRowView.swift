@@ -19,6 +19,8 @@ struct ItemRowView: View {
     /// the row from re-looking up the cache on every body evaluation.
     @State private var thumbImage: NSImage?
     @Environment(\.appTheme) private var theme
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.colorSchemeContrast) private var colorSchemeContrast
 
     private static let hexColorRegex = try! NSRegularExpression(pattern: "#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})\\b")
 
@@ -51,6 +53,7 @@ struct ItemRowView: View {
                             InlineRemarkField(
                                 text: $editingText,
                                 placeholder: item.hasCustomLabel ? item.customLabel : "添加备注...",
+                                textColor: colorScheme == .dark ? .white : NSColor(white: 0.1, alpha: 1.0),
                                 onCommit: onCommitRemark,
                                 onCancel: onCancelRemark
                             )
@@ -59,10 +62,15 @@ struct ItemRowView: View {
                         .padding(.vertical, 1)
                         .background(
                             RoundedRectangle(cornerRadius: 4, style: .continuous)
-                                .fill(Color.black.opacity(0.25))
+                                .fill(colorScheme == .dark ? Color.black.opacity(0.35) : Color.white.opacity(0.95))
                                 .overlay(
                                     RoundedRectangle(cornerRadius: 4, style: .continuous)
-                                        .strokeBorder(Color.white.opacity(0.4), lineWidth: 1)
+                                        .strokeBorder(
+                                            colorSchemeContrast == .increased
+                                                ? (colorScheme == .dark ? Color.white : Color.black)
+                                                : (colorScheme == .dark ? Color.white.opacity(0.45) : Color.black.opacity(0.30)),
+                                            lineWidth: colorSchemeContrast == .increased ? 1.5 : 1
+                                        )
                                 )
                         )
                     } else {
@@ -77,6 +85,7 @@ struct ItemRowView: View {
                             InlineRemarkField(
                                 text: $editingText,
                                 placeholder: item.hasCustomLabel ? item.customLabel : "添加图片备注...",
+                                textColor: colorScheme == .dark ? .white : NSColor(white: 0.1, alpha: 1.0),
                                 onCommit: onCommitRemark,
                                 onCancel: onCancelRemark
                             )
@@ -85,10 +94,15 @@ struct ItemRowView: View {
                         .padding(.vertical, 1)
                         .background(
                             RoundedRectangle(cornerRadius: 4, style: .continuous)
-                                .fill(Color.black.opacity(0.25))
+                                .fill(colorScheme == .dark ? Color.black.opacity(0.35) : Color.white.opacity(0.95))
                                 .overlay(
                                     RoundedRectangle(cornerRadius: 4, style: .continuous)
-                                        .strokeBorder(Color.white.opacity(0.4), lineWidth: 1)
+                                        .strokeBorder(
+                                            colorSchemeContrast == .increased
+                                                ? (colorScheme == .dark ? Color.white : Color.black)
+                                                : (colorScheme == .dark ? Color.white.opacity(0.45) : Color.black.opacity(0.30)),
+                                            lineWidth: colorSchemeContrast == .increased ? 1.5 : 1
+                                        )
                                 )
                         )
                     } else if !customLabel.isEmpty {
@@ -163,16 +177,18 @@ struct ItemRowView: View {
     @ViewBuilder
     private var selectionBackground: some View {
         if isSelected {
+            let strokeColor: Color = isDeleteModifierPressed
+                ? Color(nsColor: .systemRed)
+                : (colorSchemeContrast == .increased
+                    ? Color.white
+                    : Color(nsColor: .keyboardFocusIndicatorColor).opacity(0.85))
+            let strokeWidth: CGFloat = colorSchemeContrast == .increased ? 1.8 : 1.0
+
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .fill(isDeleteModifierPressed ? Color(nsColor: .systemRed) : Color(nsColor: .controlAccentColor))
                 .overlay(
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .strokeBorder(
-                            isDeleteModifierPressed
-                                ? Color(nsColor: .systemRed)
-                                : Color(nsColor: .keyboardFocusIndicatorColor).opacity(0.8),
-                            lineWidth: 1
-                        )
+                        .strokeBorder(strokeColor, lineWidth: strokeWidth)
                 )
                 .matchedGeometryEffect(id: "itemSelectionHighlight",
                                        in: selectionNamespace,
@@ -190,7 +206,7 @@ struct ItemRowView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 4.5, style: .continuous))
             } else {
                 Image(systemName: "app.fill").resizable().frame(width: 14, height: 14)
-                    .foregroundColor(mutedText.opacity(0.5))
+                    .foregroundColor(mutedText)
             }
         }
         .frame(width: 20, height: 20).foregroundColor(.white)
@@ -291,11 +307,11 @@ struct ItemRowView: View {
                     .frame(maxHeight: 100)
                     .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
                     .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous)
-                        .stroke(theme.popupRowHover, lineWidth: 0.5))
+                        .stroke(theme.popupRowBorder, lineWidth: 0.5))
             } else {
                 ZStack {
                     RoundedRectangle(cornerRadius: 7, style: .continuous)
-                        .stroke(mutedText.opacity(0.25), style: StrokeStyle(lineWidth: 1, dash: [4, 4]))
+                        .stroke(theme.popupRowBorder, style: StrokeStyle(lineWidth: 1, dash: [4, 4]))
                         .frame(maxHeight: 100)
                     VStack(spacing: 8) {
                         HStack(spacing: 12) {
@@ -303,21 +319,21 @@ struct ItemRowView: View {
                             VStack(spacing: 4) {
                                 Image(systemName: "photo")
                                     .font(.system(size: 18))
-                                    .foregroundColor(mutedText.opacity(0.8))
+                                    .foregroundColor(theme.popupSecondaryText)
                             }
                             .frame(width: 36, height: 36)
                             .background(theme.popupRowDefault)
                             .cornerRadius(6)
                             .overlay(
                                 RoundedRectangle(cornerRadius: 6)
-                                    .stroke(mutedText.opacity(0.15), lineWidth: 1)
+                                    .stroke(theme.popupRowBorder, lineWidth: 1)
                             )
 
                             // Flow/Processing Indicator
                             VStack(spacing: 4) {
                                 Image(systemName: "arrow.right")
                                     .font(.system(size: 14, weight: .bold))
-                                    .foregroundColor(mutedText.opacity(0.5))
+                                    .foregroundColor(theme.popupMutedText)
                                 ProgressView()
                                     .scaleEffect(0.6)
                                     .frame(height: 10)
@@ -327,19 +343,19 @@ struct ItemRowView: View {
                             VStack(spacing: 4) {
                                 Image(systemName: "desktopcomputer")
                                     .font(.system(size: 18))
-                                    .foregroundColor(mutedText.opacity(0.8))
+                                    .foregroundColor(theme.popupSecondaryText)
                             }
                             .frame(width: 36, height: 36)
                             .background(theme.popupRowDefault)
                             .cornerRadius(6)
                             .overlay(
                                 RoundedRectangle(cornerRadius: 6)
-                                    .stroke(mutedText.opacity(0.15), lineWidth: 1)
+                                    .stroke(theme.popupRowBorder, lineWidth: 1)
                             )
                         }
                         Text("图片编码中")
                             .font(.system(size: 11))
-                            .foregroundColor(mutedText.opacity(0.6))
+                            .foregroundColor(theme.popupSecondaryText)
                     }
                 }
                 .frame(maxWidth: .infinity)
@@ -380,6 +396,7 @@ private extension String {
 struct InlineRemarkField: NSViewRepresentable {
     @Binding var text: String
     let placeholder: String
+    var textColor: NSColor = .white
     let onCommit: (String) -> Void
     let onCancel: () -> Void
 
@@ -393,7 +410,7 @@ struct InlineRemarkField: NSViewRepresentable {
         field.drawsBackground = false
         field.focusRingType = .none
         field.font = .systemFont(ofSize: 13, weight: .regular)
-        field.textColor = .white
+        field.textColor = textColor
         field.placeholderString = placeholder
         field.stringValue = text
         field.delegate = context.coordinator
@@ -414,6 +431,9 @@ struct InlineRemarkField: NSViewRepresentable {
         // Keep the coordinator's copy current: it captures the binding and the
         // commit/cancel closures, which must reflect the latest render.
         context.coordinator.parent = self
+        if nsView.textColor != textColor {
+            nsView.textColor = textColor
+        }
         if nsView.stringValue != text && nsView.currentEditor() == nil {
             nsView.stringValue = text
         }

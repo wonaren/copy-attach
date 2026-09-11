@@ -576,7 +576,7 @@ struct HistoryPopupContent: View {
         HStack(spacing: 6) {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 11, weight: .medium))
-                .foregroundColor(theme.popupDimText)
+                .foregroundColor(theme.popupMutedText)
 
             TextField("搜索", text: $searchText)
                 .textFieldStyle(.plain)
@@ -593,7 +593,7 @@ struct HistoryPopupContent: View {
                 Button(action: { searchText = "" }) {
                     Image(systemName: "xmark.circle.fill")
                         .font(.system(size: 12))
-                        .foregroundColor(theme.popupDimText)
+                        .foregroundColor(theme.popupMutedText)
                 }
                 .buttonStyle(.plain)
             }
@@ -609,8 +609,8 @@ struct HistoryPopupContent: View {
                 .strokeBorder(
                     selectedIndex == 0
                         ? Color(nsColor: .controlAccentColor)
-                        : theme.popupRowHover,
-                    lineWidth: selectedIndex == 0 ? 2.5 : 1
+                        : theme.popupRowBorder,
+                    lineWidth: selectedIndex == 0 ? 2.0 : 1.0
                 )
         )
         .onTapGesture {
@@ -624,10 +624,10 @@ struct HistoryPopupContent: View {
             Spacer()
             Image(systemName: icon)
                 .font(.system(size: 28))
-                .foregroundColor(theme.popupDimText)
+                .foregroundColor(theme.popupSecondaryText)
             Text(title)
-                .font(.system(size: 14))
-                .foregroundColor(theme.popupDimText)
+                .font(.system(size: 14, weight: .medium))
+                .foregroundColor(theme.popupPrimaryText)
             Spacer()
         }
         .transition(.opacity)
@@ -646,21 +646,21 @@ struct HistoryPopupContent: View {
                         .frame(height: 16)
                         .foregroundColor(mode == filterMode
                             ? Color(nsColor: .controlAccentColor)
-                            : theme.popupDimText)
+                            : theme.popupFilterTabInactive)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 4)
                         .background(
                             RoundedRectangle(cornerRadius: 6, style: .continuous)
                                 .fill(mode == filterMode
-                                    ? Color(nsColor: .controlAccentColor).opacity(0.15)
+                                    ? theme.popupFilterTabBackgroundSelected
                                     : theme.popupFilterTabBackground)
                         )
                         .overlay(
                             RoundedRectangle(cornerRadius: 6, style: .continuous)
                                 .strokeBorder(
                                     mode == filterMode
-                                        ? Color(nsColor: .controlAccentColor).opacity(0.3)
-                                        : theme.popupFilterTabBackground,
+                                        ? Color(nsColor: .controlAccentColor).opacity(0.35)
+                                        : theme.popupRowBorder,
                                     lineWidth: 1
                                 )
                         )
@@ -868,7 +868,7 @@ struct HistoryPopupContent: View {
             }
             Text(" · ")
                 .font(.system(size: 10))
-                .foregroundColor(theme.popupDimText)
+                .foregroundColor(theme.popupMutedText)
             Text("\(memo.textCount) 文本")
                 .font(.system(size: 10))
                 .foregroundColor(theme.popupMutedText)
@@ -894,10 +894,10 @@ struct HistoryPopupContent: View {
         HStack(spacing: 3) {
             Text(key)
                 .font(.system(size: 9, weight: .semibold))
-                .foregroundColor(theme.popupMutedText)
+                .foregroundColor(theme.popupPrimaryText)
             Text(label)
                 .font(.system(size: 9))
-                .foregroundColor(theme.popupDimText)
+                .foregroundColor(theme.popupSecondaryText)
         }
         .padding(.leading, 4)
     }
