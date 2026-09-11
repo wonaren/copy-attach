@@ -41,6 +41,22 @@ open "CopyAttach.app"
 - **版本号**：唯一版本源在 `Cargo.toml` 的 `version` 字段，`build.sh` 自动注入到产物 `CopyAttach.app/Contents/Info.plist` 的 `CFBundleShortVersionString`（保持源码 `SwiftApp/Info.plist` 干净无脏 diff）。开发版本带 `-dev` 后缀（如 `0.93.0-dev`），发布版本去掉后缀。每次功能/修复提交都提升版本号并写入提交信息。
 - **CHANGELOG 规范**：内容必须**纯面向用户且简洁凝练**。
 
+### 内存测量
+
+看内存只认 `vmmap -summary` 的 `Writable regions` 行，不要用 `footprint` / 活动监视器的单值：
+
+```bash
+vmmap -summary $(pgrep -f 'CopyAttach.app/Contents/MacOS/CopyAttach') | head -16
+#   written     = phys_footprint 的来源（脏过的页，含已被压缩换出的）
+#   resident    = 真正占用 RAM
+#   swapped_out = 已被系统压缩换出
+```
+
+- `phys_footprint` 把**已压缩换出的页照样算作脏页**：实测长期会话 `resident` 仅 ~20MB，`phys_footprint` 却是 95–104MB（~70MB 在压缩器里）。两者差很大 = 账本问题，不是回收问题。
+- 稳定底线 ~36–44MB：干净空闲 19–22MB，首次开弹窗一次性 +~13–25MB（视图图，之后多轮开关零累积）。再往上的两个已实测来源：瞬时大图解码（~20MB 池，页已标记可回收、不计入 footprint）与 `NSWorkspace` 查询把 ~12MB LaunchServices 数据库拉进进程。构成与数据见 `docs/engineering-notes.md` 的「内存基线的真相」。
+- **撤销栈不是内存来源**(0.99.17 时代的笔记已过期)：载荷在删除时即落盘（`$TMPDIR/CopyAttach/Undo/*.bin`），内存只留 `payload_path`/`payload_bytes`，blobs 随即 `mark_pages_reusable`。实测删除一张 4.19MB 大图（撤销栈落盘 4.30MB）后 footprint **55 → 48MB**。
+- `malloc_zone_pressure_relief` 不要加：实测它收不回任何东西——进程内 4 次调用、以及「512MB 已释放的 1MB 块仍计入 footprint」的合成场景，全部返回 `0 bytes`。
+
 ### 生产构建
 
 默认连接生产 License Server，无需环境变量。本地开发用 `LICENSE_ENV=local`：
@@ -78,7 +94,7 @@ license-server 服务端代码**不在本仓库**（本机 `~/copy-attach-licens
 - **内存治理（0.99.10 起）**：启动不读剪贴板；图片捕获按 PNG→TIFF 顺序读最小表示；Phase 2 编码 scratch 复用；空闲池页标记可回收（`madvise MADV_FREE_REUSABLE`）；预览解码走 Rust 而非 ImageIO；自研 u8 resize 替代 `imageops::resize`（避免 f32 中转）。**改任何大缓冲路径前必读 `docs/engineering-notes.md` 的 madvise / claim 契约章节**
 - **db_id 不变量**：内存条目的 `db_id` 必须指向 DB 中该条目的行，且赋值按内容 hash 匹配、绝不按头部位置
 - **Suppress re-capture**：select_and_paste 通过 `pending_self_write` 标记自身写入，监控线程跳过匹配的 changeCount
-- **undo 删除**：撤销栈 ≤1 条，单条 ≤48MB（文本正文 + 图片 blob 统一计入），入栈为移动语义
+- **undo 删除**：撤销栈 ≤1 条，`MAX_UNDO_BYTES`(48MB) 约束的是**磁盘载荷**——删除时先落盘（`$TMPDIR/CopyAttach/Undo/*.bin`），内存只留 `payload_path`/`payload_bytes` + 元数据，blobs 随即 `mark_pages_reusable`（实测删掉 4.19MB 大图后 footprint 反降 7MB）
 
 ### Swift 前端（`SwiftApp/`，LSUIElement agent app）
 
