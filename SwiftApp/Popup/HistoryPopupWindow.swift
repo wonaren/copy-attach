@@ -6,6 +6,14 @@ import SwiftUI
 class HistoryPopupWindow: NSPanel {
     static let shared = HistoryPopupWindow()
 
+    /// The panel if it has already been created, without forcing the singleton
+    /// into existence. Consumers that only need to *react* to the popup (the
+    /// onboarding tour lights it up) must not allocate a window the user may
+    /// never open.
+    static var existing: HistoryPopupWindow? {
+        NSApp.windows.lazy.compactMap { $0 as? HistoryPopupWindow }.first
+    }
+
     /// Non-key preview panel managed by the popup content.
     weak var previewPanel: PreviewWindow?
 
@@ -230,6 +238,9 @@ class HistoryPopupWindow: NSPanel {
             _ = hosting.becomeFirstResponder()
         }
 
+        // The tour keeps this window lit while it is guiding through it.
+        OnboardingGuide.shared.refreshSpotlight()
+
         NotificationCenter.default.removeObserver(self, name: NSWindow.didResignKeyNotification, object: self)
         NotificationCenter.default.removeObserver(self, name: NSWindow.didBecomeKeyNotification, object: self)
         NotificationCenter.default.addObserver(
@@ -443,5 +454,7 @@ class HistoryPopupWindow: NSPanel {
         self.contentView = nil
         popupHostingView = nil
 
+        // Nothing left to light up.
+        OnboardingGuide.shared.refreshSpotlight()
     }
 }

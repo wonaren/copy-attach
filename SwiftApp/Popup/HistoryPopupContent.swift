@@ -264,6 +264,11 @@ struct HistoryPopupContent: View {
         }
         .scaleEffect(openingScale, anchor: .center)
         .frame(width: popupWidth, height: popupHeight)
+        // Spotlight target geometry for the onboarding tour (empty when it is
+        // not running — the reporters are only mounted while it is).
+        .onPreferenceChange(SpotlightFramePreferenceKey.self) { geometry in
+            OnboardingGuide.shared.updateSpotlightGeometry(geometry)
+        }
         .focusable()
         .focusEffectDisabled()
         .focused($isContainerFocused)
@@ -490,6 +495,7 @@ struct HistoryPopupContent: View {
             // container would take it back asynchronously.
             commitPendingInlineEdit(restoreFocus: false)
             selectedIndex = 0
+            if !newValue.isEmpty { OnboardingGuide.shared.record(.searched) }
             searchTask?.cancel()
             if newValue.isEmpty {
                 withAnimation(.easeInOut(duration: 0.25)) {
@@ -617,6 +623,7 @@ struct HistoryPopupContent: View {
             selectedIndex = 0
             isSearchFocused = true
         }
+        .reportSpotlightFrame(.searchField)
     }
 
     private func emptyMessageView(icon: String, title: String) -> some View {
@@ -718,6 +725,9 @@ struct HistoryPopupContent: View {
                 }
                 updatePreviewContent()
             }
+            // `hasSelectedRow` tells the tour whether a missing row frame means
+            // "scrolled out of the viewport" or "nothing is selected".
+            .reportSpotlightFrame(.list, hasSelectedRow: selectedIndex > 0)
     }
 
     private var itemsListScrollView: some View {
@@ -742,6 +752,7 @@ struct HistoryPopupContent: View {
                             .id(row.id)
                     case .item(let index, let item):
                         let shortcut: String? = isCommandPressed && index < 9 ? "⌘\(index + 1)" : nil
+                        let spotlightRowArmed = OnboardingGuide.shared.isActive && selectedIndex == index + 1
                         ItemRowView(
                             item: item,
                             isSelected: selectedIndex == index + 1,
@@ -779,17 +790,26 @@ struct HistoryPopupContent: View {
                                 selectedIndex = itemIdx
                             }
                         }
-                        // Report the row's frame ONLY while a right-click is
-                        // being resolved (one-shot snapshot). Normally the row
-                        // carries no geometry observer — scrolling never pays
-                        // per-row GeometryReader/preference work.
+                        // Report the row's frame ONLY while something needs it:
+                        // a right-click being resolved (one-shot snapshot), or
+                        // the onboarding tour framing the selected row. Normally
+                        // the row carries no geometry observer — scrolling never
+                        // pays per-row GeometryReader/preference work.
                         .background {
-                            if contextMenuArmed {
+                            if contextMenuArmed || spotlightRowArmed {
                                 GeometryReader { geo in
-                                    Color.clear.preference(
-                                        key: RowFramePreferenceKey.self,
-                                        value: [item.id: geo.frame(in: .global)]
-                                    )
+                                    let frame = geo.frame(in: .global)
+                                    Color.clear
+                                        .preference(
+                                            key: RowFramePreferenceKey.self,
+                                            value: contextMenuArmed ? [item.id: frame] : [:]
+                                        )
+                                        .preference(
+                                            key: SpotlightFramePreferenceKey.self,
+                                            value: spotlightRowArmed
+                                                ? SpotlightGeometry(frames: [.selectedRow: frame])
+                                                : SpotlightGeometry()
+                                        )
                                 }
                             }
                         }

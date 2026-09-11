@@ -49,12 +49,18 @@ private func menuBarIcon() -> NSImage? {
 struct AppMenuBarContent: View {
     @State private var hotkeyManager = HotkeyManager.shared
     @State private var licenseManager = LicenseManager.shared
+    @State private var onboarding = OnboardingGuide.shared
 
     var body: some View {
         if licenseManager.state.permitsCoreFeatures {
             Button("偏好设置") { AppDelegate.shared?.openSettings() }
                 .keyboardShortcut(",", modifiers: .command)
             Button("许可证…") { AppDelegate.shared?.openLicenseWindow() }
+            if onboarding.isActive {
+                Button("结束新手引导") { onboarding.skip() }
+            } else {
+                Button("新手引导") { onboarding.restart() }
+            }
             Divider()
             Button("显示历史记录 (\(hotkeyManager.config.displayString))") { AppDelegate.shared?.togglePopup() }
         } else {

@@ -99,6 +99,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             localKeyDownMonitor = nil
         }
         entitlementTimer?.invalidate()
+        OnboardingGuide.shared.stop()
         if backendStarted { ClipboardBackend.shared.stop() }
     }
 
@@ -124,6 +125,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 ClipboardBackend.shared.stop()
                 backendStarted = false
             }
+            // A live tour must not float over the license gate; progress is kept
+            // and the tour resumes when core features come back.
+            OnboardingGuide.shared.stop()
             showLicenseGate()
         }
         scheduleMaintenanceTick()
@@ -148,6 +152,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         switch ClipboardBackend.shared.start() {
         case .started:
             backendStarted = true
+            // Core features are live: the first-run tour can now be walked
+            // (its first step is watching the clipboard for a capture).
+            OnboardingGuide.shared.startIfNeeded()
         case .retryable:
             debugLog("Rust backend failed to initialize; will retry")
         case .corruptDatabase:
@@ -350,6 +357,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             popup.close()
         } else {
             popup.show()
+            OnboardingGuide.shared.record(.popupOpened)
         }
     }
 

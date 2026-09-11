@@ -73,6 +73,8 @@ class ClipboardBackend {
         // The favorites filter tab derives its list from `favoriteIds` —
         // invalidate any memoized display list.
         itemsGeneration &+= 1
+        // Single choke point for every favorite path (shortcut, context menu).
+        OnboardingGuide.shared.record(.favorited)
     }
 
     private init() {

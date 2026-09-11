@@ -29,6 +29,7 @@ extension HistoryPopupContent {
             }
         }
         guard deleted else { return }
+        OnboardingGuide.shared.record(.deleted)
         if backend.items.isEmpty {
             selectedIndex = 0
             searchText = ""
@@ -43,6 +44,7 @@ extension HistoryPopupContent {
         let item = items[index]
         guard let backendIdx = backend.items.firstIndex(where: { $0.id == item.id }) else { return }
         if backend.selectAndPaste(at: backendIdx, asPath: asPath) {
+            OnboardingGuide.shared.record(.pasted)
             closePreview()
             onClose()
         }
@@ -67,6 +69,8 @@ extension HistoryPopupContent {
             searchText = savedSearchText
             return
         }
+
+        OnboardingGuide.shared.record(.undone)
 
         // Clear search only on success so the user sees the restored item
         if !searchText.isEmpty {

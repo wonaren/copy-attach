@@ -109,6 +109,7 @@ SwiftApp/
   ├── Licensing/                       ← 许可证体系（8 文件）
   ├── App/AppDelegate.swift            ← 生命周期, 弹窗管理, entitlement 门控, 启动时 dup2 stderr → 日志
   ├── Settings/InlineSettingsView.swift ← 5 标签页设置面板
+  ├── Onboarding/                      ← 核心操作引导（4 文件：引导模型/浮窗卡片/聚光灯遮罩）
   ├── Popup/                           ← 主弹窗（7 文件：内容/窗口/事件/行/拖拽）
   ├── Preview/                         ← 预览窗口（4 文件：窗口/内容/布局/缩放）
   ├── Backend/                         ← ClipboardItem / ImageDecode / AppIcon 缓存
@@ -122,6 +123,14 @@ SwiftApp/
 - **图片加载**：缩略图走 `clipboard_get_image_thumb_by_db_id`（仅 SQLite 读），后台用 ImageIO 降采样至最长边 160px（禁用 ImageIO 驻留缓存）后存入 `NSCache`（countLimit 60、4MB），弹窗关闭立即清空；大图走 `clipboard_get_image_full_by_db_id`（优先内存，后备 DB）。预览大图由 Rust 降采样解码，预算 = 显示尺寸×scale 与 2048px 的较小值
 - **select_and_paste**：先查 accessibility 权限（未授权直接 return 0 且不动剪贴板）→ 查 history（by entry_id）→ DB 加载（失败显式 return 0，不兜底）→ 写剪贴板（设 pending_self_write）→ DB write-through → move entry to top → sleep 50ms → Cmd+V。**图片粘贴走唯一的文件路径模式**：先写 `$TMPDIR/CopyAttach/Paste/` 临时 PNG，剪贴板放 `public.file-url`（Finder 复制文件同款）再 Cmd+V
 - **粘贴目标 pid 不变式**：Cmd+V 投递给 `source_app.pid`（由 `NSWorkspace.didActivateApplicationNotification` 事件驱动更新，不轮询）。该 pid 必须是用户打开弹窗前的 app，绝不能是 CopyAttach 自身
+
+**引导（`Onboarding/`）**：
+
+- **非激活浮窗**（`canBecomeKey=false`）：取 key 会让弹窗失焦并被自动关闭；首击可达靠 `acceptsFirstMouse`
+- **聚光灯遮罩**（`ignoresMouseEvents=true`）：**必须点击穿透**，否则用户无法操作被高亮的控件。洞 = 目标控件，非整个弹窗
+- **步骤推进**：`OnboardingGuide.record(_:)` 由真实操作事件驱动（严格顺序，不匹配则忽略）
+- **光斑几何按需上报**：`SpotlightFramePreferenceKey`，仅引导期间挂 GeometryReader；行被 LazyVStack 回收时靠 `hasSelectedRow` + `lastRowRect` 区分「滚出视野」与「未选中」
+- **窗口层级**：弹窗 `.floating` → 遮罩 `+1` → 引导卡片 `+2`。预览窗与弹窗同层，故在遮罩之下，需一并纳入光斑
 
 **SwiftUI 关键机制**（详细行为见 `docs/engineering-notes.md`）：
 

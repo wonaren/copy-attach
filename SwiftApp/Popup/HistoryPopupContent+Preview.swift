@@ -45,6 +45,9 @@ extension HistoryPopupContent {
         // pid is protected in ClipboardBackend.updateSourceApp.
         NSApp.activate(ignoringOtherApps: true)
         showPreview = true
+        OnboardingGuide.shared.record(.previewed)
+        // The preview panel has its own level, so the tour has to light it too.
+        OnboardingGuide.shared.refreshSpotlight()
     }
 
     func closePreview() {
@@ -52,6 +55,7 @@ extension HistoryPopupContent {
         showPreview = false
         popupWindow?.previewPanel?.close()
         popupWindow?.previewPanel = nil
+        OnboardingGuide.shared.refreshSpotlight()
     }
 
     func updatePreviewContent() {
