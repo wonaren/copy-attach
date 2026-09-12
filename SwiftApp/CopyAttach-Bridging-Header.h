@@ -40,6 +40,13 @@ void clipboard_free_bytes(uint8_t* data, int32_t len);
 int32_t clipboard_select_and_paste(int32_t index);
 int32_t clipboard_select_and_paste_by_id(uint64_t entry_id);
 int32_t clipboard_select_and_paste_as_path_by_id(uint64_t entry_id);
+// Two-phase paste. Phase 1 writes the pasteboard and returns the target pid
+// (>0), or 0 on failure; phase 2 posts the paste keystroke to that pid. The
+// caller must dismiss its own key window between the phases: posting the
+// keystroke while the popup is still key makes a target that resolves the
+// paste against its key window (WeChat) intermittently drop it.
+int32_t clipboard_prepare_paste_by_id(uint64_t entry_id, bool as_path);
+int32_t clipboard_send_paste(int32_t pid);
 
 // ─── Lazy Text Loading (on-demand full text by entry ID) ───
 char* clipboard_get_text_by_id(uint64_t entry_id);

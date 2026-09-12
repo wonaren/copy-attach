@@ -488,6 +488,29 @@ class ClipboardBackend {
         return result
     }
 
+    /// Two-phase paste used by the popup: write the pasteboard, run
+    /// `dismiss`, then post the paste keystroke.
+    ///
+    /// The ordering is load-bearing. `dismiss` closes the popup, and only
+    /// `close()` resigns its key status; posting the keystroke before that
+    /// leaves the panel as the key window, which made WeChat intermittently
+    /// drop short-text pastes (measured via PASTEDIAG: `popupKey=true` on
+    /// every paste). Returns true when the pasteboard was written — the
+    /// keystroke is best-effort on top.
+    @discardableResult
+    func selectAndPasteDismissingPopup(at index: Int, asPath: Bool = false, dismiss: () -> Void) -> Bool {
+        guard index < items.count else { return false }
+        let entryId = UInt64(items[index].id)
+        let pid = clipboard_prepare_paste_by_id(entryId, asPath)
+        guard pid > 0 else { return false }
+        // History order changed (selected item moved to top) — force UI refresh
+        reloadItems()
+        // The popup must stop being key before the keystroke is posted.
+        dismiss()
+        _ = clipboard_send_paste(pid)
+        return true
+    }
+
     func selectAndPaste(at index: Int, asPath: Bool = false) -> Bool {
         guard index < items.count else { return false }
         let entryId = UInt64(items[index].id)

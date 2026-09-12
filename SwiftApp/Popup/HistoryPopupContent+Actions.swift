@@ -43,13 +43,16 @@ extension HistoryPopupContent {
         guard index < items.count else { return }
         let item = items[index]
         guard let backendIdx = backend.items.firstIndex(where: { $0.id == item.id }) else { return }
-        if backend.selectAndPaste(at: backendIdx, asPath: asPath) {
+        // Write the pasteboard first, dismiss the popup, and only then post the
+        // paste keystroke — the panel must not be the key window when it
+        // arrives (see `selectAndPasteDismissingPopup`).
+        backend.selectAndPasteDismissingPopup(at: backendIdx, asPath: asPath) {
             closePreview()
             onClose()
-            // The popup is gone; hand the foreground back so the caret returns
-            // to whatever the user was typing in.
-            backend.restorePasteTargetFocus()
         }
+        // The popup is gone; hand the foreground back so the caret returns
+        // to whatever the user was typing in.
+        backend.restorePasteTargetFocus()
     }
 
     // MARK: - Undo

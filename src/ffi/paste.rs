@@ -76,12 +76,36 @@ pub(crate) fn purge_stale_paste_images() {
     }
 }
 
-/// Shared implementation for select-and-paste.
-/// Loads full image data from DB if needed, writes to system clipboard,
-/// write-through DB, moves item to top of history, then simulates paste.
+/// Select-and-paste in one call: prepare the pasteboard, then post the paste
+/// keystroke. Retained for callers that do not own a key window to dismiss
+/// first; the popup path uses the two-phase split instead (see
+/// `clipboard_prepare_paste_by_id`).
+fn select_and_paste_impl(item: ClipboardEntry, as_path: bool) -> c_int {
+    let pid = prepare_paste_impl(item, as_path);
+    if pid == 0 {
+        return 0;
+    }
+    thread::sleep(Duration::from_millis(50));
+    #[cfg(target_os = "macos")]
+    {
+        if !macos::simulate_cmd_v(pid) {
+            crate::error_log!("CopyAttach: simulate_cmd_v failed");
+            return 0;
+        }
+    }
+    1
+}
+
+/// Loads full image data from DB if needed, writes to the system clipboard,
+/// write-through DB, and moves the item to the top of history — everything a
+/// paste needs except the keystroke itself.
+///
+/// Returns the pid the paste keystroke must be delivered to, or 0 on failure
+/// (in which case the pasteboard may or may not have been written, but no
+/// keystroke may be sent).
 /// When `as_path` is true and the entry is an Image, its temp PNG path is
 /// placed on the clipboard as plain text instead of `public.file-url`.
-fn select_and_paste_impl(mut item: ClipboardEntry, as_path: bool) -> c_int {
+fn prepare_paste_impl(mut item: ClipboardEntry, as_path: bool) -> c_int {
     #[cfg(target_os = "macos")]
     {
         // Cmd+V simulation needs accessibility permission. Gate BEFORE any
@@ -281,21 +305,63 @@ fn select_and_paste_impl(mut item: ClipboardEntry, as_path: bool) -> c_int {
     // is never blocked on it.
     drop(db_guard);
 
-    let front_pid = try_backend()
+    // The caller owns the keystroke: it must not be posted until the popup has
+    // resigned key status (see `clipboard_prepare_paste_by_id`).
+    try_backend()
         .and_then(|b| b.source_app.lock().ok())
-        .map_or(0, |src| src.pid);
+        .map_or(0, |src| src.pid)
+}
 
-    thread::sleep(Duration::from_millis(50));
+/// Phase 1 of a two-phase paste: write the entry to the pasteboard and update
+/// history, but do NOT post the paste keystroke yet. Returns the pid that
+/// phase 2 must deliver to (>0), or 0 on failure.
+///
+/// The split exists because the paste keystroke must arrive when the popup is
+/// no longer the key window. Only `close()` resigns key status, and it runs
+/// after the paste call — so a single-phase paste always posted the keystroke
+/// while the panel was still key. Measured via PASTEDIAG (2026-09-12):
+/// `popupKey=true` on every paste, and a target that resolves the paste against
+/// its own key window (WeChat) intermittently dropped short-text pastes.
+/// Callers MUST dismiss the popup between phase 1 and phase 2.
+#[no_mangle]
+pub extern "C" fn clipboard_prepare_paste_by_id(entry_id: u64, as_path: bool) -> c_int {
+    let item = {
+        let hist = backend().history.lock().unwrap();
+        match hist.iter().find(|e| match e {
+            ClipboardEntry::Text { id, .. } => *id == entry_id,
+            ClipboardEntry::Image { id, .. } => *id == entry_id,
+        }).cloned() {
+            Some(i) => i,
+            None => return 0,
+        }
+    };
+    prepare_paste_impl(item, as_path)
+}
+
+/// Phase 2 of a two-phase paste: post the paste keystroke to `pid` (the value
+/// returned by phase 1). Returns 1 on success, 0 if the event could not be
+/// posted.
+#[no_mangle]
+pub extern "C" fn clipboard_send_paste(pid: c_int) -> c_int {
+    // A failed phase 1 returns 0 and must never reach a keystroke: posting to
+    // pid 0 would target an arbitrary process.
+    if pid <= 0 {
+        crate::error_log!("CopyAttach: clipboard_send_paste called with pid={pid}; phase 1 must have failed");
+        return 0;
+    }
     #[cfg(target_os = "macos")]
     {
-        // Permission was already verified up front; here only the key event
-        // can fail.
-        if !macos::simulate_cmd_v(front_pid) {
-            crate::error_log!("CopyAttach: simulate_cmd_v failed");
+        if !macos::simulate_cmd_v(pid) {
+            crate::error_log!("CopyAttach: clipboard_send_paste: simulate_cmd_v failed");
             return 0;
         }
+        1
     }
-    1
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = pid;
+        0
+    }
 }
 
 /// Legacy: select and paste by array index. Prefer `clipboard_select_and_paste_by_id`.
@@ -387,4 +453,62 @@ pub extern "C" fn clipboard_get_text_by_id(entry_id: u64) -> *mut c_char {
     // Transient body: mark its pages reusable once the FFI CString is built.
     let guard = crate::backend::MarkStringReusableOnDrop(text);
     to_ffi_cstring(&guard.0)
+}
+
+#[cfg(test)]
+mod two_phase_paste_tests {
+    use super::*;
+    use std::sync::Once;
+
+    /// The FFI tests share the process-wide Backend singleton (OnceLock).
+    /// Setup must run through a single Once so `set_backend` never fires
+    /// twice.
+    static INIT: Once = Once::new();
+
+    fn ensure_test_backend() {
+        INIT.call_once(|| {
+            let conn = rusqlite::Connection::open_in_memory().expect("in-memory test DB");
+            crate::db::ensure_history_table(&conn).expect("schema creation");
+            let backend = crate::backend::Backend {
+                history: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+                monitor_handle: std::sync::Mutex::new(None),
+                source_app: std::sync::Arc::new(std::sync::Mutex::new(
+                    crate::types::SourceApp::default(),
+                )),
+                pasteboard_event_lock: std::sync::Arc::new(std::sync::Mutex::new(())),
+                pending_self_write: std::sync::Arc::new(std::sync::Mutex::new(None)),
+                db: std::sync::Arc::new(std::sync::Mutex::new(conn)),
+                cleanup_threshold: std::sync::Arc::new(
+                    std::sync::atomic::AtomicUsize::new(3000),
+                ),
+                ignore_rules: std::sync::Arc::new(std::sync::Mutex::new(
+                    crate::ignore::IgnoreRules::default(),
+                )),
+                deleted_stack: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                last_restored_id: std::sync::Arc::new(
+                    std::sync::atomic::AtomicU64::new(0),
+                ),
+            };
+            let _ = crate::backend::set_backend(backend);
+        });
+    }
+
+    /// An unknown entry must fail in phase 1 — and crucially must NOT fall
+    /// through to a keystroke. The split exists so the caller only posts the
+    /// paste after phase 1 reports a live target.
+    #[test]
+    fn prepare_paste_returns_zero_for_unknown_entry() {
+        ensure_test_backend();
+        assert_eq!(clipboard_prepare_paste_by_id(u64::MAX, false), 0);
+    }
+
+    /// Phase 2 must refuse a pid that phase 1 would never have produced.
+    /// Guarding here keeps a failed phase 1 from synthesising a keystroke
+    /// into whatever process happens to be pid 0.
+    #[test]
+    fn send_paste_rejects_nonpositive_pid() {
+        assert_eq!(clipboard_send_paste(0), 0);
+        assert_eq!(clipboard_send_paste(-1), 0);
+    }
 }
