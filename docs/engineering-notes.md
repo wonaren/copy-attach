@@ -82,7 +82,10 @@ Phase 1 同步 hash + 缩略图（最长边 300px）→ 更新内存。Phase 2 �
 
 ## 原生拖拽
 
-- 文本→`NSItemProvider(object:)`，图片→临时 PNG 文件 (`public.file-url`)。窗口拖动区限制为 PopupHostingView 外 3pt 边框，避免行拖拽误触窗口移动。
+- **文本必须广播整组 UTI，不能只给 `public.utf8-plain-text`**（0.103.2 修复）：此前文本走 `NSItemProvider(object: NSString)`，实测注册类型只有 `public.utf8-plain-text` 一个，落点的**并集**也只有 `public.utf8-plain-text` + `NSStringPboardType`。接收方各自按不同 UTI 过滤：思源笔记一类匹配 `public.plain-text`/`public.html`，因此旧实现下直接拒绝这次 drop，表现为「松手毫无反应」;而微信/QQ/Typora/VSCode 恰好匹配 `public.utf8-plain-text` 所以一直正常。现在一次性注册 `utf8PlainText / plainText / text / html / rtf`，全部用**构建期已备好的 `Data`**（避免接收方在 `draggingEntered:` 期间等异步 provider 回调）。写入真实拖拽剪贴板 `Apple CFPasteboard drag` 后实测，系统会把它们**自动展开成完整的原生表示集**（含 `NSStringPboardType`、`Apple HTML pasteboard type`、`NeXT Rich Text Format v1.0 pasteboard type`、`public.utf16-external-plain-text` 等），达到与 Finder 原生拖拽同级。RTF/HTML 走 `NSAttributedString` 序列化，不能把 UTF-8 字节直接挂在富文本 UTI 下。图片仍走临时 PNG 文件 (`public.file-url`)。
+- **调试拖拽时的剪贴板名陷阱**：拖拽进行中的剪贴板叫 `Apple CFPasteboard drag`，遗留名 `NSDragPboard` 在现代 macOS 上**始终为空**——用后者去读会得到「拖拽没数据」的假象，实测踩过这个坑。
+- **已知不修**：`chat.deepseek.com` 的输入框拒绝所有外部文本拖入（同页面其他站点的输入框正常，访达原生拖拽同样进不去），属于该网站的落点行为，不在本应用职责内。
+- 窗口拖动区限制为 PopupHostingView 外 3pt 边框，避免行拖拽误触窗口移动。
 - 拖拽结束检测用 `NSEvent.pressedMouseButtons` 轮询（40ms Timer，注册 `.common` + `.eventTracking` 双 run loop 模式）——拖拽期间 run loop 处于 `NSEventTrackingRunLoopMode`，global/local monitor 收不到 mouse-up（官方文档确认），Timer 是可靠信号。
 - **拖拽在途弹窗智能停车**（`tickDragParking`，与松手检测共用 40ms tick）：按屏幕 45%:10%:45% 分区，鼠标在右侧 45% 时弹窗停靠左边缘、左侧 45% 时停靠右边缘，中间 10% 为死区不动；同侧小幅晃动不触发横跳。`park(at:)` 用 `animator().setFrame`（无边框 NSPanel 上 `setFrameOrigin` 静默不动画）；`tickParkingSlide` 侦测 CA 事务停顿（事件跟踪模式下帧动画可能卡死，3 tick 无位移即 `setFrameOrigin` 直接落位）。拖拽结束时开关关闭走 `restoreFromParking()` 滑回居中；`show()`/`close()`/`completeItemDrag` 均 `resetDragParking()`。
 - 开关「拖拽后自动关闭弹窗」（`ClosePopupAfterDrag`，默认开）开启时，拖拽结束直接 `close()`——与 Esc 相同路径，无动画、无 completion 依赖。
