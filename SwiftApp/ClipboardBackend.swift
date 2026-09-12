@@ -35,6 +35,8 @@ class ClipboardBackend {
     /// reload queue (to skip stale snapshot builds) and bumped on the main
     /// actor — a lock keeps the two sides race-free.
     private let reloadGeneration = OSAllocatedUnfairLock(initialState: 0)
+    /// The app the user was working in before our panels took over.
+    private var pasteTargetPID: pid_t?
     private var lastImageEncodingCounter: UInt64 = 0
     private var lastHistoryRevision: UInt64 = 0
     private let thumbnailCache: NSCache<NSNumber, NSImage> = {
@@ -237,6 +239,7 @@ class ClipboardBackend {
             let name = app.localizedName ?? "Unknown"
             let bundleId = app.bundleIdentifier ?? "unknown"
             let pid = Int32(app.processIdentifier)
+            pasteTargetPID = app.processIdentifier
             clipboard_set_source_app(name, bundleId, pid)
         }
     }
@@ -624,6 +627,23 @@ class ClipboardBackend {
 
     func openPreferences() {
         clipboard_open_preferences()
+    }
+
+    /// Hand the foreground back to the app the user was working in.
+    ///
+    /// Opening the preview forces a real `NSApp.activate` — pinch gestures are
+    /// only delivered to the frontmost app — and the system never hands that
+    /// back on its own. Without this the paste still lands (Cmd+V is posted to
+    /// the target's pid) but the app stays in the background, so the content
+    /// arrives while the caret does not return to the field being edited.
+    ///
+    /// No-op unless this app actually took the foreground: the normal path uses
+    /// non-activating panels and never becomes active, so nothing is stolen.
+    func restorePasteTargetFocus() {
+        guard NSApp.isActive, let pid = pasteTargetPID else { return }
+        guard let app = NSRunningApplication(processIdentifier: pid) else { return }
+        debugLog("Handing the foreground back to pid \(pid) after paste")
+        app.activate()
     }
 
     func clearHistory() {

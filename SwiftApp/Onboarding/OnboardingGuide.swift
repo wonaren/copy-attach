@@ -30,7 +30,7 @@ enum OnboardingStep: Int, CaseIterable, Identifiable {
         case .preview: return "预览内容"
         case .favorite: return "收藏常用"
         case .deleteAndUndo: return "删除与撤销"
-        case .paste: return "粘贴到应用"
+        case .paste: return "拖拽粘贴"
         }
     }
 
@@ -49,7 +49,7 @@ enum OnboardingStep: Int, CaseIterable, Identifiable {
         case .deleteAndUndo:
             return "选中一条记录按 ⌃⌫ 删除；删错了按 ⌘Z 撤销。"
         case .paste:
-            return "选中要用的记录，按 ⏎ 直接粘贴回刚才的应用，弹窗会自动关闭。"
+            return "把要用的记录直接拖到需要的地方（编辑器、文档或聊天窗口），松手就能贴进去。"
         }
     }
 
@@ -60,8 +60,8 @@ enum OnboardingStep: Int, CaseIterable, Identifiable {
         case .preview: return "Space"
         case .favorite: return "⌥P"
         case .deleteAndUndo: return "⌃⌫ / ⌘Z"
-        case .paste: return "⏎"
-        case .copyContent, .openPopup, .search: return nil
+        // Dragging is a gesture, not a shortcut — the instruction carries it.
+        case .copyContent, .openPopup, .search, .paste: return nil
         }
     }
 
@@ -73,9 +73,22 @@ enum OnboardingStep: Int, CaseIterable, Identifiable {
         case .preview: return "eye"
         case .favorite: return "star"
         case .deleteAndUndo: return "trash"
-        case .paste: return "arrow.up.doc.on.clipboard"
+        case .paste: return "hand.draw"
         }
     }
+}
+
+// MARK: - Onboarding Phase
+
+/// Which shape the tour surface is in.
+///
+/// The tour is a *single* window that changes shape: it opens as a centered
+/// welcome card and, on 「开始引导」, shrinks into the corner progress card. One
+/// window is what makes the transition continuous — a second window appearing
+/// in the corner reads as coming out of nowhere.
+enum OnboardingPhase: Equatable {
+    case welcome
+    case guiding
 }
 
 // MARK: - Onboarding Events
@@ -91,7 +104,8 @@ enum OnboardingEvent {
     case favorited
     case deleted
     case undone
-    case pasted
+    /// A native item drag finished — the tour's last step.
+    case dragged
 }
 
 // MARK: - Onboarding Guide
@@ -115,6 +129,8 @@ final class OnboardingGuide {
 
     /// True while the tour is on screen (including the completion celebration).
     private(set) var isActive = false
+    /// Welcome card or progress card. Nil when the tour is not running.
+    private(set) var phase: OnboardingPhase?
     private(set) var completedSteps: Set<OnboardingStep> = []
     /// Sub-action flags for the combined delete/undo step.
     private(set) var deleteActionDone = false
@@ -130,19 +146,23 @@ final class OnboardingGuide {
     private var lastRowRect: CGRect?
     /// What the cutout is currently on, to tell a step change from a move.
     private var lastFocusKind: SpotlightFocusKind?
+    /// True while the user is dragging an item out of the popup.
+    private var isItemDragInProgress = false
     /// Follows the popup while the user drags it, so the cutout stays on it.
     private var popupMoveObserver: NSObjectProtocol?
     private var copyBaselineRevision: UInt64 = 0
     private var copyPollTimer: Timer?
-    private var dismissTask: Task<Void, Never>?
 
     private init() {}
 
     // MARK: - Derived State
 
     /// The first step the user has not completed, or nil when all are done.
+    ///
+    /// Nil during the welcome phase: the tour has not started, so there is no
+    /// step to show and nothing to point the spotlight at.
     var currentStep: OnboardingStep? {
-        guard isActive else { return nil }
+        guard isActive, phase == .guiding else { return nil }
         return OnboardingStep.allCases.first { !completedSteps.contains($0) }
     }
 
@@ -165,11 +185,6 @@ final class OnboardingGuide {
         }
     }
 
-    /// True while the tour is showing its completion state.
-    var isFinished: Bool {
-        isActive && completedSteps.count == OnboardingStep.allCases.count
-    }
-
     // MARK: - Lifecycle
 
     /// Auto-start hook, called once the Rust backend is up. A finished tour
@@ -187,25 +202,23 @@ final class OnboardingGuide {
 
     func skip() {
         guard isActive else { return }
-        debugLog("Onboarding guide skipped at step \(completedSteps.count + 1)")
+        debugLog(phase == .welcome
+                 ? "Onboarding guide declined at the welcome card"
+                 : "Onboarding guide skipped at step \(completedSteps.count + 1)")
         teardown()
     }
 
     /// Tear down timers/panel at app termination.
     func stop() {
-        dismissTask?.cancel()
-        dismissTask = nil
         stopCopyPolling()
         closePanel()
         hideSpotlight()
         resetReportedGeometry()
         isActive = false
+        phase = nil
     }
 
     private func start(resetProgress: Bool) {
-        dismissTask?.cancel()
-        dismissTask = nil
-
         if resetProgress {
             completedSteps = []
             deleteActionDone = false
@@ -227,21 +240,37 @@ final class OnboardingGuide {
         isActive = true
         deleteActionDone = false
         undoActionDone = false
-        if !completedSteps.contains(.copyContent) {
-            // The first step is the only one performed with no popup on screen,
-            // and the only one that needs a poll to detect.
-            copyBaselineRevision = clipboard_get_history_revision()
-            beginCopyPolling()
+        // A drag left in flight by a previous run would keep the scrim hidden.
+        isItemDragInProgress = false
+
+        // A brand-new user meets the welcome card first; someone resuming a
+        // partly finished tour goes straight back to the progress card.
+        phase = completedSteps.isEmpty ? .welcome : .guiding
+        if panel?.isVisible == true {
+            // Restarted while the window is still up: morph back to the welcome
+            // shape rather than snapping.
+            morphPanel()
+        } else {
+            showPanel()
         }
-        showPanel()
+        if phase == .guiding { startCopyPollingIfNeeded() }
         debugLog("Onboarding guide started at step \(completedSteps.count + 1)/\(OnboardingStep.allCases.count)")
+    }
+
+    /// Welcome card 「开始引导」: morph the window into the progress card and
+    /// start watching for the first step.
+    func beginTour() {
+        guard isActive, phase == .welcome else { return }
+        debugLog("Onboarding guide: welcome card accepted")
+        phase = .guiding
+        morphPanel()
+        startCopyPollingIfNeeded()
     }
 
     /// Finish (all steps done) or skip: persist completion and hide the panel.
     private func teardown() {
         isActive = false
-        dismissTask?.cancel()
-        dismissTask = nil
+        phase = nil
         stopCopyPolling()
         closePanel()
         hideSpotlight()
@@ -269,7 +298,7 @@ final class OnboardingGuide {
              (.search, .searched),
              (.preview, .previewed),
              (.favorite, .favorited),
-             (.paste, .pasted):
+             (.paste, .dragged):
             complete(step)
         case (.deleteAndUndo, .deleted):
             deleteActionDone = true
@@ -297,24 +326,28 @@ final class OnboardingGuide {
         persistProgress()
         debugLog("Onboarding step completed: \(step.title) (\(completedSteps.count)/\(OnboardingStep.allCases.count))")
 
+        // The last step is paste: the content has already landed in the user's
+        // app, so the tour gets out of the way right away instead of sitting on
+        // top of whatever they want to do next.
         if completedSteps.count == OnboardingStep.allCases.count {
-            // Mark complete immediately: quitting during the celebration must
-            // not replay the whole tour on the next launch.
             UserDefaults.standard.set(true, forKey: Self.completedKey)
-            scheduleDismiss()
+            teardown()
+            return
         }
         refreshPanel()
     }
 
-    /// Leave the completion state on screen briefly, then hide the panel.
-    private func scheduleDismiss() {
-        dismissTask?.cancel()
-        dismissTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .seconds(2.6))
-            guard !Task.isCancelled else { return }
-            self?.teardown()
-        }
+    /// Arm the clipboard watch for the first step.
+    ///
+    /// That step is the only one performed with no popup on screen, and the
+    /// only one that needs a poll to detect it.
+    private func startCopyPollingIfNeeded() {
+        guard !completedSteps.contains(.copyContent) else { return }
+        copyBaselineRevision = clipboard_get_history_revision()
+        beginCopyPolling()
     }
+
+
 
     // MARK: - Progress Persistence
 
@@ -363,7 +396,7 @@ final class OnboardingGuide {
         let panel = self.panel ?? OnboardingGuidePanel()
         self.panel = panel
         let focus = spotlightFocus()
-        panel.update(guide: self, focus: focus?.rect)
+        panel.update(guide: self, focus: focus?.rect, morph: false)
         panel.orderFrontRegardless()
         applySpotlight(focus)
     }
@@ -371,7 +404,17 @@ final class OnboardingGuide {
     /// Repaint the card and re-park it beside the current target.
     private func refreshPanel() {
         let focus = spotlightFocus()
-        panel?.update(guide: self, focus: focus?.rect)
+        panel?.update(guide: self, focus: focus?.rect, morph: false)
+        applySpotlight(focus)
+    }
+
+    /// Welcome card → progress card. The window slides and resizes to its new
+    /// place in one continuous animation while its content cross-fades, so the
+    /// corner card is visibly the welcome card shrinking away rather than a
+    /// new window appearing out of nowhere.
+    private func morphPanel() {
+        let focus = spotlightFocus()
+        panel?.update(guide: self, focus: focus?.rect, morph: true)
         applySpotlight(focus)
     }
 
@@ -417,7 +460,7 @@ final class OnboardingGuide {
         // Fresh layout: land the cutout exactly rather than easing into place.
         let focus = spotlightFocus()
         applySpotlight(focus)
-        panel?.update(guide: self, focus: focus?.rect)
+        panel?.update(guide: self, focus: focus?.rect, morph: false)
     }
 
     private func applySpotlight(_ focus: SpotlightFocus?) {
@@ -452,6 +495,10 @@ final class OnboardingGuide {
     /// whole popup and then contracting onto the control: that two-step read as
     /// a jarring jump right as the popup opened.
     private func spotlightFocus() -> SpotlightFocus? {
+        // While an item is in flight the user has to see the whole screen to
+        // pick a drop target; dimming everything outside the popup would fight
+        // the very gesture the step is teaching.
+        guard !isItemDragInProgress else { return nil }
         guard let target = spotlightTarget else { return nil }
         guard let popup = HistoryPopupWindow.existing, popup.isVisible else { return nil }
 
@@ -511,6 +558,13 @@ final class OnboardingGuide {
             width: local.width,
             height: local.height
         )
+    }
+
+    /// Track a native item drag so the scrim can step out of its way.
+    func setItemDragInProgress(_ inProgress: Bool) {
+        guard isItemDragInProgress != inProgress else { return }
+        isItemDragInProgress = inProgress
+        refreshSpotlight()
     }
 
     private func hideSpotlight() {

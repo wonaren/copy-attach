@@ -40,9 +40,12 @@ extension HistoryPopupContent {
         // NSApp.isActive reports true, but the window server keeps routing
         // magnify gestures to the previous app, so ZoomableImageNSView's
         // magnify monitor never fires. Real activation makes gesture delivery
-        // work for the preview. Deactivation is automatic when the
-        // popup/preview closes or another app is clicked; the paste target
-        // pid is protected in ClipboardBackend.updateSourceApp.
+        // work for the preview.
+        //
+        // The foreground is NOT handed back by the system: closing the preview
+        // leaves this app activated. `ClipboardBackend.restorePasteTargetFocus()`
+        // returns it after a paste; the target pid itself is protected in
+        // `updateSourceApp`.
         NSApp.activate(ignoringOtherApps: true)
         showPreview = true
         OnboardingGuide.shared.record(.previewed)

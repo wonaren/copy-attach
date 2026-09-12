@@ -44,9 +44,11 @@ extension HistoryPopupContent {
         let item = items[index]
         guard let backendIdx = backend.items.firstIndex(where: { $0.id == item.id }) else { return }
         if backend.selectAndPaste(at: backendIdx, asPath: asPath) {
-            OnboardingGuide.shared.record(.pasted)
             closePreview()
             onClose()
+            // The popup is gone; hand the foreground back so the caret returns
+            // to whatever the user was typing in.
+            backend.restorePasteTargetFocus()
         }
     }
 

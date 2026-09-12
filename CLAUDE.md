@@ -123,10 +123,12 @@ SwiftApp/
 - **图片加载**：缩略图走 `clipboard_get_image_thumb_by_db_id`（仅 SQLite 读），后台用 ImageIO 降采样至最长边 160px（禁用 ImageIO 驻留缓存）后存入 `NSCache`（countLimit 60、4MB），弹窗关闭立即清空；大图走 `clipboard_get_image_full_by_db_id`（优先内存，后备 DB）。预览大图由 Rust 降采样解码，预算 = 显示尺寸×scale 与 2048px 的较小值
 - **select_and_paste**：先查 accessibility 权限（未授权直接 return 0 且不动剪贴板）→ 查 history（by entry_id）→ DB 加载（失败显式 return 0，不兜底）→ 写剪贴板（设 pending_self_write）→ DB write-through → move entry to top → sleep 50ms → Cmd+V。**图片粘贴走唯一的文件路径模式**：先写 `$TMPDIR/CopyAttach/Paste/` 临时 PNG，剪贴板放 `public.file-url`（Finder 复制文件同款）再 Cmd+V
 - **粘贴目标 pid 不变式**：Cmd+V 投递给 `source_app.pid`（由 `NSWorkspace.didActivateApplicationNotification` 事件驱动更新，不轮询）。该 pid 必须是用户打开弹窗前的 app，绝不能是 CopyAttach 自身
+- **粘贴后必须归还前台**：预览会强制 `NSApp.activate`（捏合手势只投给最前台 app），而系统**不会**自动归还 —— 不归还的话 Cmd+V 仍能投进目标 app（内容进去了），但该 app 留在后台，光标回不到输入框。`selectItem` 粘贴后调 `ClipboardBackend.restorePasteTargetFocus()`；它只在 `NSApp.isActive` 为真时才动手，所以从不激活的普通路径是 no-op
 
 **引导（`Onboarding/`）**：
 
 - **非激活浮窗**（`canBecomeKey=false`）：取 key 会让弹窗失焦并被自动关闭；首击可达靠 `acceptsFirstMouse`
+- **单窗口双形态**：欢迎卡片（居中 380×272）与进度卡片（右下角 320×244）是**同一个窗口**，`beginTour()` 时窗口 frame 补间与内容交叉淡入同时进行（一镜到底）。两个尺寸是显式常量而非 measured —— 形变目标必须提前可知，固定卡片高度也顺带消除了步骤间的高度跳动
 - **聚光灯遮罩**（`ignoresMouseEvents=true`）：**必须点击穿透**，否则用户无法操作被高亮的控件。洞 = 目标控件，非整个弹窗
 - **步骤推进**：`OnboardingGuide.record(_:)` 由真实操作事件驱动（严格顺序，不匹配则忽略）
 - **光斑几何按需上报**：`SpotlightFramePreferenceKey`，仅引导期间挂 GeometryReader；行被 LazyVStack 回收时靠 `hasSelectedRow` + `lastRowRect` 区分「滚出视野」与「未选中」

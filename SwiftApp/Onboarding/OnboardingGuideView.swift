@@ -17,13 +17,16 @@ struct OnboardingGuideView: View {
             progressBar
             if let step = guide.currentStep {
                 stepCard(step)
-            } else {
-                finishedCard
             }
+            Spacer(minLength: 0)
             footer
         }
         .padding(16)
-        .frame(width: OnboardingGuidePanel.contentWidth)
+        .frame(
+            width: OnboardingGuidePanel.cardSize.width,
+            height: OnboardingGuidePanel.cardSize.height,
+            alignment: .topLeading
+        )
         .background(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .fill(theme.popupBackground)
@@ -128,34 +131,10 @@ struct OnboardingGuideView: View {
         }
     }
 
-    // MARK: - Finished
-
-    private var finishedCard: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "checkmark.circle.fill")
-                .font(.system(size: 22))
-                .foregroundColor(Color(nsColor: .systemGreen))
-            VStack(alignment: .leading, spacing: 2) {
-                Text("全部完成")
-                    .font(.system(size: 12.5, weight: .semibold))
-                    .foregroundColor(theme.popupPrimaryText)
-                Text("核心操作已上手，开始使用吧。")
-                    .font(.system(size: 11))
-                    .foregroundColor(theme.popupSecondaryText)
-            }
-            Spacer()
-        }
-        .padding(12)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(theme.popupSearchBackground)
-        )
-    }
-
     // MARK: - Footer
 
     private var footer: some View {
-        Text(guide.isFinished ? "引导完成，本提示会自动关闭。" : "按顺序完成以上操作，即可掌握全部核心功能。")
+        Text("按顺序完成以上操作，即可掌握全部核心功能。")
             .font(.system(size: 10.5))
             .foregroundColor(theme.popupMutedText)
     }

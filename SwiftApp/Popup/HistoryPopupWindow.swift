@@ -151,6 +151,9 @@ class HistoryPopupWindow: NSPanel {
         awaitingPostDragInteraction = false
         removePostDragClickMonitor()
         startMouseUpWatcher()
+        // The tour steps its scrim aside for the duration of the drag: the user
+        // needs the whole screen to pick a drop target.
+        OnboardingGuide.shared.setItemDragInProgress(true)
     }
 
     func show() {
@@ -279,6 +282,7 @@ class HistoryPopupWindow: NSPanel {
                 itemDragInProgress = false
                 awaitingPostDragInteraction = false
                 stopMouseUpWatcher()
+                reportItemDragFinished()
                 removePostDragClickMonitor()
                 debugLog("Popup resigned key after drag; closing (same as Esc)")
                 close()
@@ -325,6 +329,7 @@ class HistoryPopupWindow: NSPanel {
         guard itemDragInProgress else { return }
         itemDragInProgress = false
         stopMouseUpWatcher()
+        reportItemDragFinished()
 
         if Self.closePopupAfterDragEnabled {
             // 拖拽结束（已松手）→ 等同于按一次 Esc：直接关闭弹窗。
@@ -345,6 +350,13 @@ class HistoryPopupWindow: NSPanel {
             awaitingPostDragInteraction = true
             installPostDragClickMonitor()
         }
+    }
+
+    /// Tell the tour an item drag finished: it is the guided tour's last step,
+    /// and the scrim it parked during the drag comes back (or the tour ends).
+    private func reportItemDragFinished() {
+        OnboardingGuide.shared.setItemDragInProgress(false)
+        OnboardingGuide.shared.record(.dragged)
     }
 
     private func installPostDragClickMonitor() {
@@ -454,7 +466,10 @@ class HistoryPopupWindow: NSPanel {
         self.contentView = nil
         popupHostingView = nil
 
-        // Nothing left to light up.
+        // Nothing left to light up. Releasing the drag flag first also covers a
+        // drag cut short by the popup closing, which would otherwise leave the
+        // tour's scrim stuck in its hidden state.
+        OnboardingGuide.shared.setItemDragInProgress(false)
         OnboardingGuide.shared.refreshSpotlight()
     }
 }
