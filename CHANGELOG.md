@@ -2,6 +2,10 @@
 
 本文件记录每个正式版本面向用户的重要变更, 须简洁凝练。发布版本使用不带 `-dev` 后缀的版本号作为章节标题；CI 会把对应章节写入 GitHub Release。
 
+# 写给自己: 防止忘了怎么更新 tag
+git tag -f v0.xxx.x HEAD
+git push origin v0.xxx.x --force
+
 ## [Unreleased]
 
 ## [0.104.0] - 2026-09-13
