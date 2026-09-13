@@ -775,7 +775,11 @@ struct HistoryPopupContent: View {
                         .onDrag {
                             selectedIndex = index + 1
                             popupWindow?.beginItemDrag()
-                            return ClipboardDragProvider.provider(for: item)
+                            // Rich text is opt-in per source app: it breaks
+                            // VS Code chat drops but is required by 思源笔记 /
+                            // Typora. See `sourceAppNeedsRichTextDrag`.
+                            let richText = backend.sourceAppNeedsRichTextDrag
+                            return ClipboardDragProvider.provider(for: item, richText: richText)
                         }
                         .contentShape(Rectangle())
                         .onTapGesture {

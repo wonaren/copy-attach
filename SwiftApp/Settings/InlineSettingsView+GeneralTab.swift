@@ -1,5 +1,7 @@
+import AppKit
 import SwiftUI
 import ServiceManagement
+import UniformTypeIdentifiers
 
 // MARK: - 🔵 GENERAL TAB
 
@@ -9,6 +11,7 @@ extension InlineSettingsView {
             VStack(spacing: 16) {
                 permissionBanner
                 generalSettingsCard
+                richTextDragCard
                 menuBarConfigCard
             }
             .padding(20)
@@ -148,7 +151,7 @@ extension InlineSettingsView {
 
     private var generalSettingsCard: some View {
         settingsCard {
-            cardTitle(icon: "gearshape.2", text: "其它设置")
+            cardTitle(icon: "gearshape.2", text: "常规设置")
             settingToggleRow(
                 icon: launchAtLogin ? "power.circle.fill" : "power.circle",
                 iconColor: launchAtLogin ? Color(nsColor: .systemGreen) : theme.secondaryText,
@@ -204,6 +207,391 @@ extension InlineSettingsView {
                 backend.setDebugLogging(newValue)
             }
         }
+    }
+
+    // MARK: - Rich Text Drag Applications Card (Apple Design)
+
+    /// Apps that must receive HTML/RTF on drop. Everything else gets plain
+    /// text, because a drag carrying `text/html` makes VS Code's Copilot chat
+    /// input treat it as a URL attachment and swallow the drop.
+    ///
+    /// Kept as a compact single-row entry so the General tab fits in the
+    /// window without scrolling; clicking "查看列表…" opens the native modal sheet.
+    private var richTextDragCard: some View {
+        settingsCard {
+            HStack(spacing: 10) {
+                Image(systemName: "doc.richtext")
+                    .font(.system(size: 15))
+                    .foregroundColor(Color.accentColor)
+                    .frame(width: 20)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text("富文本拖拽应用")
+                            .font(.system(size: 12.5, weight: .medium))
+                            .foregroundColor(theme.primaryText)
+
+                        if !richTextDragApps.isEmpty {
+                            Text("\(richTextDragApps.count)")
+                                .font(.system(size: 10, weight: .semibold, design: .rounded))
+                                .foregroundColor(theme.secondaryText)
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 1)
+                                .background(theme.cardBorder.opacity(0.5))
+                                .clipShape(Capsule())
+                        }
+                    }
+
+                    Text(richTextSummaryText)
+                        .font(.system(size: 10.5))
+                        .foregroundColor(theme.secondaryText)
+                        .lineLimit(1)
+                }
+
+                Spacer()
+
+                // Miniature app icons stack preview
+                if !richTextDragApps.isEmpty {
+                    richTextMiniIconsPreview
+                }
+
+                // Native Apple-style "查看列表…" button that opens the modal sheet
+                Button(action: {
+                    showRichTextListSheet = true
+                }) {
+                    Text("查看列表…")
+                        .font(.system(size: 11.5, weight: .medium))
+                        .foregroundColor(theme.primaryText)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4.5)
+                        .background(theme.buttonBackground)
+                        .cornerRadius(6)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6)
+                                .stroke(theme.cardBorder, lineWidth: 1)
+                        )
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .sheet(isPresented: $showRichTextListSheet) {
+            richTextAppListSheet
+        }
+    }
+
+    // MARK: - Rich Text Drag Applications Modal Sheet (Apple Design)
+
+    private var richTextAppListSheet: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            // Sheet Header
+            HStack(spacing: 10) {
+                Image(systemName: "doc.richtext")
+                    .font(.system(size: 18))
+                    .foregroundColor(Color.accentColor)
+
+                Text("富文本拖拽应用")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundColor(theme.primaryText)
+
+                Spacer()
+
+                if !richTextDragApps.isEmpty {
+                    Text("\(richTextDragApps.count) 个应用")
+                        .font(.system(size: 11.5, weight: .medium))
+                        .foregroundColor(theme.secondaryText)
+                }
+            }
+
+            Text("默认拖拽输出纯文本，以确保与 VS Code Copilot 等聊天框的兼容性。添加到下方的应用在拖拽时将额外提供 HTML / RTF 富文本，以满足思源笔记、Typora 等编辑器的接收需求。")
+                .font(.system(size: 11.5))
+                .foregroundColor(theme.secondaryText)
+                .lineSpacing(2)
+
+            // Inset grouped list container
+            VStack(spacing: 0) {
+                if richTextDragApps.isEmpty {
+                    VStack(spacing: 8) {
+                        Image(systemName: "doc.text")
+                            .font(.system(size: 26))
+                            .foregroundColor(theme.secondaryText.opacity(0.5))
+                            .padding(.top, 24)
+                        Text("未添加特殊应用，全部按纯文本拖拽")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundColor(theme.primaryText)
+                        Text("点击下方「添加应用…」或将应用图标从访达拖入此处")
+                            .font(.system(size: 11))
+                            .foregroundColor(theme.secondaryText)
+                            .padding(.bottom, 24)
+                    }
+                    .frame(maxWidth: .infinity)
+                } else {
+                    ScrollView {
+                        VStack(spacing: 0) {
+                            ForEach(richTextDragApps, id: \.self) { bundleID in
+                                richTextAppRow(bundleID: bundleID)
+                                if bundleID != richTextDragApps.last {
+                                    sectionDivider()
+                                }
+                            }
+                        }
+                    }
+                    .frame(maxHeight: 200)
+                }
+
+                sectionDivider()
+                richTextTableFooterBar
+            }
+            .background(theme.cardRowBackground)
+            .cornerRadius(8)
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(isDraggingOverRichTextCard ? Color.accentColor : theme.cardBorder, lineWidth: isDraggingOverRichTextCard ? 1.5 : 1)
+            )
+            .animation(.easeInOut(duration: 0.15), value: isDraggingOverRichTextCard)
+            .onDrop(of: [UTType.fileURL.identifier], isTargeted: $isDraggingOverRichTextCard) { providers in
+                handleDropApplications(providers)
+            }
+
+            Spacer(minLength: 4)
+
+            // Sheet Footer Bar
+            HStack {
+                Text("按唤起弹窗时的前台应用判定")
+                    .font(.system(size: 11))
+                    .foregroundColor(theme.tertiaryText)
+
+                Spacer()
+
+                Button("完成") {
+                    showRichTextListSheet = false
+                }
+                .keyboardShortcut(.defaultAction)
+                .buttonStyle(.borderedProminent)
+                .controlSize(.regular)
+            }
+        }
+        .padding(20)
+        .frame(width: 470, height: 400)
+        .background(theme.cardBackground)
+    }
+
+    private var richTextMiniIconsPreview: some View {
+        HStack(spacing: -5) {
+            ForEach(Array(richTextDragApps.prefix(3)), id: \.self) { bundleID in
+                if let icon = getAppIcon(for: bundleID) {
+                    Image(nsImage: icon)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(width: 18, height: 18)
+                        .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                .stroke(theme.cardBackground, lineWidth: 1.5)
+                        )
+                }
+            }
+        }
+        .padding(.trailing, 2)
+    }
+
+    private var richTextSummaryText: String {
+        if richTextDragApps.isEmpty {
+            return "全部按纯文本拖拽（未设置特殊应用）"
+        }
+        let names = richTextDragApps.prefix(2).map { richTextDragApplicationName(for: $0) }
+        let joined = names.joined(separator: "、")
+        if richTextDragApps.count > 2 {
+            return "仅 \(joined) 等 \(richTextDragApps.count) 个应用启用富文本"
+        } else {
+            return "仅为 \(joined) 启用富文本，其余保持纯文本"
+        }
+    }
+
+    private func richTextAppRow(bundleID: String) -> some View {
+        HStack(spacing: 10) {
+            // App Icon with Apple squircle clip and shadow
+            if let icon = getAppIcon(for: bundleID) {
+                Image(nsImage: icon)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: 26, height: 26)
+                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.35 : 0.10), radius: 2, y: 1)
+            } else {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(Color.accentColor.opacity(0.12))
+                        .frame(width: 26, height: 26)
+                    Image(systemName: "app.dashed")
+                        .font(.system(size: 13))
+                        .foregroundColor(Color.accentColor)
+                }
+            }
+
+            // App Name & Bundle ID
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(richTextDragApplicationName(for: bundleID))
+                        .font(.system(size: 12.5, weight: .medium))
+                        .foregroundColor(theme.primaryText)
+
+                    if isRunning(bundleID: bundleID) {
+                        Circle()
+                            .fill(Color(nsColor: .systemGreen))
+                            .frame(width: 6, height: 6)
+                            .help("该应用当前正在运行")
+                    }
+                }
+
+                Text(bundleID)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundColor(theme.secondaryText)
+            }
+
+            Spacer()
+
+            // Delete button
+            Button {
+                withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
+                    richTextDragApps.removeAll { $0 == bundleID }
+                    persistRichTextDragApps()
+                }
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 14))
+                    .foregroundColor(theme.tertiaryText)
+            }
+            .buttonStyle(.plain)
+            .help("从列表中移除")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+    }
+
+    private var richTextTableFooterBar: some View {
+        HStack(spacing: 8) {
+            Menu {
+                let running = runningAppCandidates
+                if !running.isEmpty {
+                    Section("正在运行的应用") {
+                        ForEach(running, id: \.processIdentifier) { app in
+                            Button {
+                                if let id = app.bundleIdentifier {
+                                    withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
+                                        richTextDragApps.append(id)
+                                        persistRichTextDragApps()
+                                    }
+                                }
+                            } label: {
+                                if let icon = app.icon {
+                                    Image(nsImage: icon)
+                                }
+                                Text(app.localizedName ?? (app.bundleIdentifier ?? ""))
+                            }
+                        }
+                    }
+                }
+                Section {
+                    Button("从访达中选取…") {
+                        chooseRichTextDragApplication()
+                    }
+                }
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: "plus")
+                        .font(.system(size: 11, weight: .semibold))
+                    Text("添加应用…")
+                        .font(.system(size: 11.5, weight: .medium))
+                }
+                .foregroundColor(Color.accentColor)
+                .contentShape(Rectangle())
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+
+            Spacer()
+
+            if isDraggingOverRichTextCard {
+                Text("松开以添加应用")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(Color.accentColor)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+        .background(theme.cardBackground.opacity(0.35))
+    }
+
+    private func richTextDragApplicationName(for bundleID: String) -> String {
+        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
+            return FileManager.default.displayName(atPath: url.path)
+        }
+        if bundleID == "org.b3log.siyuan" { return "SiYuan" }
+        if bundleID == "abnerworks.Typora" { return "Typora" }
+        return bundleID
+    }
+
+    private func isRunning(bundleID: String) -> Bool {
+        NSWorkspace.shared.runningApplications.contains { $0.bundleIdentifier == bundleID }
+    }
+
+    private var runningAppCandidates: [NSRunningApplication] {
+        let currentIDs = Set(richTextDragApps)
+        let myPID = ProcessInfo.processInfo.processIdentifier
+        return NSWorkspace.shared.runningApplications.filter { app in
+            guard let id = app.bundleIdentifier, !currentIDs.contains(id) else { return false }
+            guard app.processIdentifier != myPID else { return false }
+            return app.activationPolicy == .regular
+        }.sorted { ($0.localizedName ?? "") < ($1.localizedName ?? "") }
+    }
+
+    private func chooseRichTextDragApplication() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = true
+        panel.allowedContentTypes = [.applicationBundle, .application]
+        panel.directoryURL = URL(fileURLWithPath: "/Applications")
+        panel.prompt = "添加"
+        panel.message = "选择需要支持富文本拖拽的应用"
+        guard panel.runModal() == .OK else { return }
+        for url in panel.urls {
+            guard let bundle = Bundle(url: url), let bundleID = bundle.bundleIdentifier else { continue }
+            if !richTextDragApps.contains(bundleID) {
+                richTextDragApps.append(bundleID)
+            }
+        }
+        persistRichTextDragApps()
+    }
+
+    private func handleDropApplications(_ providers: [NSItemProvider]) -> Bool {
+        let appProviders = providers.filter { $0.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) }
+        guard !appProviders.isEmpty else { return false }
+        for provider in appProviders {
+            provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
+                let url: URL? = {
+                    if let url = item as? URL { return url }
+                    if let nsurl = item as? NSURL { return nsurl as URL }
+                    if let data = item as? Data { return URL(dataRepresentation: data, relativeTo: nil) }
+                    return nil
+                }()
+                guard let url = url else { return }
+                guard let bundle = Bundle(url: url), let bundleID = bundle.bundleIdentifier else { return }
+                DispatchQueue.main.async {
+                    if !self.richTextDragApps.contains(bundleID) {
+                        withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
+                            self.richTextDragApps.append(bundleID)
+                            self.persistRichTextDragApps()
+                        }
+                    }
+                }
+            }
+        }
+        return true
+    }
+
+    private func persistRichTextDragApps() {
+        ClipboardBackend.richTextDragAppBundleIDs = richTextDragApps
     }
 
     private var menuBarConfigCard: some View {

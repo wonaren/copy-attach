@@ -25,6 +25,9 @@ struct InlineSettingsView: View {
     @State var pendingThreshold: Int? = nil
     @State var thresholdBeforeEdit: Double = 3000
     @State var continuousDrag = HistoryPopupWindow.continuousDragEnabled
+    @State var richTextDragApps = ClipboardBackend.richTextDragAppBundleIDs
+    @State var isDraggingOverRichTextCard = false
+    @State var showRichTextListSheet = false
     @State var debugLogging = UserDefaults.standard.object(forKey: "DebugLogging") as? Bool ?? (clipboard_is_debug_logging() != 0)
     @State var showDragGuide = false
     @State var isHoveringDragIcon = false

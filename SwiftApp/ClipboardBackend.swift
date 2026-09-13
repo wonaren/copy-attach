@@ -37,6 +37,13 @@ class ClipboardBackend {
     private let reloadGeneration = OSAllocatedUnfairLock(initialState: 0)
     /// The app the user was working in before our panels took over.
     private var pasteTargetPID: pid_t?
+    /// Bundle identifier of that same app, kept in lockstep with
+    /// `pasteTargetPID`. The popup decides the drag flavour from it: rich-text
+    /// editors (思源笔记, Typora) only accept a drop carrying `text/html`, while
+    /// VS Code's chat input only inserts text when `text/html` is absent. One
+    /// pasteboard cannot satisfy both, so the frontmost app at popup time picks
+    /// the representation set.
+    private(set) var sourceAppBundleID: String?
     private var lastImageEncodingCounter: UInt64 = 0
     private var lastHistoryRevision: UInt64 = 0
     private let thumbnailCache: NSCache<NSNumber, NSImage> = {
@@ -240,8 +247,36 @@ class ClipboardBackend {
             let bundleId = app.bundleIdentifier ?? "unknown"
             let pid = Int32(app.processIdentifier)
             pasteTargetPID = app.processIdentifier
+            sourceAppBundleID = bundleId
             clipboard_set_source_app(name, bundleId, pid)
         }
+    }
+
+    // MARK: - Drag flavour (plain vs rich text)
+
+    /// UserDefaults key for the apps that need the rich-text drag set.
+    static let richTextDragAppsDefaultsKey = "RichTextDragAppBundleIDs"
+
+    /// Apps known to reject a plain-text drop and require `text/html`.
+    /// Applied only until the user edits the list (the edit then persists an
+    /// explicit array, including an empty one).
+    static let defaultRichTextDragApps = ["org.b3log.siyuan", "abnerworks.Typora"]
+
+    /// Bundle identifiers whose drags must carry HTML/RTF instead of plain text.
+    static var richTextDragAppBundleIDs: [String] {
+        get {
+            UserDefaults.standard.stringArray(forKey: richTextDragAppsDefaultsKey)
+                ?? defaultRichTextDragApps
+        }
+        set {
+            UserDefaults.standard.set(newValue, forKey: richTextDragAppsDefaultsKey)
+        }
+    }
+
+    /// Whether the app the popup was opened over needs the rich-text drag set.
+    var sourceAppNeedsRichTextDrag: Bool {
+        guard let bundleId = sourceAppBundleID else { return false }
+        return Self.richTextDragAppBundleIDs.contains(bundleId)
     }
 
     /// Data poll: three pure FFI atomic reads + revision-gated reload. No

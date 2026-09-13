@@ -9,11 +9,20 @@ import UniformTypeIdentifiers
 /// Dropover-style shelves, and applications that consume a dropped image as a
 /// file rather than as an in-memory pasteboard image.
 ///
-/// Text is offered under every representation a drop target may key on:
-/// UTF-8 plain text, generic plain text, abstract text, HTML and RTF. A bare
-/// `NSItemProvider(object: NSString)` advertises only
+/// Text is offered as UTF-8 plain text, generic plain text and abstract text.
+/// A bare `NSItemProvider(object: NSString)` advertises only
 /// `public.utf8-plain-text`, so receivers filtering on any of the other UTIs
 /// decline the drop.
+///
+/// Rich text (HTML *and* RTF) is off by default. Chromium populates its drag
+/// `drop_data.html` — i.e. web `text/html` — when the pasteboard carries either
+/// `public.html` or `public.rtf` (it converts RTF to HTML; see
+/// `web_drag_dest_mac.mm`, "Get HTML. If there's no HTML, try RTF."). VS Code's
+/// Copilot chat input classifies *any* drag carrying `text/html` as a URL
+/// attachment ("Attach URL as Context"): it swallows the drop and never inserts
+/// the text. A few editors need the opposite — they only accept a drop that
+/// carries `text/html` (思源笔记, Typora) — so the caller opts into rich text
+/// per drag, keyed on the frontmost app active when the popup was opened.
 enum ClipboardDragProvider {
     /// The `NSItemProvider` SwiftUI's `.onDrag` hands to the drag session for
     /// `item`.
@@ -21,7 +30,7 @@ enum ClipboardDragProvider {
     /// Every representation is registered with eagerly built `Data`, so a
     /// receiver reading the pasteboard during `draggingEntered:` gets the
     /// payload without waiting on SwiftUI's asynchronous provider round trip.
-    static func provider(for item: ClipboardItem) -> NSItemProvider {
+    static func provider(for item: ClipboardItem, richText: Bool = false) -> NSItemProvider {
         let provider = NSItemProvider()
         switch item {
         case .text:
@@ -33,10 +42,11 @@ enum ClipboardDragProvider {
                 return NSItemProvider(object: "" as NSString)
             }
             let plain = Data(full.utf8)
-            let rich = Self.richRepresentations(for: full)
-            for type in Self.textRepresentationTypes {
-                // Rich types carry their own serialization; everything else is
-                // the same UTF-8 bytes under a different UTI.
+            let rich = richText ? Self.richRepresentations(for: full) : [:]
+            let types = richText ? Self.richTextRepresentationTypes : Self.plainTextRepresentationTypes
+            for type in types {
+                // Plain UTIs share the same UTF-8 bytes; a rich UTI carries its
+                // own serialization (see `richRepresentations`).
                 let data = rich[type.identifier] ?? plain
                 provider.registerDataRepresentation(
                     forTypeIdentifier: type.identifier,
@@ -76,15 +86,24 @@ enum ClipboardDragProvider {
         return provider
     }
 
-    /// Every text representation a drag result advertises.
+    /// The default text representations: plain UTIs only.
     ///
-    /// `public.utf8-plain-text` alone is not enough: receivers differ in which
-    /// UTI they match on. Electron and web drop zones (思源笔记 and other
-    /// editors) filter on `public.plain-text` or `text/plain`, while
-    /// rich-text destinations (Notes, Typora, Word) prefer `public.rtf` /
-    /// `public.html`. Advertising the whole set is what makes an
-    /// `NSDraggingItem` from a stock AppKit text control work everywhere.
-    private static let textRepresentationTypes: [UTType] = [
+    /// `public.utf8-plain-text` alone is not enough — receivers differ in which
+    /// UTI they match on, and Electron/web drop zones filter on
+    /// `public.plain-text`. Plain is also the only safe default: any rich UTI
+    /// makes Chromium synthesize `text/html` and breaks VS Code chat drops
+    /// (see above).
+    private static let plainTextRepresentationTypes: [UTType] = [
+        .utf8PlainText,
+        .plainText,
+        .text,
+    ]
+
+    /// The representations used for apps that only accept rich text.
+    ///
+    /// Adds HTML and RTF to the plain set. Only used when the source app opted
+    /// in (see `ClipboardBackend.richTextDragAppBundleIDs`).
+    private static let richTextRepresentationTypes: [UTType] = [
         .utf8PlainText,
         .plainText,
         .text,
@@ -92,7 +111,7 @@ enum ClipboardDragProvider {
         .rtf,
     ]
 
-    /// Serialized RTF and HTML for `full`.
+    /// Serialized RTF and HTML for `full`, keyed by UTI.
     ///
     /// RTF and HTML are structured formats: handing a receiver the raw UTF-8
     /// bytes under those UTIs produces a document it cannot parse. Both are
