@@ -73,13 +73,14 @@ class HistoryPopupWindow: NSPanel {
     /// Duration of the park / restore slide.
     static let dragParkDuration: TimeInterval = 0.22
 
-    /// UserDefaults key for the "拖拽后自动关闭弹窗" preference (default ON).
-    static let closePopupAfterDragDefaultsKey = "ClosePopupAfterDrag"
+    /// UserDefaults key for the "连续拖拽" preference (default OFF).
+    static let continuousDragDefaultsKey = "ContinuousDrag"
 
-    /// Whether the popup should dismiss right after an item drag completes.
-    /// Defaults to ON when the user has never touched the preference.
-    static var closePopupAfterDragEnabled: Bool {
-        UserDefaults.standard.object(forKey: closePopupAfterDragDefaultsKey) as? Bool ?? true
+    /// Whether the popup stays open after an item drag completes so the user
+    /// can drag several items in a row. Defaults to OFF when the user has never
+    /// touched the preference — i.e. the popup dismisses right after a drag.
+    static var continuousDragEnabled: Bool {
+        UserDefaults.standard.object(forKey: continuousDragDefaultsKey) as? Bool ?? false
     }
 
     /// Duration of the popup open fade-in (window alpha 0 → 1).
@@ -275,7 +276,9 @@ class HistoryPopupWindow: NSPanel {
             return
         }
         if itemDragInProgress || awaitingPostDragInteraction {
-            if Self.closePopupAfterDragEnabled {
+            if Self.continuousDragEnabled {
+                debugLog("Popup resigned key during item drag; awaiting next interaction")
+            } else {
                 // The drag left the popup and focus moved elsewhere (a drop
                 // into another app activates it). Dismiss now — the same
                 // outcome as pressing Esc.
@@ -286,8 +289,6 @@ class HistoryPopupWindow: NSPanel {
                 removePostDragClickMonitor()
                 debugLog("Popup resigned key after drag; closing (same as Esc)")
                 close()
-            } else {
-                debugLog("Popup resigned key during item drag; awaiting next interaction")
             }
             return
         }
@@ -331,15 +332,8 @@ class HistoryPopupWindow: NSPanel {
         stopMouseUpWatcher()
         reportItemDragFinished()
 
-        if Self.closePopupAfterDragEnabled {
-            // 拖拽结束（已松手）→ 等同于按一次 Esc：直接关闭弹窗。
-            awaitingPostDragInteraction = false
-            removePostDragClickMonitor()
-            resetDragParking()
-            debugLog("Drag ended; closing popup (same as Esc)")
-            close()
-        } else {
-            // 开关关闭：保持弹窗开启，可连续拖拽多个条目；
+        if Self.continuousDragEnabled {
+            // 连续拖拽开启：保持弹窗开启，可继续拖拽下一个条目；
             // 下一次外部点击正常关闭。
             if parkedSide != nil {
                 // The popup parked out of the way during the drag; slide it
@@ -349,6 +343,13 @@ class HistoryPopupWindow: NSPanel {
             }
             awaitingPostDragInteraction = true
             installPostDragClickMonitor()
+        } else {
+            // 拖拽结束（已松手）→ 等同于按一次 Esc：直接关闭弹窗。
+            awaitingPostDragInteraction = false
+            removePostDragClickMonitor()
+            resetDragParking()
+            debugLog("Drag ended; closing popup (same as Esc)")
+            close()
         }
     }
 

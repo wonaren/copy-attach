@@ -183,14 +183,14 @@ extension InlineSettingsView {
             }
             sectionDivider().padding(.vertical, 4)
             settingToggleRow(
-                icon: closePopupAfterDrag ? "hand.draw.fill" : "hand.draw",
-                iconColor: closePopupAfterDrag ? Color.accentColor : theme.secondaryText,
-                title: "拖拽后自动关闭弹窗",
-                desc: "将历史条目拖拽到其他应用后自动关闭弹窗；关闭此开关可连续拖拽多个条目。",
-                isOn: $closePopupAfterDrag
+                icon: continuousDrag ? "hand.draw.fill" : "hand.draw",
+                iconColor: continuousDrag ? Color.accentColor : theme.secondaryText,
+                title: "连续拖拽",
+                desc: "开启后，将历史条目拖拽到其他应用时弹窗保持打开，可连续拖拽多个条目。",
+                isOn: $continuousDrag
             )
-            .onChange(of: closePopupAfterDrag) { _, newValue in
-                UserDefaults.standard.set(newValue, forKey: HistoryPopupWindow.closePopupAfterDragDefaultsKey)
+            .onChange(of: continuousDrag) { _, newValue in
+                UserDefaults.standard.set(newValue, forKey: HistoryPopupWindow.continuousDragDefaultsKey)
             }
             sectionDivider().padding(.vertical, 4)
             settingToggleRow(

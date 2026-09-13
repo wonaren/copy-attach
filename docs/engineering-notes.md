@@ -89,7 +89,7 @@ Phase 1 同步 hash + 缩略图（最长边 300px）→ 更新内存。Phase 2 �
 - 窗口拖动区限制为 PopupHostingView 外 3pt 边框，避免行拖拽误触窗口移动。
 - 拖拽结束检测用 `NSEvent.pressedMouseButtons` 轮询（40ms Timer，注册 `.common` + `.eventTracking` 双 run loop 模式）——拖拽期间 run loop 处于 `NSEventTrackingRunLoopMode`，global/local monitor 收不到 mouse-up（官方文档确认），Timer 是可靠信号。
 - **拖拽在途弹窗智能停车**（`tickDragParking`，与松手检测共用 40ms tick）：按屏幕 45%:10%:45% 分区，鼠标在右侧 45% 时弹窗停靠左边缘、左侧 45% 时停靠右边缘，中间 10% 为死区不动；同侧小幅晃动不触发横跳。`park(at:)` 用 `animator().setFrame`（无边框 NSPanel 上 `setFrameOrigin` 静默不动画）；`tickParkingSlide` 侦测 CA 事务停顿（事件跟踪模式下帧动画可能卡死，3 tick 无位移即 `setFrameOrigin` 直接落位）。拖拽结束时开关关闭走 `restoreFromParking()` 滑回居中；`show()`/`close()`/`completeItemDrag` 均 `resetDragParking()`。
-- 开关「拖拽后自动关闭弹窗」（`ClosePopupAfterDrag`，默认开）开启时，拖拽结束直接 `close()`——与 Esc 相同路径，无动画、无 completion 依赖。
+- 开关「连续拖拽」（`ContinuousDrag`，默认关）：关闭时拖拽结束直接 `close()`——与 Esc 相同路径，无动画、无 completion 依赖；开启时保持弹窗、必要时 `restoreFromParking()` 滑回居中，等下一次外部点击再关闭。
 
 ## 弹窗 UI
 
