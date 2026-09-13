@@ -16,6 +16,8 @@
 #   7. 版本相对上一发布章节不倒退、不重复
 #   8. 同版本章节不重复出现（CI 按版本号提取 Release Notes）
 #   9. 已存在同版本 git tag 时告警
+#   10. Clippy 静态检查通过（cargo clippy --all-targets -- -D warnings）
+#   11. 单元测试通过（cargo test）
 #
 # 任一检查失败退出码为 1，可直接挂在 pre-push hook：
 #   .git/hooks/pre-push  →  bash check_push.sh
@@ -204,6 +206,25 @@ if git rev-parse -q --verify "refs/tags/v${VERSION}" >/dev/null 2>&1; then
   warn "已存在 tag v${VERSION}——推送标签会冲突，请确认是否要重复发布"
 else
   ok "无同版本 git tag（v${VERSION}）"
+fi
+
+# ---------- 7. Clippy 静态代码检查 ----------
+echo
+echo "${C_DIM}正在运行 cargo clippy 检查...${C_RST}"
+if CLIPPY_OUTPUT=$(cargo clippy --all-targets -- -D warnings 2>&1); then
+  ok "Clippy 检查通过（cargo clippy --all-targets -- -D warnings）"
+else
+  fail "Clippy 检查未通过："
+  printf '%s\n' "${CLIPPY_OUTPUT}"
+fi
+
+# ---------- 8. 单元测试 ----------
+echo "${C_DIM}正在运行 cargo test 测试...${C_RST}"
+if TEST_OUTPUT=$(cargo test 2>&1); then
+  ok "单元测试全部通过（cargo test）"
+else
+  fail "单元测试执行失败："
+  printf '%s\n' "${TEST_OUTPUT}"
 fi
 
 summary
