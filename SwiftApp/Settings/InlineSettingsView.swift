@@ -28,6 +28,8 @@ struct InlineSettingsView: View {
     @State var richTextDragApps = ClipboardBackend.richTextDragAppBundleIDs
     @State var isDraggingOverRichTextCard = false
     @State var showRichTextListSheet = false
+    @State var isDraggingOverIgnoreSheet = false
+    @State var showIgnoredAppsSheet = false
     @State var debugLogging = UserDefaults.standard.object(forKey: "DebugLogging") as? Bool ?? (clipboard_is_debug_logging() != 0)
     @State var showDragGuide = false
     @State var isHoveringDragIcon = false
@@ -318,17 +320,17 @@ struct InlineSettingsView: View {
     }
 
     func settingToggleRow(icon: String, iconColor: Color, title: String, desc: String, isOn: Binding<Bool>) -> some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 12) {
             Image(systemName: icon)
-                .font(.system(size: 14))
+                .font(.system(size: 15))
                 .foregroundColor(iconColor)
-                .frame(width: 18)
-            VStack(alignment: .leading, spacing: 1) {
+                .frame(width: 22)
+            VStack(alignment: .leading, spacing: 3) {
                 Text(title)
-                    .font(.system(size: 12.5, weight: .medium))
+                    .font(.system(size: 13, weight: .medium))
                     .foregroundColor(theme.primaryText)
                 Text(desc)
-                    .font(.system(size: 10.5))
+                    .font(.system(size: 11.5))
                     .foregroundColor(theme.secondaryText)
             }
             Spacer()
@@ -336,6 +338,7 @@ struct InlineSettingsView: View {
                 .toggleStyle(.switch)
                 .controlSize(.small)
         }
+        .padding(.vertical, 4)
     }
 
     func sectionDivider() -> some View {

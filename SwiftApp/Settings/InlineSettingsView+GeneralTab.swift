@@ -9,10 +9,10 @@ extension InlineSettingsView {
     var generalTab: some View {
         ScrollView {
             VStack(spacing: 16) {
-                permissionBanner
+                if !backend.permissionGranted {
+                    permissionBanner
+                }
                 generalSettingsCard
-                richTextDragCard
-                menuBarConfigCard
             }
             .padding(20)
         }
@@ -151,7 +151,6 @@ extension InlineSettingsView {
 
     private var generalSettingsCard: some View {
         settingsCard {
-            cardTitle(icon: "gearshape.2", text: "常规设置")
             settingToggleRow(
                 icon: launchAtLogin ? "power.circle.fill" : "power.circle",
                 iconColor: launchAtLogin ? Color(nsColor: .systemGreen) : theme.secondaryText,
@@ -173,7 +172,7 @@ extension InlineSettingsView {
                     UserDefaults.standard.set(!newValue, forKey: "LaunchAtLogin")
                 }
             }
-            sectionDivider().padding(.vertical, 4)
+            sectionDivider().padding(.vertical, 7)
             settingToggleRow(
                 icon: runInBackground ? "circle.fill" : "circle",
                 iconColor: runInBackground ? Color(nsColor: .systemGreen) : theme.secondaryText,
@@ -184,99 +183,109 @@ extension InlineSettingsView {
             .onChange(of: runInBackground) { _, newValue in
                 UserDefaults.standard.set(newValue, forKey: "RunInBackground")
             }
-            sectionDivider().padding(.vertical, 4)
+            sectionDivider().padding(.vertical, 7)
+            settingToggleRow(
+                icon: "menubar.rectangle",
+                iconColor: showMenuBarIcon ? Color.accentColor : theme.secondaryText,
+                title: "显示菜单栏图标",
+                desc: "控制 CopyAttach 图标在 macOS 顶部状态栏的显示与隐藏。",
+                isOn: $showMenuBarIcon
+            )
+            .onChange(of: showMenuBarIcon) { _, newValue in
+                UserDefaults.standard.set(newValue, forKey: "ShowMenuBarIcon")
+            }
+            sectionDivider().padding(.vertical, 7)
             settingToggleRow(
                 icon: continuousDrag ? "hand.draw.fill" : "hand.draw",
                 iconColor: continuousDrag ? Color.accentColor : theme.secondaryText,
                 title: "连续拖拽",
-                desc: "开启后，将历史条目拖拽到其他应用时弹窗保持打开，可连续拖拽多个条目。",
+                desc: "拖拽条目时弹窗保持打开，支持连续多次拖拽。",
                 isOn: $continuousDrag
             )
             .onChange(of: continuousDrag) { _, newValue in
                 UserDefaults.standard.set(newValue, forKey: HistoryPopupWindow.continuousDragDefaultsKey)
             }
-            sectionDivider().padding(.vertical, 4)
+            sectionDivider().padding(.vertical, 7)
+            richTextDragRow
+            sectionDivider().padding(.vertical, 7)
             settingToggleRow(
                 icon: "ant.circle.fill",
                 iconColor: debugLogging ? Color(nsColor: .systemOrange) : theme.secondaryText,
                 title: "调试日志",
-                desc: "开发/诊断时输出日志到 /tmp/copyattach_debug.log；分发版默认关闭以节省资源。",
+                desc: "记录诊断日志到 /tmp/copyattach_debug.log；默认关闭。",
                 isOn: $debugLogging
             )
             .onChange(of: debugLogging) { _, newValue in
                 backend.setDebugLogging(newValue)
             }
         }
+        .sheet(isPresented: $showRichTextListSheet) {
+            richTextAppListSheet
+        }
     }
 
     // MARK: - Rich Text Drag Applications Card (Apple Design)
 
-    /// Apps that must receive HTML/RTF on drop. Everything else gets plain
-    /// text, because a drag carrying `text/html` makes VS Code's Copilot chat
-    /// input treat it as a URL attachment and swallow the drop.
-    ///
-    /// Kept as a compact single-row entry so the General tab fits in the
-    /// window without scrolling; clicking "查看列表…" opens the native modal sheet.
-    private var richTextDragCard: some View {
-        settingsCard {
-            HStack(spacing: 10) {
-                Image(systemName: "doc.richtext")
-                    .font(.system(size: 15))
-                    .foregroundColor(Color.accentColor)
-                    .frame(width: 20)
+    // MARK: - Rich Text Drag Applications Entry Row
 
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 6) {
-                        Text("富文本拖拽应用")
-                            .font(.system(size: 12.5, weight: .medium))
-                            .foregroundColor(theme.primaryText)
+    /// Single compact row inside the unified settings card.
+    /// Clicking "查看列表…" opens the native modal sheet.
+    private var richTextDragRow: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "doc.richtext")
+                .font(.system(size: 15))
+                .foregroundColor(Color.accentColor)
+                .frame(width: 22)
 
-                        if !richTextDragApps.isEmpty {
-                            Text("\(richTextDragApps.count)")
-                                .font(.system(size: 10, weight: .semibold, design: .rounded))
-                                .foregroundColor(theme.secondaryText)
-                                .padding(.horizontal, 5)
-                                .padding(.vertical, 1)
-                                .background(theme.cardBorder.opacity(0.5))
-                                .clipShape(Capsule())
-                        }
-                    }
-
-                    Text(richTextSummaryText)
-                        .font(.system(size: 10.5))
-                        .foregroundColor(theme.secondaryText)
-                        .lineLimit(1)
-                }
-
-                Spacer()
-
-                // Miniature app icons stack preview
-                if !richTextDragApps.isEmpty {
-                    richTextMiniIconsPreview
-                }
-
-                // Native Apple-style "查看列表…" button that opens the modal sheet
-                Button(action: {
-                    showRichTextListSheet = true
-                }) {
-                    Text("查看列表…")
-                        .font(.system(size: 11.5, weight: .medium))
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text("富文本拖拽应用")
+                        .font(.system(size: 13, weight: .medium))
                         .foregroundColor(theme.primaryText)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 4.5)
-                        .background(theme.buttonBackground)
-                        .cornerRadius(6)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 6)
-                                .stroke(theme.cardBorder, lineWidth: 1)
-                        )
+
+                    if !richTextDragApps.isEmpty {
+                        Text("\(richTextDragApps.count)")
+                            .font(.system(size: 10, weight: .semibold, design: .rounded))
+                            .foregroundColor(theme.secondaryText)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(theme.cardBorder.opacity(0.5))
+                            .clipShape(Capsule())
+                    }
                 }
-                .buttonStyle(.plain)
+
+                Text(richTextSummaryText)
+                    .font(.system(size: 11.5))
+                    .foregroundColor(theme.secondaryText)
+                    .lineLimit(1)
             }
+
+            Spacer()
+
+            // Miniature app icons stack preview
+            if !richTextDragApps.isEmpty {
+                richTextMiniIconsPreview
+            }
+
+            // Native Apple-style "查看列表…" button that opens the modal sheet
+            Button(action: {
+                showRichTextListSheet = true
+            }) {
+                Text("查看列表…")
+                    .font(.system(size: 11.5, weight: .medium))
+                    .foregroundColor(theme.primaryText)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(theme.buttonBackground)
+                    .cornerRadius(6)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6)
+                            .stroke(theme.cardBorder, lineWidth: 1)
+                    )
+            }
+            .buttonStyle(.plain)
         }
-        .sheet(isPresented: $showRichTextListSheet) {
-            richTextAppListSheet
-        }
+        .padding(.vertical, 4)
     }
 
     // MARK: - Rich Text Drag Applications Modal Sheet (Apple Design)
@@ -382,10 +391,10 @@ extension InlineSettingsView {
                     Image(nsImage: icon)
                         .resizable()
                         .aspectRatio(contentMode: .fit)
-                        .frame(width: 18, height: 18)
-                        .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+                        .frame(width: 20, height: 20)
+                        .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
                         .overlay(
-                            RoundedRectangle(cornerRadius: 4, style: .continuous)
+                            RoundedRectangle(cornerRadius: 5, style: .continuous)
                                 .stroke(theme.cardBackground, lineWidth: 1.5)
                         )
                 }
@@ -594,19 +603,5 @@ extension InlineSettingsView {
         ClipboardBackend.richTextDragAppBundleIDs = richTextDragApps
     }
 
-    private var menuBarConfigCard: some View {
-        settingsCard {
-            cardTitle(icon: "menubar.rectangle", text: "菜单栏图标状态设置")
-            settingToggleRow(
-                icon: "dot.square",
-                iconColor: showMenuBarIcon ? Color.accentColor : theme.secondaryText,
-                title: "显示菜单栏图标",
-                desc: "控制 CopyAttach 图标在 macOS 右上角状态栏的显隐。",
-                isOn: $showMenuBarIcon
-            )
-            .onChange(of: showMenuBarIcon) { _, newValue in
-                UserDefaults.standard.set(newValue, forKey: "ShowMenuBarIcon")
-            }
-        }
-    }
+
 }
