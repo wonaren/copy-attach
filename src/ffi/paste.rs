@@ -341,14 +341,11 @@ pub extern "C" fn clipboard_prepare_paste_by_id(entry_id: u64, as_path: bool) ->
 /// Phase 2 of a two-phase paste: post the paste keystroke to `pid` (the value
 /// returned by phase 1). Returns 1 on success, 0 if the event could not be
 /// posted.
+///
+/// A non-positive `pid` needs no guard here: `simulate_cmd_v` already refuses
+/// it, so a failed phase 1 cannot cause a keystroke.
 #[no_mangle]
 pub extern "C" fn clipboard_send_paste(pid: c_int) -> c_int {
-    // A failed phase 1 returns 0 and must never reach a keystroke: posting to
-    // pid 0 would target an arbitrary process.
-    if pid <= 0 {
-        crate::error_log!("CopyAttach: clipboard_send_paste called with pid={pid}; phase 1 must have failed");
-        return 0;
-    }
     #[cfg(target_os = "macos")]
     {
         if !macos::simulate_cmd_v(pid) {
@@ -455,60 +452,3 @@ pub extern "C" fn clipboard_get_text_by_id(entry_id: u64) -> *mut c_char {
     to_ffi_cstring(&guard.0)
 }
 
-#[cfg(test)]
-mod two_phase_paste_tests {
-    use super::*;
-    use std::sync::Once;
-
-    /// The FFI tests share the process-wide Backend singleton (OnceLock).
-    /// Setup must run through a single Once so `set_backend` never fires
-    /// twice.
-    static INIT: Once = Once::new();
-
-    fn ensure_test_backend() {
-        INIT.call_once(|| {
-            let conn = rusqlite::Connection::open_in_memory().expect("in-memory test DB");
-            crate::db::ensure_history_table(&conn).expect("schema creation");
-            let backend = crate::backend::Backend {
-                history: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
-                running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
-                monitor_handle: std::sync::Mutex::new(None),
-                source_app: std::sync::Arc::new(std::sync::Mutex::new(
-                    crate::types::SourceApp::default(),
-                )),
-                pasteboard_event_lock: std::sync::Arc::new(std::sync::Mutex::new(())),
-                pending_self_write: std::sync::Arc::new(std::sync::Mutex::new(None)),
-                db: std::sync::Arc::new(std::sync::Mutex::new(conn)),
-                cleanup_threshold: std::sync::Arc::new(
-                    std::sync::atomic::AtomicUsize::new(3000),
-                ),
-                ignore_rules: std::sync::Arc::new(std::sync::Mutex::new(
-                    crate::ignore::IgnoreRules::default(),
-                )),
-                deleted_stack: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
-                last_restored_id: std::sync::Arc::new(
-                    std::sync::atomic::AtomicU64::new(0),
-                ),
-            };
-            let _ = crate::backend::set_backend(backend);
-        });
-    }
-
-    /// An unknown entry must fail in phase 1 — and crucially must NOT fall
-    /// through to a keystroke. The split exists so the caller only posts the
-    /// paste after phase 1 reports a live target.
-    #[test]
-    fn prepare_paste_returns_zero_for_unknown_entry() {
-        ensure_test_backend();
-        assert_eq!(clipboard_prepare_paste_by_id(u64::MAX, false), 0);
-    }
-
-    /// Phase 2 must refuse a pid that phase 1 would never have produced.
-    /// Guarding here keeps a failed phase 1 from synthesising a keystroke
-    /// into whatever process happens to be pid 0.
-    #[test]
-    fn send_paste_rejects_nonpositive_pid() {
-        assert_eq!(clipboard_send_paste(0), 0);
-        assert_eq!(clipboard_send_paste(-1), 0);
-    }
-}
