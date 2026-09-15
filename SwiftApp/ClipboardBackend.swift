@@ -318,10 +318,12 @@ class ClipboardBackend {
             return generation
         }
         // Local copy of the lock struct: it wraps a shared underlying lock,
-        // so the background queue can race the main actor without capturing
-        // `self` into the @Sendable closure.
+        // so the background queue can race the main actor without reaching
+        // back through `self` for the generation. `self` is captured weakly
+        // (matching the inner hop to main) so a queued reload never keeps the
+        // backend alive, and the outer/inner captures agree in ownership.
         let generationLock = reloadGeneration
-        reloadQueue.async { [gen, generationLock] in
+        reloadQueue.async { [gen, generationLock, weak self] in
             // Several changes can queue reloads in a burst (e.g. consecutive
             // image Phase-2 completions). Skip building a full snapshot when
             // a newer request has already superseded this one; the result

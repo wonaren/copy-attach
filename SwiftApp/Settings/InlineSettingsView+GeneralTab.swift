@@ -382,6 +382,9 @@ extension InlineSettingsView {
         .padding(20)
         .frame(width: 470, height: 400)
         .background(theme.cardBackground)
+        .sheetDismissOnOutsideClick {
+            showRichTextListSheet = false
+        }
     }
 
     private var richTextMiniIconsPreview: some View {
