@@ -96,12 +96,27 @@ class ClipboardBackend {
     private var lastHistoryRevision: UInt64 = 0
     private let thumbnailCache: NSCache<NSNumber, NSImage> = {
         let c = NSCache<NSNumber, NSImage>()
-        // Decoded thumbnails now match the display box, so they run ~70 KB
-        // (920×20 flat image) to ~290 KB (356×200 screenshot) instead of a
-        // uniform ~100 KB. 4 MB still bounds the cache for smooth scrolling
-        // without letting decoded bitmaps inflate the small zone footprint.
-        c.countLimit = 60
-        c.totalCostLimit = 4 * 1024 * 1024  // 4 MB
+        // Cost is the real decoded size (~2 KB to ~700 KB, median ~255 KB).
+        // The old code charged a flat 160×160×4 = 100 KB, so 4 MB held ~40
+        // thumbnails. Charging real pixels dropped that to ~13 images — and the
+        // live corpus packs 13 images into a single 20-row window (4.08 MB), so
+        // every decode evicted a thumbnail still on screen. Arrow-key scrolling
+        // then re-decoded and re-flashed the placeholder row — whose "photo" /
+        // "desktopcomputer" glyphs are exactly the icons seen blinking. Measured
+        // with NSCache's own eviction over the real corpus (not a model), one
+        // traversal costs 442-5416 decodes at 4 MB (the range is how far
+        // LazyVStack pre-materializes) vs 141 at 8 MB — i.e. ~one per image.
+        // (NSCache does honor totalCostLimit — measured 4 MB/300 KB retained
+        // exactly 13 objects — so this is a hard bound, not a soft hint.)
+        //
+        // 8 MB is the measured knee: it clears the densest live window (a
+        // 40-row span peaks at 5.85 MB, a 20-row one at 4.08 MB), so arrow-key
+        // scrolling never evicts an image still on screen. Going to 12/16 MB
+        // buys only ~5% more hits for a higher ceiling, so it stops here and
+        // stays well below the 41 MB full corpus — a bound, not "cache
+        // everything".
+        c.countLimit = 120
+        c.totalCostLimit = 8 * 1024 * 1024  // 8 MB
         return c
     }()
     var favoriteIds: Set<Int> = []

@@ -69,7 +69,7 @@ Phase 1 同步 hash + 缩略图（fit 进显示框 920×200px = 460×100pt @2×�
 
 ### 内存基线的真相（勿再追查）
 
-干净进程空闲 19MB → 弹窗开 +20MB → 关闭后一次性保留 ~17MB 不再回落，**绝非泄漏**——heap 证实无 `MALLOC_LARGE` 残留、连续多会话零累积（37→42→39→38MB 噪声内恒定）。构成 = 框架一次性热缓存 ~7MB（字体/字形位图/类元数据/SwiftUI+AttributeGraph 表/CoreSVG）+ malloc 小 zone 游离脏页高水位 ~6-10MB。实测 macOS 无任何机制回收小 zone 这部分（`malloc_zone_pressure_relief` 两种时点、空页延迟自回收全部无效）——~36-40MB 是此 SwiftUI app 的稳定底线。另有两点上限：撤销栈（≤1 条，**载荷落盘**、内存只留路径——实测删掉 4.19MB 大图后 footprint 反降 7MB，此条取代早期"按设计钉内存"的说法）、缩略图 NSCache（countLimit 60 / 4MB）。PopupHostingView 刻意跨会话复用（3000 行 LazyVStack 每次重建 35.8MB vs 复用 15.8MB，复用是设计而非泄漏）。
+干净进程空闲 19MB → 弹窗开 +20MB → 关闭后一次性保留 ~17MB 不再回落，**绝非泄漏**——heap 证实无 `MALLOC_LARGE` 残留、连续多会话零累积（37→42→39→38MB 噪声内恒定）。构成 = 框架一次性热缓存 ~7MB（字体/字形位图/类元数据/SwiftUI+AttributeGraph 表/CoreSVG）+ malloc 小 zone 游离脏页高水位 ~6-10MB。实测 macOS 无任何机制回收小 zone 这部分（`malloc_zone_pressure_relief` 两种时点、空页延迟自回收全部无效）——~36-40MB 是此 SwiftUI app 的稳定底线。另有两点上限：撤销栈（≤1 条，**载荷落盘**、内存只留路径——实测删掉 4.19MB 大图后 footprint 反降 7MB，此条取代早期"按设计钉内存"的说法）、缩略图 NSCache（countLimit 120 / 8MB；0.105.2 修越扁越糊后 cost 改按真实解码尺寸，4MB 曾把容量从 ~40 张压到 ~13 张、比单屏密集区还小，导致方向键滚动时反复解码闪烁，实测一次全遍历 5416 次解码 → 8MB 时 141 次）。PopupHostingView 刻意跨会话复用（3000 行 LazyVStack 每次重建 35.8MB vs 复用 15.8MB，复用是设计而非泄漏）。
 
 用户实测（0.99.17-dev 仪器化会话）：基线 39MB → 预览 2880×1800 大图 71MB（峰值 113MB 瞬时解码）→ Esc 关预览 46MB（立即回落 25MB）→ 关弹窗 44MB → 稳定 44MB。诊断日志覆盖每条路径：`preview_decode done` / `preview_buffer_release` / `decode_scratch drop … mark_reusable` / `undo_push … total_payload_bytes`。长会话 125MB 进程 = 44MB 稳态 + 大图解码峰值残留与框架侧会话增长 + 多会话滚动 churn——无预览链残留（撤销栈已排除：载荷删时即落盘）。且该数中大部分页已被系统压缩出 RAM，footprint 仍把压缩页计为脏页，故不等于占用。
 
