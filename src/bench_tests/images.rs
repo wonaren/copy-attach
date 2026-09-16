@@ -90,12 +90,12 @@ fn benchmark_images() {
         let encode_time = encode_start.elapsed();
 
         let l3_start = std::time::Instant::now();
-        let _thumb_l3 = create_thumbnail(w, h, &rgba, 500)
+        let _thumb_l3 = create_thumbnail(w, h, &rgba)
             .expect("bench: L3 thumbnail failed");
         let l3_time = l3_start.elapsed();
 
         let cr_start = std::time::Instant::now();
-        let thumb_cr = create_thumbnail_fast(w, h, &rgba, 500)
+        let thumb_cr = create_thumbnail_fast(w, h, &rgba)
             .expect("bench: CR thumbnail failed");
         let cr_time = cr_start.elapsed();
 

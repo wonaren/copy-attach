@@ -76,12 +76,33 @@ fn test_decode_png_rgba8_into_rejects_other_formats() {
 }
 
 #[test]
-fn test_create_thumbnail() {
+fn test_create_thumbnail_fits_display_box() {
+    // A flat landscape source is bounded by the box's WIDTH, not by a single
+    // 300px longest-edge cap: the row gives it ~460pt of width, so a 300px long
+    // edge was upscaled ~3x and read as blurry.
+    let rgba = make_test_image_rgba(4000, 100, 150);
+    let (_, tw, th) = create_thumbnail(4000, 100, &rgba).expect("flat thumbnail");
+    assert_eq!(tw, crate::image::THUMB_BOX_W, "a 40:1 source is width-bounded");
+    assert!(th <= crate::image::THUMB_BOX_H);
+
+    // A screenshot-like source is bounded by the box's HEIGHT instead.
+    let rgba = make_test_image_rgba(1920, 1080, 150);
+    let (_, tw, th) = create_thumbnail(1920, 1080, &rgba).expect("screenshot thumbnail");
+    assert!(tw <= crate::image::THUMB_BOX_W);
+    assert_eq!(th, crate::image::THUMB_BOX_H, "a 16:9 source is height-bounded");
+
+    // A portrait source must also be height-bounded. Matching by the source's
+    // long/short sides instead of the box's width/height axes would bound this
+    // by the 920 side and let the blob exceed the row vertically.
+    let rgba = make_test_image_rgba(1362, 1774, 150);
+    let (_, tw, th) = create_thumbnail(1362, 1774, &rgba).expect("portrait thumbnail");
+    assert_eq!(th, crate::image::THUMB_BOX_H, "a portrait source is height-bounded");
+    assert!(tw <= crate::image::THUMB_BOX_W);
+
+    // A source already inside the box is encoded as-is (no upscale, no resize).
     let rgba = make_test_image_rgba(200, 100, 150);
-    let thumb = create_thumbnail(200, 100, &rgba, 50);
-    assert!(thumb.is_some());
-    let (_, tw, th) = thumb.unwrap();
-    assert!(tw <= 50 && th <= 50);
+    let (_, tw, th) = create_thumbnail(200, 100, &rgba).expect("identity thumbnail");
+    assert_eq!((tw, th), (200, 100), "in-box sources must not be resized");
 }
 
 #[test]

@@ -182,16 +182,15 @@ pub extern "C" fn clipboard_init() -> c_int {
     // is an orphan from a previous process.
     crate::backend::purge_undo_payload_dir();
 
-    // One-time image-hash migration (DefaultHasher → stable FNV-1a,
-    // user_version 2 → 3) on a background thread: decoding ~250 MB of stored
-    // PNGs takes seconds, and the DB lock is held one row at a time so
-    // captures keep flowing during the window. Idempotent — an interrupted run
-    // is redone on the next launch (the recompute is a pure function of the
-    // stored bytes). Skipped in stress-test builds, whose DBs are generated
-    // fresh with the new algorithm.
+    // One-time image metadata migration (DefaultHasher → stable FNV-1a hashes
+    // and 300px → display-box thumbnails, user_version 3 → 4) on a background
+    // thread: decoding ~250 MB of stored PNGs takes seconds, and the DB lock is
+    // held one row at a time so captures keep flowing during the window.
+    // Idempotent — an interrupted run is redone on the next launch. Skipped in
+    // stress-test builds, whose DBs are generated fresh with the new algorithm.
     #[cfg(not(feature = "stress-test"))]
     if let Some(b) = crate::backend::try_backend() {
-        spawn_image_hash_migration(b);
+        spawn_metadata_migration(b);
     }
 
     // NOTE: no baseline clipboard read here. The monitor seeds
@@ -219,20 +218,28 @@ pub extern "C" fn clipboard_init() -> c_int {
     1
 }
 
-/// Background driver for the image-hash migration (`schema::migrate_one_image_row`).
+/// Background driver for the image metadata migration (user_version 3 → 4):
+/// `schema::migrate_one_image_row` rehashes, `schema::migrate_one_thumbnail_row`
+/// re-encodes stored thumbnails to the display-box fit.
 ///
-/// Collects the image row ids once, then decodes and rehashes each row on a
+/// Collects the image row ids once, then decodes and rewrites each row on a
 /// fresh DB lock — the lock is never held across a decode, so the capture
 /// monitor and paste paths only ever wait for a single row (~tens of ms). The
-/// in-memory entry's hash is mirrored as each row completes, so same-session
-/// re-capture dedup sees the new value immediately. On completion stamps
-/// `user_version = METADATA_VERSION`; failures are logged and counted but do
-/// not block the stamp — an undecodable row will never decode, and retrying it
-/// forever would waste every later launch. An interrupted run simply re-runs
-/// next launch (idempotent recompute).
+/// in-memory entry's hash and thumbnail dims are mirrored as each row
+/// completes, so same-session re-capture dedup and fresh rows see the new values
+/// immediately. On completion stamps `user_version = METADATA_VERSION`;
+/// failures are logged and counted but do not block the stamp — an undecodable
+/// row will never decode, and retrying it forever would waste every later
+/// launch. An interrupted run simply re-runs next launch (idempotent).
+///
+/// Each pass is gated on its own starting version, so a user already at 3 only
+/// re-encodes thumbnails instead of also re-decoding every PNG for a hash that
+/// is already stable. They share one `user_version` stamp at the end: two
+/// independent writers would race, and whichever stamped first would make the
+/// other's half appear done.
 #[cfg(not(feature = "stress-test"))]
-fn spawn_image_hash_migration(b: &'static crate::backend::Backend) {
-    // Skip entirely once the image generation is stamped (3) — a later launch
+fn spawn_metadata_migration(b: &'static crate::backend::Backend) {
+    // Skip entirely once the image generation is stamped (4) — a later launch
     // must not re-decode the whole corpus.
     let version: i32 = match b.db.lock() {
         Ok(c) => match c.query_row("PRAGMA user_version", [], |r| r.get(0)) {
@@ -244,19 +251,29 @@ fn spawn_image_hash_migration(b: &'static crate::backend::Backend) {
     if version >= crate::db::METADATA_VERSION {
         return;
     }
+    let hash_pending = version < 3;
+    let thumb_pending = version < 4;
     let ids: Vec<i64> = match b.db.lock() {
         Ok(c) => {
-            let mut stmt = match c.prepare("SELECT id FROM clipboard_history WHERE entry_type = 1") {
+            // Order by decreasing source size so the reusable decode buffers
+            // reach their high-water mark on the first row and are then reused
+            // without further growth. An arbitrary order makes the scratch
+            // ratchet through several allocations, each of which keeps its
+            // pages resident after MADV_FREE_REUSABLE.
+            let mut stmt = match c.prepare(
+                "SELECT id FROM clipboard_history WHERE entry_type = 1
+                 ORDER BY width * height DESC, LENGTH(png_data) DESC",
+            ) {
                 Ok(s) => s,
                 Err(e) => {
-                    crate::error_log!("CopyAttach: image-hash migration: cannot list image rows: {e}");
+                    crate::error_log!("CopyAttach: metadata migration: cannot list image rows: {e}");
                     return;
                 }
             };
             let rows = match stmt.query_map([], |row| row.get::<_, i64>(0)) {
                 Ok(r) => r,
                 Err(e) => {
-                    crate::error_log!("CopyAttach: image-hash migration: cannot read image rows: {e}");
+                    crate::error_log!("CopyAttach: metadata migration: cannot read image rows: {e}");
                     return;
                 }
             };
@@ -273,45 +290,82 @@ fn spawn_image_hash_migration(b: &'static crate::backend::Backend) {
     }
     std::thread::spawn(move || {
         let mut updated = 0usize;
+        let mut thumbs = 0usize;
         let mut failed = 0usize;
+        // One blob buffer reused for every row: a fresh 4-7 MB Vec per row
+        // churns malloc, and each freed one stayed resident after being marked
+        // reusable (measured 132 MB of Malloc Large (Reusable) retained, and a
+        // 180 MB peak across 137 mixed-size rows).
+        let mut thumb_blob: Vec<u8> = Vec::new();
+        let mut thumb_scratch: Vec<u8> = Vec::new();
         for id in ids {
             if !b.running.load(Ordering::SeqCst) {
                 return; // shutting down — next launch resumes (idempotent)
             }
-            let result = match b.db.lock() {
-                Ok(c) => crate::db::migrate_one_image_row(&c, id),
-                Err(_) => {
-                    failed += 1;
-                    continue;
+            let mut new_hash: Option<u64> = None;
+            if hash_pending {
+                match b.db.lock() {
+                    Ok(c) => match crate::db::migrate_one_image_row(&c, id) {
+                        Ok(h) => {
+                            updated += 1;
+                            new_hash = Some(h);
+                        }
+                        Err(()) => failed += 1,
+                    },
+                    Err(_) => failed += 1,
                 }
-            };
-            match result {
-                Ok(hash) => {
-                    updated += 1;
-                    // Mirror into the in-memory entry so same-session
-                    // re-capture dedup sees the stable hash immediately (a
-                    // re-copy before the next restart would otherwise show a
-                    // transient duplicate).
-                    if let Ok(mut hist) = b.history.lock() {
-                        for entry in hist.iter_mut() {
-                            if let crate::types::ClipboardEntry::Image { db_id, hash: h, .. } = entry {
-                                if *db_id == id {
+            }
+            let mut new_dims: Option<(u32, u32)> = None;
+            if thumb_pending {
+                match b.db.lock() {
+                    Ok(c) => match crate::db::migrate_one_thumbnail_row(&c, id, &mut thumb_blob, &mut thumb_scratch) {
+                        Ok(dims) => {
+                            if dims.is_some() {
+                                thumbs += 1;
+                            }
+                            new_dims = dims;
+                        }
+                        Err(()) => failed += 1,
+                    },
+                    Err(_) => failed += 1,
+                }
+            }
+            // Mirror into the in-memory entry: same-session re-capture dedup
+            // needs the stable hash, and the row's stored dims must match the
+            // blob now in the DB.
+            if new_hash.is_some() || new_dims.is_some() {
+                if let Ok(mut hist) = b.history.lock() {
+                    for entry in hist.iter_mut() {
+                        if let crate::types::ClipboardEntry::Image {
+                            db_id, hash: h, thumb_width, thumb_height, ..
+                        } = entry {
+                            if *db_id == id {
+                                if let Some(hash) = new_hash {
                                     *h = hash;
-                                    break;
                                 }
+                                if let Some((tw, th)) = new_dims {
+                                    *thumb_width = tw;
+                                    *thumb_height = th;
+                                }
+                                break;
                             }
                         }
                     }
                 }
-                Err(()) => failed += 1,
             }
         }
+        // Hand both reusable buffers' pages back before this thread exits.
+        // They are caller-owned and outlive the loop, so without this the
+        // idle process keeps a blob-sized and a scratch-sized region resident
+        // long after the migration finished.
+        crate::backend::mark_pages_reusable(thumb_blob.as_ptr(), thumb_blob.capacity());
+        crate::backend::mark_pages_reusable(thumb_scratch.as_ptr(), thumb_scratch.capacity());
         if let Ok(c) = b.db.lock() {
             if let Err(e) = c.pragma_update(None, "user_version", crate::db::METADATA_VERSION) {
-                crate::error_log!("CopyAttach: image-hash migration: failed to stamp user_version: {e}");
+                crate::error_log!("CopyAttach: metadata migration: failed to stamp user_version: {e}");
             }
         }
-        crate::debug_log!("CopyAttach: image-hash migration complete: {updated} updated, {failed} failed");
+        crate::debug_log!("CopyAttach: metadata migration complete: {updated} rows hashed, {thumbs} thumbnails re-encoded, {failed} failed");
     });
 }
 

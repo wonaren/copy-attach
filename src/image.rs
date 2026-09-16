@@ -75,9 +75,9 @@ pub(crate) fn decode_png_rgba8_into(png: &[u8], out: &mut Vec<u8>) -> Option<(u3
 /// intermediate the memory work removed from the hot path.
 #[cfg(test)]
 pub(crate) fn create_thumbnail(
-    width: u32, height: u32, rgba_bytes: &[u8], max_dim: u32,
+    width: u32, height: u32, rgba_bytes: &[u8],
 ) -> Option<(Vec<u8>, u32, u32)> {
-    create_thumbnail_with_filter(width, height, rgba_bytes, max_dim, FilterType::Lanczos3)
+    create_thumbnail_with_filter(width, height, rgba_bytes, FilterType::Lanczos3)
 }
 
 /// Create a thumbnail with `CatmullRom` filtering.
@@ -87,9 +87,9 @@ pub(crate) fn create_thumbnail(
 /// would allocate a `dst_w × src_h × 16B` float intermediate per capture
 /// (~14MB for a 5K screenshot) whose pages are never returned to the OS.
 pub(crate) fn create_thumbnail_fast(
-    width: u32, height: u32, rgba_bytes: &[u8], max_dim: u32,
+    width: u32, height: u32, rgba_bytes: &[u8],
 ) -> Option<(Vec<u8>, u32, u32)> {
-    let (new_w, new_h) = match thumbnail_target_dims(width, height, max_dim) {
+    let (new_w, new_h) = match thumbnail_target_dims(width, height) {
         Some(d) => d,
         None => return encode_png(width, height, rgba_bytes).map(|d| (d, width, height)),
     };
@@ -102,35 +102,46 @@ pub(crate) fn create_thumbnail_fast(
     encoded
 }
 
-/// Keep thumbnail short side >= max_dim / 5 to avoid blurry wide images.
-const MIN_THUMB_SHORT_RATIO: u32 = 5;
+/// Row thumbnail display budget, in points. The list row renders an image with
+/// `.resizable().aspectRatio(.fit).frame(maxHeight: 100)` inside a 500pt-wide
+/// popup; after the app-icon column and row/list padding an image may span
+/// ~460pt of width and 100pt of height. The budget is therefore a **box**
+/// (460 × 100 pt), not a single longest-edge cap: a 30:1 panorama is bounded by
+/// the width, a screenshot by the height. Swift mirrors these numbers in
+/// `RowThumbnailBox`; changing one side without the other reintroduces the
+/// upscale blur this replaced.
+pub(crate) const THUMB_BOX_W_PT: u32 = 460;
+pub(crate) const THUMB_BOX_H_PT: u32 = 100;
 
-/// Hard cap on thumbnail long side for extreme panoramas.
-const MAX_THUMB_LONG: u32 = 900;
+/// Highest display scale the stored blob must stay sharp at. macOS ships 1× and
+/// 2× (Retina) only; capturing at the maximum means a Retina screen never
+/// upscales, and the Swift decode box clamps back down to the live screen's scale.
+pub(crate) const THUMB_MAX_DISPLAY_SCALE: u32 = 2;
 
-/// Aspect-preserving thumbnail target dims: `max_dim` long side, short side
-/// kept >= max_dim/5, long side capped for extreme panoramas. Returns `None`
-/// when no downscale is needed (encode the source as-is).
-fn thumbnail_target_dims(width: u32, height: u32, max_dim: u32) -> Option<(u32, u32)> {
-    let scale_long = (f64::from(max_dim) / f64::from(width.max(height))).min(1.0);
-    if scale_long >= 1.0 {
+/// Pixel box the stored thumbnail must fit: 920 × 200.
+pub(crate) const THUMB_BOX_W: u32 = THUMB_BOX_W_PT * THUMB_MAX_DISPLAY_SCALE;
+pub(crate) const THUMB_BOX_H: u32 = THUMB_BOX_H_PT * THUMB_MAX_DISPLAY_SCALE;
+
+/// Aspect-preserving thumbnail target dims: fit the source into the display box
+/// (`THUMB_BOX_W` × `THUMB_BOX_H`), never upscaling. Returns `None` when the
+/// source already fits (encode it as-is).
+///
+/// A box fit — rather than the previous "long side 300, short side bumped to
+/// 60, long side re-capped at 900" rule — is what keeps flat images sharp: the
+/// row gives a 30:1 panorama ~460pt of width, so its stored long edge must be
+/// ~920px, not 300.
+///
+/// The box's axes are width and height, **not** the source's long and short
+/// sides. Matching a portrait source by long/short would bound it with the
+/// box's 920 side when it is really the 200 side that limits it, letting the
+/// blob exceed the row on the height axis.
+pub(crate) fn thumbnail_target_dims(width: u32, height: u32) -> Option<(u32, u32)> {
+    if width <= THUMB_BOX_W && height <= THUMB_BOX_H {
         return None;
     }
-
-    // Keep the short side large enough that the UI doesn't upscale a blurry thumb.
-    let min_short = (max_dim / MIN_THUMB_SHORT_RATIO).max(1);
-    let scale = if (f64::from(width.min(height)) * scale_long) < f64::from(min_short) {
-        let by_short = (f64::from(min_short) / f64::from(width.min(height))).min(1.0);
-        let long_candidate = f64::from(width.max(height)) * by_short;
-        if long_candidate > f64::from(MAX_THUMB_LONG) {
-            f64::from(MAX_THUMB_LONG) / f64::from(width.max(height))
-        } else {
-            by_short
-        }
-    } else {
-        scale_long
-    };
-
+    let scale = (f64::from(THUMB_BOX_W) / f64::from(width))
+        .min(f64::from(THUMB_BOX_H) / f64::from(height))
+        .min(1.0);
     Some((
         (f64::from(width) * scale).round().max(1.0) as u32,
         (f64::from(height) * scale).round().max(1.0) as u32,
@@ -140,11 +151,11 @@ fn thumbnail_target_dims(width: u32, height: u32, max_dim: u32) -> Option<(u32, 
 /// Core thumbnail logic parameterized by resize filter.
 #[cfg(test)]
 fn create_thumbnail_with_filter(
-    width: u32, height: u32, rgba_bytes: &[u8], max_dim: u32,
+    width: u32, height: u32, rgba_bytes: &[u8],
     filter: FilterType,
 ) -> Option<(Vec<u8>, u32, u32)> {
     use image::{ImageBuffer, Rgba};
-    let (new_w, new_h) = match thumbnail_target_dims(width, height, max_dim) {
+    let (new_w, new_h) = match thumbnail_target_dims(width, height) {
         Some(d) => d,
         None => return encode_png(width, height, rgba_bytes).map(|d| (d, width, height)),
     };

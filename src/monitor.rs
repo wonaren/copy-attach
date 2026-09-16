@@ -19,9 +19,6 @@ use crate::history::add_to_history;
 use crate::ignore::IgnoreRules;
 use crate::macos;
 
-/// Maximum length of the longest edge for thumbnail generation.
-const THUMBNAIL_MAX_DIM: u32 = 300;
-
 /// Phase 2 image payload: either an already-encoded PNG byte buffer (e.g. native
 /// pasteboard PNG) that can be written straight to DB, or raw uncompressed RGBA pixels
 /// requiring async PNG compression.
@@ -142,7 +139,7 @@ fn ingest_rgba_image(
     // A new changeCount means a genuine re-copy, even with equal image content.
     if width > 0 && height > 0 {
         // Phase 1 (sync): fast thumbnail -> in-memory history.
-        let (thumb_data, thumb_w, thumb_h) = if let Some(t) = create_thumbnail_fast(width, height, &rgba, THUMBNAIL_MAX_DIM) { t } else {
+        let (thumb_data, thumb_w, thumb_h) = if let Some(t) = create_thumbnail_fast(width, height, &rgba) { t } else {
             // Keep the entry; Phase 2 will remove it if the image is truly broken.
             crate::debug_log!("CopyAttach: thumbnail creation failed for image {width}x{height} — capturing without thumbnail");
             (Vec::new(), 0u32, 0u32)

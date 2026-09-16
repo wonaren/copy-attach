@@ -33,7 +33,7 @@ fn make_text(text: &str, ts: u64) -> ClipboardEntry {
 
 fn make_image(data: &[u8], w: u32, h: u32, ts: u64) -> ClipboardEntry {
     let hash = image_hash(data, w, h);
-    let thumb = create_thumbnail(w, h, data, 100).unwrap();
+    let thumb = create_thumbnail(w, h, data).unwrap();
     ClipboardEntry::Image {
         id: new_entry_id(),
         width: w,

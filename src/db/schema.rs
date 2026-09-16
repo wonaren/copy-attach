@@ -136,7 +136,11 @@ pub(crate) fn ensure_history_table(conn: &Connection) -> Result<(), rusqlite::Er
 }
 
 /// Metadata migration version stored in SQLite `user_version`.
-pub(crate) const METADATA_VERSION: i32 = 3;
+///
+/// 0 legacy → 1 first text backfill → 2 DefaultHasher text recompute →
+/// 3 stable FNV-1a for text + image hashes → 4 thumbnails re-encoded to the
+/// display-box fit.
+pub(crate) const METADATA_VERSION: i32 = 4;
 
 /// Max text length indexed by FTS; oversized rows use a LIKE fallback.
 pub(crate) const FTS_MAX_INDEXED_TEXT_LEN: i64 = 512 * 1024;
@@ -208,4 +212,123 @@ pub(crate) fn migrate_one_image_row(conn: &Connection, id: i64) -> Result<u64, (
         crate::debug_log!("CopyAttach: image-hash migration: update failed for row {id}: {e}");
     })?;
     Ok(hash)
+}
+
+/// Re-encode one image row's thumbnail to the current display-box fit.
+///
+/// `Ok(None)` means the stored thumbnail already matches the target dims and was
+/// left alone (no re-encode); `Ok(Some(dims))` reports the new thumbnail size;
+/// `Err` leaves the row untouched.
+///
+/// Unlike the hash migration (a pure recompute), this changes stored bytes: the
+/// thumbnail geometry moved from "300px longest edge" to a 920×200 display box,
+/// so rows captured by an older build keep an undersized blob that the row then
+/// upscales. Re-encoding uses `create_thumbnail_fast` — the exact production
+/// path — so a migrated thumbnail is byte-identical to a freshly captured one.
+pub(crate) fn migrate_one_thumbnail_row(
+    conn: &Connection, id: i64, blob: &mut Vec<u8>, scratch: &mut Vec<u8>,
+) -> Result<Option<(u32, u32)>, ()> {
+    // Decide from metadata first: the target dims are a pure function of the
+    // stored source width/height, so a row whose thumbnail already matches
+    // needs no blob read at all. Reading 162 MB of PNGs across a history to
+    // then discard most of them is what made this pass memory-hungry.
+    let (w, h, old_tw, old_th, old_thumb_len): (i64, i64, i64, i64, i64) = conn.query_row(
+        "SELECT width, height, thumb_width, thumb_height, LENGTH(thumb_data)
+         FROM clipboard_history WHERE id = ?1 AND entry_type = 1",
+        rusqlite::params![id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+    ).map_err(|e| {
+        crate::debug_log!("CopyAttach: thumbnail migration: cannot read row {id}: {e}");
+    })?;
+    if w <= 0 || h <= 0 {
+        crate::debug_log!("CopyAttach: thumbnail migration: row {id} has no usable dims — skipped");
+        return Err(());
+    }
+    let (want_w, want_h) =
+        crate::image::thumbnail_target_dims(w as u32, h as u32).unwrap_or((w as u32, h as u32));
+    // A row already at the target dims needs no work — but only if it really
+    // carries a blob. Dims without bytes (e.g. a Phase 2 that never landed)
+    // must still be re-encoded, so the length check stays.
+    if old_thumb_len > 0 && (want_w as i64, want_h as i64) == (old_tw, old_th) {
+        return Ok(None);
+    }
+
+    // Only now, for rows that genuinely need re-encoding, load the blob.
+    // `blob` is caller-owned and reused across rows: allocating a fresh
+    // 4-7 MB Vec per row made malloc churn, and every freed one kept its
+    // pages resident after being marked reusable (measured `Malloc Large
+    // (Reusable)` = 132 MB at the end of the pass, and a 180 MB peak for
+    // 137 mixed-size rows versus 55 MB when every row is one size).
+    let loaded = conn.query_row(
+        "SELECT png_data FROM clipboard_history WHERE id = ?1 AND entry_type = 1",
+        rusqlite::params![id],
+        |row| {
+            let bytes = match row.get_ref(0)? {
+                rusqlite::types::ValueRef::Blob(b) => b,
+                _ => &[],
+            };
+            blob.clear();
+            if blob.capacity() < bytes.len() {
+                blob.reserve(bytes.len());
+            }
+            // The pages may have come back from malloc still marked
+            // reclaimable, so claim before writing (madvise contract).
+            crate::backend::claim_pages(blob.as_ptr(), blob.capacity());
+            blob.extend_from_slice(bytes);
+            Ok(!bytes.is_empty())
+        },
+    ).map_err(|e| {
+        crate::debug_log!("CopyAttach: thumbnail migration: cannot load png for row {id}: {e}");
+    })?;
+    if !loaded {
+        crate::debug_log!("CopyAttach: thumbnail migration: row {id} has empty png_data — skipped");
+        return Err(());
+    }
+    let png: &[u8] = blob;
+
+    // Decode into a caller-owned scratch reused across rows. The capture
+    // pipeline's single-slot pool is deliberately NOT used: this is a one-shot
+    // startup pass, and parking its buffer in that pool would couple two
+    // unrelated phases and leave a migration-sized buffer pool-resident for
+    // the rest of the session.
+    let decoded_dims = crate::image::decode_png_rgba8_into(png, scratch).or_else(|| {
+        // Non-RGBA8 PNG: let the image crate decode, copy into the scratch,
+        // then hand the temporary's pages back.
+        let img = image::load_from_memory(png).ok()?;
+        let rgba = img.to_rgba8();
+        let (w, h) = rgba.dimensions();
+        let raw = rgba.into_raw();
+        crate::backend::claim_pages(raw.as_ptr(), raw.capacity());
+        scratch.clear();
+        if scratch.capacity() < raw.len() {
+            scratch.reserve(raw.len());
+        }
+        crate::backend::claim_pages(scratch.as_ptr(), scratch.capacity());
+        scratch.extend_from_slice(&raw);
+        crate::backend::mark_pages_reusable(raw.as_ptr(), raw.capacity());
+        Some((w, h))
+    });
+    // Size from the *decoded* dimensions: they belong to this buffer, and
+    // they are exactly the input the capture path fed to
+    // `create_thumbnail_fast`. Using the metadata columns instead would let a
+    // disagreement between the two resize against the wrong stride.
+    let (decoded_w, decoded_h) = decoded_dims.ok_or_else(|| {
+        crate::debug_log!("CopyAttach: thumbnail migration: row {id} png undecodable");
+    })?;
+    let (thumb_data, tw, th) =
+        crate::image::create_thumbnail_fast(decoded_w, decoded_h, scratch).ok_or_else(|| {
+        crate::debug_log!("CopyAttach: thumbnail migration: row {id} thumbnail generation failed");
+    })?;
+    // The encoded blob is a fresh allocation released right after the write;
+    // return its pages to the system on release (release-side symmetry with
+    // the claimed decode scratch), or a whole-history pass leaves them dirty.
+    let thumb_guard = crate::backend::MarkBlobReusableOnDrop(thumb_data);
+    conn.execute(
+        "UPDATE clipboard_history SET thumb_data = ?1, thumb_width = ?2, thumb_height = ?3
+         WHERE id = ?4",
+        rusqlite::params![thumb_guard.0, i64::from(tw), i64::from(th), id],
+    ).map_err(|e| {
+        crate::debug_log!("CopyAttach: thumbnail migration: update failed for row {id}: {e}");
+    })?;
+    Ok(Some((tw, th)))
 }

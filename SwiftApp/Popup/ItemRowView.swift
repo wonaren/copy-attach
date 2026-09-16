@@ -21,6 +21,7 @@ struct ItemRowView: View {
     @Environment(\.appTheme) private var theme
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.colorSchemeContrast) private var colorSchemeContrast
+    @Environment(\.displayScale) private var displayScale
 
     private static let hexColorRegex = try! NSRegularExpression(pattern: "#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})\\b")
 
@@ -298,6 +299,14 @@ struct ItemRowView: View {
         }
     }
 
+    /// Display box the row draws an image into, at this screen's scale. Mirrors
+    /// the `.frame(maxHeight: 100)` below and Rust's `THUMB_BOX_*` (which sizes
+    /// the stored blob); the box is one rectangle, so flat and tall images share
+    /// a single source of truth instead of each guessing a longest edge.
+    private var thumbnailBox: RowThumbnailBox {
+        RowThumbnailBox.current(scale: displayScale)
+    }
+
     private func imageContent(dbId: Int, width: Int, height: Int) -> some View {
         HStack(spacing: 8) {
             // Synchronous cache hit renders instantly (no IO); a miss shows
@@ -368,7 +377,7 @@ struct ItemRowView: View {
         // into a row that is no longer visible.
         .task(id: dbId) {
             guard dbId != 0 else { return }
-            let img = await ClipboardBackend.shared.loadThumbnail(dbId: dbId)
+            let img = await ClipboardBackend.shared.loadThumbnail(dbId: dbId, box: thumbnailBox)
             guard !Task.isCancelled else { return }
             thumbImage = img
         }

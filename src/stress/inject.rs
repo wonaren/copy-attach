@@ -4,11 +4,11 @@ use std::time::Instant;
 
 use crate::backend::new_entry_id;
 use crate::db::{insert_entry_to_db, trim_db_history};
-use crate::image::{encode_png, image_hash};
+use crate::image::{encode_png, image_hash, thumbnail_target_dims};
 use crate::types::ClipboardEntry;
 use super::image::generate_image_rgba;
 use super::text::generate_text_content;
-use super::{ImageResolution, InjectStats, TextLength, THUMB_MAX_DIM};
+use super::{ImageResolution, InjectStats, TextLength};
 
 /// Inject `count` entries into a DB at `db_path`.  Returns stats.
 ///
@@ -119,14 +119,11 @@ pub fn inject_into_db(
             // Generate thumbnail DIRECTLY at thumb resolution — skip the
             // expensive downscale from native resolution.  Using the same
             // seed-based block generator at thumb scale gives a visually
-            // consistent result without touching 33M pixels.
-            let thumb_scale = THUMB_MAX_DIM as f64 / encode_w.max(encode_h) as f64;
-            let (thumb_w, thumb_h) = if thumb_scale < 1.0 {
-                ((encode_w as f64 * thumb_scale).round() as u32,
-                 (encode_h as f64 * thumb_scale).round() as u32)
-            } else {
-                (encode_w, encode_h)
-            };
+            // consistent result without touching 33M pixels. The target dims
+            // come from the production box fit so injected data matches what
+            // the capture pipeline would store.
+            let (thumb_w, thumb_h) = thumbnail_target_dims(encode_w.max(1), encode_h.max(1))
+                .unwrap_or((encode_w.max(1), encode_h.max(1)));
             let thumb_sky = generate_image_rgba(thumb_w.max(1), thumb_h.max(1), s);
             let thumb_data = encode_png(thumb_w.max(1), thumb_h.max(1), &thumb_sky)
                 .unwrap_or_default();

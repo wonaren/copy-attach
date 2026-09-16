@@ -19,7 +19,7 @@ pub(crate) use schema::{ensure_history_table, open_db};
 // stress-test builds (their DBs are freshly generated with the stable
 // algorithm), so these re-exports follow the same gate; tests keep access.
 #[cfg(any(not(feature = "stress-test"), test))]
-pub(crate) use schema::{METADATA_VERSION, migrate_one_image_row};
+pub(crate) use schema::{METADATA_VERSION, migrate_one_image_row, migrate_one_thumbnail_row};
 pub(crate) use schema::FTS_MAX_INDEXED_TEXT_LEN;
 #[cfg(feature = "migration")]
 pub(crate) use schema::get_persist_dir;

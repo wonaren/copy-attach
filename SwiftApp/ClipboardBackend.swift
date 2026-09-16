@@ -5,6 +5,54 @@ import os
 
 private let thumbnailDecodeSlots = DispatchSemaphore(value: 4)
 
+/// The pixel rectangle a list-row thumbnail must fill to be drawn without
+/// upscaling — mirrored from Rust's `THUMB_BOX_W_PT`/`THUMB_BOX_H_PT`
+/// (`src/image.rs`), which size the *stored* blob; this sizes the *decode*.
+/// Both describe the same row geometry: `.resizable().aspectRatio(.fit)` with
+/// `.frame(maxHeight: 100)` inside the 500pt popup, so an image may span ~460pt
+/// of width and 100pt of height. Changing one side without the other
+/// reintroduces the upscale blur this exists to prevent.
+struct RowThumbnailBox: Sendable, Equatable {
+    /// The box's own width/height axes, **not** the source's long/short sides:
+    /// a portrait source is bounded by the box height, not by a longer side.
+    let widthPx: Int
+    let heightPx: Int
+
+    /// Box at a given display scale (1×/2×), resolved once per popup session.
+    static func current(scale: CGFloat) -> RowThumbnailBox {
+        let s = max(scale, 1)
+        return RowThumbnailBox(widthPx: Int((460 * s).rounded()),
+                               heightPx: Int((100 * s).rounded()))
+    }
+
+    /// Downsample `source` into the box, preserving aspect ratio and never
+    /// upscaling.
+    func makeThumbnail(from source: CGImageSource) -> CGImage? {
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceShouldCache: false,
+            // ImageIO takes a single "longest edge" bound, so the box fit has to
+            // be expressed as whichever source dimension actually limits it
+            // (see `bound`).
+            kCGImageSourceThumbnailMaxPixelSize: bound(for: source)
+        ]
+        return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
+    }
+
+    /// Largest decoded long edge that still fits the box for `source`'s aspect
+    /// ratio. Never exceeds the source's own long edge, so ImageIO cannot upscale.
+    private func bound(for source: CGImageSource) -> Int {
+        guard let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let w = (props[kCGImagePropertyPixelWidth] as? NSNumber)?.doubleValue,
+              let h = (props[kCGImagePropertyPixelHeight] as? NSNumber)?.doubleValue,
+              w > 0, h > 0 else {
+            return max(widthPx, heightPx)
+        }
+        let scale = min(Double(widthPx) / w, Double(heightPx) / h, 1.0)
+        return max(1, Int((max(w, h) * scale).rounded()))
+    }
+}
+
 @MainActor
 @Observable
 class ClipboardBackend {
@@ -48,9 +96,10 @@ class ClipboardBackend {
     private var lastHistoryRevision: UInt64 = 0
     private let thumbnailCache: NSCache<NSNumber, NSImage> = {
         let c = NSCache<NSNumber, NSImage>()
-        // Downsampled thumbnails are ~100 KB each (≤160px RGBA). 4 MB keeps ~40
-        // rows cached for smooth scrolling without letting decoded bitmaps inflate
-        // the small zone footprint.
+        // Decoded thumbnails now match the display box, so they run ~70 KB
+        // (920×20 flat image) to ~290 KB (356×200 screenshot) instead of a
+        // uniform ~100 KB. 4 MB still bounds the cache for smooth scrolling
+        // without letting decoded bitmaps inflate the small zone footprint.
         c.countLimit = 60
         c.totalCostLimit = 4 * 1024 * 1024  // 4 MB
         return c
@@ -415,10 +464,21 @@ class ClipboardBackend {
         return thumbnailCache.object(forKey: NSNumber(value: dbId))
     }
 
-    /// Decode lightweight thumbnail off the main actor with a hard concurrency bound.
-    /// Uses pre-computed 300px thumb blob from SQLite directly and downsamples to ≤160px
-    /// (matching Retina display size for row icons) while bypassing ImageIO's resident cache.
-    private nonisolated static func decodeThumbnail(dbId: Int) async -> NSImage? {
+    /// Decode off the main actor with a hard concurrency bound, resizing the
+    /// stored blob down to the row's **display box** at the live screen scale.
+    ///
+    /// The box is a rectangle, not a single "longest edge" cap. The row renders
+    /// an image with `.resizable().aspectRatio(.fit).frame(maxHeight: 100)` in a
+    /// 500pt popup, so a flat image spans ~460pt of width while a screenshot is
+    /// bounded by the 100pt height. A fixed 160px longest-edge crop used to
+    /// satisfy neither: a 3000×100 panorama decoded to 160×5 and was then drawn
+    /// ~5× larger, which is the "the flatter, the blurrier" artifact. Sizing both
+    /// sides against the box means the decoded pixels match what is drawn.
+    ///
+    /// Off-main and cached-independent (same dbId, same box) for the popup's
+    /// lifetime. ImageIO's resident cache stays disabled so no unmapped dirty
+    /// pages accumulate.
+    private nonisolated static func decodeThumbnail(dbId: Int, box: RowThumbnailBox) async -> NSImage? {
         await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 while thumbnailDecodeSlots.wait(timeout: .now() + 0.05) == .timedOut {
@@ -445,14 +505,8 @@ class ClipboardBackend {
                         continuation.resume(returning: nil)
                         return
                     }
-                    // Bounded 160px thumbnail (ample for 60x48pt rows on 2x Retina).
-                    // Disabling ImageIO cache prevents resident unmapped dirty pages from accumulating.
-                    let options: [CFString: Any] = [
-                        kCGImageSourceCreateThumbnailFromImageAlways: true,
-                        kCGImageSourceShouldCache: false,
-                        kCGImageSourceThumbnailMaxPixelSize: 160
-                    ]
-                    guard let cgThumb = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
+                    let cgThumb = box.makeThumbnail(from: source)
+                    guard let cgThumb else {
                         continuation.resume(returning: nil)
                         return
                     }
@@ -467,14 +521,17 @@ class ClipboardBackend {
     /// Async full thumbnail load: NSCache hit, else the FFI read + PNG decode
     /// run off the main thread, and the result is cached before returning.
     /// The main thread never performs DB access or image decoding for rows.
-    func loadThumbnail(dbId: Int) async -> NSImage? {
+    func loadThumbnail(dbId: Int, box: RowThumbnailBox) async -> NSImage? {
         guard dbId != 0, !Task.isCancelled else { return nil }
         let key = NSNumber(value: dbId)
         if let cached = thumbnailCache.object(forKey: key) { return cached }
-        guard let image = await Self.decodeThumbnail(dbId: dbId) else { return nil }
+        guard let image = await Self.decodeThumbnail(dbId: dbId, box: box) else { return nil }
         guard !Task.isCancelled else { return nil }
-        // cost = decoded RGBA upper bound for a 160px-max-dimension thumbnail (~100 KB)
-        thumbnailCache.setObject(image, forKey: key, cost: 160 * 160 * 4)
+        // Cost is the real decoded size, not a fixed point-value guess: a flat
+        // image in the box is 920×20 (~74 KB) while a screenshot is 356×200
+        // (~285 KB). Charging them the same made the 4 MB cap meaningless.
+        let px = image.size.width * image.size.height
+        thumbnailCache.setObject(image, forKey: key, cost: Int(px) * 4)
         return image
     }
 

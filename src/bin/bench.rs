@@ -106,13 +106,18 @@ fn bench_images() {
     }
 
     println!();
-    println!("  -- Thumbnail (<=300px, generated at thumb size) --");
+    println!("  -- Thumbnail (display box, generated at thumb size) --");
     for &(w, h, label) in resolutions {
-        let scale = 300.0 / w.max(h) as f64;
-        let (tw, th) = if scale < 1.0 {
-            ((w as f64 * scale).round() as u32, (h as f64 * scale).round() as u32)
-        } else {
+        // Mirrors image::THUMB_BOX_W/H (this binary inlines image code).
+        const BOX_W: u32 = 460 * 2;
+        const BOX_H: u32 = 100 * 2;
+        let (tw, th) = if w <= BOX_W && h <= BOX_H {
             (w, h)
+        } else {
+            let scale = (BOX_W as f64 / w as f64)
+                .min(BOX_H as f64 / h as f64)
+                .min(1.0);
+            ((w as f64 * scale).round() as u32, (h as f64 * scale).round() as u32)
         };
 
         let t0 = Instant::now();

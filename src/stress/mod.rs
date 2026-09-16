@@ -28,8 +28,6 @@ mod inject;
 
 pub use inject::{bench_count, bench_snapshot_clone, default_db_path, ffi_inject, ffi_reset, inject_into_db};
 
-const THUMB_MAX_DIM: u32 = 300;
-
 /// Text length categories with their target byte ranges.
 #[derive(Clone, Copy)]
 pub enum TextLength {

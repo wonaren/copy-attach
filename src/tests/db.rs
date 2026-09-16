@@ -371,7 +371,7 @@ fn test_metadata_version_stamped_after_text_phase() {
     let conn = test_db();
     let v: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
     assert_eq!(v, 2, "text phase stamps 2; images reach 3 via the background thread");
-    assert_eq!(crate::db::METADATA_VERSION, 3);
+    assert_eq!(crate::db::METADATA_VERSION, 4);
 }
 
 /// A pre-migration image row carries a DefaultHasher value; the per-row
@@ -384,7 +384,7 @@ fn test_image_hash_migration_recomputes_stable_hash() {
     let expected = crate::image::image_hash(&rgba, 8, 8);
     let img = make_image(&rgba, 8, 8, 100);
     let png = crate::image::encode_png(8, 8, &rgba).unwrap();
-    let thumb = crate::image::create_thumbnail(8, 8, &rgba, 100).unwrap();
+    let thumb = crate::image::create_thumbnail(8, 8, &rgba).unwrap();
     let (tw, th) = match &img {
         ClipboardEntry::Image { thumb_width, thumb_height, .. } =>
             (*thumb_width, *thumb_height),
@@ -520,4 +520,65 @@ fn test_recapture_persists_preserved_custom_label() {
         "the remark must survive recapture in the DB, not only in memory"
     );
     assert_eq!(loaded[0].entry_id(), first_id);
+}
+
+/// A row captured by an older build holds a thumbnail sized for the old
+/// 300px-longest-edge rule. The list draws flat images ~460pt wide, so that blob
+/// was upscaled ~3x in the row. This pins the re-encode to the display box, and
+/// that a second run is a no-op (idempotent — the migration may be interrupted).
+#[test]
+fn test_thumbnail_migration_reencodes_undersized_blob() {
+    let conn = test_db();
+    let rgba = make_test_image_rgba(4000, 100, 77);
+    let png = crate::image::encode_png(4000, 100, &rgba).unwrap();
+    // The stale 300x8 blob a pre-migration capture would have stored.
+    let stale = crate::image::encode_png(300, 8, &make_test_image_rgba(300, 8, 77)).unwrap();
+    conn.execute(
+        "INSERT INTO clipboard_history
+         (entry_type, png_data, width, height, thumb_data, thumb_width, thumb_height, hash, timestamp)
+         VALUES (1, ?1, 4000, 100, ?2, 300, 8, 1, 1)",
+        rusqlite::params![png, stale],
+    ).unwrap();
+    let id = conn.last_insert_rowid();
+
+    let mut blob = Vec::new();
+    let (tw, th) = crate::db::migrate_one_thumbnail_row(&conn, id, &mut blob, &mut Vec::new())
+        .unwrap().expect("an undersized thumbnail must be re-encoded");
+    assert_eq!(tw, crate::image::THUMB_BOX_W, "40:1 source is bounded by the box width");
+    assert!(th <= crate::image::THUMB_BOX_H);
+
+    let (stored_w, stored_h, stored_len): (i64, i64, i64) = conn.query_row(
+        "SELECT thumb_width, thumb_height, LENGTH(thumb_data) FROM clipboard_history WHERE id = ?1",
+        rusqlite::params![id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    ).unwrap();
+    assert_eq!((stored_w, stored_h), (tw as i64, th as i64), "stored dims must match the new blob");
+    assert!(stored_len > 0);
+
+    assert_eq!(crate::db::migrate_one_thumbnail_row(&conn, id, &mut blob, &mut Vec::new()).unwrap(), None,
+               "a blob already at the target dims must not be re-encoded");
+}
+
+/// An undecodable PNG must fail the thumbnail migration loudly and leave the row
+/// untouched — never a silent success that stamps the version and strands it.
+#[test]
+fn test_thumbnail_migration_fails_explicitly_on_undecodable_row() {
+    let conn = test_db();
+    // Stale thumbnail dims (300x8) relative to the 10x10 source so the
+    // metadata precheck does not short-circuit: this fixture must reach the
+    // decode, which is the failure under test.
+    conn.execute(
+        "INSERT INTO clipboard_history
+         (entry_type, png_data, width, height, thumb_data, thumb_width, thumb_height, hash, timestamp)
+         VALUES (1, X'00FF', 10, 10, X'0102', 300, 8, 12345, 1)",
+        [],
+    ).unwrap();
+    let id = conn.last_insert_rowid();
+
+    assert!(crate::db::migrate_one_thumbnail_row(&conn, id, &mut Vec::new(), &mut Vec::new()).is_err());
+
+    let (tw, th): (i64, i64) = conn.query_row(
+        "SELECT thumb_width, thumb_height FROM clipboard_history WHERE id = ?1",
+        rusqlite::params![id], |r| Ok((r.get(0)?, r.get(1)?)),
+    ).unwrap();
+    assert_eq!((tw, th), (300, 8), "old thumbnail left untouched when the PNG cannot be decoded");
 }

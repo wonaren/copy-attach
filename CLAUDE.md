@@ -16,6 +16,7 @@ CopyAttach 是一个 macOS 剪贴板历史管理器：Rust 后端（cdylib）+ S
 - 调试采样点自身也可能错。踩过的坑：读 `NSDragPboard` 得到「拖拽无数据」的假象——现代 macOS 拖拽剪贴板实为 `Apple CFPasteboard drag`，前者恒为空。**先证明观测手段有效（能观测到已知为真的现象），再采信它给出的「没有」。**
 - 报「已修复」前必须能回答：改动前失败、改动后成功，两次都在真实场景里观察到。做不到就明说「尚未实测」。
 - **并发/竞态类问题单次运行不足以下结论**。踩过的坑：`src/ffi/paste.rs` 与 `src/tests/backend.rs` 各持一份 `Once` + `set_backend` 争抢进程级单例，6 次运行中 3 次失败（105/109），单跑一次全绿就提交了。**这类验证要连跑多次（≥8 次）并观察失败率**，不能以「这一次是绿的」收尾。
+- **验证手法本身可能破坏被测前提**。踩过的坑：① 用覆盖的 `HOME` 启动 GUI 测内存，导致钥匙串不可达而弹出无关对话框，差点误导成「沙箱读不到钥匙串」（详见「钥匙串弹窗」节）；② 用每 500ms 新开一个 SQLite 连接轮询 `user_version` 来判定迁移结束——对一个 188MB 的库反复建连，把它自己注入了被测的常驻内存，得出前后矛盾的稳态数字；③ 起第二个 GUI 实例被单实例守卫直接 `exit(0)`，采样到的「进程消失」毫无意义。**观测动作不能改变被测对象；判定结束优先靠日志标记而非副作用式探询。**
 
 ## 构建与测试
 
@@ -64,6 +65,7 @@ vmmap -summary $(pgrep -f 'CopyAttach.app/Contents/MacOS/CopyAttach') | head -16
 - 稳定底线 ~36–44MB：干净空闲 19–22MB，首次开弹窗一次性 +~13–25MB（视图图，之后多轮开关零累积）。再往上的两个已实测来源：瞬时大图解码（~20MB 池，页已标记可回收、不计入 footprint）与 `NSWorkspace` 查询把 ~12MB LaunchServices 数据库拉进进程。构成与数据见 `docs/engineering-notes.md` 的「内存基线的真相」。
 - **撤销栈不是内存来源**(0.99.17 时代的笔记已过期)：载荷在删除时即落盘（`$TMPDIR/CopyAttach/Undo/*.bin`），内存只留 `payload_path`/`payload_bytes`，blobs 随即 `mark_pages_reusable`。实测删除一张 4.19MB 大图（撤销栈落盘 4.30MB）后 footprint **55 → 48MB**。
 - `malloc_zone_pressure_relief` 不要加：实测它收不回任何东西——进程内 4 次调用、以及「512MB 已释放的 1MB 块仍计入 footprint」的合成场景，全部返回 `0 bytes`。
+- **缩略图迁移是一次性内存事件**（0.105.1 起，仅 user_version 3 的库首次启动触发一次）：真库 137 行 release 实测峰值 79MB、稳态回落至与 no-op 相当（~9–18MB vs ~8.7MB），完成后不再发生。它不是常驻泄漏；若在「刚升级后」看到后台内存偏高，先确认 `metadata migration complete` 日志是否已出现。实现细节与三条踩坑（绕过 madvise 契约、每行新建 blob、借用捕获池）见 `docs/engineering-notes.md`。
 
 ### 生产构建
 
@@ -89,7 +91,7 @@ license-server 服务端代码**不在本仓库**（本机 `~/copy-attach-licens
 | `db/` | SQLite write-through：`schema.rs`（连接/FTS5/迁移）、`crud.rs`（load/insert/dedup/trim）、`search.rs`（FTS/LIKE）。禁用 mmap，4MB LRU page cache；FTS 索引上限 512K 字符，超限行走 LIKE 兜底；text/image hash 均为稳定 FNV-1a 64 |
 | `monitor.rs` | 后台线程每 500ms 轮询剪贴板，changeCount 轻量检测，write-through DB，ignore rules 过滤。图片 Phase 2 单 worker + 单槽有界队列（背压） |
 | `ignore.rs` | 捕获时忽略规则：按 app bundle ID、类型、短文本阈值过滤 |
-| `image.rs` | PNG/JPEG/GIF/WebP/BMP/TIFF 编解码，CatmullRom 缩略图（最长边 300px），FNV-1a 内容哈希 |
+| `image.rs` | PNG/JPEG/GIF/WebP/BMP/TIFF 编解码，CatmullRom 缩略图（等比 fit 进行显示框 920×200px），FNV-1a 内容哈希 |
 | `backend.rs` | `OnceLock<Backend>` 单例，entry_id（AtomicU64），HISTORY_REVISION / IMAGE_ENCODING_COUNTER 原子计数器，自写抑制 |
 | `macos.rs` | NSPasteboard changeCount + 文件 URL 读写，CGEventPost Cmd+V，AXIsProcessTrusted。cfg-gated，非 macOS 用空桩 |
 | `history.rs` | `add_to_history()` — 去重 + 头部插入，纯函数式 |
@@ -128,7 +130,7 @@ SwiftApp/
 
 - **Snapshot API**（`clipboard_snapshot_acquire/release`）：Swift 批量读取时一次性加锁构建紧凑快照（`SnapshotRow`：类型/id/时间戳/label/source/图片尺寸 + preview，**不含全文**），后续无锁访问。新功能优先用此 API
 - **稳定 ID**：`entry_id`（u64，AtomicU64 单调递增），用于 `select_and_paste_by_id`，避免数组索引竞争
-- **图片加载**：缩略图走 `clipboard_get_image_thumb_by_db_id`（仅 SQLite 读），后台用 ImageIO 降采样至最长边 160px（禁用 ImageIO 驻留缓存）后存入 `NSCache`（countLimit 60、4MB），弹窗关闭立即清空；大图走 `clipboard_get_image_full_by_db_id`（优先内存，后备 DB）。预览大图由 Rust 降采样解码，预算 = 显示尺寸×scale 与 2048px 的较小值
+- **图片加载**：缩略图走 `clipboard_get_image_thumb_by_db_id`（仅 SQLite 读），后台用 ImageIO 降采样到**行显示框**（460×100pt，按屏幕 backupScale 换算像素；Rust 端存储 blob 按 2× 上限 920×200 生成，双向镜像同一组常量）后存入 `NSCache`（countLimit 60、4MB，cost 按实际解码尺寸计），弹窗关闭立即清空；大图走 `clipboard_get_image_full_by_db_id`（优先内存，后备 DB）。预览大图由 Rust 降采样解码，预算 = 显示尺寸×scale 与 2048px 的较小值。**显示框是矩形而非「最长边」**：扁图由宽边限制、竖图由高边限制，按长/短边匹配会让竖图纵向溢出（曾实测 1362×1774 → 200×260 超出 200 高）。
 - **select_and_paste**：先查 accessibility 权限（未授权直接 return 0 且不动剪贴板）→ 查 history（by entry_id）→ DB 加载（失败显式 return 0，不兜底）→ 写剪贴板（设 pending_self_write）→ DB write-through → move entry to top → sleep 50ms → Cmd+V。**图片粘贴走唯一的文件路径模式**：先写 `$TMPDIR/CopyAttach/Paste/` 临时 PNG，剪贴板放 `public.file-url`（Finder 复制文件同款）再 Cmd+V
 - **粘贴目标 pid 不变式**：Cmd+V 投递给 `source_app.pid`（由 `NSWorkspace.didActivateApplicationNotification` 事件驱动更新，不轮询）。该 pid 必须是用户打开弹窗前的 app，绝不能是 CopyAttach 自身
 - **粘贴后必须归还前台**：预览会强制 `NSApp.activate`（捏合手势只投给最前台 app），而系统**不会**自动归还 —— 不归还的话 Cmd+V 仍能投进目标 app（内容进去了），但该 app 留在后台，光标回不到输入框。`selectItem` 粘贴后调 `ClipboardBackend.restorePasteTargetFocus()`；它只在 `NSApp.isActive` 为真时才动手，所以从不激活的普通路径是 no-op
@@ -166,6 +168,14 @@ SwiftApp/
 ## 钥匙串弹窗
 
 钥匙串条目（Lease + 设备密钥，svce=`com.example.copyattach.licensing`）按创建应用的代码签名授权。**必须用正式签名身份构建**：ad-hoc 签名的 cdhash 每次构建都变，导致每次重开 App 都弹钥匙串授权。build.sh 自动用 `security find-identity` 找 Apple Development 身份，找不到才回退 ad-hoc。
+
+### 严禁用覆盖的 HOME 启动 GUI（踩过的坑）
+
+**不要用 `HOME=/tmp/xxx` 启动 CopyAttach.app 做验证。** 覆盖 HOME 后 `~/Library/Keychains` 不存在，Secure Enclave 的设备密钥（`device-secure-enclave-p256-v1`）查找失败，会弹出「找不到用于储存 … 的钥匙串」对话框，并把测试者引向「沙箱读不到钥匙串」的错误结论。它不是沙箱限制，是测试手法破坏了前置条件。
+
+- 需要隔离数据做验证时，**只有 Rust 测试二进制**（`cargo test` 产物，如直接跑 `target/release/deps/copy_attach-*`）可以用覆盖的 HOME——它不碰钥匙串。GUI 一律用真实 HOME。
+- 想验证 GUI 的真实启动/迁移路径又不想动用户数据：可让 Rust 测试二进制跑真实 `clipboard_init`（它读的就是 `$HOME/Library/Application Support/CopyAttach/history.db`），GUI 本身不必启动。
+- 另注：启动第二个 GUI 实例会被单实例守卫直接 `exit(0)` 并激活已有实例（日志会出现 `Another CopyAttach instance … is running`），所以「用覆盖 HOME 起一个并行实例」这条路本身也不通。
 
 ### GitHub Actions 分发
 

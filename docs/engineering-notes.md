@@ -24,7 +24,15 @@
 
 ## 两阶段图片捕获与内存治理
 
-Phase 1 同步 hash + 缩略图（最长边 300px）→ 更新内存。Phase 2 异步完整 PNG 编码 → DB write-through → 更新 db_id。
+Phase 1 同步 hash + 缩略图（fit 进显示框 920×200px = 460×100pt @2×）→ 更新内存。Phase 2 异步完整 PNG 编码 → DB write-through → 更新 db_id。
+
+- **缩略图尺寸 = 行显示框（0.105.1 修复扁长图模糊）**：旧规则是「最长边压到 300、短边托底 max_dim/5、长边再 cap 900」，但 Swift 显示端又无条件按最长边 160px 重采样，把托底彻底抹掉。扁图（如 3000×100）被解成 160×5 后按 ~460pt 行宽绘制，放大 ~5.75× ——这就是「越扁越糊」。现改为两端共用同一**矩形框** `THUMB_BOX_W×THUMB_BOX_H`(920×200)：Rust `thumbnail_target_dims` 按框做等比 fit 生成存储 blob，Swift `RowThumbnailBox` 按当前 screen scale 计算框并把 fit 换算成 ImageIO 的唯一 long-edge 参数（`bound(for:)`）。**轴是宽/高，不是长/短边**：按长/短边匹配会让竖图被 920 那一侧兜底而纵向溢出（实测 1362×1774 → 200×260 超出 200 高）。实测（真库副本 137 行）：3000×100 由放大 5.75× → 1.00×，1920×1080 由 2.22× → 1.00×。存储端常量与 Swift 端必须同步修改。
+
+- **缩略图迁移的内存纪律（0.105.1，踩坑记录）**：user_version 3→4 会把历史缩略图按新显示框重编码。首版实现有三个内存错误，均实测定位（真库副本 137 行，release，`/usr/bin/time -l` 峰值 RSS）：
+  1. 用普通 `decode_png`（`load_from_memory` + `to_rgba8` 拷贝）解码全分辨率 PNG，绕过了本仓库对大缓冲的 madvise 契约（claim / mark reusable / 池化）——峰值 **323MB**，而该 pass 为 no-op 时仅 19MB。
+  2. 每行 `SELECT png_data` 都新建一个 4–7MB `Vec`，137 行不同尺寸的分配让 malloc 产生大量 large 块；释放后因未被标记而滞留（`Malloc Large (Reusable)` 实测 132MB）。
+  3. 借用了捕获管线的单槽解码池 `ImageDecodeBuffer`——一个一次性启动 pass 把迁移尺寸的缓冲留在池里整个会话，并且让 `backend::test_image_decode_buffer_pool_lifecycle` 稳定失败（8/8，与 `--test-threads=1` 无关，是跨测试对进程级池的耦合）。
+  修法：迁移自带 caller-owned 的可复用 blob/scratch（两者 end 时显式 `mark_pages_reusable`）、编码产物走 `MarkBlobReusableOnDrop`、**按源尺寸降序遍历**（让可复用缓冲一次到达高水位后被复用，而非随行尺寸来回 ratchet；仅此一项就把峰值 156→79MB）。最终：峰值 **79MB**、稳态回落至与 no-op 相当（~9–18MB vs ~8.7MB）。**教训：任何遍历全库大 blob 的 pass 都必须自己持有缓冲并显式归还，且顺序会影响峰值。**
 
 - **有界背压（0.99.25-dev）**：单 worker + 单槽 `sync_channel`（`IMAGE_PHASE2_QUEUE`），编码跟不上时捕获线程在 `send()` 上显式阻塞——原 `thread::spawn` 每张图片一个线程、各自持有全分辨率 RGBA，复制速度快于编码时在途线程无界堆积，清理阈值管不住它，是「后台内存随使用时长增长」的根因之一；单槽上限 = 常驻在途最多 2 张全分辨率图（编码中 1 + 排队 1）。
 
