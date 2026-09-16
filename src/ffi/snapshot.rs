@@ -258,7 +258,13 @@ pub extern "C" fn clipboard_snapshot_packed_acquire(out_len: *mut c_int) -> *mut
         Some(b) => b.history.lock().unwrap(),
         None => return std::ptr::null_mut(),
     };
+    let perf = crate::perf::PerfSpan::start("rust", "snapshot.pack");
     let packed = encode_snapshot_packed(&hist);
+    let rows = hist.len();
+    if let Some(mut span) = perf {
+        span.val = Some(rows as i64);
+        span.data = Some(format!("bytes{}", packed.len()));
+    }
     if !out_len.is_null() {
         unsafe {
             *out_len = packed.len() as c_int;

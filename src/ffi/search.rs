@@ -27,8 +27,13 @@ pub extern "C" fn clipboard_search_ids(query: *const c_char, out_count: *mut c_i
         Some(Ok(c)) => c,
         _ => return std::ptr::null_mut(),
     };
+    let perf = crate::perf::PerfSpan::start("rust", "search.query");
     let ids = crate::db::search_history(&conn, &q);
     let len = ids.len();
+    if let Some(mut span) = perf {
+        span.val = Some(len as i64);
+        span.data = Some(if q.chars().count() >= 3 { "fts".to_string() } else { "like".to_string() });
+    }
     if len == 0 {
         return std::ptr::null_mut();
     }

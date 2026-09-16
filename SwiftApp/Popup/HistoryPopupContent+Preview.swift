@@ -20,6 +20,7 @@ extension HistoryPopupContent {
     }
 
     func openPreview() {
+        let perfPreview = PerfSpan.start("swift", "preview.open")
         let itemIndex = selectedIndex - 1
         guard itemIndex < displayItems.count, let popup = popupWindow else { return }
         let item = displayItems[itemIndex]
@@ -51,6 +52,7 @@ extension HistoryPopupContent {
         OnboardingGuide.shared.record(.previewed)
         // The preview panel has its own level, so the tour has to light it too.
         OnboardingGuide.shared.refreshSpotlight()
+        perfPreview?.end()
     }
 
     func closePreview() {
@@ -75,6 +77,9 @@ extension HistoryPopupContent {
     private func fullTextItem(_ item: ClipboardItem) -> ClipboardItem? {
         switch item {
         case .text(let entryId, let timestamp, let customLabel, let label, let sourceName, let sourceBundleId, _, let displayPreview):
+            let perfText = PerfSpan.start("swift", "preview.load_full_text")
+            if let span = perfText { span.val = Int64(entryId) }
+            defer { perfText?.end() }
             guard let full = item.fullText else {
                 debugLog("fullTextItem: failed to load full text for entry \(entryId)")
                 return nil

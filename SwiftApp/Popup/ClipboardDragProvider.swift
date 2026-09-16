@@ -31,7 +31,12 @@ enum ClipboardDragProvider {
     /// receiver reading the pasteboard during `draggingEntered:` gets the
     /// payload without waiting on SwiftUI's asynchronous provider round trip.
     static func provider(for item: ClipboardItem, richText: Bool = false) -> NSItemProvider {
+        let perfDrag = PerfSpan.start("swift", "drag.materialize")
+        if let span = perfDrag {
+            span.data = item.isImage ? "image" : "text"
+        }
         let provider = NSItemProvider()
+        defer { perfDrag?.end() }
         switch item {
         case .text:
             // Full text is no longer held in the snapshot; load it on demand

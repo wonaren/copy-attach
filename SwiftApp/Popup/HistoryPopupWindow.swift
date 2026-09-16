@@ -159,6 +159,8 @@ class HistoryPopupWindow: NSPanel {
 
     func show() {
         debugLog("HistoryPopupWindow.show() called")
+        Perf.instant("swift", "popup.show_begin")
+        let perfShow = PerfSpan.start("swift", "popup.show")
         closeSessionGeneration &+= 1
 
         // Start the popup-driven UI poll (0.5s refresh of pure FFI atomics)
@@ -259,6 +261,9 @@ class HistoryPopupWindow: NSPanel {
             name: NSWindow.didBecomeKeyNotification,
             object: self
         )
+
+        // Synchronous span end: window ordered, key, alpha animation started.
+        perfShow?.end()
     }
 
     @objc private func didBecomeKey(_ notification: Notification) {
@@ -439,6 +444,7 @@ class HistoryPopupWindow: NSPanel {
     }
 
     override func close() {
+        let perfClose = PerfSpan.start("swift", "popup.close")
         // Stop the popup-driven UI poll: the list is no longer visible.
         ClipboardBackend.shared.setPopupVisible(false)
 
@@ -472,5 +478,7 @@ class HistoryPopupWindow: NSPanel {
         // tour's scrim stuck in its hidden state.
         OnboardingGuide.shared.setItemDragInProgress(false)
         OnboardingGuide.shared.refreshSpotlight()
+
+        perfClose?.end()
     }
 }

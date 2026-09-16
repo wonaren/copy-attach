@@ -209,6 +209,15 @@ CI（`.github/workflows/build.yml`）签名步骤关键：`build` job 必须声�
 - 许可证体系（激活庆祝、在线轮询、设备身份、尺寸陷阱）
 - 签名与分发（钥匙串弹窗、GitHub Actions 修复史）
 
+### 性能测量（流畅度仪表）
+
+改动任何热路径前后，用仪表实测而非推测。详见 `docs/perf-instrumentation.md`（格式、门禁、基线）与 `perf/BASELINE.md`（已实测基线）。
+
+- 开启：`defaults write com.example.copyattach PerfTracing -bool true` 后 `open "CopyAttach.app"`（`open` 不继承 shell 环境变量，故用偏好而非 env）。
+- 采集：`bash perf/collect.sh launch` / `smoke N` / `analyze <start_ms>`；或 `python3 perf/analyze.py /tmp/copyattach_debug.log --session-start <ms>`。
+- 记录写在既有 `/tmp/copyattach_debug.log`，以 `__CA_PERF__` 开头；Rust 用 `mach_absolute_time`、Swift 用 `DispatchTime.uptimeNanoseconds`，同一单调时钟（有 G6 门禁证明）。
+- 分析器先跑 9 条门禁（自检/通道/时钟对齐/开销/关闭态惰性），任一失败即判 INVALID 且返回码 2；数字不可信之前不会给出结论。
+
 ## .claude 配置
 
 `.claude/settings.local.json` 包含命令白名单权限。新命令需要时在 `permissions.allow` 数组中添加。

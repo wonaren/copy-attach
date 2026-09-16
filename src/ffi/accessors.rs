@@ -241,6 +241,7 @@ pub extern "C" fn clipboard_get_image_thumb_by_db_id(db_id: i64, out_len: *mut c
         return std::ptr::null_mut();
     }
 
+    let perf = crate::perf::PerfSpan::start("rust", "thumb.load_db");
     let thumb_data = match backend().db.lock() {
         Ok(conn) => {
             match conn.query_row(
@@ -263,6 +264,9 @@ pub extern "C" fn clipboard_get_image_thumb_by_db_id(db_id: i64, out_len: *mut c
 
     // Same blob-read contract as preview/paste/undo.
     crate::backend::claim_pages(thumb_data.as_ptr(), thumb_data.capacity());
+    if let Some(mut span) = perf {
+        span.val = Some(thumb_data.len() as i64);
+    }
     let len = thumb_data.len() as c_int;
     unsafe { *out_len = len; }
     vec_to_raw(thumb_data)
@@ -297,6 +301,8 @@ pub extern "C" fn clipboard_decode_preview_by_db_id(
         *out_is_gif = 0;
     }
     crate::debug_log!("CopyAttach: preview_decode db_id={db_id} max_dim={max_dim}");
+
+    let perf = crate::perf::PerfSpan::start("rust", "preview.decode");
 
     let png: Vec<u8> = match backend().db.lock() {
         Ok(conn) => match conn.query_row(
@@ -403,6 +409,9 @@ pub extern "C" fn clipboard_decode_preview_by_db_id(
         Some((ptr, w, h, byte_len)) => {
             crate::debug_log!("CopyAttach: preview_decode done db_id={db_id} w={w} h={h} bytes={byte_len} gif={}",
                 unsafe { *out_is_gif });
+            if let Some(mut span) = perf {
+                span.val = Some(byte_len as i64);
+            }
             unsafe {
                 *out_len = byte_len as c_int;
                 *out_w = w as c_int;

@@ -62,6 +62,8 @@ extension HistoryPopupContent {
     func performUndo() {
         guard backend.canUndo() else { return }
 
+        let perfUndo = PerfSpan.start("swift", "undo.perform")
+        defer { perfUndo?.end() }
         let savedSearchText = searchText
 
         let success = withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) {

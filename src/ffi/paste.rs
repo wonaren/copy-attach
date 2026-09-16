@@ -106,6 +106,10 @@ fn select_and_paste_impl(item: ClipboardEntry, as_path: bool) -> c_int {
 /// When `as_path` is true and the entry is an Image, its temp PNG path is
 /// placed on the clipboard as plain text instead of `public.file-url`.
 fn prepare_paste_impl(mut item: ClipboardEntry, as_path: bool) -> c_int {
+    let perf_total = crate::perf::PerfSpan::start("rust", "paste.prepare");
+    if let Some(mut span) = perf_total {
+        span.data = Some(if as_path { "path".to_string() } else { "normal".to_string() });
+    }
     #[cfg(target_os = "macos")]
     {
         // Cmd+V simulation needs accessibility permission. Gate BEFORE any
@@ -148,9 +152,15 @@ fn prepare_paste_impl(mut item: ClipboardEntry, as_path: bool) -> c_int {
                 crate::error_log!("CopyAttach: select_and_paste aborted for text entry {}: db_id=0 (entry not persisted)", item.entry_id());
                 return 0;
             }
+            let perf_text = crate::perf::PerfSpan::start("rust", "paste.load_text");
             match backend().db.lock() {
                 Ok(conn) => match load_text_by_db_id(&conn, *db_id) {
-                    Some(t) => Some(crate::backend::MarkStringReusableOnDrop(t)),
+                    Some(t) => {
+                        if let Some(mut span) = perf_text {
+                            span.val = Some(t.len() as i64);
+                        }
+                        Some(crate::backend::MarkStringReusableOnDrop(t))
+                    }
                     None => {
                         crate::error_log!("CopyAttach: select_and_paste DB text load failed for entry {} (db_id={}) — paste aborted", item.entry_id(), *db_id);
                         return 0;
@@ -177,6 +187,7 @@ fn prepare_paste_impl(mut item: ClipboardEntry, as_path: bool) -> c_int {
                     return 0;
                 }
             };
+            let perf_blob = crate::perf::PerfSpan::start("rust", "paste.load_image_blobs");
             match conn.query_row(
                 "SELECT png_data, thumb_data, thumb_width, thumb_height FROM clipboard_history WHERE id = ?",
                 rusqlite::params![*db_id],
@@ -188,6 +199,9 @@ fn prepare_paste_impl(mut item: ClipboardEntry, as_path: bool) -> c_int {
                 )),
             ) {
                 Ok((png, thumb, tw, th)) => {
+                    if let Some(mut span) = perf_blob {
+                        span.val = Some(png.len() as i64);
+                    }
                     // Claim any reusable-marked pages the allocator handed
                     // back: these blobs are written to the pasteboard.
                     crate::backend::claim_pages(png.as_ptr(), png.capacity());
@@ -230,6 +244,10 @@ fn prepare_paste_impl(mut item: ClipboardEntry, as_path: bool) -> c_int {
                 Some(b) if !b.png.is_empty() => b,
                 _ => return 0,
             };
+            let perf_write = crate::perf::PerfSpan::start("rust", "paste.write_temp_png");
+            if let Some(mut span) = perf_write {
+                span.val = Some(blobs.png.len() as i64);
+            }
             let path = match write_paste_image_file(&blobs.png, *id) {
                 Some(p) => p,
                 None => return 0,

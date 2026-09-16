@@ -345,6 +345,7 @@ pub(crate) fn persist_entry_to_db(
     image_thumb: Option<(&[u8], u32, u32)>,
     threshold: usize,
 ) -> Result<i64, ()> {
+    let perf = crate::perf::PerfSpan::start("rust", "db.write");
     // `unchecked_transaction` skips the BEGIN round-trip: the first write
     // statement opens the implicit transaction and `commit` closes it.
     let tx = conn.unchecked_transaction().map_err(|e| {
@@ -357,6 +358,12 @@ pub(crate) fn persist_entry_to_db(
     tx.commit().map_err(|e| {
         crate::error_log!("CopyAttach: failed to commit write transaction: {e}");
     })?;
+    if let Some(mut span) = perf {
+        span.data = Some(match entry {
+            ClipboardEntry::Text { .. } => "text".to_string(),
+            ClipboardEntry::Image { .. } => "image".to_string(),
+        });
+    }
     Ok(row_id)
 }
 

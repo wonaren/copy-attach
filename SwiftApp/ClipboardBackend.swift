@@ -94,6 +94,10 @@ class ClipboardBackend {
     private(set) var sourceAppBundleID: String?
     private var lastImageEncodingCounter: UInt64 = 0
     private var lastHistoryRevision: UInt64 = 0
+    /// Wall-relative uptime (µs) when the popup was opened, for the
+    /// open -> first-published-rows latency. Zero when no open is pending.
+    private var popupOpenPerfUs: UInt64 = 0
+    private var popupOpenPerfPending = false
     private let thumbnailCache: NSCache<NSNumber, NSImage> = {
         let c = NSCache<NSNumber, NSImage>()
         // Cost is the real decoded size (~2 KB to ~700 KB, median ~255 KB).
@@ -231,6 +235,14 @@ class ClipboardBackend {
     @MainActor
     func setPopupVisible(_ visible: Bool) {
         if visible {
+            let perfOpen = PerfSpan.start("swift", "popup.visible_setup")
+            // "Open -> list data available". When the list is already populated
+            // (the common case: it is cached from the startup refresh), the data
+            // is available immediately and waiting for a *fresh* reload would
+            // report the time to the next capture instead. Only an empty list
+            // actually has to wait for the first snapshot to publish.
+            popupOpenPerfUs = Perf.nowUs()
+            popupOpenPerfPending = items.isEmpty
             // Keep decoded thumbnails warm for the duration of this popup session.
             refreshPermission()
             refresh()
@@ -244,6 +256,7 @@ class ClipboardBackend {
             // imperceptible but reduces idle wakeups while the popup is open.
             t.tolerance = 0.1
             timer = t
+            perfOpen?.end()
         } else {
             timer?.invalidate()
             timer = nil
@@ -353,6 +366,9 @@ class ClipboardBackend {
         // A duplicate re-copy changes ordering/timestamp but not count. Observe
         // the backend revision as well so the Popup reloads in that case.
         if newCount != count || newEncCounter != lastImageEncodingCounter || newHistoryRevision != lastHistoryRevision {
+            // First observation of a change: a marker the analyzer pairs with
+            // the Rust capture instant to measure capture -> UI-refresh lag.
+            Perf.instant("swift", "capture.ui_observed")
             count = newCount
             lastImageEncodingCounter = newEncCounter
             lastHistoryRevision = newHistoryRevision
@@ -377,6 +393,8 @@ class ClipboardBackend {
     }
 
     private func reloadItems() {
+        // End-to-end reload latency: request -> the new list published on main.
+        let perfReload = PerfSpan.start("swift", "popup.reload")
         let gen = reloadGeneration.withLock { generation in
             generation &+= 1
             return generation
@@ -403,12 +421,17 @@ class ClipboardBackend {
                   packedLength > 0 else { return }
             defer { clipboard_free_bytes(packed, packedLength) }
 
+            let perfDecode = PerfSpan.start("swift", "snapshot.decode")
             guard let newItems = PackedSnapshot.decodeItems(
                 from: UnsafeRawPointer(packed),
                 length: Int(packedLength)
             ) else {
                 debugLog("Packed snapshot decode failed; skipping reload")
                 return
+            }
+            if let span = perfDecode {
+                span.val = Int64(newItems.count)
+                span.end()
             }
 
             DispatchQueue.main.async { [gen, weak self] in
@@ -418,6 +441,18 @@ class ClipboardBackend {
                     self.items = newItems
                     // New base data — invalidate memoized display lists.
                     self.itemsGeneration &+= 1
+                    if let span = perfReload {
+                        span.val = Int64(newItems.count)
+                        span.end()
+                    }
+                    // First list published after a popup open: the point at
+                    // which the user-visible history is available.
+                    if self.popupOpenPerfPending {
+                        self.popupOpenPerfPending = false
+                        let delta = Perf.nowUs() &- self.popupOpenPerfUs
+                        Perf.counter("swift", "popup.first_data_us", Int64(delta))
+                        Perf.counter("swift", "popup.first_data_rows", Int64(newItems.count))
+                    }
                 }
             }
         }
@@ -496,12 +531,19 @@ class ClipboardBackend {
     private nonisolated static func decodeThumbnail(dbId: Int, box: RowThumbnailBox) async -> NSImage? {
         await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
+                // Queue wait is separated from decode work: with only 4 decode
+                // slots, a burst of row requests spends most of its wall time
+                // here, and conflating the two would misattribute the cost to
+                // decoding.
+                let perfQueue = PerfSpan.start("swift", "thumb.queue_wait")
                 while thumbnailDecodeSlots.wait(timeout: .now() + 0.05) == .timedOut {
                     if Task.isCancelled {
+                        perfQueue?.end()
                         continuation.resume(returning: nil)
                         return
                     }
                 }
+                perfQueue?.end()
                 defer { thumbnailDecodeSlots.signal() }
                 guard !Task.isCancelled else {
                     continuation.resume(returning: nil)
@@ -509,10 +551,14 @@ class ClipboardBackend {
                 }
                 autoreleasepool {
                     var len: Int32 = 0
+                    let perfFfi = PerfSpan.start("swift", "thumb.ffi_read")
                     guard let ptr = clipboard_get_image_thumb_by_db_id(Int64(dbId), &len), len > 0 else {
+                        perfFfi?.end()
                         continuation.resume(returning: nil)
                         return
                     }
+                    perfFfi?.val = Int64(len)
+                    perfFfi?.end()
                     defer { clipboard_free_bytes(ptr, len) }
                     let data = Data(bytesNoCopy: ptr, count: Int(len), deallocator: .none)
 
@@ -520,7 +566,9 @@ class ClipboardBackend {
                         continuation.resume(returning: nil)
                         return
                     }
+                    let perfImageIO = PerfSpan.start("swift", "thumb.imageio")
                     let cgThumb = box.makeThumbnail(from: source)
+                    perfImageIO?.end()
                     guard let cgThumb else {
                         continuation.resume(returning: nil)
                         return
@@ -539,8 +587,18 @@ class ClipboardBackend {
     func loadThumbnail(dbId: Int, box: RowThumbnailBox) async -> NSImage? {
         guard dbId != 0, !Task.isCancelled else { return nil }
         let key = NSNumber(value: dbId)
-        if let cached = thumbnailCache.object(forKey: key) { return cached }
-        guard let image = await Self.decodeThumbnail(dbId: dbId, box: box) else { return nil }
+        if let cached = thumbnailCache.object(forKey: key) {
+            Perf.counter("swift", "thumb.cache_hit", 1)
+            return cached
+        }
+        Perf.counter("swift", "thumb.cache_miss", 1)
+        let perfThumb = PerfSpan.start("swift", "thumb.decode_total")
+        if let span = perfThumb { span.val = Int64(dbId) }
+        guard let image = await Self.decodeThumbnail(dbId: dbId, box: box) else {
+            perfThumb?.end()
+            return nil
+        }
+        perfThumb?.end()
         guard !Task.isCancelled else { return nil }
         // Cost is the real decoded size, not a fixed point-value guess: a flat
         // image in the box is 920×20 (~74 KB) while a screenshot is 356×200
@@ -609,6 +667,7 @@ class ClipboardBackend {
     @discardableResult
     func selectAndPasteDismissingPopup(at index: Int, asPath: Bool = false, dismiss: () -> Void) -> Bool {
         guard index < items.count else { return false }
+        let perfPaste = PerfSpan.start("swift", "paste.menu_to_keystroke")
         let entryId = UInt64(items[index].id)
         let pid = clipboard_prepare_paste_by_id(entryId, asPath)
         guard pid > 0 else { return false }
@@ -617,6 +676,7 @@ class ClipboardBackend {
         // The popup must stop being key before the keystroke is posted.
         dismiss()
         _ = clipboard_send_paste(pid)
+        perfPaste?.end()
         return true
     }
 

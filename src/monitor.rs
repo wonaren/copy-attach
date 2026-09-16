@@ -77,6 +77,10 @@ fn persist_image_phase2(job: ImagePhase2Job) {
         }
         ImagePhase2Payload::Rgba { buffer, width, height } => {
             scratch_guard = crate::backend::ImageEncodeScratchGuard::acquire();
+            let perf = crate::perf::PerfSpan::start("rust", "image.encode_png");
+            if let Some(mut span) = perf {
+                span.val = Some((width as i64) * (height as i64));
+            }
             match crate::image::encode_png_into(width, height, &buffer, &mut scratch_guard) {
                 Some(()) => scratch_guard.as_slice(),
                 None => {
@@ -139,6 +143,10 @@ fn ingest_rgba_image(
     // A new changeCount means a genuine re-copy, even with equal image content.
     if width > 0 && height > 0 {
         // Phase 1 (sync): fast thumbnail -> in-memory history.
+        let perf_thumb = crate::perf::PerfSpan::start("rust", "image.thumbnail_phase1");
+        if let Some(mut span) = perf_thumb {
+            span.val = Some((width as i64) * (height as i64));
+        }
         let (thumb_data, thumb_w, thumb_h) = if let Some(t) = create_thumbnail_fast(width, height, &rgba) { t } else {
             // Keep the entry; Phase 2 will remove it if the image is truly broken.
             crate::debug_log!("CopyAttach: thumbnail creation failed for image {width}x{height} — capturing without thumbnail");
@@ -167,6 +175,7 @@ fn ingest_rgba_image(
                 hist.pop();
             }
             crate::backend::mark_history_changed();
+            crate::perf::perf_instant("rust", "capture.image_phase1", Some("image"));
         }
 
         let payload = if let Some(png) = raw_png {
@@ -403,6 +412,7 @@ pub(crate) fn clipboard_monitor(
                                 hist.pop();
                             }
                             crate::backend::mark_history_changed();
+                            crate::perf::perf_instant("rust", "capture.text", Some("text"));
                             hist[0].clone()
                         }; // history lock released
 

@@ -45,6 +45,7 @@ mod image;
 mod history;
 mod db;
 mod ignore;
+mod perf;
 
 #[cfg(target_os = "macos")]
 mod macos;

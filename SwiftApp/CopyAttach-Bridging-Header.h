@@ -4,6 +4,17 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+// ─── Performance instrumentation (opt-in, see Utility/PerfTrace.swift) ───
+// Enable/disable runtime perf tracing; returns the effective state (1/0).
+int32_t clipboard_set_perf_enabled(int32_t state);
+// Current effective state (1/0).
+int32_t clipboard_perf_enabled(void);
+// Write a probe record carrying the C string token; returns the monotonic ns
+// stamp (0 on a null token). Used by the instrument self-check.
+uint64_t clipboard_perf_emit_probe(const char* token);
+// Self-check of the Rust-side instrument primitives (bitmask; 7 == all pass).
+int32_t clipboard_perf_selfcheck(void);
+
 // ─── Lifecycle ───
 int32_t clipboard_set_runtime_entitlement(int32_t state);
 // 1 = running, 0 = retryable failure, -1 = database corrupt (call

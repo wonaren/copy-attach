@@ -46,6 +46,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // Route Rust stderr into the debug log (the agent has no terminal).
         redirectStderrToDebugLog()
 
+        // Resolve perf tracing before any measured path can run, and validate
+        // the instrument itself. The self-check runs every launch (its probe
+        // and verdict records are written unconditionally) so "is the
+        // instrument working?" always has a recorded answer.
+        let perfOn = Perf.bootstrap()
+        let perfVerdict = PerfSelfCheck.run()
+        debugLog("Perf tracing \(perfOn ? "enabled" : "disabled"); self-check \(perfVerdict ? "PASS" : "FAIL")")
+
         // Apply persisted debug-logging preference before startup diagnostics.
         ClipboardBackend.syncDebugLogging()
 

@@ -274,6 +274,7 @@ struct HistoryPopupContent: View {
         .focused($isContainerFocused)
         .onKeyPress(.upArrow) {
             guard editingItemId == nil else { return .ignored }
+            Perf.instant("swift", "nav.input", data: "up")
             if selectedIndex > 0 {
                 selectedIndex -= 1
             }
@@ -281,6 +282,7 @@ struct HistoryPopupContent: View {
         }
         .onKeyPress(.downArrow) {
             guard editingItemId == nil else { return .ignored }
+            Perf.instant("swift", "nav.input", data: "down")
             if selectedIndex < maxIndex {
                 selectedIndex += 1
             }
@@ -317,6 +319,11 @@ struct HistoryPopupContent: View {
             return .handled
         }
         .onAppear {
+            // SwiftUI has mounted and is laying out the content: the closest
+            // synchronous proxy for "the rows are on screen". Paired with the
+            // popup.show_begin instant this is the hotkey -> visible latency.
+            Perf.instant("swift", "popup.content_appear",
+                         data: backend.items.isEmpty ? "empty" : "rows")
             // Reset transient state in place; the hosting view is reused across sessions.
             selectedIndex = backend.items.isEmpty ? 0 : 1
             searchText = ""
@@ -514,6 +521,7 @@ struct HistoryPopupContent: View {
             let debounceNs: UInt64 = hasCJK ? 150_000_000 : 80_000_000
 
         let query = newValue
+        let perfSearch = PerfSpan.start("swift", "search.end_to_end")
         searchTask = Task { [items = backend.items] in
             do {
                 try await Task.sleep(nanoseconds: debounceNs)
@@ -526,8 +534,9 @@ struct HistoryPopupContent: View {
                 // generated label ("Image (WxH)") / source name.
                 let filtered: [ClipboardItem] = await Task.detached(priority: .userInitiated) { [items, backend, query] in
                     guard !Task.isCancelled else { return [ClipboardItem]() }
+                    let perfFilter = PerfSpan.start("swift", "search.filter")
                     let matchIds = backend.searchIds(query)
-                    return items.filter {
+                    let result = items.filter {
                         matchIds.contains($0.id) ||
                         $0.customLabel.localizedCaseInsensitiveContains(query) ||
                         $0.label.localizedCaseInsensitiveContains(query) ||
@@ -535,6 +544,9 @@ struct HistoryPopupContent: View {
                         DayGroup.label(for: $0.timestamp)
                             .localizedCaseInsensitiveContains(query)
                     }
+                    perfFilter?.val = Int64(result.count)
+                    perfFilter?.end()
+                    return result
                 }.value
 
                 // Task.detached is not auto-cancelled with this task — if the
@@ -543,7 +555,12 @@ struct HistoryPopupContent: View {
                 try Task.checkCancellation()
 
                 await MainActor.run {
+                    // Discarded results are not a latency sample; only a query
+                    // that actually lands on screen is timed.
                     guard !Task.isCancelled, self.searchText == query else { return }
+                    perfSearch?.val = Int64(filtered.count)
+                    perfSearch?.data = hasCJK ? "cjk" : "ascii"
+                    perfSearch?.end()
                     withAnimation(.easeInOut(duration: 0.25)) {
                         effectiveSearchText = query
                         searchResults = filtered
@@ -711,6 +728,10 @@ struct HistoryPopupContent: View {
         itemsListScrollView
             .scrollPosition(id: $scrollTarget)
             .onChange(of: selectedIndex) { _, newValue in
+                // Selection state has been applied and SwiftUI is about to lay
+                // the row out; paired with the preceding nav.input instant this
+                // yields the input -> applied latency.
+                Perf.instant("swift", "nav.applied", data: String(newValue))
                 if newValue == 0 {
                     if showPreview { closePreview() }
                     // Don't set scrollTarget here — the searchText onChange

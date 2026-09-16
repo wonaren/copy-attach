@@ -1,0 +1,194 @@
+{
+  "gates": [
+    {
+      "name": "G5_records_parse",
+      "ok": true,
+      "detail": "813 records parsed, 0 malformed, 1215 log lines"
+    },
+    {
+      "name": "G5b_known_version",
+      "ok": true,
+      "detail": "versions seen: [1]"
+    },
+    {
+      "name": "G1_selfcheck",
+      "ok": true,
+      "detail": "verdict=1 data=swift15_rust7_seen11_clk1_skew51us"
+    },
+    {
+      "name": "G2_channel",
+      "ok": true,
+      "detail": "probe writers seen: ['rust_probe', 'swift_probe']"
+    },
+    {
+      "name": "G6_clock_alignment",
+      "ok": true,
+      "detail": "Rust minus Swift stamp delta 51.4 us"
+    },
+    {
+      "name": "G3_overhead_bounded",
+      "ok": true,
+      "detail": "5 unconditional records for pid 76968 (expected <= 8 per launch)"
+    },
+    {
+      "name": "G7_format_cost",
+      "ok": true,
+      "detail": "358 ns/record to format a trace record"
+    },
+    {
+      "name": "G8_disabled_inert",
+      "ok": true,
+      "detail": "disabled PerfSpan.start costs 0 ns/call"
+    },
+    {
+      "name": "G4_clock",
+      "ok": true,
+      "detail": "slope ratio 1.0001, R^2 0.999993 over 103 samples"
+    }
+  ],
+  "spans": {
+    "rust/snapshot.pack": {
+      "n": 8,
+      "p50": 176.5,
+      "p95": 282.85,
+      "p99": 285.37,
+      "max": 286.0,
+      "mean": 186.0
+    },
+    "swift/snapshot.decode": {
+      "n": 8,
+      "p50": 16760.5,
+      "p95": 17313.65,
+      "p99": 17381.13,
+      "max": 17398.0,
+      "mean": 15681.0
+    },
+    "swift/popup.reload": {
+      "n": 8,
+      "p50": 17589.5,
+      "p95": 101592.44999999992,
+      "p99": 137609.68999999994,
+      "max": 146614.0,
+      "mean": 32573.875
+    },
+    "rust/db.write": {
+      "n": 18,
+      "p50": 676.0,
+      "p95": 1060.7499999999998,
+      "p99": 1132.1499999999999,
+      "max": 1150.0,
+      "mean": 711.7222222222222
+    },
+    "swift/popup.visible_setup": {
+      "n": 5,
+      "p50": 34.0,
+      "p95": 137.99999999999997,
+      "p99": 158.8,
+      "max": 164.0,
+      "mean": 56.6
+    },
+    "swift/popup.show": {
+      "n": 5,
+      "p50": 35986.0,
+      "p95": 84379.19999999998,
+      "p99": 93531.04000000001,
+      "max": 95819.0,
+      "mean": 47453.8
+    },
+    "swift/popup.close": {
+      "n": 5,
+      "p50": 5803.0,
+      "p95": 14972.0,
+      "p99": 15331.2,
+      "max": 15421.0,
+      "mean": 8840.0
+    }
+  },
+  "chains": {
+    "open->content_appear": {
+      "n": 5,
+      "p50": 40058.834,
+      "p95": 88838.1672,
+      "p99": 98053.30064,
+      "max": 100357.084,
+      "mean": 51662.317
+    },
+    "nav.input->nav.applied": {
+      "n": 0,
+      "p50": null,
+      "p95": null,
+      "p99": null,
+      "max": null,
+      "mean": null
+    },
+    "capture->ui_observed": {
+      "n": 7,
+      "p50": 323851.583,
+      "p95": 354632.5207,
+      "p99": 358486.57054,
+      "max": 359450.083,
+      "mean": 326067.57714285713
+    }
+  },
+  "counters": {
+    "perfcheck/format_cost_ns": {
+      "n": 1,
+      "p50": 358.0,
+      "p95": 358.0,
+      "p99": 358.0,
+      "max": 358.0,
+      "mean": 358.0
+    },
+    "perfcheck/disabled_start_cost_ns": {
+      "n": 1,
+      "p50": 0.0,
+      "p95": 0.0,
+      "p99": 0.0,
+      "max": 0.0,
+      "mean": 0.0
+    },
+    "perfcheck/verdict": {
+      "n": 1,
+      "p50": 1.0,
+      "p95": 1.0,
+      "p99": 1.0,
+      "max": 1.0,
+      "mean": 1.0
+    }
+  },
+  "budgets": [
+    {
+      "budget": "hotkey -> popup content mounted",
+      "p95_us": 88838.1672,
+      "threshold_us": 150000,
+      "status": "OK",
+      "n": 5
+    },
+    {
+      "budget": "popup open (show)",
+      "p95_us": 84379.19999999998,
+      "threshold_us": 100000,
+      "status": "OK",
+      "n": 5
+    },
+    {
+      "budget": "list reload (request -> publish)",
+      "p95_us": 101592.44999999992,
+      "threshold_us": 100000,
+      "status": "OVER",
+      "n": 8
+    },
+    {
+      "budget": "capture -> ui observed",
+      "p95_us": 354632.5207,
+      "threshold_us": 300000,
+      "status": "OVER",
+      "n": 7
+    }
+  ],
+  "records": 103,
+  "malformed": 0,
+  "pid": 76968,
+  "valid": true,
+  "session_start": 1789564143364
+}
