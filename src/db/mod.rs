@@ -14,7 +14,7 @@ mod crud;
 mod migration;
 mod search;
 
-pub(crate) use schema::{ensure_history_table, open_db};
+pub(crate) use schema::{classify_db_error, ensure_history_table, open_db, DbFailure};
 // The image-hash migration driver lives in ffi/init.rs and is compiled out of
 // stress-test builds (their DBs are freshly generated with the stable
 // algorithm), so these re-exports follow the same gate; tests keep access.

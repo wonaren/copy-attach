@@ -181,7 +181,7 @@ pub fn default_db_path() -> Option<String> {
 /// In-memory injection into the running backend.
 /// Returns the number of entries actually inserted.
 pub fn ffi_inject(count: i32, text_ratio: f64, seed: i64) -> i32 {
-    let b = crate::backend::backend();
+    let Some(b) = crate::backend::try_backend() else { return 0 };
     let db_path = match default_db_path() {
         Some(p) => p,
         None => return 0,
@@ -199,7 +199,7 @@ pub fn ffi_inject(count: i32, text_ratio: f64, seed: i64) -> i32 {
 
 /// Reset stress-injected data by re-loading from DB.
 pub fn ffi_reset() {
-    let b = crate::backend::backend();
+    let Some(b) = crate::backend::try_backend() else { return };
     crate::backend::reload_history_from_db(b);
 }
 

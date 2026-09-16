@@ -51,7 +51,7 @@ Phase 1 同步 hash + 缩略图（fit 进显示框 920×200px = 460×100pt @2×�
 
 **释放侧对称（0.99.26-dev）**：claim 过的大缓冲释放前必须 `mark_pages_reusable`，否则脏页滞留 footprint——paste/undo 的 DB blob、`pasteboard_image_data` 原始字节、大文本 String（`load_text_by_db_id` 源头统一 claim）分别由 `MarkEntryBlobsReusableOnDrop`/`MarkBlobReusableOnDrop`/`MarkStringReusableOnDrop`（backend.rs）守卫覆盖全部返回路径。实测 A/B：捕获 2880×1800 截图后旧构建后台 79.6MB 永久钉住，新构建峰值 48.4MB → 空闲 28–32MB 稳定、连续捕获零累积。
 
-**init 失败分级（0.100.12-dev）**：`clipboard_init` 返回 1/0/-1——`-1` 仅在 `SQLITE_CORRUPT`/`SQLITE_NOTADB` 时返回，表示永久性失败；Swift 侧收到 -1 置 `databaseCorrupt`、停止 5s 重试循环，弹 NSAlert「备份并重建 / 退出」，热键按下也会重弹该对话框而非显示空列表。`clipboard_recover_corrupt_db` 把 `history.db{,-wal,-shm}` 整组改名为 `history.db.corrupt-<secs>{,-wal,-shm}`——WAL/SHM 必须一起移走，否则旧 WAL 会回放到新库上再次损坏。仅在 init 返回 -1 后调用（此时无 backend 持有连接）。
+**init 失败分级（0.100.12-dev；0.105.4-dev 扩展为 1/0/-1/-2，详见「init 失败分级（0.105.4-dev）」）**：`clipboard_init` 返回 1/0/-1——`-1` 仅在 `SQLITE_CORRUPT`/`SQLITE_NOTADB` 时返回，表示永久性失败；Swift 侧收到 -1 置 `databaseCorrupt`、停止 5s 重试循环，弹 NSAlert「备份并重建 / 退出」，热键按下也会重弹该对话框而非显示空列表。`clipboard_recover_corrupt_db` 把 `history.db{,-wal,-shm}` 整组改名为 `history.db.corrupt-<secs>{,-wal,-shm}`——WAL/SHM 必须一起移走，否则旧 WAL 会回放到新库上再次损坏。仅在 init 返回 -1 后调用（此时无 backend 持有连接）。
 
 **单实例检查时机（0.100.12-dev）**：SwiftUI 在任何 `NSApplicationDelegate` 回调之前就求值 `MenuBarExtra` body，`HotkeyManager.shared` 随之注册 Carbon 热键；因此单实例检查放在 `applicationDidFinishLaunching`/`WillFinishLaunching` 都太晚——重复实例会先注册热键，导致主实例（或自身）报 `-9878 eventHotKeyExistsErr`。现放在 `App.init()`（`AppDelegate.terminateIfDuplicateInstance`），实测重复实例在 `HotkeyManager init started` 之前退出。Carbon 注册遇 -9878 退避重试 5 次（0.5s 递增），耗尽后若 `AXIsProcessTrusted()` 为 false（NSEvent 兜底同样失效）才弹提示。
 
@@ -172,3 +172,150 @@ CI（`.github/workflows/build.yml`）已修复的关键坑：
 - `AppIcon+Ext.swift`：bundleId → 36pt 单尺寸图标缓存（NSWorkspace 图标多尺寸全量可达数百 KB/张，18pt 行只用 36px，缓存前降采样）。
 - 日期分组：`DayGroup` 按日历日分组，`PopupRow` 在扁平列表中渲染分隔符+条目行。底栏计数用 `.contentTransition(.numericText())`。
 - swiftc 必须 `-O -whole-module-optimization`——缺省 `-Onone` 会让 SwiftUI 前端全速跑在未优化代码上（build.sh 已处理）。
+## init 失败分级（0.105.4-dev）
+
+**问题**：`open_db()` 返回 `Option<Connection>`，把「文件只读 / 权限拒绝 / 磁盘满 / 路径打不开」与「busy / locked 瞬态」
+一律压成 `None` → `clipboard_init` 统一返回 0 → Swift 无限 5s 重试，用户看不到任何原因。
+P0 崩溃（FFI 未初始化 panic）正发生在这个「重试中但弹窗可开」的状态里。
+
+**修复**：`src/db/schema.rs` 新增 `DbFailure { Transient, PermanentEnvironment, Corrupt }` 与
+`classify_db_error(&rusqlite::Error)`，按 SQLite 错误码分类：
+
+| 错误码 | 分类 | 语义 |
+|---|---|---|
+| `DatabaseCorrupt` / `NotADatabase` | Corrupt | 文件不可用，只有替换能修 |
+| `ReadOnly` / `CannotOpen` / `PermissionDenied` / `DiskFull` | PermanentEnvironment | 文件是好的，环境不行；重试无用 |
+| `DatabaseBusy` / `DatabaseLocked` / `SystemIoFailure` / 其他 | Transient | 重试可能成功 |
+
+`clipboard_init` 返回码（与 Swift `StartResult` 一一对应）：`1` started ／ `0` retryable（冷却重试）／
+`-1` corrupt（备份重建对话框）／ **`-2` permanentEnvironment**（新，弹「无法读写 + 重试/退出」，**不提供重建** ——
+数据库完好，重建会毁掉好数据去掩盖一个可修的环境问题）。
+
+**实测**（对产物 dylib 直接调用，隔离 `HOME`，仅用 Rust 二进制以避免钥匙串）：
+
+| 场景 | 返回 |
+|---|---|
+| 干净目录（新建） | `1` |
+| 垃圾文件冒充 DB | `-1` |
+| 有效 DB 置为只读（0444） | `-2` |
+
+**回归测试**：`src/tests/db.rs::db_failure_classification` 用**真实** SQLite 错误（真写只读文件、真读非 DB 文件）断言分类，而非手工构造错误值。
+
+**注意**：`presentDatabaseUnusableDialog` 的「重试」分支最初同步调用 `startBackendIfNeeded()`，此时
+`databaseUnusableDialogShowing` 尚未被 `defer` 清除 → 若环境仍未修好，嵌套对话框被守卫静默吞掉，
+用户点「重试」后没有任何反馈。改为 `DispatchQueue.main.async` 让本次调用先展开。
+
+
+## 启动重试：二进制指数退避（0.105.5-dev）
+
+**背景**：旧实现是固定 5s 冷却，且 `permanentEnvironment`（只读/权限/磁盘满）会停止重试循环——
+用户即使修好了环境也不会自动恢复，必须重开应用。
+
+**机制**（`AppDelegate`）：
+
+- `delay_n = min(60s, 2s × 2^(n-1)) × jitter(0.75–1.25)`，`n` = 连续失败次数。
+- 失败递增 `startFailures`；**成功时清零**（并记录「backoff reset」日志，供分析器/支持使用）。
+- `scheduleMaintenanceTick` 用 `currentStartRetryDelay()` 计算下一次重试时刻（**不是**硬编码 5s——
+  否则会静默抵消退避）。
+- `permanentEnvironment` **不再停止重试**：环境类故障正是「用户在带外修好、应用需自愈」的场景。
+  对话框改为用户主动触发（按热键时）的说明面板，且其「重试」按钮会清零退避以立即重试。
+- 抖动用于打散与许可维护、剪贴板轮询等周期工作的相位，避免重试总是与无关工作同一瞬间触发。
+
+**实测（真实 GUI + 真实启动路径，隔离数据目录；`COPYATTACH_DATA_DIR` 覆盖，HOME 保持真实以保留钥匙串）**：
+
+```text
+Rust backend refused to start: database unusable in this environment (attempt 1); ... next in 1.7s
+Rust backend refused to start: database unusable in this environment (attempt 2); ... next in 4.2s
+Rust backend refused to start: database unusable in this environment (attempt 3); ... next in 7.9s
+# 用户修好写权限（chmod 644），无任何 UI 交互：
+Rust backend started after 3 failed attempt(s); backoff reset
+db.write after recovery: 1        <- 恢复后捕获写入正常
+```
+
+- 退避实测：1.7s → 4.2s → 7.9s（2s×2^k × jitter，符合预期）。
+- **自愈实测**：恢复写权限后 **6s 内**自动重新启动后端并恢复采集，无需重开应用或点击任何按钮。
+- 真实库 `REAL_DB_BEFORE == REAL_DB_AFTER`（size/mtime/perms 均未变），测试全程未触碰用户数据。
+
+**测试钩子**：`COPYATTACH_DATA_DIR`（仅测试用，正常未设置时无任何影响）——
+因为对真实库做 `chmod`/符号链接会被文件沙箱拒绝（`Operation not permitted`），
+无法在不破坏用户数据的前提下注入只读故障；该钩子让真实启动路径可被完整验证。
+
+## 鲁棒性审查（2026-09-16，第一性 + 实测）
+
+审查方法：代码取证 + 真实路径复现。凡未实测者标注为「假设」。
+
+### P0：FFI 无初始化时 panic 直接 abort 进程（已修复，已实测）
+
+- **代码事实**：`backend()` 在 `OnceLock` 未初始化时 `expect` panic；它被 ~30 个 `extern "C"` 入口调用。
+  Rust panic 跨 `extern "C"` 无法 unwind，运行时报 `panic in a function that cannot unwind` → **abort（SIGABRT）**。
+- **可达性（代码 + 运行证据）**：`clipboard_init` 受 entitlement 门控，失败返回 0 时 Swift 进入 `retryable`
+  重试循环，而 `togglePopup()` 只在 `databaseCorrupt` 时拦截——`retryable` 状态下弹窗仍可打开，
+  `setPopupVisible(true) → refresh() → clipboard_get_count()` 即命中 panic。实测日志中确有 
+  `failed to create table: attempt to write a readonly database` → `will retry` → 之后仍收到 `HistoryPopupWindow.show()`。
+- **实测复现**：对一个**未调用 `clipboard_init`** 的进程直接调用 FFI（C 程序链接产物 dylib）：
+  `clipboard_get_count` / `clipboard_get_item_type` / `clipboard_get_image_thumb_by_db_id` 均 `EXIT=134`（SIGABRT）。
+- **修复**：删除 panicking `backend()`（编译期强制所有调用点处理未初始化），全部改为 `try_backend()` + 文档化哨兵值。
+  **实测**：同一 C harness 修复后 `EXIT=0`，分别返回 `0` / `-1` / `NULL`。
+- **回归防线**：`test_recoverable_backend_accessor_is_the_only_accessor`；真正的端到端证明是 C harness（见上）。
+
+### P1：拖拽图片的 fatalError（已修复）
+
+- **代码事实**：`ClipboardDragProvider` 图片分支在 `item.imageData == nil`（仍在编码、行被裁剪、DB 读取失败）时 `fatalError`；
+  写临时文件失败同样 `fatalError`。文本分支则是 log + 空拖拽——**同一策略两种实现，不一致**。
+- **触发场景**：图片 Phase 2 尚未落库时（`dbId=0` 但列表已显示占位行）用户直接拖拽，或磁盘/权限异常。
+- **修复**：图片分支改为与文本一致——`debugLog`/`errorLog` + 返回空 `NSItemProvider`，拒绝拖拽而非崩溃进程。
+
+### P1：`pasteboard_change_count()` 的 `.expect()`（已修复）
+
+- **代码事实**：`pasteboard_change_count()` 返回 `Option<i64>`（pasteboard 不可用时为 `None`），调用点却 `.expect()`。
+- **修复**：改为显式失败——返回 0 中止粘贴。注释说明代价：此时已写入剪贴板但**不发 ⌘V**，
+  用户不会粘贴到内容，也避免了「无法识别自写入」导致监控把自身粘贴重新捕获为一条新记录。
+
+### P2：整条单阶段粘贴路径是死代码 + 有一致性缺陷（已删除）
+
+- **代码事实**：`select_and_paste_impl` 在写完剪贴板后 `thread::sleep(50ms)`，仅有的三个调用者
+  （`clipboard_select_and_paste{,_by_id,_as_path_by_id}`）在 Swift 侧**无任何调用者**；
+  `ClipboardBackend.selectAndPaste(at:)` 也无调用者（弹窗走两阶段 API）。
+- **为何危险**：该实现正是仓库文档记录的「⌘V 可能在弹窗仍为 key 时发出」缺陷形态（实测 7/7，微信丢短文本），
+  且阻塞调用线程。保留它等于留一个随时会被误用的陷阱。
+- **修复**：删除该函数与三个导出、Swift 包装、桥接头声明；更新引用它的测试为两阶段 API 的等价断言。
+
+### 已核查但判定为「非问题」（附证据，避免重复排查）
+
+- **`DayGroup.preconditionFailure` / `separatorID` 溢出**：Calendar 对任意 `UInt64` 时间戳都返回非 nil 组件，
+  key 恒为正（实测 0 / 1 / 负值 / 1970 / 2100 / 1e15 均安全）。不可达。
+- **`LargeTextView` 的 `textContainer!`**：`NSTextView` 构造后 textContainer 必非 nil，不可达。
+- **`imageops`、madvise、claim 契约**：既有的 `docs/engineering-notes.md` 已覆盖，未发现新问题。
+- **`stress-test` 下 2 个 `memory_probe` 失败**：是沙箱禁止 `ps`（`Operation not permitted`），
+  与本仓库代码无关；CI 跑的是默认 feature 的 `cargo test`（117 passed）。
+
+### 仍存在、本次未改（列为待办，需产品决策或独立验证）
+
+1. **`lock().unwrap()` × 60**：任一持锁线程 panic 会污染 mutex，其余线程随后全部 panic。
+   当前已达成的安全边界是「FFI 入口不再因未初始化 panic」，但 DB/monitor 内部的 panic 仍会级联。
+   按仓库「不搞兜底」原则，不建议统一吞掉 poison；更合适的是消除可 panic 的持锁区（见第 2 点）。
+2. ~~**`open_db()` 吞掉具体错误**~~ —— **已修复（0.105.4-dev）**，见上文「init 失败分级」。
+   旧行为：只读/权限/磁盘满与瞬态失败无法区分 → init 统一返回 0 → 无限 5s 重试
+   （该状态下弹窗仍可打开，正是上面 P0 崩溃的温床）。
+3. **`monitor.rs` 的 `unreachable!`（text capture 得到非 text 条目）**：属不变量断言，当前调用链不可达，暂留。
+
+
+## 事件驱动刷新（0.106.0-dev，capture → UI 实测 p95 522ms → 0.46ms）
+
+- **问题**：`ClipboardBackend` 在弹窗打开期间用 0.5s Timer 轮询三个计数器；实测一次捕获
+  从落到 DB（`db.write` p95 0.9ms）到 UI 察觉 p50 135ms / p95 522ms——延迟全部来自轮询周期。
+- **机制**：Rust `HISTORY_EVENT`（`Mutex<u64>` + `Condvar`）+ FFI `clipboard_wait_for_history_change`；
+  Swift 在后台 Task 阻塞等待，唤醒后回主线程刷新。超时 3s 仅作丢通知兜底，正常路径不触发。
+- **释放语义**：`mark_history_changed()` **必须在持有 history 锁时**调用（先递增 `HISTORY_REVISION`，
+  再在同一临界区写 pending + `notify_all`）——这是「不会漏唤醒」和「多次变化合并为一次重载」的共同前提。
+  现有通知点：捕获（文本/图片 Phase1）、图片 Phase2 db_id 回填、粘贴 move-to-top、删除、撤销、清空、
+  百分比裁剪、`reload_history_from_db`、迁移内存镜像。
+- **踩坑：非原子追加会互相覆盖**。Rust `perf::emit` 曾分两次 `write_all`、`backend::write_log_line` 曾分四次写、
+  Swift 曾用 `FileHandle.seekToEnd()+write`。并发下实测丢过一条 `capture.text` 记录，并出现
+  `...data=text__CA_PERF__ v=1 ...` 粘连行。三处现均为「整行拼好 → 单次 write → O_APPEND」；
+  分析器 G5 门禁拒绝 torn 行而非误解析。
+- **踩坑：时钟字段语义**。`t`(单调) 与 `wall`(墙钟) 必须同一瞬间取值；曾在 span 结束时取 `wall`、
+  开始时取 `t`，长 span 上二者相差一个 span 时长，被 G4 门禁捕获（R² 0.9899、~3000ms 残差台阶）。
+- **可观测性**：`reload.wait`（等待时长）+ `reload.event_wake`（事件唤醒标记）+ `list.published`；
+  链 `capture->ui_observed`（后端→UI 察觉）与 `capture->list_published`（含重建+发布）。
+

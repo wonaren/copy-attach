@@ -155,7 +155,7 @@ pub(crate) fn sanitize_token(raw: &str) -> String {
     out
 }
 
-fn wall_ms() -> u64 {
+pub(crate) fn wall_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -170,6 +170,7 @@ pub(crate) fn format_record(
     cat: &str,
     name: &str,
     t_ns: u64,
+    wall: u64,
     dur_us: Option<u64>,
     src: Option<&str>,
     scen: Option<&str>,
@@ -187,7 +188,7 @@ pub(crate) fn format_record(
     s.push_str(" t=");
     s.push_str(&t_ns.to_string());
     s.push_str(" wall=");
-    s.push_str(&wall_ms().to_string());
+    s.push_str(&wall.to_string());
     s.push_str(" kind=");
     s.push_str(kind);
     s.push_str(" cat=");
@@ -227,8 +228,16 @@ fn emit(line: &str) {
         .append(true)
         .open(PERF_LOG_PATH)
     {
-        let _ = f.write_all(line.as_bytes());
-        let _ = f.write_all(b"\n");
+        // ONE write for the whole record including its newline. Writing the
+        // line and the newline separately let another thread append in between,
+        // producing a line that looks like
+        //   "...data=text__CA_PERF__ v=1 pid=..." 
+        // i.e. a record with no newline glued to the next record. Because the
+        // fd is O_APPEND, a single write is placed atomically at end-of-file.
+        let mut buf = String::with_capacity(line.len() + 1);
+        buf.push_str(line);
+        buf.push('\n');
+        let _ = f.write_all(buf.as_bytes());
     }
 }
 
@@ -237,7 +246,7 @@ fn emit(line: &str) {
 /// off).
 pub(crate) fn emit_probe(cat: &str, name: &str, data: &str) -> u64 {
     let t = perf_now_ns();
-    let line = format_record("i", cat, name, t, None, None, None, Some(data), None);
+    let line = format_record("i", cat, name, t, wall_ms(), None, None, None, Some(data), None);
     emit(&line);
     t
 }
@@ -248,6 +257,10 @@ pub(crate) struct PerfSpan {
     cat: &'static str,
     name: &'static str,
     t0: u64,
+    /// Wall clock at span START, so wall and t describe the same instant.
+    /// Stamping wall at format time made them differ by the span duration,
+    /// which broke wall<->monotonic correlation (caught by gate G4).
+    wall0: u64,
     src: Option<&'static str>,
     scen: Option<&'static str>,
     /// Value attached at any point before the span ends (e.g. result count).
@@ -269,6 +282,7 @@ impl PerfSpan {
             cat,
             name,
             t0: perf_now_ns(),
+            wall0: wall_ms(),
             src: None,
             scen: None,
             val: None,
@@ -305,6 +319,7 @@ impl Drop for PerfSpan {
             self.cat,
             self.name,
             self.t0,
+            self.wall0,
             Some(dur_us),
             self.src,
             self.scen,
@@ -322,7 +337,7 @@ pub(crate) fn perf_instant(cat: &'static str, name: &'static str, data: Option<&
         return;
     }
     let t = perf_now_ns();
-    let line = format_record("i", cat, name, t, None, None, None, data, None);
+    let line = format_record("i", cat, name, t, wall_ms(), None, None, None, data, None);
     emit(&line);
 }
 
@@ -333,7 +348,7 @@ pub(crate) fn perf_counter(cat: &'static str, name: &'static str, value: i64) {
         return;
     }
     let t = perf_now_ns();
-    let line = format_record("c", cat, name, t, None, None, None, None, Some(value));
+    let line = format_record("c", cat, name, t, wall_ms(), None, None, None, None, Some(value));
     emit(&line);
 }
 
@@ -393,6 +408,7 @@ pub extern "C" fn clipboard_perf_selfcheck() -> i32 {
         "rust",
         "selfcheck",
         t0,
+        wall_ms(),
         Some(t1.saturating_sub(t0) / 1_000),
         None,
         None,
@@ -431,7 +447,7 @@ mod tests {
     #[test]
     fn test_format_record_is_single_wellformed_line() {
         let rec = format_record(
-            "e", "swift", "popup.show", 123, Some(45),
+            "e", "swift", "popup.show", 123, 456, Some(45),
             Some("s1"), Some("popup_open"), Some("x"), None,
         );
         assert!(rec.starts_with(PERF_MAGIC));

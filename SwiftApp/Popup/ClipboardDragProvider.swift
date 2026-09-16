@@ -64,9 +64,13 @@ enum ClipboardDragProvider {
 
         case .image:
             // nil here means no persisted db_id yet (still encoding) or a load
-            // failure — either way the item must not be dragged.
+            // failure (row trimmed between snapshot and drag, DB lock/IO fault).
+            // Degrade exactly like the text branch: log and offer an empty drag
+            // instead of aborting the process — a declined drop is recoverable,
+            // a fatalError in a user drag handler is not.
             guard let data = item.imageData else {
-                fatalError("Failed to load PNG data for draggable image entry \(item.id)")
+                debugLog("Drag: failed to load PNG data for image entry \(item.id); offering empty drag")
+                return NSItemProvider()
             }
 
             do {
@@ -85,7 +89,10 @@ enum ClipboardDragProvider {
                 }
                 provider.suggestedName = url.lastPathComponent
             } catch {
-                fatalError("Failed to materialize draggable image entry \(item.id): \(error)")
+                // Disk full / permission / sandbox: the drop cannot be
+                // materialized. Log and decline rather than crash the app.
+                errorLog("Drag: failed to materialize image entry \(item.id): \(error)")
+                return NSItemProvider()
             }
         }
         return provider

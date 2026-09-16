@@ -68,7 +68,7 @@ enum PerfSelfCheck {
         var sink = 0
         let fmtStart = Perf.nowNs()
         for _ in 0..<1_000 {
-            sink &+= Perf.format(kind: "e", cat: "swift", name: "x", t: fmtStart,
+            sink &+= Perf.format(kind: "e", cat: "swift", name: "x", t: fmtStart, wall: 0,
                                  durUs: 1, src: nil, scen: nil, data: nil, val: nil).utf8.count
         }
         let fmtNs = (Perf.nowNs() - fmtStart) / 1_000

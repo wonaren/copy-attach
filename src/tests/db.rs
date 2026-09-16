@@ -582,3 +582,74 @@ fn test_thumbnail_migration_fails_explicitly_on_undecodable_row() {
     ).unwrap();
     assert_eq!((tw, th), (300, 8), "old thumbnail left untouched when the PNG cannot be decoded");
 }
+
+#[cfg(test)]
+mod db_failure_classification {
+    use crate::db::{classify_db_error, DbFailure};
+    use rusqlite::Connection;
+
+    /// A read-only file must classify as PermanentEnvironment: retrying can
+    /// never succeed, but the database is intact.
+    #[test]
+    fn test_readonly_file_is_permanent_environment() {
+        let dir = tempdir();
+        let path = dir.join("ro.db");
+        {
+            let c = Connection::open(&path).expect("create");
+            crate::db::ensure_history_table(&c).expect("schema");
+        }
+        // Clear outstanding WAL so the file is fully materialized before chmod.
+        {
+            let c = Connection::open(&path).expect("reopen");
+            let _: String = c.query_row("PRAGMA journal_mode=DELETE", [], |r| r.get(0)).unwrap();
+        }
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        use std::os::unix::fs::PermissionsExt;
+        perms.set_mode(0o444);
+        std::fs::set_permissions(&path, perms).unwrap();
+
+        let err = Connection::open(&path)
+            .and_then(|c| {
+                // Force a write so the read-only condition is exercised.
+                c.execute("CREATE TABLE probe (x INTEGER)", [])
+            })
+            .expect_err("write to a read-only file must fail");
+        assert_eq!(
+            classify_db_error(&err),
+            DbFailure::PermanentEnvironment,
+            "read-only must be permanent-environment, got {err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A non-database file must classify as Corrupt, which is what drives the
+    /// back-up-and-rebuild dialog.
+    #[test]
+    fn test_not_a_database_is_corrupt() {
+        let dir = tempdir();
+        let path = dir.join("junk.db");
+        std::fs::write(&path, b"this is not a sqlite database at all, not even close").unwrap();
+        let err = Connection::open(&path)
+            .and_then(|c| c.query_row("SELECT * FROM sqlite_master", [], |r| r.get::<_, i64>(0)))
+            .expect_err("opening junk as a DB must fail");
+        assert_eq!(
+            classify_db_error(&err),
+            DbFailure::Corrupt,
+            "non-database file must classify as corrupt, got {err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn tempdir() -> std::path::PathBuf {
+        let base = std::env::temp_dir().join(format!(
+            "copyattach-dbfail-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        base
+    }
+}

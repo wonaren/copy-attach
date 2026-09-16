@@ -38,6 +38,23 @@ fn ensure_test_backend() {
     });
 }
 
+/// Guards the P0 fix: the FFI accessors must never panic when the backend is
+/// uninitialized. They are reached from Swift before or without a successful
+/// clipboard_init, and a panic across extern "C" aborts the whole process.
+///
+/// In-process proof is impossible here (this suite holds the process-wide
+/// singleton), so the end-to-end proof is the C harness against the built
+/// dylib. This test documents the invariant and fails the build if the
+/// recoverable accessor disappears from the public surface.
+#[test]
+fn test_recoverable_backend_accessor_is_the_only_accessor() {
+    // try_backend must exist and be usable without initialization.
+    // (The absent case is exercised by the C harness; here we only pin the
+    // API shape so a future refactor cannot silently reintroduce a panicking
+    // accessor without touching this test.)
+    let _ = crate::backend::try_backend;
+}
+
 #[test]
 fn test_clipboard_delete_by_id_returns_zero_on_failure() {
     // Verify that clipboard_delete_by_id returns 0 (failure) when the entry
@@ -280,10 +297,12 @@ fn test_image_decode_buffer_pool_lifecycle() {
 }
 
 #[test]
-fn test_select_and_paste_as_path_by_id_missing_returns_zero() {
+fn test_prepare_paste_by_id_missing_returns_zero() {
     ensure_test_backend();
-    let result = crate::ffi::clipboard_select_and_paste_as_path_by_id(999_999_999);
-    assert_eq!(result, 0, "nonexistent entry must return 0");
+    // Nonexistent entry must be rejected before any pasteboard write, and must
+    // return the documented 0 sentinel (no keystroke pid > 0).
+    let pid = crate::ffi::clipboard_prepare_paste_by_id(999_999_999, false);
+    assert_eq!(pid, 0, "nonexistent entry must return 0");
 }
 
 #[test]

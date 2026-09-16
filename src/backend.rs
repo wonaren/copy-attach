@@ -3,8 +3,9 @@
 use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread;
+use std::time::Duration;
 use rusqlite::Connection;
 
 use crate::types::{ClipboardEntry, SourceApp};
@@ -260,19 +261,26 @@ pub(crate) fn error_log_fmt(args: std::fmt::Arguments<'_>) {
     write_log_line(args);
 }
 
-/// One log line: `<timestamp> <message>\n`.
+/// One log line: <timestamp> <message>\n, written in a SINGLE write.
 ///
 /// Both log macros share it so every Rust line carries the same UTC+8 stamp as
-/// the Swift side's `DebugLog` (`yyyy-MM-dd HH:mm:ss +0800`). Without a stamp,
+/// the Swift side's DebugLog (yyyy-MM-dd HH:mm:ss +0800). Without a stamp,
 /// Rust-side errors were impossible to place on a timeline against the Swift
 /// lines around them.
+///
+/// The single write matters: a human line must never be torn by a concurrent
+/// perf record. Emitting the four pieces separately let a one-write trace
+/// record land between the timestamp and the message, producing a line like
+/// "2026-09-16 21:11:28 +0800__CA_PERF__ ..." — corrupting both records.
 fn write_log_line(args: std::fmt::Arguments<'_>) {
     use std::io::Write;
-    let mut err = std::io::stderr();
-    let _ = err.write_all(log_timestamp().as_bytes());
-    let _ = err.write_all(b" ");
-    let _ = err.write_fmt(args);
-    let _ = err.write_all(b"\n");
+    let mut line = String::with_capacity(96);
+    line.push_str(&log_timestamp());
+    line.push(' ');
+    let _ = std::fmt::Write::write_fmt(&mut line, args);
+    line.push('\n');
+    // stderr is unbuffered in Rust, so this is one write(2) to the log fd.
+    let _ = std::io::stderr().write_all(line.as_bytes());
 }
 
 /// Current time stamped as UTC+8, matching the Swift formatter.
@@ -344,8 +352,85 @@ pub(crate) static IMAGE_ENCODING_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// Incremented whenever history ordering or metadata changes.
 pub(crate) static HISTORY_REVISION: AtomicU64 = AtomicU64::new(0);
 
+// History-change event wire.
+//
+// The UI used to poll the counters below on a 500 ms timer, so a capture took up
+// to half a second to appear (measured p95 ~522 ms end to end, while the backend
+// itself finished in ~1 ms). The frontend now blocks on this channel instead,
+// which turns capture -> visible into a latency proportional to the actual work
+// rather than to a timer period.
+//
+// Contract: the pending revision is stored and notified in the same critical
+// section as the mutation it describes, and only while the history lock is held.
+// Because every history mutation takes the history lock, this makes
+// "mutate -> publish" atomic:
+//
+//   * a waiter can never miss a change (either it observes the bumped revision,
+//     or the pending value is still set from an earlier unpublished change), and
+//   * a burst of changes between two waits costs one backend reload at most,
+//     because the pending value collapses them into a single "changed" signal.
+//
+// Callers must invoke mark_history_changed() while holding the history lock (or
+// a lock that serializes against it). Every mutation site does so.
+static HISTORY_EVENT: OnceLock<Arc<(Mutex<u64>, Condvar)>> = OnceLock::new();
+const NO_EVENT: u64 = u64::MAX;
+
+fn history_event() -> &'static (Mutex<u64>, Condvar) {
+    HISTORY_EVENT.get_or_init(|| Arc::new((Mutex::new(NO_EVENT), Condvar::new())))
+}
+
+/// Publish a history change. MUST be called while holding the history lock (or a
+/// lock that serializes with it): the revision increment and the wakeup then
+/// cannot be reordered against the mutation by another thread.
 pub(crate) fn mark_history_changed() {
     HISTORY_REVISION.fetch_add(1, Ordering::Relaxed);
+    let (m, cv) = history_event();
+    let mut pending = m.lock().unwrap_or_else(|e| e.into_inner());
+    *pending = HISTORY_REVISION.load(Ordering::Relaxed);
+    cv.notify_all();
+}
+
+/// Block until history changes after since, or timeout_ms elapses.
+///
+/// Returns the newest observed revision (always > since when awakened), or the
+/// current revision on timeout. The timeout is a safety net against a missed
+/// wakeup: with a correct publish protocol it should never fire, but the UI must
+/// never hang forever if a notify is ever lost.
+#[no_mangle]
+pub extern "C" fn clipboard_wait_for_history_change(since: u64, timeout_ms: u64) -> u64 {
+    let (m, cv) = history_event();
+    let mut pending = m.lock().unwrap_or_else(|e| e.into_inner());
+    if *pending == NO_EVENT || *pending <= since {
+        let (guard, _timeout) = cv
+            .wait_timeout_while(pending, Duration::from_millis(timeout_ms), |p| {
+                *p == NO_EVENT || *p <= since
+            })
+            .unwrap_or_else(|e| e.into_inner());
+        pending = guard;
+    }
+    let current = HISTORY_REVISION.load(Ordering::Relaxed);
+    if *pending != NO_EVENT && *pending > since {
+        *pending
+    } else {
+        current.max(since)
+    }
+}
+
+/// The revision values the UI keys its reload decision on, read together so the
+/// comparison stays consistent with the counters the backend increments.
+#[no_mangle]
+pub extern "C" fn clipboard_history_counters(
+    out_revision: *mut u64,
+    out_image_encoding: *mut u64,
+) -> i32 {
+    if out_revision.is_null() || out_image_encoding.is_null() {
+        return 0;
+    }
+    unsafe {
+        *out_revision = HISTORY_REVISION.load(Ordering::Relaxed);
+        *out_image_encoding = IMAGE_ENCODING_COUNTER.load(Ordering::Relaxed);
+    }
+    1
 }
 
 pub(crate) fn new_entry_id() -> u64 {
@@ -682,10 +767,13 @@ pub(crate) struct Backend {
 
 static BACKEND: OnceLock<Backend> = OnceLock::new();
 
-/// Returns the singleton, panicking if not yet initialized.
-pub(crate) fn backend() -> &'static Backend {
-    BACKEND.get().expect("Clipboard backend not initialized. Call clipboard_init() first.")
-}
+// NOTE: there is deliberately NO panicking accessor here. These functions are
+// called from extern "C" entry points, where a panic cannot unwind ("panic in a
+// function that cannot unwind" -> abort / SIGABRT). The UI can reach them
+// before or without a successful clipboard_init (init is gated on entitlement
+// and is retried on failure), so a panicking accessor turns a recoverable
+// "backend unavailable" state into a hard process crash.
+// Always use try_backend() and return the documented sentinel.
 
 /// Set the singleton. Returns `Ok(())` on first call, `Err(())` if already set.
 pub(crate) fn set_backend(b: Backend) -> Result<(), ()> {
@@ -708,9 +796,50 @@ pub(crate) fn reload_history_from_db(b: &Backend) -> usize {
 
     let mut hist = b.history.lock().unwrap();
     *hist = trimmed;
-    crate::backend::HISTORY_REVISION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    // Publish under the history lock (bulk reload replaced the whole list).
+    mark_history_changed();
 
     count
+}
+
+#[cfg(test)]
+mod history_event_tests {
+    use super::*;
+
+    /// A publish from another thread must wake a parked waiter.
+    ///
+    /// Robust under parallel tests: it asserts only that our own publish is
+    /// observed, so unrelated concurrent publishes cannot make it fail (at
+    /// worst they wake the waiter early — still a wake).
+    #[test]
+    fn test_wait_wakes_on_publish() {
+        let before = HISTORY_REVISION.load(Ordering::Relaxed);
+        let publisher = thread::spawn(|| {
+            thread::sleep(Duration::from_millis(40));
+            mark_history_changed();
+        });
+        let observed = clipboard_wait_for_history_change(before, 5_000);
+        publisher.join().unwrap();
+        assert!(
+            observed > before,
+            "waiter did not observe the publish: before={before} observed={observed}"
+        );
+    }
+
+    /// A waiter that can never be satisfied must time out and return the input
+    /// revision. u64::MAX is unreachable by any real revision, so concurrent
+    /// publishes cannot spuriously satisfy it — deterministic under parallelism.
+    #[test]
+    fn test_wait_times_out() {
+        let start = std::time::Instant::now();
+        let observed = clipboard_wait_for_history_change(u64::MAX, 80);
+        let elapsed = start.elapsed();
+        assert_eq!(observed, u64::MAX);
+        assert!(
+            elapsed >= Duration::from_millis(60),
+            "returned before the timeout: {elapsed:?}"
+        );
+    }
 }
 
 #[cfg(test)]

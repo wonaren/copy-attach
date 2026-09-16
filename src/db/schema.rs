@@ -1,8 +1,65 @@
 use std::path::PathBuf;
 use rusqlite::Connection;
 
+/// Why a database operation failed, at the granularity the UI must act on.
+///
+/// The distinction is load-bearing: the startup path retries transient failures
+/// forever, but a permanent environment failure (read-only file, disk full,
+/// permission denied) never succeeds on retry. Collapsing them into one
+/// "failed" value — as the previous Option-returning open did — produced an
+/// infinite 5 s retry loop with no user-visible cause.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DbFailure {
+    /// Retrying may succeed: busy/locked (another process holds it) or a
+    /// transient IO error.
+    Transient,
+    /// Retrying cannot help without user action, but the database file itself
+    /// is intact. The environment is the problem (read-only, permissions,
+    /// disk full, path not openable).
+    PermanentEnvironment,
+    /// The file is not a usable database. Only replacing it can help.
+    Corrupt,
+}
+
+/// Classify a rusqlite error into the category the caller must act on.
+pub(crate) fn classify_db_error(e: &rusqlite::Error) -> DbFailure {
+    let code = match e {
+        rusqlite::Error::SqliteFailure(ffi, _) => ffi.code,
+        _ => return DbFailure::Transient,
+    };
+    match code {
+        rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase => {
+            DbFailure::Corrupt
+        }
+        rusqlite::ErrorCode::ReadOnly
+        | rusqlite::ErrorCode::CannotOpen
+        | rusqlite::ErrorCode::PermissionDenied
+        | rusqlite::ErrorCode::DiskFull => DbFailure::PermanentEnvironment,
+        // DatabaseBusy / DatabaseLocked / SystemIoFailure / OperationInterrupted
+        // and anything unrecognized: a retry may succeed.
+        _ => DbFailure::Transient,
+    }
+}
+
 /// Resolve the storage directory under `~/Library/Application Support/CopyAttach`.
+///
+/// `COPYATTACH_DATA_DIR` overrides the location. It exists so the real startup
+/// path (open -> init -> backoff -> recover) can be exercised against a
+/// controlled database without touching the user's data or overriding HOME
+/// (overriding HOME breaks keychain access — see CLAUDE.md). Unset in normal
+/// operation, where it has no effect.
 pub(crate) fn get_persist_dir() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os("COPYATTACH_DATA_DIR") {
+        let dir = PathBuf::from(dir);
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            crate::error_log!(
+                "CopyAttach: COPYATTACH_DATA_DIR {} is unusable: {e}",
+                dir.display()
+            );
+            return None;
+        }
+        return Some(dir);
+    }
     let home = std::env::var("HOME").ok()?;
     let dir = PathBuf::from(&home).join("Library/Application Support/CopyAttach");
     std::fs::create_dir_all(&dir).ok()?;
@@ -10,22 +67,34 @@ pub(crate) fn get_persist_dir() -> Option<PathBuf> {
 }
 
 /// Open (or create) the SQLite database with WAL, a small page cache, and no mmap.
-pub(crate) fn open_db() -> Option<Connection> {
-    let db_path = get_persist_dir()?.join("history.db");
+///
+/// The failure is classified rather than flattened: the caller uses it to decide
+/// between retrying, surfacing an environment problem, and offering a rebuild.
+pub(crate) fn open_db() -> Result<Connection, DbFailure> {
+    let dir = get_persist_dir().ok_or_else(|| {
+        crate::error_log!("CopyAttach: cannot resolve or create the storage directory");
+        DbFailure::PermanentEnvironment
+    })?;
+    let db_path = dir.join("history.db");
     let conn = Connection::open(&db_path).map_err(|e| {
-        crate::error_log!("CopyAttach: failed to open database: {e}");
-    }).ok()?;
-    // No mmap keeps the FTS index out of resident memory; a failed WAL switch
-    // is logged rather than swallowed so the journal mode remains visible.
+        let failure = classify_db_error(&e);
+        crate::error_log!("CopyAttach: failed to open database ({}): {e}", db_path.display());
+        failure
+    })?;
+    // Configure the connection. A WAL switch can fail on a read-only file even
+    // when the open succeeded; that is a permanent environment failure, not a
+    // warning, so it is classified and returned rather than swallowed.
     if let Err(e) = conn.execute_batch(
         "PRAGMA journal_mode = WAL;
          PRAGMA synchronous = NORMAL;
          PRAGMA mmap_size = 0;
          PRAGMA cache_size = -4096;"
     ) {
-        crate::error_log!("CopyAttach: failed to configure DB pragmas (WAL/synchronous/cache): {e}");
+        let failure = classify_db_error(&e);
+        crate::error_log!("CopyAttach: failed to configure DB pragmas ({failure:?}): {e}");
+        return Err(failure);
     }
-    Some(conn)
+    Ok(conn)
 }
 
 /// Create the history table and migrate legacy columns/indexes.

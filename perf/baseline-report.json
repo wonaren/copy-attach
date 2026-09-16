@@ -3,7 +3,7 @@
     {
       "name": "G5_records_parse",
       "ok": true,
-      "detail": "813 records parsed, 0 malformed, 1215 log lines"
+      "detail": "2500 records parsed, 0 malformed in window (0 torn/interleaved), 13 torn before window (historical), 3256 log lines"
     },
     {
       "name": "G5b_known_version",
@@ -13,7 +13,7 @@
     {
       "name": "G1_selfcheck",
       "ok": true,
-      "detail": "verdict=1 data=swift15_rust7_seen11_clk1_skew51us"
+      "detail": "verdict=1 data=swift15_rust7_seen11_clk1_skew36us"
     },
     {
       "name": "G2_channel",
@@ -23,17 +23,17 @@
     {
       "name": "G6_clock_alignment",
       "ok": true,
-      "detail": "Rust minus Swift stamp delta 51.4 us"
+      "detail": "Rust minus Swift stamp delta 36.3 us"
     },
     {
       "name": "G3_overhead_bounded",
       "ok": true,
-      "detail": "5 unconditional records for pid 76968 (expected <= 8 per launch)"
+      "detail": "5 unconditional records for pid 79915 (expected <= 8 per launch)"
     },
     {
       "name": "G7_format_cost",
       "ok": true,
-      "detail": "358 ns/record to format a trace record"
+      "detail": "301 ns/record to format a trace record"
     },
     {
       "name": "G8_disabled_inert",
@@ -43,75 +43,91 @@
     {
       "name": "G4_clock",
       "ok": true,
-      "detail": "slope ratio 1.0001, R^2 0.999993 over 103 samples"
+      "detail": "slope ratio 1.0001, R^2 0.999999 over 129 samples"
     }
   ],
   "spans": {
     "rust/snapshot.pack": {
-      "n": 8,
-      "p50": 176.5,
-      "p95": 282.85,
-      "p99": 285.37,
-      "max": 286.0,
-      "mean": 186.0
+      "n": 11,
+      "p50": 134.0,
+      "p95": 210.5,
+      "p99": 212.5,
+      "max": 213.0,
+      "mean": 138.0909090909091
+    },
+    "swift/snapshot.decode.strings": {
+      "n": 11,
+      "p50": 422.0,
+      "p95": 472.5,
+      "p99": 476.9,
+      "max": 478.0,
+      "mean": 415.09090909090907
+    },
+    "swift/snapshot.decode.format_preview": {
+      "n": 11,
+      "p50": 12855.0,
+      "p95": 13361.0,
+      "p99": 13404.2,
+      "max": 13415.0,
+      "mean": 12154.545454545454
     },
     "swift/snapshot.decode": {
-      "n": 8,
-      "p50": 16760.5,
-      "p95": 17313.65,
-      "p99": 17381.13,
-      "max": 17398.0,
-      "mean": 15681.0
+      "n": 11,
+      "p50": 13479.0,
+      "p95": 14109.5,
+      "p99": 14109.9,
+      "max": 14110.0,
+      "mean": 12790.272727272728
     },
     "swift/popup.reload": {
-      "n": 8,
-      "p50": 17589.5,
-      "p95": 101592.44999999992,
-      "p99": 137609.68999999994,
-      "max": 146614.0,
-      "mean": 32573.875
-    },
-    "rust/db.write": {
-      "n": 18,
-      "p50": 676.0,
-      "p95": 1060.7499999999998,
-      "p99": 1132.1499999999999,
-      "max": 1150.0,
-      "mean": 711.7222222222222
+      "n": 11,
+      "p50": 13884.0,
+      "p95": 14595.0,
+      "p99": 14675.8,
+      "max": 14696.0,
+      "mean": 13185.272727272728
     },
     "swift/popup.visible_setup": {
-      "n": 5,
-      "p50": 34.0,
-      "p95": 137.99999999999997,
-      "p99": 158.8,
-      "max": 164.0,
-      "mean": 56.6
+      "n": 1,
+      "p50": 53.0,
+      "p95": 53.0,
+      "p99": 53.0,
+      "max": 53.0,
+      "mean": 53.0
     },
     "swift/popup.show": {
-      "n": 5,
-      "p50": 35986.0,
-      "p95": 84379.19999999998,
-      "p99": 93531.04000000001,
-      "max": 95819.0,
-      "mean": 47453.8
+      "n": 1,
+      "p50": 87899.0,
+      "p95": 87899.0,
+      "p99": 87899.0,
+      "max": 87899.0,
+      "mean": 87899.0
     },
-    "swift/popup.close": {
-      "n": 5,
-      "p50": 5803.0,
-      "p95": 14972.0,
-      "p99": 15331.2,
-      "max": 15421.0,
-      "mean": 8840.0
+    "swift/reload.wait": {
+      "n": 12,
+      "p50": 1007351.0,
+      "p95": 3002645.95,
+      "p99": 3004542.79,
+      "max": 3005017.0,
+      "mean": 1303346.25
+    },
+    "rust/db.write": {
+      "n": 10,
+      "p50": 605.5,
+      "p95": 711.8499999999999,
+      "p99": 728.77,
+      "max": 733.0,
+      "mean": 566.8
     }
   },
   "chains": {
     "open->content_appear": {
-      "n": 5,
-      "p50": 40058.834,
-      "p95": 88838.1672,
-      "p99": 98053.30064,
-      "max": 100357.084,
-      "mean": 51662.317
+      "n": 1,
+      "p50": 92781.875,
+      "p95": 92781.875,
+      "p99": 92781.875,
+      "max": 92781.875,
+      "mean": 92781.875
     },
     "nav.input->nav.applied": {
       "n": 0,
@@ -122,22 +138,30 @@
       "mean": null
     },
     "capture->ui_observed": {
-      "n": 7,
-      "p50": 323851.583,
-      "p95": 354632.5207,
-      "p99": 358486.57054,
-      "max": 359450.083,
-      "mean": 326067.57714285713
+      "n": 10,
+      "p50": 305.64549999999997,
+      "p95": 421.5376499999999,
+      "p99": 439.20753,
+      "max": 443.625,
+      "mean": 311.51660000000004
+    },
+    "capture->list_published": {
+      "n": 10,
+      "p50": 14271.646,
+      "p95": 14942.34795,
+      "p99": 15097.403189999999,
+      "max": 15136.167,
+      "mean": 14209.108400000001
     }
   },
   "counters": {
     "perfcheck/format_cost_ns": {
       "n": 1,
-      "p50": 358.0,
-      "p95": 358.0,
-      "p99": 358.0,
-      "max": 358.0,
-      "mean": 358.0
+      "p50": 301.0,
+      "p95": 301.0,
+      "p99": 301.0,
+      "max": 301.0,
+      "mean": 301.0
     },
     "perfcheck/disabled_start_cost_ns": {
       "n": 1,
@@ -159,36 +183,43 @@
   "budgets": [
     {
       "budget": "hotkey -> popup content mounted",
-      "p95_us": 88838.1672,
+      "p95_us": 92781.875,
       "threshold_us": 150000,
       "status": "OK",
-      "n": 5
+      "n": 1
     },
     {
       "budget": "popup open (show)",
-      "p95_us": 84379.19999999998,
+      "p95_us": 87899.0,
       "threshold_us": 100000,
       "status": "OK",
-      "n": 5
+      "n": 1
     },
     {
       "budget": "list reload (request -> publish)",
-      "p95_us": 101592.44999999992,
+      "p95_us": 14595.0,
       "threshold_us": 100000,
-      "status": "OVER",
-      "n": 8
+      "status": "OK",
+      "n": 11
     },
     {
-      "budget": "capture -> ui observed",
-      "p95_us": 354632.5207,
+      "budget": "capture -> ui noticed",
+      "p95_us": 421.5376499999999,
       "threshold_us": 300000,
-      "status": "OVER",
-      "n": 7
+      "status": "OK",
+      "n": 10
+    },
+    {
+      "budget": "capture -> list published (rendered)",
+      "p95_us": 14942.34795,
+      "threshold_us": 300000,
+      "status": "OK",
+      "n": 10
     }
   ],
-  "records": 103,
+  "records": 129,
   "malformed": 0,
-  "pid": 76968,
+  "pid": 79915,
   "valid": true,
-  "session_start": 1789564143364
+  "session_start": 1789565758938
 }

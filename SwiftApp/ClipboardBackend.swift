@@ -76,7 +76,19 @@ class ClipboardBackend {
     /// memo keyed on it can never serve stale data.
     private(set) var itemsGeneration: Int = 0
 
-    private var timer: Timer?
+    /// Event-driven refresh state. The popup used to poll every 500 ms, which
+    /// bounded capture -> visible at up to half a second (measured p95 522 ms
+    /// while the backend finished in ~1 ms). The waiter below blocks on a Rust
+    /// condvar and wakes exactly when history changes.
+    private struct WaiterState {
+        var generation = 0
+        var active = false
+    }
+    private let waiterState = OSAllocatedUnfairLock(initialState: WaiterState())
+    /// Low-frequency safety net. The event is authoritative; this only guards
+    /// against a missed publish, so it is deliberately much slower than the old
+    /// 500 ms poll (which was the latency bound we are removing).
+    nonisolated private static let refreshLifelineMs: UInt64 = 3_000
     private var sourceAppObserver: NSObjectProtocol?
     private let reloadQueue = DispatchQueue(label: "com.copyattach.reload", qos: .userInitiated)
     /// Monotonic generation of reload requests. Read on the background
@@ -159,7 +171,18 @@ class ClipboardBackend {
         loadFavorites()
     }
 
-    enum StartResult { case started, retryable, corruptDatabase }
+    enum StartResult {
+        case started
+        /// Transient: retrying on a cooldown may succeed.
+        case retryable
+        /// The database file is not usable; only replacing it can help.
+        case corruptDatabase
+        /// The environment makes the database unusable (read-only, permissions,
+        /// disk full). Retrying cannot help and the file is intact, so this is
+        /// distinct from corruptDatabase: offering a rebuild would destroy a
+        /// good database over a fixable environment problem.
+        case permanentEnvironment
+    }
 
     func start() -> StartResult {
         // Apply the debug-logging preference BEFORE init: init-time diagnostics
@@ -167,9 +190,15 @@ class ClipboardBackend {
         // release build; syncing afterwards would silently drop them.
         Self.syncDebugLogging()
         let result = clipboard_init()
+        // Mirror of the Rust init codes (src/ffi/init.rs):
+        //   1 started, 0 retryable, -1 corrupt, -2 permanent environment.
         if result == -1 {
             print("[ClipboardBackend] init failed: database corrupt")
             return .corruptDatabase
+        }
+        if result == -2 {
+            print("[ClipboardBackend] init failed: database unusable in this environment")
+            return .permanentEnvironment
         }
         guard result != 0 else {
             print("[ClipboardBackend] init failed (result: \(result)) — Rust backend not available")
@@ -218,8 +247,7 @@ class ClipboardBackend {
     }
 
     func stop() {
-        timer?.invalidate()
-        timer = nil
+        stopHistoryWaiter()
         clearThumbnailCache()
         if let observer = sourceAppObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(observer)
@@ -246,20 +274,10 @@ class ClipboardBackend {
             // Keep decoded thumbnails warm for the duration of this popup session.
             refreshPermission()
             refresh()
-            guard timer == nil else { return }
-            let t = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
-                guard let self = self else { return }
-                MainActor.assumeIsolated { self.refresh() }
-            }
-            // Allow AppKit to coalesce this timer with other system timers /
-            // display refresh work. A 100ms slack on a 500ms UI poll is
-            // imperceptible but reduces idle wakeups while the popup is open.
-            t.tolerance = 0.1
-            timer = t
+            startHistoryWaiter()
             perfOpen?.end()
         } else {
-            timer?.invalidate()
-            timer = nil
+            stopHistoryWaiter()
             // Release unused SQLite page-cache memory back to the OS now that
             // the monitor is the only DB user and the popup will not search or
             // load thumbnails again until the next open. Run off the main
@@ -270,6 +288,64 @@ class ClipboardBackend {
                 }
             }
             clearThumbnailCache()
+        }
+    }
+
+    /// Start the event-driven refresh waiter (idempotent). One refresh cycle is
+    /// in flight at a time; a generation bump retires the old cycle so a rapid
+    /// close/open pair cannot leave two waiters running.
+    @MainActor
+    private func startHistoryWaiter() {
+        let already = waiterState.withLock { state -> Bool in
+            if state.active { return true }
+            state.active = true
+            state.generation &+= 1
+            return false
+        }
+        guard !already else { return }
+        let generation = waiterState.withLock { $0.generation }
+        scheduleWait(generation: generation)
+    }
+
+    /// Stop the waiter. The blocking FFI call cannot be interrupted, so it is
+    /// left to time out (bounded by the lifeline period) and observes the
+    /// inactive state on wake instead.
+    @MainActor
+    private func stopHistoryWaiter() {
+        _ = waiterState.withLock { state -> Int in
+            state.active = false
+            state.generation &+= 1
+            return state.generation
+        }
+    }
+
+    /// One wait cycle: block off-main on the backend event, then publish a
+    /// reload on main and wait again if still wanted.
+    @MainActor
+    private func scheduleWait(generation: Int) {
+        // Read the revision right before waiting so a change that landed while
+        // we were publishing still wakes us immediately on the next cycle.
+        var revision: UInt64 = 0
+        var encoding: UInt64 = 0
+        _ = clipboard_history_counters(&revision, &encoding)
+
+        Task.detached(priority: .userInitiated) { [weak self] in
+            guard let self else { return }
+            let perfWait = PerfSpan.start("swift", "reload.wait")
+            let observed = clipboard_wait_for_history_change(revision, Self.refreshLifelineMs)
+            perfWait?.val = Int64(observed &- revision)
+            perfWait?.end()
+
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                let stillActive = self.waiterState.withLock { $0.generation == generation && $0.active }
+                guard stillActive else { return }
+                if observed != revision {
+                    Perf.instant("swift", "reload.event_wake")
+                    self.refresh()
+                }
+                self.scheduleWait(generation: generation)
+            }
         }
     }
 
@@ -356,13 +432,15 @@ class ClipboardBackend {
         return Self.richTextDragAppBundleIDs.contains(bundleId)
     }
 
-    /// Data poll: three pure FFI atomic reads + revision-gated reload. No
-    /// system-framework calls, so the 0.5s popup-open poll is structurally
-    /// allocation-free and cannot accumulate anything over time.
+    /// Data check: pure FFI atomic reads + revision-gated reload. No
+    /// system-framework calls, so a wake is structurally allocation-free and
+    /// cannot accumulate anything over time. Driven by the history-change event
+    /// (plus a slow lifeline), not by a 500 ms poll.
     private func refresh() {
         let newCount = Int(clipboard_get_count())
-        let newEncCounter = clipboard_get_image_encoding_counter()
-        let newHistoryRevision = clipboard_get_history_revision()
+        var newHistoryRevision: UInt64 = 0
+        var newEncCounter: UInt64 = 0
+        _ = clipboard_history_counters(&newHistoryRevision, &newEncCounter)
         // A duplicate re-copy changes ordering/timestamp but not count. Observe
         // the backend revision as well so the Popup reloads in that case.
         if newCount != count || newEncCounter != lastImageEncodingCounter || newHistoryRevision != lastHistoryRevision {
@@ -441,6 +519,9 @@ class ClipboardBackend {
                     self.items = newItems
                     // New base data — invalidate memoized display lists.
                     self.itemsGeneration &+= 1
+                    // List published: paired with the Rust capture marker this is
+                    // the user-perceived "captured content is in the list" point.
+                    Perf.instant("swift", "list.published")
                     if let span = perfReload {
                         span.val = Int64(newItems.count)
                         span.end()
@@ -678,19 +759,6 @@ class ClipboardBackend {
         _ = clipboard_send_paste(pid)
         perfPaste?.end()
         return true
-    }
-
-    func selectAndPaste(at index: Int, asPath: Bool = false) -> Bool {
-        guard index < items.count else { return false }
-        let entryId = UInt64(items[index].id)
-        let result = (asPath
-            ? clipboard_select_and_paste_as_path_by_id(entryId)
-            : clipboard_select_and_paste_by_id(entryId)) != 0
-        if result {
-            // History order changed (selected item moved to top) — force UI refresh
-            reloadItems()
-        }
-        return result
     }
 
     // MARK: - Undo Delete

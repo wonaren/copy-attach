@@ -1,11 +1,10 @@
 use std::ffi::{c_char, c_int};
 use std::sync::atomic::Ordering;
-use std::thread;
 use std::time::Duration;
 
 use arboard::Clipboard;
 
-use crate::backend::{backend, try_backend, copyattach_temp_root, mark_history_changed, PendingSelfWrite};
+use crate::backend::{try_backend, copyattach_temp_root, mark_history_changed, PendingSelfWrite};
 use crate::db::load_text_by_db_id;
 use crate::history::add_to_history;
 use crate::macos;
@@ -76,25 +75,15 @@ pub(crate) fn purge_stale_paste_images() {
     }
 }
 
-/// Select-and-paste in one call: prepare the pasteboard, then post the paste
-/// keystroke. Retained for callers that do not own a key window to dismiss
-/// first; the popup path uses the two-phase split instead (see
-/// `clipboard_prepare_paste_by_id`).
-fn select_and_paste_impl(item: ClipboardEntry, as_path: bool) -> c_int {
-    let pid = prepare_paste_impl(item, as_path);
-    if pid == 0 {
-        return 0;
-    }
-    thread::sleep(Duration::from_millis(50));
-    #[cfg(target_os = "macos")]
-    {
-        if !macos::simulate_cmd_v(pid) {
-            crate::error_log!("CopyAttach: simulate_cmd_v failed");
-            return 0;
-        }
-    }
-    1
-}
+// NOTE: the former single-phase select_and_paste_impl() lived here. It
+// slept 50 ms on the caller thread between writing the pasteboard and posting
+// Cmd+V, on the assumption that the popup would resign key on its own. That
+// assumption is exactly what the two-phase split exists to reject: the popup
+// is a canBecomeKey nonactivating panel and only close() resigns key, so the
+// keystroke could arrive while the panel was still key (measured 7/7; WeChat
+// dropped short pastes). It also blocked the main thread. The popup uses
+// clipboard_prepare_paste_by_id + clipboard_send_paste instead, and nothing
+// else called this, so it was removed rather than left as a trap.
 
 /// Loads full image data from DB if needed, writes to the system clipboard,
 /// write-through DB, and moves the item to the top of history — everything a
@@ -152,8 +141,9 @@ fn prepare_paste_impl(mut item: ClipboardEntry, as_path: bool) -> c_int {
                 crate::error_log!("CopyAttach: select_and_paste aborted for text entry {}: db_id=0 (entry not persisted)", item.entry_id());
                 return 0;
             }
+            let Some(b) = try_backend() else { return 0 };
             let perf_text = crate::perf::PerfSpan::start("rust", "paste.load_text");
-            match backend().db.lock() {
+            match b.db.lock() {
                 Ok(conn) => match load_text_by_db_id(&conn, *db_id) {
                     Some(t) => {
                         if let Some(mut span) = perf_text {
@@ -180,7 +170,8 @@ fn prepare_paste_impl(mut item: ClipboardEntry, as_path: bool) -> c_int {
 
     if let ClipboardEntry::Image { db_id, id, .. } = &item {
         if *db_id != 0 {
-            let conn = match backend().db.lock() {
+            let Some(b) = try_backend() else { return 0 };
+            let conn = match b.db.lock() {
                 Ok(c) => c,
                 Err(e) => {
                     crate::error_log!("CopyAttach: DB mutex poisoned in select_and_paste image load: {e}");
@@ -220,7 +211,7 @@ fn prepare_paste_impl(mut item: ClipboardEntry, as_path: bool) -> c_int {
     // Text paste needs the arboard clipboard handle; image paste writes the
     // pasteboard directly via NSPasteboard (set_pasteboard_file_url) and must
     // not fail on an arboard handle it never uses.
-    let b = backend();
+    let Some(b) = try_backend() else { return 0 };
     let _event_guard = b.pasteboard_event_lock.lock().unwrap();
     // Image paste always uses drag-style file-path mode — the single,
     // universal convention: the image is materialized as a temp PNG and only
@@ -260,8 +251,18 @@ fn prepare_paste_impl(mut item: ClipboardEntry, as_path: bool) -> c_int {
             }
         }
     }
-    let change_count = macos::pasteboard_change_count()
-        .expect("CopyAttach: cannot identify self-written pasteboard change");
+    // A missing pasteboard is a real (if rare) failure. Without the changeCount
+    // the self-write cannot be suppressed, so the monitor would re-capture our
+    // own paste as a new entry. Refuse the paste instead of panicking: the
+    // pasteboard was written, but no keystroke is sent, so nothing is pasted
+    // and no duplicate is captured. Explicit failure, never a crash.
+    let change_count = match macos::pasteboard_change_count() {
+        Some(cc) => cc,
+        None => {
+            crate::error_log!("CopyAttach: pasteboard changeCount unavailable — paste aborted to avoid self re-capture");
+            return 0;
+        }
+    };
     *b.pending_self_write.lock().unwrap() = Some(
         PendingSelfWrite { change_count },
     );
@@ -275,7 +276,7 @@ fn prepare_paste_impl(mut item: ClipboardEntry, as_path: bool) -> c_int {
     // Every other DB writer (monitor text capture, Phase 2, undo) already
     // holds the DB lock across its memory write; this path was the only one
     // that did not.
-    let b = backend();
+    let Some(b) = try_backend() else { return 0 };
     let mut db_guard = match b.db.lock() {
         Ok(c) => Some(c),
         Err(e) => {
@@ -344,7 +345,8 @@ fn prepare_paste_impl(mut item: ClipboardEntry, as_path: bool) -> c_int {
 #[no_mangle]
 pub extern "C" fn clipboard_prepare_paste_by_id(entry_id: u64, as_path: bool) -> c_int {
     let item = {
-        let hist = backend().history.lock().unwrap();
+        let Some(b) = try_backend() else { return 0 };
+        let hist = b.history.lock().unwrap();
         match hist.iter().find(|e| match e {
             ClipboardEntry::Text { id, .. } => *id == entry_id,
             ClipboardEntry::Image { id, .. } => *id == entry_id,
@@ -377,51 +379,6 @@ pub extern "C" fn clipboard_send_paste(pid: c_int) -> c_int {
         let _ = pid;
         0
     }
-}
-
-/// Legacy: select and paste by array index. Prefer `clipboard_select_and_paste_by_id`.
-#[no_mangle]
-pub extern "C" fn clipboard_select_and_paste(index: c_int) -> c_int {
-    let item = {
-        let hist = backend().history.lock().unwrap();
-        match hist.get(index as usize).cloned() {
-            Some(i) => i,
-            None => return 0,
-        }
-    };
-    select_and_paste_impl(item, false)
-}
-
-/// Select and paste by stable entry ID (not array index).
-#[no_mangle]
-pub extern "C" fn clipboard_select_and_paste_by_id(entry_id: u64) -> c_int {
-    let item = {
-        let hist = backend().history.lock().unwrap();
-        match hist.iter().find(|e| match e {
-            ClipboardEntry::Text { id, .. } => *id == entry_id,
-            ClipboardEntry::Image { id, .. } => *id == entry_id,
-        }).cloned() {
-            Some(i) => i,
-            None => return 0,
-        }
-    };
-    select_and_paste_impl(item, false)
-}
-
-/// Select and paste as path text by stable entry ID (e.g. Shift+Enter).
-#[no_mangle]
-pub extern "C" fn clipboard_select_and_paste_as_path_by_id(entry_id: u64) -> c_int {
-    let item = {
-        let hist = backend().history.lock().unwrap();
-        match hist.iter().find(|e| match e {
-            ClipboardEntry::Text { id, .. } => *id == entry_id,
-            ClipboardEntry::Image { id, .. } => *id == entry_id,
-        }).cloned() {
-            Some(i) => i,
-            None => return 0,
-        }
-    };
-    select_and_paste_impl(item, true)
 }
 
 /// Load full text by entry ID (for on-demand preview loading). The body lives

@@ -16,6 +16,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// user recovers via the dialog.
     private var databaseCorrupt = false
     private var corruptDialogShowing = false
+    /// Set when clipboard_init reported a permanent environment failure (-2);
+    /// blocks the retry loop until the user fixes it and asks to retry.
+    private var databaseUnusable = false
+    private var databaseUnusableDialogShowing = false
     /// Last backend start attempt, for retry cooldown.
     private var lastBackendStartAttempt: Date?
     /// True while a maintenance tick's async body is running.
@@ -160,18 +164,84 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         switch ClipboardBackend.shared.start() {
         case .started:
             backendStarted = true
+            // Recovered (or started cleanly): clear the backoff so a future
+            // failure starts from the base delay again.
+            if startFailures > 0 {
+                debugLog("Rust backend started after \(startFailures) failed attempt(s); backoff reset")
+            }
+            startFailures = 0
+            // Clear any environment-failure flag: auto-recovery succeeded.
+            databaseUnusable = false
             // Core features are live: the first-run tour can now be walked
             // (its first step is watching the clipboard for a capture).
             OnboardingGuide.shared.startIfNeeded()
         case .retryable:
-            debugLog("Rust backend failed to initialize; will retry")
+            startFailures += 1
+            let next = currentStartRetryDelay()
+            debugLog("Rust backend failed to initialize (attempt \(startFailures)); next retry in \(String(format: "%.1f", next))s")
         case .corruptDatabase:
-            // Permanent: retrying is pointless and silently showing an empty
-            // popup hides the failure. Stop the retry loop and ask the user.
+            // Permanent: retrying cannot fix a corrupt file and silently
+            // showing an empty popup hides the failure. Stop the retry loop and
+            // ask the user; only replacing the file can help.
             databaseCorrupt = true
             lastBackendStartAttempt = nil
+            startFailures = 0
             debugLog("Rust backend refused to start: database corrupt")
             presentCorruptDatabaseDialog()
+        case .permanentEnvironment:
+            // The database is intact; the environment is not. Auto-recovery is
+            // the whole point here: the user fixes disk/permissions out of band
+            // (no UI interaction), so the app keeps retrying on the backoff
+            // schedule and starts by itself once the fix lands. The dialog is a
+            // separate, user-initiated affordance — it must NOT stop the timer.
+            startFailures += 1
+            let next = currentStartRetryDelay()
+            databaseUnusable = true
+            debugLog("Rust backend refused to start: database unusable in this environment (attempt \(startFailures)); will keep retrying, next in \(String(format: "%.1f", next))s")
+        }
+    }
+
+    /// Non-corrupt permanent failure dialog: the database is fine, the
+    /// environment is not (read-only, permissions, disk full). No rebuild offer,
+    /// because that would discard a usable database.
+    @MainActor
+    private func presentDatabaseUnusableDialog() {
+        guard !databaseUnusableDialogShowing else { return }
+        databaseUnusableDialogShowing = true
+        defer { databaseUnusableDialogShowing = false }
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "无法读写剪贴板历史数据库"
+        alert.informativeText = """
+        CopyAttach 无法打开历史数据库，剪贴板监控已停止。
+
+        常见原因：磁盘空间不足、目录权限异常，或该目录被安全软件限制写入。
+
+        位置：~/Library/Application Support/CopyAttach/
+
+        修复后 CopyAttach 会自动恢复；也可点击「重试」立即重试。
+        """
+        alert.alertStyle = .critical
+        alert.addButton(withTitle: "重试")
+        alert.addButton(withTitle: "退出")
+        if alert.runModal() == .alertFirstButtonReturn {
+            // Explicit user retry: reset the backoff so this attempt is
+            // immediate rather than waiting out the current step. Auto-recovery
+            // is already running; this just pre-empts the timer.
+            databaseUnusable = false
+            startFailures = 0
+            lastBackendStartAttempt = nil
+            scheduleMaintenanceTick()
+            // Retry on the next run-loop turn: this function's defer has not
+            // run yet, so calling startBackendIfNeeded() synchronously here
+            // would leave databaseUnusableDialogShowing == true and silently
+            // swallow a re-presentation if the environment is still broken
+            // (the user would click 重试 and see the dialog vanish with no
+            // feedback). Letting this call unwind first makes the retry path
+            // reachable and, on repeat failure, re-presents the dialog.
+            DispatchQueue.main.async { [weak self] in
+                self?.startBackendIfNeeded()
+            }
         }
     }
 
@@ -210,13 +280,51 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
-    /// Retry a failed backend start on a 5s cooldown.
+    // MARK: - Backend start retry (binary exponential backoff)
+
+    /// Consecutive failed start attempts. Reset to 0 on success; drives the
+    /// backoff exponent.
+    private var startFailures = 0
+    /// First retry delay after a failure. Small: a busy/locked database often
+    /// clears within a second or two, and the user is waiting for capture.
+    private static let startRetryBaseDelay: TimeInterval = 2
+    /// Ceiling on the retry delay. A permanently broken environment must not
+    /// produce an unbounded schedule, and a self-healing one (disk freed,
+    /// permissions restored) still recovers within a minute.
+    private static let startRetryMaxDelay: TimeInterval = 60
+
+    /// Binary exponential backoff: delay_n = min(cap, base * 2^(n-1)), before
+    /// a +/-25% jitter.
+    ///
+    /// The doubling is the standard response to a resource that is not ready:
+    /// retry eagerly while the fault may be momentary, then back off so a
+    /// persistent fault costs a bounded trickle of attempts instead of a busy
+    /// loop. The jitter de-synchronises this timer from the other periodic
+    /// work (license maintenance, the clipboard poll) so retries do not
+    /// repeatedly land on the same instant as unrelated work.
+    @MainActor
+    private func currentStartRetryDelay() -> TimeInterval {
+        guard startFailures > 0 else { return 0 }
+        // Cap the exponent before pow to avoid overflow on a long outage.
+        let exponent = min(Double(startFailures - 1), 20)
+        let raw = Self.startRetryBaseDelay * pow(2, exponent)
+        let capped = min(raw, Self.startRetryMaxDelay)
+        return capped * Double.random(in: 0.75...1.25)
+    }
+
+    /// Retry a failed backend start once its backoff delay has elapsed.
+    ///
+    /// Deliberately does NOT stop for databaseUnusable: a permanent
+    /// environment failure (read-only file, disk full) is exactly the case
+    /// where the user fixes the cause out-of-band, and the app must recover on
+    /// its own. Retrying costs one open() per backoff period, bounded by the
+    /// cap; the dialog is presented separately, on user action.
     @MainActor
     private func retryBackendStartIfNeeded() {
         guard !backendStarted, !databaseCorrupt,
               LicenseManager.shared.state.permitsCoreFeatures else { return }
         if let last = lastBackendStartAttempt,
-           Date().timeIntervalSince(last) < 5 { return }
+           Date().timeIntervalSince(last) < currentStartRetryDelay() { return }
         startBackendIfNeeded()
     }
 
@@ -246,10 +354,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return
         }
 
-        // Include backend-start retry cooldown in the candidate deadlines.
+        // Include the backend-start retry deadline in the candidate deadlines.
+        // The delay is the current backoff step, so the schedule honours the
+        // exponential growth (a hardcoded value here would silently defeat it).
         let retryAt: Date? = {
-            guard !backendStarted, let last = lastBackendStartAttempt else { return nil }
-            return last.addingTimeInterval(5)
+            guard !backendStarted, !databaseCorrupt, let last = lastBackendStartAttempt else { return nil }
+            return last.addingTimeInterval(currentStartRetryDelay())
         }()
 
         var candidates: [Date] = []
@@ -359,6 +469,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let popup = HistoryPopupWindow.shared
         if databaseCorrupt {
             presentCorruptDatabaseDialog()
+            return
+        }
+        if databaseUnusable {
+            presentDatabaseUnusableDialog()
             return
         }
         if popup.isVisible {

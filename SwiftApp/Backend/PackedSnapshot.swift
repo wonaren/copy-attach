@@ -27,6 +27,12 @@ enum PackedSnapshot {
         items.reserveCapacity(count)
         var offset = headerLength
 
+        // Sub-phase accumulation. Measuring per row would flood the log; the
+        // totals answer "where did the 16 ms go" without perturbing the loop.
+        let profiling = Perf.isEnabled
+        var stringNs: UInt64 = 0
+        var formatNs: UInt64 = 0
+
         for _ in 0..<count {
             guard offset <= length - rowHeaderLength else { return nil }
             let entryType = readInt32(ptr, at: offset)
@@ -46,6 +52,7 @@ enum PackedSnapshot {
             guard stringBytes >= 0, offset <= length - rowHeaderLength - stringBytes else { return nil }
 
             var span = offset + rowHeaderLength
+            let strT0 = profiling ? Perf.nowNs() : 0
             let customLabel = readString(ptr, at: span, byteCount: customLabelLength)
             span += customLabelLength
             let label = readString(ptr, at: span, byteCount: labelLength)
@@ -56,10 +63,13 @@ enum PackedSnapshot {
             span += sourceBundleIdLength
             let preview = readString(ptr, at: span, byteCount: previewLength)
             span += previewLength
+            if profiling { stringNs &+= Perf.nowNs() &- strT0 }
 
             switch entryType {
             case 0:
+                let fmtT0 = profiling ? Perf.nowNs() : 0
                 let display = ClipboardItem.formatDisplayPreview(preview)
+                if profiling { formatNs &+= Perf.nowNs() &- fmtT0 }
                 items.append(.text(
                     entryId: id,
                     timestamp: timestamp,
@@ -86,6 +96,10 @@ enum PackedSnapshot {
                 return nil
             }
             offset = span
+        }
+        if profiling, count > 0 {
+            Perf.emitSpan("swift", "snapshot.decode.strings", durNs: stringNs, val: Int64(count))
+            Perf.emitSpan("swift", "snapshot.decode.format_preview", durNs: formatNs, val: Int64(count))
         }
         return items
     }

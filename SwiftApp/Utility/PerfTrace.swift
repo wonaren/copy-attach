@@ -102,12 +102,12 @@ enum Perf {
     /// Render one record. Pure so the self-check can assert its shape.
     @inline(__always)
     static func format(kind: String, cat: String, name: String, t: UInt64,
-                       durUs: UInt64?, src: String?, scen: String?,
+                       wall: UInt64, durUs: UInt64?, src: String?, scen: String?,
                        data: String?, val: Int64?) -> String {
         var s = magic
         s += " v=\(version) pid=\(ProcessInfo.processInfo.processIdentifier)"
         s += " tid=\(String(threadId, radix: 16))"
-        s += " t=\(t) wall=\(wallMs())"
+        s += " t=\(t) wall=\(wall)"
         s += " kind=\(kind) cat=\(cat) name=\(name)"
         if let durUs { s += " dur_us=\(durUs)" }
         if let val { s += " val=\(val)" }
@@ -117,16 +117,29 @@ enum Perf {
         return s
     }
 
-    /// Append a raw line to the shared log. Same open/append/close pattern as
-    /// `debugLog`, so tracing never depends on the stderr redirect.
+    /// Append a raw line to the shared log.
+    ///
+    /// MUST be a single O_APPEND write. The Rust half appends with O_APPEND; a
+    /// FileHandle seekToEnd()+write() is NOT atomic, so a Rust append landing
+    /// between the seek and the write gets overwritten — measured: a capture
+    /// record disappeared because the notify woke the Swift waiter, which then
+    /// clobbered the record the monitor wrote immediately after. Both writers
+    /// now open O_APPEND and issue one write(), which the kernel serializes.
     private static func appendLine(_ line: String) {
-        let payload = line + "\n"
-        if let handle = try? FileHandle(forWritingTo: logURL) {
-            defer { try? handle.close() }
-            _ = try? handle.seekToEnd()
-            if let data = payload.data(using: .utf8) { try? handle.write(contentsOf: data) }
-        } else {
-            try? payload.write(to: logURL, atomically: true, encoding: .utf8)
+        let payload = Array((line + "\n").utf8)
+        let fd = open(logPath, O_WRONLY | O_CREAT | O_APPEND, 0o644)
+        guard fd >= 0 else { return }
+        defer { close(fd) }
+        payload.withUnsafeBufferPointer { buf in
+            guard let base = buf.baseAddress, buf.count > 0 else { return }
+            var remaining = buf.count
+            var ptr = base
+            while remaining > 0 {
+                let n = write(fd, ptr, remaining)
+                if n <= 0 { break }
+                remaining -= n
+                ptr += n
+            }
         }
     }
 
@@ -140,7 +153,7 @@ enum Perf {
     /// uses this to prove the observation channel itself works even when
     /// tracing is otherwise off (the "validate the instrument" requirement).
     static func emitProbe(_ name: String, data: String) {
-        appendLine(format(kind: "i", cat: "probe", name: name, t: nowNs(),
+        appendLine(format(kind: "i", cat: "probe", name: name, t: nowNs(), wall: wallMs(),
                           durUs: nil, src: nil, scen: nil, data: data, val: nil))
     }
 
@@ -149,7 +162,7 @@ enum Perf {
     /// misconfiguration left tracing off.
     static func emitUnconditional(_ cat: String, _ name: String, _ value: Int64,
                                   data: String? = nil) {
-        appendLine(format(kind: "c", cat: cat, name: name, t: nowNs(),
+        appendLine(format(kind: "c", cat: cat, name: name, t: nowNs(), wall: wallMs(),
                           durUs: nil, src: nil, scen: nil, data: data, val: value))
     }
 
@@ -157,11 +170,22 @@ enum Perf {
     /// read-back.
     static var observationLogPath: String { logPath }
 
+    /// Emit a completed span from an already-measured duration. Used when the
+    /// cost is accumulated across many iterations (so per-iteration spans would
+    /// flood the log) but still deserves its own named record.
+    static func emitSpan(_ cat: String, _ name: String, durNs: UInt64,
+                         val: Int64? = nil, data: String? = nil) {
+        guard isEnabled else { return }
+        let t0 = nowNs() &- durNs
+        emit(format(kind: "e", cat: cat, name: name, t: t0, wall: wallMs(), durUs: durNs / 1_000,
+                    src: nil, scen: nil, data: data, val: val))
+    }
+
     /// Instantaneous marker.
     @inline(__always)
     static func instant(_ cat: String, _ name: String, data: String? = nil) {
         guard isEnabled else { return }
-        emit(format(kind: "i", cat: cat, name: name, t: nowNs(),
+        emit(format(kind: "i", cat: cat, name: name, t: nowNs(), wall: wallMs(),
                     durUs: nil, src: nil, scen: nil, data: data, val: nil))
     }
 
@@ -169,7 +193,7 @@ enum Perf {
     @inline(__always)
     static func counter(_ cat: String, _ name: String, _ value: Int64) {
         guard isEnabled else { return }
-        emit(format(kind: "c", cat: cat, name: name, t: nowNs(),
+        emit(format(kind: "c", cat: cat, name: name, t: nowNs(), wall: wallMs(),
                     durUs: nil, src: nil, scen: nil, data: nil, val: value))
     }
 
@@ -210,7 +234,7 @@ enum Perf {
         let t1 = nowNs()
         if t1 > t0 { mask |= 1 }
 
-        let rec = format(kind: "e", cat: "swift", name: "selfcheck", t: t0,
+        let rec = format(kind: "e", cat: "swift", name: "selfcheck", t: t0, wall: wallMs(),
                          durUs: (t1 - t0) / 1_000, src: nil, scen: nil,
                          data: nil, val: nil)
         if rec.hasPrefix(magic), !rec.contains("\n"), rec.contains(" cat=swift"),
@@ -243,6 +267,10 @@ final class PerfSpan: @unchecked Sendable {
     private let cat: String
     private let name: String
     private let t0: UInt64
+    /// Wall clock at span START, so wall and t describe the same instant.
+    /// Stamping wall at end made them differ by the span duration and broke
+    /// wall<->monotonic correlation (caught by gate G4).
+    private let wall0: UInt64
     private var src: String?
     private var scen: String?
     private var ended = false
@@ -255,6 +283,7 @@ final class PerfSpan: @unchecked Sendable {
         self.cat = cat
         self.name = name
         self.t0 = Perf.nowNs()
+        self.wall0 = UInt64(Date().timeIntervalSince1970 * 1000)
     }
 
     /// Begin a span, or nil when tracing is off.
@@ -276,8 +305,8 @@ final class PerfSpan: @unchecked Sendable {
         ended = true
         let t1 = Perf.nowNs()
         let dur = t1 >= t0 ? (t1 - t0) / 1_000 : 0
-        Perf.emit(Perf.format(kind: "e", cat: cat, name: name, t: t0, durUs: dur,
-                              src: src, scen: scen, data: data, val: val))
+        Perf.emit(Perf.format(kind: "e", cat: cat, name: name, t: t0, wall: wall0,
+                              durUs: dur, src: src, scen: scen, data: data, val: val))
     }
 
     deinit { if !ended { end() } }

@@ -105,7 +105,8 @@ cmd_smoke() {
 
 cmd_analyze() {
     local start="${1:-0}"
-    python3 "$ROOT/perf/analyze.py" "$LOG" --session-start "$start"
+    local byte="${2:-0}"
+    python3 "$ROOT/perf/analyze.py" "$LOG" --session-start "$start" --session-byte "$byte"
 }
 
 case "${1:-}" in

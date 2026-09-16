@@ -113,6 +113,9 @@ fn persist_image_phase2(job: ImagePhase2Job) {
                         if *hash == item_hash { *db_id = row_id; break; }
                     }
                 }
+                // Publish under the history lock (held just above) so the row's
+                // new db_id and the change signal cannot be reordered.
+                crate::backend::mark_history_changed();
                 crate::backend::IMAGE_ENCODING_COUNTER.fetch_add(1, Ordering::Relaxed);
             }
             Err(()) => crate::error_log!("CopyAttach: Phase 2 DB insert failed for image hash {item_hash} — entry stays with db_id=0"),

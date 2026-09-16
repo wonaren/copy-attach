@@ -1,7 +1,7 @@
 use std::ffi::{c_char, c_int, c_longlong, CString};
 use std::sync::atomic::Ordering;
 
-use crate::backend::{backend, try_backend, DEFAULT_CLEANUP_THRESHOLD, HISTORY_REVISION, IMAGE_ENCODING_COUNTER};
+use crate::backend::{try_backend, DEFAULT_CLEANUP_THRESHOLD, HISTORY_REVISION, IMAGE_ENCODING_COUNTER};
 use crate::db::load_text_by_db_id;
 use crate::macos;
 use crate::types::ClipboardEntry;
@@ -11,8 +11,8 @@ use super::{to_ffi_cstring, vec_to_raw};
 
 #[no_mangle]
 pub extern "C" fn clipboard_get_count() -> c_int {
-    let hist = backend().history.lock().unwrap();
-    hist.len() as c_int
+    let Some(b) = try_backend() else { return 0 };
+    b.history.lock().unwrap().len() as c_int
 }
 
 /// Monotonic counter bumped when Phase 2 image encoding finishes.
@@ -29,20 +29,23 @@ pub extern "C" fn clipboard_get_history_revision() -> u64 {
 
 #[no_mangle]
 pub extern "C" fn clipboard_get_item_type(index: c_int) -> c_int {
-    let hist = backend().history.lock().unwrap();
+    let Some(b) = try_backend() else { return -1 };
+    let hist = b.history.lock().unwrap();
     hist.get(index as usize).map_or(-1, ClipboardEntry::content_type)
 }
 
 #[no_mangle]
 pub extern "C" fn clipboard_get_item_timestamp(index: c_int) -> c_longlong {
-    let hist = backend().history.lock().unwrap();
+    let Some(b) = try_backend() else { return 0 };
+    let hist = b.history.lock().unwrap();
     hist.get(index as usize).map_or(0, |item| item.timestamp() as c_longlong)
 }
 
 /// Caller must free with `clipboard_free_string()`.
 #[no_mangle]
 pub extern "C" fn clipboard_get_item_source_name(index: c_int) -> *mut c_char {
-    let hist = backend().history.lock().unwrap();
+    let Some(b) = try_backend() else { return std::ptr::null_mut() };
+    let hist = b.history.lock().unwrap();
     let name = match hist.get(index as usize) {
         Some(item) => item.source_name(),
         None => return std::ptr::null_mut(),
@@ -53,7 +56,8 @@ pub extern "C" fn clipboard_get_item_source_name(index: c_int) -> *mut c_char {
 /// Caller must free with `clipboard_free_string()`.
 #[no_mangle]
 pub extern "C" fn clipboard_get_item_source_bundle_id(index: c_int) -> *mut c_char {
-    let hist = backend().history.lock().unwrap();
+    let Some(b) = try_backend() else { return std::ptr::null_mut() };
+    let hist = b.history.lock().unwrap();
     let bid = match hist.get(index as usize) {
         Some(item) => item.source_bundle_id(),
         None => return std::ptr::null_mut(),
@@ -64,7 +68,8 @@ pub extern "C" fn clipboard_get_item_source_bundle_id(index: c_int) -> *mut c_ch
 /// Caller must free with `clipboard_free_string()`.
 #[no_mangle]
 pub extern "C" fn clipboard_get_item_label(index: c_int) -> *mut c_char {
-    let hist = backend().history.lock().unwrap();
+    let Some(b) = try_backend() else { return std::ptr::null_mut() };
+    let hist = b.history.lock().unwrap();
     let label = match hist.get(index as usize) {
         Some(item) => item.label(),
         None => return std::ptr::null_mut(),
@@ -76,7 +81,7 @@ pub extern "C" fn clipboard_get_item_label(index: c_int) -> *mut c_char {
 /// Caller must free with `clipboard_free_string()`.
 #[no_mangle]
 pub extern "C" fn clipboard_get_item_text(index: c_int) -> *mut c_char {
-    let b = backend();
+    let Some(b) = try_backend() else { return std::ptr::null_mut() };
     let db_id = {
         let hist = b.history.lock().unwrap();
         match hist.get(index as usize) {
@@ -111,8 +116,9 @@ pub extern "C" fn clipboard_get_item_text(index: c_int) -> *mut c_char {
 pub extern "C" fn clipboard_get_image_thumb(index: c_int, out_len: *mut c_int) -> *mut u8 {
     if out_len.is_null() { return std::ptr::null_mut(); }
 
+    let Some(b) = try_backend() else { return std::ptr::null_mut() };
     let db_id = {
-        let hist = backend().history.lock().unwrap();
+        let hist = b.history.lock().unwrap();
         match hist.get(index as usize) {
             Some(ClipboardEntry::Image { db_id, .. }) => *db_id,
             _ => return std::ptr::null_mut(),
@@ -123,7 +129,7 @@ pub extern "C" fn clipboard_get_image_thumb(index: c_int, out_len: *mut c_int) -
         return std::ptr::null_mut();
     }
 
-    let thumb_data = match backend().db.lock() {
+    let thumb_data = match b.db.lock() {
         Ok(conn) => {
             match conn.query_row(
                 "SELECT thumb_data FROM clipboard_history WHERE id = ?",
@@ -157,8 +163,9 @@ pub extern "C" fn clipboard_get_image_thumb(index: c_int, out_len: *mut c_int) -
 pub extern "C" fn clipboard_get_image_full(index: c_int, out_len: *mut c_int) -> *mut u8 {
     if out_len.is_null() { return std::ptr::null_mut(); }
 
+    let Some(b) = try_backend() else { return std::ptr::null_mut() };
     let db_id = {
-        let hist = backend().history.lock().unwrap();
+        let hist = b.history.lock().unwrap();
         match hist.get(index as usize) {
             Some(ClipboardEntry::Image { db_id, .. }) => *db_id,
             _ => return std::ptr::null_mut(),
@@ -169,7 +176,7 @@ pub extern "C" fn clipboard_get_image_full(index: c_int, out_len: *mut c_int) ->
         return std::ptr::null_mut();
     }
 
-    let data: Vec<u8> = match backend().db.lock() {
+    let data: Vec<u8> = match b.db.lock() {
         Ok(conn) => {
             match conn.query_row(
                 "SELECT png_data FROM clipboard_history WHERE id = ?",
@@ -206,7 +213,8 @@ pub extern "C" fn clipboard_get_image_full_by_db_id(db_id: i64, out_len: *mut c_
         return std::ptr::null_mut();
     }
 
-    let data = match backend().db.lock() {
+    let Some(b) = try_backend() else { return std::ptr::null_mut() };
+    let data = match b.db.lock() {
         Ok(conn) => {
             match conn.query_row(
                 "SELECT png_data FROM clipboard_history WHERE id = ?",
@@ -241,8 +249,9 @@ pub extern "C" fn clipboard_get_image_thumb_by_db_id(db_id: i64, out_len: *mut c
         return std::ptr::null_mut();
     }
 
+    let Some(b) = try_backend() else { return std::ptr::null_mut() };
     let perf = crate::perf::PerfSpan::start("rust", "thumb.load_db");
-    let thumb_data = match backend().db.lock() {
+    let thumb_data = match b.db.lock() {
         Ok(conn) => {
             match conn.query_row(
                 "SELECT thumb_data FROM clipboard_history WHERE id = ?",
@@ -304,7 +313,8 @@ pub extern "C" fn clipboard_decode_preview_by_db_id(
 
     let perf = crate::perf::PerfSpan::start("rust", "preview.decode");
 
-    let png: Vec<u8> = match backend().db.lock() {
+    let Some(b) = try_backend() else { return std::ptr::null_mut() };
+    let png: Vec<u8> = match b.db.lock() {
         Ok(conn) => match conn.query_row(
             "SELECT png_data FROM clipboard_history WHERE id = ? AND entry_type = 1",
             rusqlite::params![db_id],
@@ -440,7 +450,8 @@ pub extern "C" fn clipboard_preview_buffer_release(ptr: *mut u8, len: c_int) {
 // Image Size
 #[no_mangle]
 pub extern "C" fn clipboard_get_image_size(index: c_int, out_width: *mut c_int, out_height: *mut c_int) -> c_int {
-    let hist = backend().history.lock().unwrap();
+    let Some(b) = try_backend() else { return 0 };
+    let hist = b.history.lock().unwrap();
     match hist.get(index as usize) {
         Some(ClipboardEntry::Image { width, height, .. }) => {
             if !out_width.is_null() { unsafe { *out_width = *width as c_int; } }

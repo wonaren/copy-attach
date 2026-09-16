@@ -187,6 +187,20 @@ perf/collect.sh analyze <start_ms>
 - 分析器只对「同 pid」的 `t` 相减；跨进程不做时间换算。
 - 高负载下关闭态计时可能取整为 0 ns（编译器与 CPU 都会把它压到极限），这本身就是「关闭态惰性」的证据，不是缺失数据。
 
+### 关于「把工作搬到 Rust」的实测校准
+
+曾在基线里写下「Swift 快照解码比 Rust 序列化慢 ~130×」，**该结论已被证伪**：两者工作不等价。拆解后（960 行）：
+
+| 阶段 | 实测 |
+|---|---|
+| Rust `snapshot.pack`（序列化有界字段） | ~0.12 ms |
+| Swift 构造 String（真正对应上面那件事） | 0.26–0.38 ms |
+| Swift `formatDisplayPreview`（Rust 侧未做） | 7.7–14.9 ms |
+
+即**反序列化本身与 Rust 同数量级**；那 16 ms 是 Swift 在算 Rust 没算的东西。Rust 里实现同一个 `formatDisplayPreview` 实测 **647 ns/行 → 960 行约 0.62 ms**。
+
+**方法教训**：跨语言比较必须同工作量；不同语言的隔离微基准不能外推（同一改动原语层测出 14.5×，真实路径只有 1.25–1.35×）。
+
 ---
 
 ## 9. 增量演进规则
@@ -195,3 +209,37 @@ perf/collect.sh analyze <start_ms>
 - Swift 跨 `Task`/`DispatchQueue` 捕获 span 是安全的（`PerfSpan` 标注 `@unchecked Sendable`，同一 span 只会被单一顺序流触碰）。
 - 名字保持稳定小写点分；`data` 只放枚举化 token，**绝不放入剪贴板正文**。
 - 不新增控制流分支以适配仪表；仪表只做旁路观测。
+---
+
+## 10. 事件驱动刷新（capture → UI）
+
+**问题（实测）**：UI 每 500 ms 轮询后端计数器，一次捕获 p95 要 522 ms 才被察觉，而后端
+`db.write` p95 仅 0.9 ms。延迟全部来自「轮询周期」，不是后端。
+
+**机制**：Rust 侧新增 `HISTORY_EVENT`（`Mutex<u64>` + `Condvar`）与 FFI
+`clipboard_wait_for_history_change(since, timeout_ms)`。Swift 在弹窗打开期间不再起 Timer，
+而是在后台 `Task` 里阻塞等待，被唤醒后回主线程刷新。
+
+**正确性契约（关键，不要拆）**：`mark_history_changed()` 必须在**持有 history 锁**时调用，
+它先递增 `HISTORY_REVISION`，再在同一临界区写入 pending 并 `notify_all`。
+
+- **不会漏**：waiter 要么看到递增后的 revision，要么 pending 仍是上一次未消费的值（`wait_timeout_while` 的条件检查与 notify 同锁，不存在丢唤醒窗口）。
+- **可合并**：pending 只存最新 revision，两次等待之间发生 N 次变化，UI 最多重载一次。
+- **有兜底**：等待带 `timeout_ms`（当前 3 s）。协议正确时永不触发，仅防「万一丢通知」导致永久挂死。
+
+**必须通知的位点**（否则事件驱动会变成「列表静默不更新」——轮询时代是被掩盖的）：
+捕获（文本/图片 Phase1）、图片 Phase2 的 `db_id` 回填、粘贴 move-to-top、删除、撤销、清空、
+按百分比裁剪、`reload_history_from_db`、缩略图/hash 迁移的内存镜像。全部已在各自持锁区间内发布。
+
+**不要在无历史变化时误唤醒**：`mark_history_changed` 只在这些真实变更处调用；分析器的
+`reload.wait` 与 `reload.event_wake` 两个埋点可区分「被事件唤醒」与「兜底超时」。
+
+**日志写入必须单次 O_APPEND**（本次踩坑）：Rust `perf::emit` 曾分两次 `write_all`（内容、换行），
+`backend::write_log_line` 曾分四次写；Swift 侧曾用 `FileHandle.seekToEnd()+write`（非原子）。
+并发写入会互相覆盖——实测丢过一条 `capture.text`，并产生 `...data=text__CA_PERF__ v=1 ...` 这种粘连行。
+现在三处都是「拼好整行 → 单次 write → O_APPEND」。分析器的 G5 门禁会拒绝任何 torn 行，不再静默误读。
+
+**时钟字段语义**：`t`（单调 ns）与 `wall`（Unix ms）**必须描述同一瞬间**。曾在 span 结束时取 `wall`、
+开始时取 `t`，长 span 上二者相差一个 span 时长，被 G4 门禁抓到（R² 0.9899、残差恰好出现 ~3000 ms 台阶，
+等于 waiter 超时）。现两语言都在 span 起点同时取 `t` 与 `wall`。
+

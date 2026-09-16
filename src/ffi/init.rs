@@ -9,12 +9,18 @@ use crate::ignore::IgnoreRules;
 use crate::monitor::clipboard_monitor;
 use crate::types::ClipboardEntry;
 
-/// SQLITE_CORRUPT / SQLITE_NOTADB: the file is not a usable database. No
-/// retry can fix this; only backing the file up and starting fresh can.
-fn is_corruption_error(e: &rusqlite::Error) -> bool {
-    matches!(e, rusqlite::Error::SqliteFailure(ffi, _)
-        if matches!(ffi.code, rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase))
-}
+// init return codes, mirrored by Swift's ClipboardBackend.StartResult:
+//   1  = started
+//   0  = retryable (transient; the UI retries on a cooldown)
+//  -1  = corrupt database (replacing the file is the only fix)
+//  -2  = permanent environment failure (read-only / permissions / disk full /
+//        path not openable). Retrying cannot help; the user must fix the
+//        environment. Distinct from -1: the database is intact, so offering a
+//        "back up and rebuild" would needlessly destroy a good file.
+const INIT_OK: c_int = 1;
+const INIT_RETRYABLE: c_int = 0;
+const INIT_CORRUPT: c_int = -1;
+const INIT_PERMANENT_ENV: c_int = -2;
 
 /// Move a corrupt `history.db` (plus WAL/SHM sidecars) aside as
 /// `history.db.corrupt-<unix-secs>` so the next `clipboard_init` starts
@@ -96,21 +102,38 @@ pub extern "C" fn clipboard_init() -> c_int {
         return 1;
     }
 
-    let mut conn = if let Some(c) = open_db() { c } else {
-        crate::error_log!("CopyAttach: failed to open database, init failed");
-        return 0;
+    let mut conn = match open_db() {
+        Ok(c) => c,
+        Err(crate::db::DbFailure::Corrupt) => {
+            crate::error_log!("CopyAttach: database is not usable, init aborted");
+            return INIT_CORRUPT;
+        }
+        Err(crate::db::DbFailure::PermanentEnvironment) => {
+            crate::error_log!("CopyAttach: database cannot be used in this environment, init aborted");
+            return INIT_PERMANENT_ENV;
+        }
+        Err(crate::db::DbFailure::Transient) => {
+            crate::error_log!("CopyAttach: database temporarily unavailable, init will retry");
+            return INIT_RETRYABLE;
+        }
     };
 
     if let Err(e) = ensure_history_table(&conn) {
-        if is_corruption_error(&e) {
-            // Permanent failure: retrying cannot help and the user must
-            // decide (back up + rebuild, or quit). Distinct code so Swift
-            // stops the retry loop and surfaces a dialog.
-            crate::error_log!("CopyAttach: database is corrupt, init aborted: {e}");
-            return -1;
+        match crate::db::classify_db_error(&e) {
+            crate::db::DbFailure::Corrupt => {
+                // Replacing the file is the only fix; the user decides.
+                crate::error_log!("CopyAttach: database is corrupt, init aborted: {e}");
+                return INIT_CORRUPT;
+            }
+            crate::db::DbFailure::PermanentEnvironment => {
+                crate::error_log!("CopyAttach: database is read-only or unusable: {e}");
+                return INIT_PERMANENT_ENV;
+            }
+            crate::db::DbFailure::Transient => {
+                crate::error_log!("CopyAttach: failed to create table (retryable): {e}");
+                return INIT_RETRYABLE;
+            }
         }
-        crate::error_log!("CopyAttach: failed to create table: {e}");
-        return 0;
     }
 
     migrate_from_json_to_db(&mut conn);
@@ -351,6 +374,9 @@ fn spawn_metadata_migration(b: &'static crate::backend::Backend) {
                             }
                         }
                     }
+                    // Publish under the history lock: the mirrored hash/dims are
+                    // now part of the visible row state.
+                    crate::backend::mark_history_changed();
                 }
             }
         }

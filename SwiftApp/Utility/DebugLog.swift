@@ -32,17 +32,24 @@ func errorLog(_ message: String) {
 }
 
 private func appendLogLine(_ line: String) {
-    let logLine = line + "\n"
-    // stderr is dup2'd onto the debug log file by AppDelegate at launch, so
-    // Rust's eprintln interleaves here too; write to the file directly to
-    // stay independent of that redirect (logging may run before it).
-    if let handle = try? FileHandle(forWritingTo: URL(fileURLWithPath: debugLogPath)) {
-        handle.seekToEndOfFile()
-        if let data = logLine.data(using: .utf8) {
-            handle.write(data)
+    // Single O_APPEND write: seekToEnd+write is not atomic, so it can overwrite
+    // a record the Rust side appended in between (measured as corrupted trace
+    // lines / a lost capture record). O_APPEND makes the kernel place every
+    // write at end-of-file atomically, so Swift, Rust stderr, and the trace
+    // writer can all share this file safely.
+    let payload = Array((line + "\n").utf8)
+    let fd = open(debugLogPath, O_WRONLY | O_CREAT | O_APPEND, 0o644)
+    guard fd >= 0 else { return }
+    defer { close(fd) }
+    payload.withUnsafeBufferPointer { buf in
+        guard let base = buf.baseAddress, buf.count > 0 else { return }
+        var remaining = buf.count
+        var ptr = base
+        while remaining > 0 {
+            let n = write(fd, ptr, remaining)
+            if n <= 0 { break }
+            remaining -= n
+            ptr += n
         }
-        handle.closeFile()
-    } else {
-        try? logLine.write(toFile: debugLogPath, atomically: true, encoding: .utf8)
     }
 }

@@ -34,6 +34,11 @@ SUPPORTED_VERSIONS = {1}
 # Values must not swallow the line's trailing newline.
 KEY_RE = re.compile(r"([a-z_]+)=([^ \n]*)")
 
+# A record must contain exactly one magic token and start with it. Anything else
+# is a torn/interleaved append (two writers racing on the same file) which would
+# otherwise be silently mis-parsed into plausible-looking numbers.
+MAGIC_COUNT_RE = re.compile(MAGIC)
+
 # Duration spans we report on, in report order.
 SPAN_ORDER = [
     ("swift", "popup.show"),
@@ -65,6 +70,14 @@ SPAN_ORDER = [
 ]
 
 
+def torn(line):
+    """True when a line is not exactly one record starting at column 0."""
+    n = len(MAGIC_COUNT_RE.findall(line))
+    if n == 0:
+        return False
+    return n > 1 or not line.startswith(MAGIC)
+
+
 def parse_line(line):
     idx = line.find(MAGIC)
     if idx < 0:
@@ -78,14 +91,34 @@ def parse_line(line):
     return rec
 
 
-def load(path):
+def load(path, session_byte=0):
+    """Parse the log.
+
+    Torn lines before session_byte are historical (written by a build that had
+    the non-atomic append defect); they are counted separately so a clean
+    measurement window is not invalidated by an old, already-fixed fault. Torn
+    lines inside the window always fail the parse gate.
+    """
     records = []
     malformed = 0
+    torn_lines = 0
+    torn_historical = 0
     total_lines = 0
-    with open(path, "r", encoding="utf-8", errors="replace") as fh:
-        for line in fh:
+    offset = 0
+    with open(path, "rb") as fh:
+        for raw in fh:
+            line_offset = offset
+            offset += len(raw)
             total_lines += 1
+            line = raw.decode("utf-8", errors="replace")
             if MAGIC not in line:
+                continue
+            if torn(line):
+                if line_offset < session_byte:
+                    torn_historical += 1
+                else:
+                    torn_lines += 1
+                    malformed += 1
                 continue
             rec = parse_line(line)
             if rec is None:
@@ -103,7 +136,7 @@ def load(path):
                 malformed += 1
                 continue
             records.append(rec)
-    return records, malformed, total_lines
+    return records, malformed, total_lines, torn_lines, torn_historical
 
 
 def pct(sorted_vals, p):
@@ -176,9 +209,13 @@ def main():
     ap.add_argument("--no-strict", action="store_true")
     ap.add_argument("--session-start", type=int, default=None,
                     help="measurement window: records with wall >= this unix-ms")
+    ap.add_argument("--session-byte", type=int, default=0,
+                    help="log byte offset at session start; torn lines before it "
+                         "are reported as historical rather than failing the gate")
     args = ap.parse_args()
 
-    all_records, malformed, total_lines = load(args.log)
+    all_records, malformed, total_lines, torn_lines, torn_historical = load(
+        args.log, args.session_byte)
     window = all_records
     if args.session_start is not None:
         window = [r for r in all_records if r["wall"] >= args.session_start]
@@ -189,8 +226,9 @@ def main():
         gates.append({"name": name, "ok": bool(ok), "detail": detail})
 
     gate("G5_records_parse", malformed == 0,
-         "%d records parsed, %d malformed, %d log lines"
-         % (len(all_records), malformed, total_lines))
+         "%d records parsed, %d malformed in window (%d torn/interleaved), "
+         "%d torn before window (historical), %d log lines"
+         % (len(all_records), malformed, torn_lines, torn_historical, total_lines))
 
     versions = sorted({r["v"] for r in all_records})
     gate("G5b_known_version", bool(versions) and all(v in SUPPORTED_VERSIONS for v in versions),
@@ -285,6 +323,9 @@ def main():
         "capture->ui_observed": summarize(
             chain_latencies(window, "capture.text", "capture.ui_observed")
             + chain_latencies(window, "capture.image_phase1", "capture.ui_observed")),
+        "capture->list_published": summarize(
+            chain_latencies(window, "capture.text", "list.published")
+            + chain_latencies(window, "capture.image_phase1", "list.published")),
     }
 
     data_spans = defaultdict(list)
@@ -369,7 +410,8 @@ def main():
         ("preview open", "span", "swift/preview.open", 150_000),
         ("preview full-text load", "span", "swift/preview.load_full_text", 50_000),
         ("paste (menu -> keystroke)", "span", "swift/paste.menu_to_keystroke", 150_000),
-        ("capture -> ui observed", "chain", "capture->ui_observed", 300_000),
+        ("capture -> ui noticed", "chain", "capture->ui_observed", 300_000),
+        ("capture -> list published (rendered)", "chain", "capture->list_published", 300_000),
     ]
 
     def budget_stats(kind, key):

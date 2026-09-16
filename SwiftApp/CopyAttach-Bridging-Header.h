@@ -4,6 +4,13 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+// ─── History change events (event-driven UI refresh) ───
+// Block until history changes after `since`, or timeout_ms elapses. Returns the
+// newest observed revision (> since when awakened; == since on timeout).
+uint64_t clipboard_wait_for_history_change(uint64_t since, uint64_t timeout_ms);
+// Read the revision counters the UI keys its reload decision on, together.
+int32_t clipboard_history_counters(uint64_t* out_revision, uint64_t* out_image_encoding);
+
 // ─── Performance instrumentation (opt-in, see Utility/PerfTrace.swift) ───
 // Enable/disable runtime perf tracing; returns the effective state (1/0).
 int32_t clipboard_set_perf_enabled(int32_t state);
@@ -48,9 +55,9 @@ void clipboard_free_string(char* s);
 void clipboard_free_bytes(uint8_t* data, int32_t len);
 
 // ─── Action ───
-int32_t clipboard_select_and_paste(int32_t index);
-int32_t clipboard_select_and_paste_by_id(uint64_t entry_id);
-int32_t clipboard_select_and_paste_as_path_by_id(uint64_t entry_id);
+// Single-phase select-and-paste was removed: it blocked the caller thread and
+// could post Cmd+V while the panel was still key. Use the two-phase
+// clipboard_prepare_paste_by_id + clipboard_send_paste below.
 // Two-phase paste. Phase 1 writes the pasteboard and returns the target pid
 // (>0), or 0 on failure; phase 2 posts the paste keystroke to that pid. The
 // caller must dismiss its own key window between the phases: posting the

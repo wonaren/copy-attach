@@ -32,6 +32,8 @@ pub extern "C" fn clipboard_clear_history() -> c_int {
     // undo stack (materialized payload files removed with their slots).
     let mut hist = b.history.lock().unwrap();
     hist.clear();
+    // Publish under the history lock so the emptied list is observed atomically.
+    crate::backend::mark_history_changed();
     let mut stack = b.deleted_stack.lock().unwrap();
     for slot in stack.iter() {
         remove_undo_payload_file(slot);
@@ -214,6 +216,8 @@ pub extern "C" fn clipboard_delete_by_id(entry_id: u64) -> c_int {
     {
         let mut hist = b.history.lock().unwrap();
         crate::history::remove_deleted_entry(&mut hist, entry_id, target_db_id);
+        // Publish under the history lock: delete mutates and notifies atomically.
+        crate::backend::mark_history_changed();
     }
 
     // Step 6: Push the metadata-only slot (with its on-disk payload) onto the
@@ -356,6 +360,8 @@ pub extern "C" fn clipboard_undo_delete() -> c_int {
     // (preserving the re-captured duplicate's id); read the final id from the
     // head so Swift's last_restored_id points at the entry actually restored.
     let restored_id = hist.first().map_or(0, ClipboardEntry::entry_id);
+    // Publish under the history lock (undo replaced the head / deduped).
+    crate::backend::mark_history_changed();
     drop(hist);
 
     // Record the restored entry ID so Swift can find it in the snapshot
@@ -507,6 +513,8 @@ pub extern "C" fn clipboard_trim_oldest_percent(percent: i32) -> c_int {
     while hist.len() > b.cleanup_threshold.load(Ordering::Relaxed) {
         hist.pop();
     }
+    // Publish under the history lock (entries were removed from the tail).
+    crate::backend::mark_history_changed();
 
     actual as c_int
 }
