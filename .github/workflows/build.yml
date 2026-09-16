@@ -274,7 +274,9 @@ jobs:
           python3 scripts/lanzou_uploader.py "$ZIP_PATH" \
             --folder-name "copyattach" \
             --password "1234"
-          printf '\n---\n### 国内下载\n- [蓝奏云下载](https://pan.lanzoub.com/b0341lhs5g)（提取码：`1234`）\n' >> "$NOTES_FILE"
+          # 稳定入口：dl.abovepast.shop/lanzou 每次 302 到当前可用的蓝奏域名，
+          # 蓝奏轮换域名时无需改动本文件或重发 Release。
+          printf '\n---\n### 国内下载\n- [蓝奏云下载](https://dl.abovepast.shop/lanzou)（提取码：`1234`）\n' >> "$NOTES_FILE"
 
       # The automatic GITHUB_TOKEN publishes a private release in the source repo.
       - name: Create or update private source release
