@@ -319,3 +319,44 @@ db.write after recovery: 1        <- 恢复后捕获写入正常
 - **可观测性**：`reload.wait`（等待时长）+ `reload.event_wake`（事件唤醒标记）+ `list.published`；
   链 `capture->ui_observed`（后端→UI 察觉）与 `capture->list_published`（含重建+发布）。
 
+### 发布契约审计：按「是否真的会被看见」定级（0.105.6-dev）
+
+事件驱动刷新的本质是一条唯一通路：waiter 不轮询脏标记，只阻塞在 condvar 上，被唤醒后重载。
+因此「内存变更 → UI 可见」几乎完全依赖 `mark_history_changed()`。据此逐个核对全部变更点后，
+共发现 5 处「变更未发布」。但**是否构成真实缺陷，取决于该变更有没有消费者、消费者当时是否活着**——
+第一版审计把 5 处并列、暗示同级危害，是过度声称。按可观察后果重排如下：
+
+**1. 真实缺陷（已修，根因在 Swift 侧）——`clipboard_set_cleanup_threshold`（`ffi/accessors.rs`）**
+裁剪在锁内 `hist.pop()` 后从不发布。消费方是设置页「存储统计」：`InlineSettingsView+StorageTab.swift`
+直接渲染 `backend.items.count`（`textCount`/`imageCount` 也来自 `backend.items`）。关键事实：
+**弹窗（唯一持有 waiter 的地方）在设置窗打开时必然是关闭的，所以那一刻根本没有 waiter 在等**
+——即使 Rust 发布了也无人接收。真正治病的是 Swift 侧：`ClipboardBackend.setCleanupThreshold`
+此前只调用 FFI、不刷新，现补一次 `refresh()`（它按 count 变化门控，所以提高阈值仍是 no-op）。
+Rust 侧的发布照旧保留：让该变更在有 waiter 时（例如将来设置页与弹窗并存）也正确，且与契约一致。
+
+**2. 结构性隐患（已修，当前近乎不可达）——`monitor.rs` 三处回滚**（Phase2 编码失败 `hist.retain`、
+文本写库 `Err`、DB 锁 poisoned）：都先经头插并发布给 UI，失败后又把该条从内存移除，却不再发布。
+后果是 UI 可能短暂显示一个从未落库、随即消失的条目（点它会静默粘贴失败）。但回滚发生在同一后台
+串行流程的毫秒窗口内，且 3s lifeline 会自愈；现实中要撞上需要极精确的时序。修（成本为零）但不夸大。
+
+**3. 无收益、已回退——`clipboard_set_custom_label` 的发布点置于锁外**。这是一处**顺序**违规
+（契约要求持锁发布），但 `ClipboardBackend.setCustomLabel` 已在 Swift 侧同步更新 `items[idx]`，
+UI 走本地状态即正确；label 又是覆盖式幂等写，懒重载的旧值快照无损。没有可观察收益，故回退，
+不在测试中断言它。
+
+**未改（判定为正确遗漏）**：`history::assign_db_id_by_text_hash` 不发布——文本行的 `db_id` 不进快照
+线格式（`PackedSnapshot.swift` 文本分支不读 `dbId`），UI 看不到，无需发布。
+
+**验证**：`test_history_mutations_publish_a_revision`（`src/tests/backend.rs`）断言「裁剪使
+`HISTORY_REVISION` 前进」与「no-op 阈值变更不得发布」。反向对照：删掉 `if hist.len() != before`
+守卫，测试如期以 `(1 -> 1)` 失败，恢复后通过——证明测试确在检测该缺陷。
+`cargo test` 120 passed（原 119），`clippy --all-targets -D warnings` 干净。
+
+**教训（写给自己）**：这一轮先把 5 处并列、用「变更必发布」的契约去证明「用户可见」，
+是把**机制正确性**当成了**用户可见性**，又一次踩到「推导≠验证」。正确的判据是：该变更有没有
+消费者、消费者在那一刻是否活着。缺了这一步，「已修复/有危害」都只是假设。
+
+**同时消除的测试隐患**：`src/tests/backend.rs` 的 4 个用例共享进程级 Backend 的同一 `Vec`，
+却并行运行；新增的裁剪用例会与 `test_clipboard_delete_by_id_returns_zero_on_failure`（断言小 id 不存在）
+等相互踩踏。已加 `SHARED_STATE_LOCK` 串行化，连跑 8 次稳定全绿。
+

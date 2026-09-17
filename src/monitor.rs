@@ -87,6 +87,9 @@ fn persist_image_phase2(job: ImagePhase2Job) {
                     crate::debug_log!("CopyAttach: failed to encode full-size PNG for image {width}x{height} — removing broken entry from history");
                     let mut hist = history.lock().unwrap();
                     hist.retain(|e| !matches!(e, ClipboardEntry::Image { hash, .. } if *hash == item_hash));
+                    // Publish under the history lock (held here): the rollback
+                    // removed a row that a prior publish may already have shown.
+                    crate::backend::mark_history_changed();
                     return;
                 }
             }
@@ -451,6 +454,9 @@ pub(crate) fn clipboard_monitor(
                                             ClipboardEntry::Text { text_hash: h, .. } => *h != failed_hash,
                                             _ => true,
                                         });
+                                        // Publish under the history lock: the entry the
+                                        // head-insert above published is now gone.
+                                        crate::backend::mark_history_changed();
                                     }
                                 }
                             }
@@ -461,6 +467,9 @@ pub(crate) fn clipboard_monitor(
                                     ClipboardEntry::Text { text_hash: h, .. } => *h != failed_hash,
                                     _ => true,
                                 });
+                                // Publish under the history lock: the entry the
+                                // head-insert above published is now gone.
+                                crate::backend::mark_history_changed();
                             }
                         }
                     }

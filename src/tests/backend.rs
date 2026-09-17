@@ -38,6 +38,19 @@ fn ensure_test_backend() {
     });
 }
 
+/// Serializes the tests that share the process-wide Backend singleton's
+/// in-memory history. Rust runs tests on parallel threads, and these tests all
+/// mutate the same global `Vec`: without a lock one test can insert an entry
+/// another asserts is absent, or trim away an entry another is mid-way through
+/// checking. The lock also makes the ordering of `hist.push` relative to a
+/// `hist.pop` deterministic. `unwrap_or_else(into_inner)` keeps a panic in one
+/// test from poisoning the lock for the rest.
+static SHARED_STATE_LOCK: Mutex<()> = Mutex::new(());
+
+fn shared_state_guard() -> std::sync::MutexGuard<'static, ()> {
+    SHARED_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Guards the P0 fix: the FFI accessors must never panic when the backend is
 /// uninitialized. They are reached from Swift before or without a successful
 /// clipboard_init, and a panic across extern "C" aborts the whole process.
@@ -65,6 +78,7 @@ fn test_clipboard_delete_by_id_returns_zero_on_failure() {
     //   2. backend.deleteEntry(at:) calls clipboard_delete_by_id in Rust
     //   3. If this returns 0, deleteEntry returns false
     //   4. But searchResults.removeAll { $0.id == item.id } has already run
+    let _shared = shared_state_guard();
     ensure_test_backend();
 
     // Test 1: non-existent entry ID → returns 0
@@ -196,6 +210,7 @@ fn test_undo_stack_caps() {
 /// into a fresh DB row.
 #[test]
 fn test_undo_image_restore_releases_blob_capacity() {
+    let _shared = shared_state_guard();
     ensure_test_backend();
 
     let b = crate::backend::try_backend().expect("backend initialized");
@@ -307,6 +322,7 @@ fn test_prepare_paste_by_id_missing_returns_zero() {
 
 #[test]
 fn test_clipboard_set_custom_label_ffi() {
+    let _shared = shared_state_guard();
     ensure_test_backend();
     let b = crate::backend::try_backend().expect("backend initialized");
 
@@ -454,6 +470,66 @@ fn test_update_entry_custom_label_requires_existing_row() {
         |r| r.get(0),
     ).unwrap();
     assert_eq!(stored, "real");
+}
+
+/// Regression: a threshold trim must publish a revision bump.
+///
+/// Lowering the cleanup threshold deletes rows from the in-memory history, and
+/// the settings "存储统计" card reads `backend.items.count` straight off that
+/// list. When the popup is closed there is no event waiter running, so the
+/// count only updates when something explicitly reloads — which is why the
+/// Swift side reloads after `setCleanupThreshold` (see ClipboardBackend).
+/// This test pins the Rust half: the trim must advance `HISTORY_REVISION` so a
+/// running waiter is woken, and a no-op threshold change must NOT publish (an
+/// unconditional bump would cost a full reload on every raise of the slider).
+///
+/// Negative control: deleting the `if hist.len() != before` guard makes the
+/// first assertion fail with `(1 -> 1)`.
+#[test]
+fn test_history_mutations_publish_a_revision() {
+    let _shared = shared_state_guard();
+    ensure_test_backend();
+    let b = crate::backend::try_backend().expect("backend initialized");
+    let rev = || crate::backend::HISTORY_REVISION.load(std::sync::atomic::Ordering::Relaxed);
+
+    // --- set_cleanup_threshold: a real trim must publish. ---
+    // Appended at the tail (hist.push), so the head — which other tests assert
+    // on — is untouched for the whole window.
+    let pad: u64 = 555_100_000;
+    let pad_count: u64 = 150;
+    {
+        let mut hist = b.history.lock().unwrap();
+        for i in 0..pad_count {
+            hist.push(ClipboardEntry::text_entry(
+                pad + i, "pad", 0, String::new(), String::new(), 0,
+            ));
+        }
+    }
+    assert!(b.history.lock().unwrap().len() > 100, "fixture must exceed the clamped minimum");
+    let before_trim = rev();
+    crate::ffi::clipboard_set_cleanup_threshold(100);
+    let after_trim = rev();
+    assert!(
+        after_trim > before_trim,
+        "a threshold trim must publish ({before_trim} -> {after_trim})"
+    );
+    assert!(b.history.lock().unwrap().len() <= 100, "trim must bound the list");
+
+    // A no-op threshold change (list already under the limit) must not publish:
+    // otherwise every slider drag would force a needless full reload.
+    let before_noop = rev();
+    crate::ffi::clipboard_set_cleanup_threshold(100);
+    assert_eq!(rev(), before_noop, "a no-op threshold change must not publish");
+
+    // Restore the shared backend: the pad entries were only ever in memory
+    // (the DB trim is bounded by the same threshold and self-heals on the next
+    // insert). Removing them by the reserved id range keeps any entries other
+    // tests left behind.
+    crate::ffi::clipboard_set_cleanup_threshold(3000);
+    {
+        let mut hist = b.history.lock().unwrap();
+        hist.retain(|e| !(e.entry_id() >= pad && e.entry_id() < pad + pad_count));
+    }
 }
 
 #[test]

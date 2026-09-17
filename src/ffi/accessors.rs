@@ -498,8 +498,16 @@ pub extern "C" fn clipboard_set_cleanup_threshold(threshold: i32) {
         b.cleanup_threshold.store(t, Ordering::Relaxed);
         {
             let mut hist = b.history.lock().unwrap();
+            let before = hist.len();
             while hist.len() > t {
                 hist.pop();
+            }
+            // Publish under the history lock, and only when rows were actually
+            // removed: the UI must observe the shortened list atomically (same
+            // contract as every other history mutation). A no-op raise of the
+            // threshold must not cost a needless full reload.
+            if hist.len() != before {
+                crate::backend::mark_history_changed();
             }
         }
         if let Ok(conn) = b.db.lock() {

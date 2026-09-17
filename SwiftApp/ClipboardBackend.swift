@@ -941,10 +941,19 @@ class ClipboardBackend {
     }
 
     /// Set the cleanup threshold. Persists to UserDefaults and syncs to Rust.
+    ///
+    /// Lowering the threshold trims the in-memory history immediately, and the
+    /// settings "存储统计" card renders `items.count` straight off that list.
+    /// The popup — the only thing that runs the event waiter — is necessarily
+    /// closed while this is set, so nothing would otherwise reload and the count
+    /// and its pie chart would keep showing the deleted rows until the next
+    /// popup open. `refresh()` re-reads the count and reloads only when it
+    /// actually changed, so raising the threshold stays a no-op.
     func setCleanupThreshold(_ threshold: Int) {
         let clamped = max(100, min(10000, threshold))
         clipboard_set_cleanup_threshold(Int32(clamped))
         UserDefaults.standard.set(clamped, forKey: "CleanupThreshold")
+        refresh()
     }
 
     /// Returns total storage size in bytes of all clipboard entries in the database.
