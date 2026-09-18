@@ -49,7 +49,7 @@ Phase 1 同步 hash + 缩略图（fit 进显示框 920×200px = 460×100pt @2×�
 
 **claim 契约（malloc 复用陷阱）**：被标记的块释放后会被 malloc 原样复用给下一次任意分配，复用后的页仍处可回收状态——不计数但可随时被内核回收（实测重写后 footprint 仍不回升），live 缓冲若落在其上会在内存压力下花屏/读零。因此**任何可能复用标记块的大缓冲在写入/读出前必须 `claim_pages`**：池 acquire ✓、`vec_to_raw` 交 Swift 前 ✓、预览 delivered 缓冲分配后 ✓、`resize_rgba` 的 tmp/out 分配后 ✓、rusqlite blob 读取后（预览 png / paste / undo / 迁移）✓、`pasteboard_image_data` 的 to_vec 后 ✓、快照 rows 交 Swift 前 ✓。
 
-**释放侧对称（0.99.26-dev）**：claim 过的大缓冲释放前必须 `mark_pages_reusable`，否则脏页滞留 footprint——paste/undo 的 DB blob、`pasteboard_image_data` 原始字节、大文本 String（`load_text_by_db_id` 源头统一 claim）分别由 `MarkEntryBlobsReusableOnDrop`/`MarkBlobReusableOnDrop`/`MarkStringReusableOnDrop`（backend.rs）守卫覆盖全部返回路径。实测 A/B：捕获 2880×1800 截图后旧构建后台 79.6MB 永久钉住，新构建峰值 48.4MB → 空闲 28–32MB 稳定、连续捕获零累积。
+**释放侧对称（0.99.26-dev）**：claim 过的大缓冲释放前必须 `mark_pages_reusable`，否则脏页滞留 footprint——paste/undo 的 DB blob、`pasteboard_image_data` 原始字节、大文本 String（`load_text_by_db_id` 源头统一 claim）分别由 `MarkImageBlobsReusableOnDrop`/`MarkBlobReusableOnDrop`/`MarkStringReusableOnDrop`（backend.rs）守卫覆盖全部返回路径（原文此处写作 `MarkEntryBlobsReusableOnDrop`，该类型不存在，已按实际守卫名修正）。实测 A/B：捕获 2880×1800 截图后旧构建后台 79.6MB 永久钉住，新构建峰值 48.4MB → 空闲 28–32MB 稳定、连续捕获零累积。
 
 **init 失败分级（0.100.12-dev；0.105.4-dev 扩展为 1/0/-1/-2，详见「init 失败分级（0.105.4-dev）」）**：`clipboard_init` 返回 1/0/-1——`-1` 仅在 `SQLITE_CORRUPT`/`SQLITE_NOTADB` 时返回，表示永久性失败；Swift 侧收到 -1 置 `databaseCorrupt`、停止 5s 重试循环，弹 NSAlert「备份并重建 / 退出」，热键按下也会重弹该对话框而非显示空列表。`clipboard_recover_corrupt_db` 把 `history.db{,-wal,-shm}` 整组改名为 `history.db.corrupt-<secs>{,-wal,-shm}`——WAL/SHM 必须一起移走，否则旧 WAL 会回放到新库上再次损坏。仅在 init 返回 -1 后调用（此时无 backend 持有连接）。
 
@@ -359,4 +359,131 @@ UI 走本地状态即正确；label 又是覆盖式幂等写，懒重载的旧�
 **同时消除的测试隐患**：`src/tests/backend.rs` 的 4 个用例共享进程级 Backend 的同一 `Vec`，
 却并行运行；新增的裁剪用例会与 `test_clipboard_delete_by_id_returns_zero_on_failure`（断言小 id 不存在）
 等相互踩踏。已加 `SHARED_STATE_LOCK` 串行化，连跑 8 次稳定全绿。
+
+## 内存与释放语义审计（0.105.7-dev，含真实 GUI 路径验证）
+
+起点是一个纯静态问题：「频繁随机操作后，内存管理有没有不合理的地方」。结论是**账本健康、契约不一致**：
+活进程 13 小时后 `Writable written=75.9MB`、`resident=40.9MB`、`Malloc Large (Reusable) 25.1MB 且 resident=0K`
+——madvise 契约在真实路径上确实生效；问题集中在「同一份契约在不同调用点被不同对待」。
+共修 7 项，按危害排序，全部带实测或编译期证据。
+
+### ① `clipboard_trim_oldest_percent` 吞掉 DB 失败后照旧删内存（真 bug）
+
+原实现两处错，第二处比第一处更深：
+
+1. DB `DELETE` 失败只记日志，随后**无条件**从内存移除，且返回 >0 → 调用方（设置页百分比裁剪）判定「成功删了 N 条」。
+   后果：DB 行还在、内存条目没了，重启后这批「已删除」条目**全部复活**。这是全仓唯一违反「DB 失败则不动内存」契约的路径
+   （`delete_by_id` / `clear_history` / `select_and_paste` 都是 DB 优先）。
+2. 内存移除用的是**尾部位置**（`split_off`），而 DB 删除按 `rowid` 顺序——两者不是同一个集合。只要列表顺序与 rowid 顺序出现分歧
+   （异步捕获 / Phase 2 回填 / 撤销），删掉的内存条目就可能与 DB 删掉的行**对不上**。这与 `db_id 不变量` 是同一类错误。
+
+修法：先 `SELECT id ... ORDER BY id ASC LIMIT n` 取确切 id 集 → 按该集合删 DB → **仅当 DELETE 成功**，按 `db_id` 从内存 `retain` 掉同一集合。
+返回「DB 实际删除的行数」，而不是请求数。`trim_db_history` 改为返回 `Result<(), ()>`——clippy 随即抓出 3 处未处理的调用点，
+说明返回类型本身就是比注释更强的约束（`persist_entry_to_db` 里它现在参与事务，失败即整体回滚）。
+
+**验证**：`test_trim_oldest_percent_leaves_memory_intact_when_db_delete_fails`，用真实 `PRAGMA query_only` 制造写失败（非 mock）。
+反向对照：还原旧语义后该用例以 `left: 4, right: 0` 失败，恢复后通过——证明用例确在检测该缺陷。
+
+### ② `entry_id` 会被复用 → 收藏错乱（正确性，非内存）
+
+`favoriteIds` 无裁剪只是表象。实测确认了真正的机制：`entry_id` **可以重复发放**。
+`NEXT_ENTRY_ID` 唯一的初始化点是 `clipboard_init` 的 `prime_entry_id(max_loaded + 1)`，而 `max_loaded` 只来自**本次加载到的行**；
+清空历史后重启 → 表为空 → `max_loaded = 0` → 新 id 从 1 重新走 → 穿过 `favoriteIds` 里记录的 1228/1286/1477/1483/2141，
+于是**无关的新内容被标成收藏**（实测该 5 个 id 与 `COUNT(*)=1093`、`MIN=304`、`MAX=2395` 的库状态相符）。schema 里 `entry_id` 无 UNIQUE 约束，DB 层不报错。
+
+修法（两层，缺一不可）：
+
+- **持久化高水位**：新增 `clipboard_meta(key,value)` 存 `entry_id_watermark`；`insert_entry_to_db` 成功即 `MAX(value, entry_id)` 抬升
+  （放在插入点而非退出时：崩溃或「收藏后立刻清空再退出」都不能丢记录）；init 取 `max(max_loaded, watermark) + 1`，
+  并把 `prime_entry_id` 从 `store` 改成 `fetch_max`（单调不回退）。
+- **Swift 侧收敛点**：`pruneFavorites(against:)` 挂在**唯一的列表发布点**（`reloadItems` 的 main-async 段），
+  一次覆盖删除/撤销/两种裁剪/清空，且幂等、无变化时不写 UserDefaults。
+
+**验证**：`test_entry_id_never_reused_after_clear_and_restart`。反向对照：去掉插入时的抬升，用例以 `left: 0, right: 5` 失败；恢复后通过。
+
+### ③ `claim_pages` 的返回值在 29 处被忽略（编译期强制，非运行时验证）
+
+契约文档写明「返回 false 时调用方必须视该缓冲为不可用」，但只有池路径遵守；池外 29 处读取侧调用点全部忽略返回值。
+加 `#[must_use]` 后编译器一次性列全 29 处（`cargo clippy --all-targets -- -D warnings`），逐点表态。
+
+统一规则：**认领被拒 = 该操作显式失败**（`vec_to_raw`/`to_ffi_cstring`/快照 rows/搜索 id 返回 null，预览解码返回 null，
+paste/undo/文本读取返回失败，迁移行跳过并在下次启动重试），并在错误路径补上释放侧对称（认领过就 `mark_pages_reusable` 后释放）。
+这一条是**编译期强制**，不是运行时验证：日志里 `madvise ... failed` 实测 0 次，这些分支从未被触发过。
+
+### ④ 死代码：9 个零调用 accessor 与一段不可达分支
+
+`clipboard_get_item_{type,timestamp,source_name,source_bundle_id,label,text}`、`clipboard_get_image_{thumb,full}`（index 版）、
+`clipboard_get_image_size` 在 Swift + Rust + header 之外**零引用**（`_by_db_id` 是不同函数，仍在用），合计 218 行 = `accessors.rs` 的 36%
+（601 → 412 行，另有 9 条头文件声明）。同时删掉 `HistoryPopupWindow.show()` 里恒不可达的复用分支——`close()` 无条件把 `popupHostingView` 置 nil，
+自 0.101.0 起该分支永不成立。`clipboard_get_image_full` 的注释写「先查内存缓存」，实现里**没有任何缓存检查**，一并改正。
+
+**踩坑**：第一次删除用「逐函数找边界」的脚本，因相邻函数 doc 注释重叠而切坏了文件（`unexpected closing delimiter`）。
+已从 git 还原，改用「函数头 → 第一个列 0 的 `}`」大括号配对重做。删除类脚本必须校验骨架，不能只信行号推算。
+
+产物验证：`nm -gU` 确认新符号 `clipboard_purge_stale_drag_images` 存在、上述 9 个 accessor 已从二进制消失。
+
+### ⑤ 三个临时目录三套清理策略，其中一套的触发条件可能永不发生
+
+`Undo/`（启动清 + 逐次删）与 `Paste/`（60s TTL + 启动清）都有界，`Drag/` 只在**下一次图片拖拽开始时删光整个目录**。
+实测后果：一个 2026-09-16 23:31 写入的 207,388 B PNG，到 09-17 23:11 仍在磁盘上，跨了多次进程重启。
+
+修法：抽出 `purge_age_out(dir, ttl)`，`Paste`/`Drag` 共用；Drag 加 60s TTL（与 Paste 同源：拖放目标可能在手势结束后仍在读文件），
+Swift 侧从「删光目录」改为「写完新文件后扫过期」；启动时两个目录各清一次。新增 FFI `clipboard_purge_stale_drag_images`。
+
+**验证（真实 `$TMPDIR`，判别性）**：放入 2 小时前的 `stale-probe.png` 与刚写的 `fresh-probe.png`，重启后 `stale present: NO` / `fresh present: YES`。
+那条 09-16 的 207KB 残留也在真实路径上消失了。反向对照：把判据改成「凡到访即删」后，单测 `test_temp_purge_removes_only_aged_out_files` 如期失败。
+
+### ⑥ 预览解码没有并发上限（缩略图有 4 槽）
+
+`thumbnailDecodeSlots = DispatchSemaphore(value: 4)` 只约束了列表行；预览解码经由 `Task.detached` 无闸门，
+而它是更重的一条：交付缓冲最大 `maxPixel²×4`（实测 2293×1440 源 → 13,207,680 B），且活到预览关闭。
+Rust 侧的「单槽」`IMAGE_DECODE_SCRATCH` 是**复用机会**而非并发上限（第二个调用者 `.take()` 拿到 `None` 就走全新分配），兜不住。
+
+实现细节：Swift 6 禁止在 async 上下文用 `DispatchSemaphore.wait`（会占据协作线程），故写成 actor `PreviewDecodeGate`（挂起而非阻塞，
+排队中被取消的任务不会占槽）。**第一版记账有漏**：被取消的等待者苏醒后不计数，会永久漏掉一个槽位；改为「waiters 不占 permit，
+苏醒必然意味着某次 release 已把 permit 交给你」的记账后可由构造证明守恒。
+
+**验证（真实 FFI + 真实仪表）**：合成按键无法进入 key window（见下），故直接驱动真实解码路径
+（`clipboard_init` + `clipboard_decode_preview_by_db_id`，跑在真实库副本上），用应用自己的 `rust.preview.decode` span 度量。
+10 轮：**gate ON 峰值恒为 2**；gate OFF（修复前）为 4–9（均值 6.1）。
+因果用**上限扫描**确认：limit=1→恒 1、limit=2→恒 2、limit=4→恒 4。旁证：OFF 的 p50 也更高（75–91ms vs 71ms），即不受限时互相拖慢。
+
+**踩坑（本轮最重要的教训）**：第一版并发度量写成 `spans.filter { 与区间 i 相交 }.count`，数的是「相交数、且含自身」，
+不是「同时在场数」。它让 gate=2 的构建报出峰值 3–4，与设计矛盾，我一度准备当 bug 深挖。改成扫描线求最大深度后峰值精确等于上限。
+**采样点自身也会错**——最终结论只能来自手工核验过原始区间的那一次。
+
+### ⑦ 日志无轮转且跨构建混装（会直接误导基线）
+
+`/tmp/copyattach_debug.log` 是 append-only，三个写入方（Swift `dup2` 的 stderr、Rust 逐记录 `emit`、Rust error log）都不轮转。
+这不只是磁盘卫生：分析器读整个文件，旧构建的 span 与新构建无法区分。实测症状——全局 `popup.show` 报 **p95 561ms / max 733ms**，
+而按 pid 过滤到当前构建只有 **p50 53ms / max 118ms**；更糟的是 `popup.build_hosting`（源码里已不存在，`grep` 返回空）仍出现在统计里。
+
+修法：① 启动时按 4MiB 轮转为 `.1`，位置在 `dup2` **之前**（否则 stderr fd 会指向被移走的 inode）；Rust 逐记录路径**不**轮转，只加注释说明原因。
+② 分析器把**全部聚合**（不只验证记录）按 dominant pid 切分，并在报告头声明被排除的记录数。
+
+**验证（真实 GUI 路径，完整）**：把日志填到 4.92MB → 重启 → 归档为 `.1`；新日志里**有 `[ClipboardManager]` stderr 行**
+（证明 `dup2` 指向新 inode）；新日志 `Malformed: 0`、门禁 PASS；归档日志输出「覆盖 pid 80167，排除 17297 条其他进程记录」。
+
+### 本轮方法论教训（两条都是我自己的工具出错，不是产品问题）
+
+**a. 验证手法破坏了被测前提。** 起初用 `perf/collect.sh launch` 带 `COPYATTACH_PERF=1` 直接启动二进制，
+结果 app **继承了调用者的沙箱**，连真实 DB 都写不了（日志刷 `attempt to write a readonly database`、后端起不来、
+弹窗永远打不开，我因此误以为「`open` 不触发 toggle」）。正确做法是 `open -a`（由 launchd 拉起、不继承沙箱）
+＋ `defaults write com.example.copyattach PerfTracing -bool true`（`open` 不继承 shell 环境变量）。
+这与 CLAUDE.md 里「覆盖 HOME 启动 GUI」是同一类错误：**测试手法必须先确认不改变被测对象**。
+
+**b. 合成按键无法进入 key window（已实测，非推断）。** 三种方式全部失败：`CGEvent.post(tap:.cghidEventTap)`（0 条记录）、
+`postToPid`（120 次方向键 0 次生效）、AppleScript System Events（TCC `-10004`）；`AXIsProcessTrusted=false`。
+判别实验：弹窗**确认打开**、`isActive=true`、最前台为本应用的前提下，投递 Escape **也不产生 `popup.close`**
+（而此前它确实成功记录过 2 次 `popup.close`）。
+
+**由此遗留：本轮未验证的那一部分。** 「弹窗内连按方向键」这一层的端到端**仍未实测**；已验证的是其下层真实 FFI 解码路径 + 门闸
+（10/10 峰值 2）以及上限扫描的因果。这条缺口只能用真实键盘补。
+同理，③的 29 个「认领被拒」分支从未被触发过（`madvise failed` 实测 0 次），属未验证的风险面而非已修缺陷。
+
+### 最终校验
+
+`cargo clippy --all-targets -- -D warnings` 干净；`cargo test --lib` **123 passed / 0 failed**；Swift 全量 `-typecheck` 通过；
+版本 `0.105.7-dev`（只动 patch 位）。新增文件 1 个（`SwiftApp/Backend/PreviewDecodeGate.swift`）。
+
 

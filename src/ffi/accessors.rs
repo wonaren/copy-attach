@@ -1,13 +1,9 @@
-use std::ffi::{c_char, c_int, c_longlong, CString};
+use std::ffi::{c_char, c_int, CString};
 use std::sync::atomic::Ordering;
 
 use crate::backend::{try_backend, DEFAULT_CLEANUP_THRESHOLD, HISTORY_REVISION, IMAGE_ENCODING_COUNTER};
-use crate::db::load_text_by_db_id;
 use crate::macos;
-use crate::types::ClipboardEntry;
-use super::{to_ffi_cstring, vec_to_raw};
-
-// Legacy Index-Based Accessors
+use super::vec_to_raw;
 
 #[no_mangle]
 pub extern "C" fn clipboard_get_count() -> c_int {
@@ -27,183 +23,7 @@ pub extern "C" fn clipboard_get_history_revision() -> u64 {
     HISTORY_REVISION.load(Ordering::Relaxed)
 }
 
-#[no_mangle]
-pub extern "C" fn clipboard_get_item_type(index: c_int) -> c_int {
-    let Some(b) = try_backend() else { return -1 };
-    let hist = b.history.lock().unwrap();
-    hist.get(index as usize).map_or(-1, ClipboardEntry::content_type)
-}
-
-#[no_mangle]
-pub extern "C" fn clipboard_get_item_timestamp(index: c_int) -> c_longlong {
-    let Some(b) = try_backend() else { return 0 };
-    let hist = b.history.lock().unwrap();
-    hist.get(index as usize).map_or(0, |item| item.timestamp() as c_longlong)
-}
-
-/// Caller must free with `clipboard_free_string()`.
-#[no_mangle]
-pub extern "C" fn clipboard_get_item_source_name(index: c_int) -> *mut c_char {
-    let Some(b) = try_backend() else { return std::ptr::null_mut() };
-    let hist = b.history.lock().unwrap();
-    let name = match hist.get(index as usize) {
-        Some(item) => item.source_name(),
-        None => return std::ptr::null_mut(),
-    };
-    to_ffi_cstring(name)
-}
-
-/// Caller must free with `clipboard_free_string()`.
-#[no_mangle]
-pub extern "C" fn clipboard_get_item_source_bundle_id(index: c_int) -> *mut c_char {
-    let Some(b) = try_backend() else { return std::ptr::null_mut() };
-    let hist = b.history.lock().unwrap();
-    let bid = match hist.get(index as usize) {
-        Some(item) => item.source_bundle_id(),
-        None => return std::ptr::null_mut(),
-    };
-    to_ffi_cstring(bid)
-}
-
-/// Caller must free with `clipboard_free_string()`.
-#[no_mangle]
-pub extern "C" fn clipboard_get_item_label(index: c_int) -> *mut c_char {
-    let Some(b) = try_backend() else { return std::ptr::null_mut() };
-    let hist = b.history.lock().unwrap();
-    let label = match hist.get(index as usize) {
-        Some(item) => item.label(),
-        None => return std::ptr::null_mut(),
-    };
-    to_ffi_cstring(&label)
-}
-
-/// Get text by index, loading the body from SQLite.
-/// Caller must free with `clipboard_free_string()`.
-#[no_mangle]
-pub extern "C" fn clipboard_get_item_text(index: c_int) -> *mut c_char {
-    let Some(b) = try_backend() else { return std::ptr::null_mut() };
-    let db_id = {
-        let hist = b.history.lock().unwrap();
-        match hist.get(index as usize) {
-            Some(ClipboardEntry::Text { db_id, .. }) => *db_id,
-            _ => return std::ptr::null_mut(),
-        }
-    };
-    if db_id == 0 {
-        return std::ptr::null_mut();
-    }
-    match b.db.lock() {
-        Ok(conn) => match load_text_by_db_id(&conn, db_id) {
-            // The guard marks the body's pages reusable on drop — the text is
-            // transient here (copied into the FFI CString).
-            Some(t) => {
-                let guard = crate::backend::MarkStringReusableOnDrop(t);
-                to_ffi_cstring(&guard.0)
-            }
-            None => std::ptr::null_mut(),
-        },
-        Err(e) => {
-            crate::error_log!("CopyAttach: DB mutex poisoned loading text at index {index}: {e}");
-            std::ptr::null_mut()
-        }
-    }
-}
-
 // Image Loading (Index-Based & by db_id)
-
-/// Load thumbnail by array index. Caller must free with `clipboard_free_bytes()`.
-#[no_mangle]
-pub extern "C" fn clipboard_get_image_thumb(index: c_int, out_len: *mut c_int) -> *mut u8 {
-    if out_len.is_null() { return std::ptr::null_mut(); }
-
-    let Some(b) = try_backend() else { return std::ptr::null_mut() };
-    let db_id = {
-        let hist = b.history.lock().unwrap();
-        match hist.get(index as usize) {
-            Some(ClipboardEntry::Image { db_id, .. }) => *db_id,
-            _ => return std::ptr::null_mut(),
-        }
-    };
-
-    if db_id == 0 {
-        return std::ptr::null_mut();
-    }
-
-    let thumb_data = match b.db.lock() {
-        Ok(conn) => {
-            match conn.query_row(
-                "SELECT thumb_data FROM clipboard_history WHERE id = ?",
-                rusqlite::params![db_id],
-                |row| row.get::<_, Vec<u8>>(0),
-            ) {
-                Ok(data) => data,
-                Err(e) => {
-                    crate::debug_log!("CopyAttach: failed to load thumbnail for db_id={db_id}: {e}");
-                    return std::ptr::null_mut();
-                }
-            }
-        }
-        Err(e) => {
-            crate::error_log!("CopyAttach: DB mutex poisoned loading thumbnail for db_id={db_id}: {e}");
-            return std::ptr::null_mut();
-        }
-    };
-
-    // Same blob-read contract as preview/paste/undo: rusqlite may have grown
-    // this Vec over reusable-marked pages, so claim before reading the bytes.
-    crate::backend::claim_pages(thumb_data.as_ptr(), thumb_data.capacity());
-    let len = thumb_data.len() as c_int;
-    unsafe { *out_len = len; }
-    vec_to_raw(thumb_data)
-}
-
-/// Load full image by array index. Checks in-memory cache first, then `SQLite`.
-/// Caller must free with `clipboard_free_bytes()`.
-#[no_mangle]
-pub extern "C" fn clipboard_get_image_full(index: c_int, out_len: *mut c_int) -> *mut u8 {
-    if out_len.is_null() { return std::ptr::null_mut(); }
-
-    let Some(b) = try_backend() else { return std::ptr::null_mut() };
-    let db_id = {
-        let hist = b.history.lock().unwrap();
-        match hist.get(index as usize) {
-            Some(ClipboardEntry::Image { db_id, .. }) => *db_id,
-            _ => return std::ptr::null_mut(),
-        }
-    };
-
-    if db_id == 0 {
-        return std::ptr::null_mut();
-    }
-
-    let data: Vec<u8> = match b.db.lock() {
-        Ok(conn) => {
-            match conn.query_row(
-                "SELECT png_data FROM clipboard_history WHERE id = ?",
-                rusqlite::params![db_id],
-                |row| row.get(0),
-            ) {
-                Ok(data) => data,
-                Err(e) => {
-                    crate::error_log!("CopyAttach: failed to load full image for db_id={db_id}: {e}");
-                    return std::ptr::null_mut();
-                }
-            }
-        }
-        Err(e) => {
-            crate::error_log!("CopyAttach: DB mutex poisoned loading full image for db_id={db_id}: {e}");
-            return std::ptr::null_mut();
-        }
-    };
-
-    // Same blob-read contract as preview/paste/undo: the DB-loaded Vec (or an
-    // in-memory cached clone) may live on reusable-marked pages, so claim
-    // before reading its bytes.
-    crate::backend::claim_pages(data.as_ptr(), data.capacity());
-    let len = data.len() as c_int;
-    unsafe { *out_len = len; }
-    vec_to_raw(data)
-}
 
 /// Load full image directly by database row id (no history lock).
 /// Caller must free with `clipboard_free_bytes()`.
@@ -235,7 +55,10 @@ pub extern "C" fn clipboard_get_image_full_by_db_id(db_id: i64, out_len: *mut c_
     };
 
     // Same blob-read contract as preview/paste/undo.
-    crate::backend::claim_pages(data.as_ptr(), data.capacity());
+    if !crate::backend::claim_pages(data.as_ptr(), data.capacity()) {
+        crate::error_log!("CopyAttach: full image blob for db_id={db_id} could not be claimed — returning null");
+        return std::ptr::null_mut();
+    }
     let len = data.len() as c_int;
     unsafe { *out_len = len; }
     vec_to_raw(data)
@@ -272,7 +95,10 @@ pub extern "C" fn clipboard_get_image_thumb_by_db_id(db_id: i64, out_len: *mut c
     };
 
     // Same blob-read contract as preview/paste/undo.
-    crate::backend::claim_pages(thumb_data.as_ptr(), thumb_data.capacity());
+    if !crate::backend::claim_pages(thumb_data.as_ptr(), thumb_data.capacity()) {
+        crate::error_log!("CopyAttach: thumbnail blob for db_id={db_id} could not be claimed — returning null");
+        return std::ptr::null_mut();
+    }
     if let Some(mut span) = perf {
         span.val = Some(thumb_data.len() as i64);
     }
@@ -280,8 +106,6 @@ pub extern "C" fn clipboard_get_image_thumb_by_db_id(db_id: i64, out_len: *mut c
     unsafe { *out_len = len; }
     vec_to_raw(thumb_data)
 }
-
-use crate::backend::MarkBlobReusableOnDrop;
 
 /// Decode a stored image downscaled to at most `max_dim`, returning an RGBA8
 /// buffer owned by the caller (release via `clipboard_preview_buffer_release`).
@@ -331,9 +155,13 @@ pub extern "C" fn clipboard_decode_preview_by_db_id(
             return std::ptr::null_mut();
         }
     };
-    // Claim pages before the decoder reads the blob.
-    crate::backend::claim_pages(png.as_ptr(), png.capacity());
-    let png_guard = MarkBlobReusableOnDrop(png);
+    // Claim pages before the decoder reads the blob; an unclaimable blob is
+    // reported as a decode failure rather than decoded from reclaimable pages.
+    if !crate::backend::claim_pages(png.as_ptr(), png.capacity()) {
+        crate::error_log!("CopyAttach: preview blob for db_id={db_id} could not be claimed — returning null");
+        return std::ptr::null_mut();
+    }
+    let png_guard = crate::backend::MarkBlobReusableOnDrop(png);
     let png = &png_guard.0;
     if png.is_empty() {
         crate::debug_log!("CopyAttach: preview db_id={db_id}: stored png_data is empty");
@@ -363,8 +191,15 @@ pub extern "C" fn clipboard_decode_preview_by_db_id(
                 crate::error_log!("CopyAttach: preview alloc failed for {byte_len} bytes");
                 None
             } else {
-                // Claim pages before Swift owns the long-lived buffer.
-                crate::backend::claim_pages(dst, byte_len);
+                // Claim pages before Swift owns the long-lived buffer. This buffer
+                // is delivered to the UI as a CGImage and lives until the preview
+                // closes, so it must never be reclaimable: an unclaimable one is
+                // released and reported as a decode failure.
+                if !crate::backend::claim_pages(dst, byte_len) {
+                    crate::error_log!("CopyAttach: preview buffer for db_id={db_id} could not be claimed — returning null");
+                    unsafe { std::alloc::dealloc(dst, layout_for(byte_len)) };
+                    return std::ptr::null_mut();
+                }
                 if (dw, dh) == (w, h) {
                     unsafe { std::ptr::copy_nonoverlapping(pooled.as_ptr(), dst, byte_len) };
                 } else if let Some(resized) =
@@ -394,7 +229,12 @@ pub extern "C" fn clipboard_decode_preview_by_db_id(
                         crate::error_log!("CopyAttach: preview alloc failed for {byte_len} bytes");
                         return std::ptr::null_mut();
                     }
-                    crate::backend::claim_pages(dst, byte_len);
+                    if !crate::backend::claim_pages(dst, byte_len) {
+                        crate::error_log!("CopyAttach: preview buffer for db_id={db_id} could not be claimed — returning null");
+                        crate::backend::mark_pages_reusable(rgba.as_ptr(), rgba.capacity());
+                        unsafe { std::alloc::dealloc(dst, layout_for(byte_len)) };
+                        return std::ptr::null_mut();
+                    }
                     if (dw, dh) == (w, h) {
                         unsafe { std::ptr::copy_nonoverlapping(rgba.as_ptr(), dst, byte_len) };
                     } else if let Some(resized) = crate::image::resize_rgba(&rgba, w, h, dw, dh) {
@@ -448,19 +288,6 @@ pub extern "C" fn clipboard_preview_buffer_release(ptr: *mut u8, len: c_int) {
 }
 
 // Image Size
-#[no_mangle]
-pub extern "C" fn clipboard_get_image_size(index: c_int, out_width: *mut c_int, out_height: *mut c_int) -> c_int {
-    let Some(b) = try_backend() else { return 0 };
-    let hist = b.history.lock().unwrap();
-    match hist.get(index as usize) {
-        Some(ClipboardEntry::Image { width, height, .. }) => {
-            if !out_width.is_null() { unsafe { *out_width = *width as c_int; } }
-            if !out_height.is_null() { unsafe { *out_height = *height as c_int; } }
-            1
-        }
-        _ => 0,
-    }
-}
 
 // Memory Management Helpers
 
@@ -511,7 +338,10 @@ pub extern "C" fn clipboard_set_cleanup_threshold(threshold: i32) {
             }
         }
         if let Ok(conn) = b.db.lock() {
-            crate::db::trim_db_history(&conn, t);
+            // A failure here is self-healing: the in-memory list is already
+            // bounded, and the next capture's transactional trim (same
+            // threshold) removes whatever rows are still over it.
+            let _ = crate::db::trim_db_history(&conn, t);
         }
     }
 }

@@ -31,6 +31,22 @@ fn make_text(text: &str, ts: u64) -> ClipboardEntry {
     )
 }
 
+/// Stamp db_ids in rowid order: the newest entry (head) keeps the largest id,
+/// the oldest (tail) the smallest — exactly the ordering SQLite's
+/// autoincrement rowids produce. Tests that exercise identity-based removal
+/// need real ids, since a 0 stands for "not persisted" and is never a row.
+fn assign_row_ids(hist: &mut [ClipboardEntry]) {
+    let n = hist.len();
+    for (i, entry) in hist.iter_mut().enumerate() {
+        let db_id = (n - i) as i64;
+        match entry {
+            ClipboardEntry::Text { db_id: d, .. } | ClipboardEntry::Image { db_id: d, .. } => {
+                *d = db_id;
+            }
+        }
+    }
+}
+
 fn make_image(data: &[u8], w: u32, h: u32, ts: u64) -> ClipboardEntry {
     let hash = image_hash(data, w, h);
     let thumb = create_thumbnail(w, h, data).unwrap();
@@ -88,8 +104,13 @@ fn fill_and_trim_to(threshold: usize, count: usize) -> Vec<ClipboardEntry> {
     hist
 }
 
-/// Mirror of `clipboard_trim_oldest_percent`'s in-memory split for unit testing
-/// the percent/ceil arithmetic without a live backend.
+/// Mirror of `clipboard_trim_oldest_percent` for unit testing the
+/// percent/ceil arithmetic without a live backend.
+///
+/// Models the production contract faithfully on two points that the previous
+/// tail-split mirror did not: the count is "how many DB rows the DELETE
+/// actually removed", and memory removal is by identity (db_id) rather than by
+/// position. Tests can therefore assert the DB/memory consistency invariant.
 fn simulate_trim_oldest_percent(
     mut hist: Vec<ClipboardEntry>, percent: usize,
 ) -> (Vec<ClipboardEntry>, Vec<ClipboardEntry>) {
@@ -99,7 +120,24 @@ fn simulate_trim_oldest_percent(
     }
     let count = ((total as f64 * percent as f64 / 100.0).ceil()) as usize;
     let count = count.min(total);
-    let split_at = total - count;
-    let removed = hist.split_off(split_at);
-    (hist, removed)
+    // Which rows the DELETE would have removed: oldest by row order.
+    let mut by_row: Vec<(i64, usize)> = hist
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| e.db_id() != 0)
+        .map(|(i, e)| (e.db_id(), i))
+        .collect();
+    by_row.sort_by_key(|(db_id, _)| *db_id);
+    let doomed: std::collections::HashSet<i64> =
+        by_row.iter().take(count).map(|(db_id, _)| *db_id).collect();
+    let mut kept = Vec::with_capacity(hist.len());
+    let mut removed = Vec::new();
+    for entry in hist.drain(..) {
+        if doomed.contains(&entry.db_id()) {
+            removed.push(entry);
+        } else {
+            kept.push(entry);
+        }
+    }
+    (kept, removed)
 }

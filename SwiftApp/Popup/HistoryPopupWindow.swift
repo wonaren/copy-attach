@@ -182,14 +182,12 @@ class HistoryPopupWindow: NSPanel {
             debugLog("HistoryPopupContent onClose callback")
             self?.close()
         }).withAppTheme())
-        let hosting: PopupHostingView
-        if let existing = popupHostingView {
-            existing.rootView = contentView
-            hosting = existing
-        } else {
-            hosting = PopupHostingView(rootView: contentView)
-            popupHostingView = hosting
-        }
+        // A fresh hosting view per session. `close()` releases `popupHostingView`
+        // unconditionally, so reusing a previous instance is not an available
+        // branch — the view graph, its State storage and its image references
+        // all have exactly one session's lifetime by construction.
+        let hosting = PopupHostingView(rootView: contentView)
+        popupHostingView = hosting
         let contentRect = self.contentRect(forFrameRect: self.frame)
         hosting.frame = contentRect
 

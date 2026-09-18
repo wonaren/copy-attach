@@ -16,7 +16,8 @@ mod snapshot;
 mod search;
 mod init;
 mod accessors;
-mod paste;
+#[cfg_attr(not(test), allow(unused))]
+pub(crate) mod paste;
 mod history;
 mod stress;
 
@@ -50,7 +51,17 @@ pub(super) fn vec_to_raw(v: Vec<u8>) -> *mut u8 {
     // blocks are reused as-is). Such pages stay kernel-reclaimable — and
     // uncounted — until claimed, so a live buffer read by Swift could be
     // zeroed under memory pressure. Claim before the caller touches it.
-    crate::backend::claim_pages(ptr, len);
+    //
+    // A rejected claim means this hand-off cannot be honoured: the caller
+    // would read memory the kernel may reclaim at any moment. Returning null
+    // is the honest answer — every Swift call site already treats null as
+    // "this load failed" — and it keeps a corrupted payload out of the UI.
+    if !crate::backend::claim_pages(ptr, len) {
+        crate::error_log!("CopyAttach: FFI hand-off buffer len={len} could not be claimed — returning null instead of reclaimable bytes");
+        crate::backend::mark_pages_reusable(ptr, len);
+        unsafe { drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len))) };
+        return std::ptr::null_mut();
+    }
     ptr
 }
 
@@ -67,7 +78,14 @@ fn to_ffi_cstring(s: &str) -> *mut c_char {
     };
     if !raw.is_null() {
         let len = unsafe { std::ffi::CStr::from_ptr(raw) }.to_bytes_with_nul().len();
-        crate::backend::claim_pages(raw as *const u8, len);
+        // Same hand-off rule as `vec_to_raw`: an unclaimable CString may read
+        // back zeroed, so decline instead of handing the caller bad bytes.
+        if !crate::backend::claim_pages(raw as *const u8, len) {
+            crate::error_log!("CopyAttach: FFI string len={len} could not be claimed — returning null");
+            crate::backend::mark_pages_reusable(raw as *const u8, len);
+            unsafe { drop(CString::from_raw(raw)) };
+            return std::ptr::null_mut();
+        }
     }
     raw
 }

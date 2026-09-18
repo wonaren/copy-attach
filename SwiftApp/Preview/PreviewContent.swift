@@ -98,9 +98,11 @@ struct PreviewContent: View {
         let size = imagePixelSize
         let maxPixel = ImageDecode.previewBudget(width: size.w, height: size.h,
                                                  screenSize: screenSize, scale: scale)
-        let decoded = await Task.detached(priority: .userInitiated) { () -> DecodedImage? in
-            ImageDecode.previewImage(dbId: dbId, maxPixel: maxPixel)
-        }.value
+        // Concurrency-bounded inside `previewImageAsync`: an unbounded burst of
+        // selections (fast arrow-key navigation) would otherwise stack whole
+        // decode buffers, since cancelling this task cannot interrupt a decode
+        // already running in Rust.
+        let decoded = await ImageDecode.previewImageAsync(dbId: dbId, maxPixel: maxPixel)
         // Only apply if we're still showing the same item
         if currentDbId == dbId {
             if let decoded { image = decoded.image }

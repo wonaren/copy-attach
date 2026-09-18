@@ -161,15 +161,14 @@ enum ClipboardDragProvider {
             .appendingPathComponent("Drag", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
 
-        // Drag output is durable until a later image drag begins. This lets the
-        // drop destination consume the URL after the originating drag gesture
-        // ends without retaining decoded image data in the popup.
-        for url in try FileManager.default.contentsOfDirectory(
-            at: directory,
-            includingPropertiesForKeys: nil
-        ) {
-            try FileManager.default.removeItem(at: url)
-        }
-        return directory.appendingPathComponent("clipboard-\(entryId)-\(UUID().uuidString).png")
+        // Sweep aged-out drag files AFTER the new one is written. The old rule
+        // deleted every file at the start of each drag, which left the last
+        // drag's PNG on disk forever for anyone who dragged an image only once
+        // (measured: a 207 KB file surviving across several restarts). The TTL
+        // is the same one the paste path uses, so a drop destination that reads
+        // its file slightly after the gesture ends still finds it.
+        let url = directory.appendingPathComponent("clipboard-\(entryId)-\(UUID().uuidString).png")
+        clipboard_purge_stale_drag_images()
+        return url
     }
 }

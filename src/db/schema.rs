@@ -166,6 +166,24 @@ pub(crate) fn ensure_history_table(conn: &Connection) -> Result<(), rusqlite::Er
     }
     backfill_text_metadata(conn)?;
 
+    // Monotonic entry-id high-water mark.
+    //
+    // entry_id is the identity Swift stores favorites against, so it must
+    // never be handed out twice for the lifetime of a database — not merely
+    // within one session. Priming the counter from `MAX(entry_id)` of the
+    // rows that happen to be loaded is not enough: after the history is
+    // cleared the table is empty, the counter restarts at 1, and newly
+    // captured entries walk straight through the ids recorded in the
+    // Favorites list — old favorites then light up on unrelated new content.
+    // The watermark is stored in the DB (surviving clear, trim, and restart)
+    // and only ever moves forward.
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS clipboard_meta (
+             key   TEXT PRIMARY KEY,
+             value INTEGER NOT NULL
+         );"
+    )?;
+
     // Dedup lookup index for (entry_type, hash).
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_history_type_hash
@@ -202,6 +220,38 @@ pub(crate) fn ensure_history_table(conn: &Connection) -> Result<(), rusqlite::Er
     );
     conn.execute_batch(&fts_sql)?;
     Ok(())
+}
+
+/// Key of the monotonic entry-id high-water mark in `clipboard_meta`.
+pub(crate) const ENTRY_ID_WATERMARK_KEY: &str = "entry_id_watermark";
+
+/// Highest entry id ever issued for this database. 0 when never recorded.
+///
+/// Reads the persisted watermark only; the caller combines it with the
+/// loaded rows' maximum (a database written by an older build has no
+/// watermark yet).
+pub(crate) fn entry_id_watermark(conn: &Connection) -> u64 {
+    conn.query_row(
+        "SELECT value FROM clipboard_meta WHERE key = ?1",
+        rusqlite::params![ENTRY_ID_WATERMARK_KEY],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|v| v.max(0) as u64)
+    .unwrap_or(0)
+}
+
+/// Raise the watermark to `value`. Never lowers it, so a stale caller cannot
+/// reopen a gap that ids were already issued from.
+pub(crate) fn bump_entry_id_watermark(conn: &Connection, value: u64) -> Result<(), ()> {
+    conn.execute(
+        "INSERT INTO clipboard_meta (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = MAX(value, excluded.value)",
+        rusqlite::params![ENTRY_ID_WATERMARK_KEY, value as i64],
+    )
+    .map(|_| ())
+    .map_err(|e| {
+        crate::error_log!("CopyAttach: failed to record entry-id watermark {value}: {e}");
+    })
 }
 
 /// Metadata migration version stored in SQLite `user_version`.
@@ -266,8 +316,14 @@ pub(crate) fn migrate_one_image_row(conn: &Connection, id: i64) -> Result<u64, (
         crate::debug_log!("CopyAttach: image-hash migration: row {id} has empty png_data — hash left as-is");
         return Err(());
     }
-    // Claim reusable-marked pages before the decoder reads the blob.
-    crate::backend::claim_pages(png.as_ptr(), png.capacity());
+    // Claim reusable-marked pages before the decoder reads the blob. A rejected
+    // claim means the decode could read reclaimed pages, so the row is treated
+    // as undecodable (skipped, logged, and retried on the next launch — the
+    // migration is idempotent).
+    if !crate::backend::claim_pages(png.as_ptr(), png.capacity()) {
+        crate::error_log!("CopyAttach: image-hash migration: row {id} png blob could not be claimed — skipped");
+        return Err(());
+    }
     let img = image::load_from_memory(&png).map_err(|e| {
         crate::debug_log!("CopyAttach: image-hash migration: row {id} png undecodable: {e}");
     })?;
@@ -341,8 +397,14 @@ pub(crate) fn migrate_one_thumbnail_row(
                 blob.reserve(bytes.len());
             }
             // The pages may have come back from malloc still marked
-            // reclaimable, so claim before writing (madvise contract).
-            crate::backend::claim_pages(blob.as_ptr(), blob.capacity());
+            // reclaimable, so claim before writing (madvise contract). A
+            // rejected claim means the blob we are about to build could lose
+            // pages mid-copy, so report the row as unreadable rather than
+            // hand the migration a half-valid PNG.
+            if !crate::backend::claim_pages(blob.as_ptr(), blob.capacity()) {
+                crate::error_log!("CopyAttach: thumbnail migration: blob buffer could not be claimed for row {id}");
+                return Err(rusqlite::Error::InvalidQuery);
+            }
             blob.extend_from_slice(bytes);
             Ok(!bytes.is_empty())
         },
@@ -367,12 +429,32 @@ pub(crate) fn migrate_one_thumbnail_row(
         let rgba = img.to_rgba8();
         let (w, h) = rgba.dimensions();
         let raw = rgba.into_raw();
-        crate::backend::claim_pages(raw.as_ptr(), raw.capacity());
+        // Both buffers feed the copy below. The temporary is freshly decoded
+        // by the image crate (unmarked), but it is claimed anyway so the
+        // release-side symmetry holds; the reuse scratch may still carry a
+        // previous row's marking, so an unclaimable scratch must abandon the
+        // row instead of copying into possibly-reclaimable pages.
+        if !crate::backend::claim_pages(raw.as_ptr(), raw.capacity())
+            || !crate::backend::claim_pages(scratch.as_ptr(), scratch.capacity())
+        {
+            crate::error_log!("CopyAttach: thumbnail migration: decode scratch could not be claimed for row {id}");
+            crate::backend::mark_pages_reusable(raw.as_ptr(), raw.capacity());
+            return None;
+        }
         scratch.clear();
         if scratch.capacity() < raw.len() {
-            scratch.reserve(raw.len());
+            // Grow as one whole allocation: a realloc-spliced mapping rejects
+            // madvise (see the pool rule in image.rs) and would break the
+            // reuse contract for every later row.
+            let fresh: Vec<u8> = Vec::with_capacity(raw.len());
+            crate::backend::mark_pages_reusable(scratch.as_ptr(), scratch.capacity());
+            if !crate::backend::claim_pages(fresh.as_ptr(), fresh.capacity()) {
+                crate::error_log!("CopyAttach: thumbnail migration: fresh scratch could not be claimed for row {id}");
+                crate::backend::mark_pages_reusable(raw.as_ptr(), raw.capacity());
+                return None;
+            }
+            *scratch = fresh;
         }
-        crate::backend::claim_pages(scratch.as_ptr(), scratch.capacity());
         scratch.extend_from_slice(&raw);
         crate::backend::mark_pages_reusable(raw.as_ptr(), raw.capacity());
         Some((w, h))

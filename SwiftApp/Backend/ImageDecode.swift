@@ -77,10 +77,40 @@ enum ImageDecode {
                    max(Int(displayLongest * scale), zoomHeadroomPx))
     }
 
+    /// Concurrency bound for preview decodes.
+    ///
+    /// The list rows already bound their decodes (`thumbnailDecodeSlots`); the
+    /// preview path had none, and it is the heavier one: each delivered buffer
+    /// is up to maxPixel²×4 bytes (measured 13.2 MB for a 2293×1440 source), and
+    /// it is held until the preview closes. Rapid arrow-key navigation cancels
+    /// the Swift task, but cancellation cannot interrupt a decode already inside
+    /// Rust — so without a slot limit a burst of selection changes stacks whole
+    /// decode buffers at once.
+    /// Sized for previews (one is on screen at a time) while still allowing the
+    /// next selection to start decoding before the previous one is torn down.
+    private static let decodeGate = PreviewDecodeGate(limit: 2)
+
+    /// Async entry point: waits for a decode slot, then decodes. Returns nil if
+    /// the task was cancelled while waiting, so a superseded selection never
+    /// occupies a slot.
+    static func previewImageAsync(dbId: Int, maxPixel: Int) async -> DecodedImage? {
+        guard let ticket = await decodeGate.acquire() else { return nil }
+        defer { ticket.release() }
+        guard !Task.isCancelled else { return nil }
+        // Decode off the cooperative pool: this is blocking work and would
+        // otherwise occupy a thread the runtime wants for awaiting tasks.
+        return await Task.detached(priority: .userInitiated) { () -> DecodedImage? in
+            previewImage(dbId: dbId, maxPixel: maxPixel)
+        }.value
+    }
+
     /// Decode the stored image for `dbId` as a bounded preview. The Rust path
     /// avoids ImageIO's full-resolution thumbnail decode and returns an image
     /// whose pixel buffer has a hard longest-edge limit.
-    static func previewImage(dbId: Int, maxPixel: Int) -> DecodedImage? {
+    ///
+    /// Blocking; callers must go through `previewImageAsync` so the decode is
+    /// concurrency-bounded.
+    private static func previewImage(dbId: Int, maxPixel: Int) -> DecodedImage? {
         guard dbId != 0 else { return nil }
         var len: Int32 = 0, w: Int32 = 0, h: Int32 = 0, isGif: Int32 = 0
         let ptr = clipboard_decode_preview_by_db_id(Int64(dbId), Int32(maxPixel),

@@ -183,6 +183,59 @@ fn test_entry_id_monotonic_after_reload() {
         "post-restart entry_id {} must be present", new_id);
 }
 
+/// Guards the favorite-identity invariant: entry ids must never be re-issued
+/// for as long as the database exists — not merely within one session.
+///
+/// The failure this pins down: favorites are stored Swift-side as entry_id.
+/// Priming the counter from `MAX(entry_id)` of the LOADED rows restarts at 1
+/// once the history is empty, so after a clear + relaunch the first new
+/// captures walk through the ids the favorites still reference and come up
+/// already starred. The persisted watermark is what makes the ids monotonic
+/// across a clear.
+#[test]
+fn test_entry_id_never_reused_after_clear_and_restart() {
+    let conn = test_db();
+
+    // Session 1: capture, favorite-worthy ids get issued.
+    for i in 0..5 {
+        insert_text(&conn, &format!("session-1-{i}"), i as u64);
+    }
+    let max_issued: u64 = load_history_from_db(&conn, 3000)
+        .iter()
+        .map(|e| match e {
+            ClipboardEntry::Text { id, .. } | ClipboardEntry::Image { id, .. } => *id,
+        })
+        .max()
+        .expect("rows were inserted");
+
+    // Session 2: the user clears the history (the table becomes empty but the
+    // database file, and the Favorites list, survive).
+    conn.execute("DELETE FROM clipboard_history", []).expect("clear");
+    assert_eq!(load_history_from_db(&conn, 3000).len(), 0, "table is empty");
+    assert_eq!(
+        crate::db::entry_id_watermark(&conn),
+        max_issued,
+        "the watermark must have survived the clear"
+    );
+
+    // Relaunch priming, exactly as clipboard_init computes it.
+    let max_loaded = load_history_from_db(&conn, 3000)
+        .iter()
+        .map(|e| match e {
+            ClipboardEntry::Text { id, .. } | ClipboardEntry::Image { id, .. } => *id,
+        })
+        .max()
+        .unwrap_or(0);
+    assert_eq!(max_loaded, 0, "nothing loads from an empty table");
+    let watermark = crate::db::entry_id_watermark(&conn);
+    let next = max_loaded.max(watermark) + 1;
+
+    assert!(
+        next > max_issued,
+        "a cleared database must not restart ids below the previously issued {max_issued} (got {next})"
+    );
+}
+
 #[test]
 fn test_entry_id_backfill_old_rows() {
     // Simulate an old DB that was created before the entry_id column existed.
@@ -302,11 +355,11 @@ fn test_trim_range_delete_semantics() {
     conn.execute("DELETE FROM clipboard_history WHERE id = 3", []).unwrap();
 
     // Under threshold: no-op.
-    crate::db::trim_db_history(&conn, 10);
+    crate::db::trim_db_history(&conn, 10).expect("trim below threshold must succeed");
     assert_eq!(load_history_from_db(&conn, 3000).len(), 4);
 
     // Over threshold: exactly the newest 2 survive, gaps included.
-    crate::db::trim_db_history(&conn, 2);
+    crate::db::trim_db_history(&conn, 2).expect("trim over threshold must succeed");
     let loaded = load_history_from_db(&conn, 3000);
     assert_eq!(loaded.len(), 2);
     assert_eq!(loaded[0].label(), "t4");

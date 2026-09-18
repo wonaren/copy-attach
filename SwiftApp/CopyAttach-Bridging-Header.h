@@ -40,15 +40,8 @@ int32_t clipboard_is_debug_logging(void);
 int32_t clipboard_get_count(void);
 uint64_t clipboard_get_image_encoding_counter(void);
 uint64_t clipboard_get_history_revision(void);
-int32_t clipboard_get_item_type(int32_t index);
-int64_t clipboard_get_item_timestamp(int32_t index);
-char* clipboard_get_item_label(int32_t index);
-char* clipboard_get_item_text(int32_t index);
 
 // Image data (caller must free with clipboard_free_bytes)
-uint8_t* clipboard_get_image_thumb(int32_t index, int32_t* out_len);
-uint8_t* clipboard_get_image_full(int32_t index, int32_t* out_len);
-int32_t clipboard_get_image_size(int32_t index, int32_t* out_width, int32_t* out_height);
 
 // ─── Free ───
 void clipboard_free_string(char* s);
@@ -93,6 +86,11 @@ void clipboard_snapshot_release(void* snap);
 uint64_t* clipboard_search_ids(const char* query, int32_t* out_count);
 void clipboard_free_u64_array(uint64_t* ptr, int32_t len);
 
+// ─── Temp drag output sweep (TTL; see src/ffi/paste.rs) ───
+// Called after the drag provider writes a new PNG, so the Drag directory is
+// bounded by age rather than by "the next image drag".
+void clipboard_purge_stale_drag_images(void);
+
 // ─── Image by DB row id (no history lock) ───
 uint8_t* clipboard_get_image_thumb_by_db_id(int64_t db_id, int32_t* out_len);
 uint8_t* clipboard_get_image_full_by_db_id(int64_t db_id, int32_t* out_len);
@@ -117,8 +115,6 @@ void clipboard_preview_buffer_release(uint8_t* ptr, int32_t len);
 void clipboard_set_source_app(const char* name, const char* bundle_id, int32_t pid);
 // Newline-delimited application bundle IDs; 0 disables the text-length rule.
 int32_t clipboard_set_ignore_rules(const char* app_bundle_ids, int32_t ignore_text, int32_t ignore_images, int32_t min_text_characters, int32_t ignore_sensitive);
-char* clipboard_get_item_source_name(int32_t index);
-char* clipboard_get_item_source_bundle_id(int32_t index);
 
 // ─── Permissions ───
 int32_t clipboard_check_permission(void);

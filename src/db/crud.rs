@@ -1,5 +1,6 @@
 use rusqlite::Connection;
 
+use crate::db::schema::bump_entry_id_watermark;
 use crate::types::ClipboardEntry;
 
 /// One-time onboarding rows shown the very first time the app opens with an
@@ -268,6 +269,13 @@ pub(crate) fn insert_entry_to_db(
             ).map(|_| ()).map_err(|e| { crate::error_log!("CopyAttach: failed to insert image entry: {e}"); })
         }
     };
+    // Persisting a row is the moment its entry_id enters the durable identity
+    // space, so the high-water mark is raised here rather than at shutdown:
+    // a crash (or a clear before quitting) must not lose the record, or a
+    // later session would re-issue an id a favorite still points at.
+    if result.is_ok() && bump_entry_id_watermark(conn, entry.entry_id()).is_err() {
+        crate::error_log!("CopyAttach: entry-id watermark not raised after insert; ids stay unique only while rows survive");
+    }
     result
 }
 
@@ -321,7 +329,7 @@ pub(crate) fn delete_matching_entry(conn: &Connection, entry: &ClipboardEntry, t
 /// older than that cutoff. When the table holds ≤ threshold rows the subquery
 /// yields NULL and nothing is visited at all — the previous `id NOT IN
 /// (SELECT ...)` form scanned every record on every capture.
-pub(crate) fn trim_db_history(conn: &Connection, threshold: usize) {
+pub(crate) fn trim_db_history(conn: &Connection, threshold: usize) -> Result<(), ()> {
     if let Err(e) = conn.execute(
         "DELETE FROM clipboard_history
          WHERE id <= (SELECT id FROM clipboard_history
@@ -329,7 +337,9 @@ pub(crate) fn trim_db_history(conn: &Connection, threshold: usize) {
         rusqlite::params![threshold as i64],
     ) {
         crate::error_log!("CopyAttach: failed to trim DB history: {e}");
+        return Err(());
     }
+    Ok(())
 }
 
 /// The capture/paste write-through as ONE transaction: insert + dedup delete +
@@ -353,7 +363,9 @@ pub(crate) fn persist_entry_to_db(
     })?;
     insert_entry_to_db(&tx, entry, text, image_png, image_thumb)?;
     delete_matching_entry(&tx, entry, text);
-    trim_db_history(&tx, threshold);
+    // Trim is part of the same transaction: a failure must roll the whole
+    // write back rather than commit a capture that left the table over the cap.
+    trim_db_history(&tx, threshold)?;
     let row_id = tx.last_insert_rowid();
     tx.commit().map_err(|e| {
         crate::error_log!("CopyAttach: failed to commit write transaction: {e}");

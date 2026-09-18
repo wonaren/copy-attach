@@ -60,7 +60,13 @@ pub(crate) fn pasteboard_image_data() -> Option<Vec<u8>> {
             let bytes = std::slice::from_raw_parts(ptr as *const u8, len);
             let owned = bytes.to_vec();
             // Claim reusable-marked pages before the capture pipeline decodes them.
-            crate::backend::claim_pages(owned.as_ptr(), owned.capacity());
+            // An unclaimable buffer must not be decoded: the kernel could zero
+            // it mid-decode. Returning None means "no image representation" —
+            // the monitor then falls through to its other capture paths.
+            if !crate::backend::claim_pages(owned.as_ptr(), owned.capacity()) {
+                crate::error_log!("CopyAttach: pasteboard image bytes ({len} bytes) could not be claimed — skipped");
+                return None;
+            }
             return Some(owned);
         }
         None

@@ -305,31 +305,41 @@ def main():
              % (clk["slope_ratio"], clk["r2"], clk["n"]))
 
     # ---- Measurement view -------------------------------------------------
+    # Scoped to the dominant pid. The log is append-only and shared across
+    # launches, so an unscoped aggregation silently mixes records written by
+    # other (often older) processes into this session's numbers: a stale
+    # popup.show from a previous build reported p95 561 ms / max 733 ms while
+    # the live pid read p50 53 ms / max 118 ms, and retired spans such as
+    # popup.build_hosting still appeared because their records never left the
+    # file. Every writer stamps pid=, so the split is exact, not heuristic.
+    measured = [r for r in window if pid is None or r["pid"] == pid]
+    foreign = len(window) - len(measured)
+
     by_span = defaultdict(list)
-    for r in window:
+    for r in measured:
         if r["kind"] == "e" and r["dur_us"] is not None:
             by_span[(r["cat"], r["name"])].append(r["dur_us"])
     spans = {"%s/%s" % k: summarize(v) for k, v in by_span.items()}
 
     counters = defaultdict(list)
-    for r in window:
+    for r in measured:
         if r["kind"] == "c" and r["val"] is not None:
             counters["%s/%s" % (r["cat"], r["name"])].append(r["val"])
 
     chains = {
         "open->content_appear": summarize(
-            chain_latencies(window, "popup.show_begin", "popup.content_appear")),
-        "nav.input->nav.applied": summarize(chain_latencies(window, "nav.input", "nav.applied")),
+            chain_latencies(measured, "popup.show_begin", "popup.content_appear")),
+        "nav.input->nav.applied": summarize(chain_latencies(measured, "nav.input", "nav.applied")),
         "capture->ui_observed": summarize(
-            chain_latencies(window, "capture.text", "capture.ui_observed")
-            + chain_latencies(window, "capture.image_phase1", "capture.ui_observed")),
+            chain_latencies(measured, "capture.text", "capture.ui_observed")
+            + chain_latencies(measured, "capture.image_phase1", "capture.ui_observed")),
         "capture->list_published": summarize(
-            chain_latencies(window, "capture.text", "list.published")
-            + chain_latencies(window, "capture.image_phase1", "list.published")),
+            chain_latencies(measured, "capture.text", "list.published")
+            + chain_latencies(measured, "capture.image_phase1", "list.published")),
     }
 
     data_spans = defaultdict(list)
-    for r in window:
+    for r in measured:
         if r["kind"] == "e" and r["dur_us"] is not None and r.get("data"):
             data_spans[("%s/%s" % (r["cat"], r["name"]), r["data"])].append(r["dur_us"])
 
@@ -339,6 +349,10 @@ def main():
     print()
     print("Log: %s" % args.log)
     print("Dominant pid: %s   Records: %d   Malformed: %d" % (pid, len(window), malformed))
+    if foreign:
+        print("Scope: the distributions below cover pid %s only; %d record(s) in "
+              "this window belong to other processes and are excluded (rows are "
+              "stamped pid=, so the split is exact)." % (pid, foreign))
     if args.session_start is not None:
         print("Measurement window: wall >= %d" % args.session_start)
     print()

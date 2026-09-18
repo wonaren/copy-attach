@@ -118,11 +118,47 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// Redirect stderr to the debug log so Rust diagnostics land in the same file.
     private func redirectStderrToDebugLog() {
         let path = "/tmp/copyattach_debug.log"
+        Self.rotateDebugLogIfNeeded(at: path)
         let fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0o644)
         guard fd >= 0 else { return }
         dup2(fd, STDERR_FILENO)
         close(fd)
     }
+
+    /// Keep the shared debug log bounded by rotating it once per launch.
+    ///
+    /// Nothing rotated this file before: it is append-only, written by three
+    /// independent writers (Swift's `dup2`'d stderr, Rust's per-record `emit`,
+    /// and Rust's error log) and it therefore grew without bound. That is not
+    /// just disk hygiene — it corrupted measurement. The analyzer reads the
+    /// whole file, and spans from previous builds are indistinguishable from
+    /// current ones, so a stale `popup.show` from an older binary reported as
+    /// p95 561 ms / max 733 ms while the live pid showed p50 53 ms / max 118 ms.
+    /// Worse, `popup.build_hosting` no longer exists in the source yet still
+    /// appeared in the statistics.
+    ///
+    /// Rotation happens here, before every writer has opened the file: the
+    /// stderr fd is `dup2`'d to whatever `open` returns below, and Rust opens
+    /// per record, so no writer is ever left pointing at a moved inode. Doing
+    /// it per record instead would race exactly that fd.
+    private static func rotateDebugLogIfNeeded(at path: String) {
+        let fm = FileManager.default
+        guard let size = try? fm.attributesOfItem(atPath: path)[.size] as? Int,
+              let bytes = size as Int?,
+              bytes >= debugLogRotationBytes else { return }
+        let archived = path + ".1"
+        try? fm.removeItem(atPath: archived)
+        do {
+            try fm.moveItem(atPath: path, toPath: archived)
+        } catch {
+            // Keeping the old file is better than losing the log.
+            return
+        }
+    }
+
+    /// Rotate once the log passes this size (~4 MB holds many sessions of
+    /// tracing records while staying small enough to read whole).
+    private static let debugLogRotationBytes = 4 * 1024 * 1024
 
     @MainActor
     func entitlementDidChange() {

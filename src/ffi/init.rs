@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use crate::backend::{set_backend, Backend, DEFAULT_CLEANUP_THRESHOLD};
-use crate::db::{ensure_history_table, get_persist_dir, load_history_from_db, migrate_from_json_to_db, open_db, seed_first_launch_tips, trim_db_history};
+use crate::db::{bump_entry_id_watermark, ensure_history_table, entry_id_watermark, get_persist_dir, load_history_from_db, migrate_from_json_to_db, open_db, seed_first_launch_tips, trim_db_history};
 use crate::ignore::IgnoreRules;
 use crate::monitor::clipboard_monitor;
 use crate::types::ClipboardEntry;
@@ -153,17 +153,35 @@ pub extern "C" fn clipboard_init() -> c_int {
     // `load_history_from_db` already applies `LIMIT ?` with the same bound,
     // so the returned Vec is at most INIT_LOAD entries.
     let saved = load_history_from_db(&conn, INIT_LOAD);
-    trim_db_history(&conn, INIT_LOAD);
+    if trim_db_history(&conn, INIT_LOAD).is_err() {
+        crate::error_log!("CopyAttach: startup trim failed; the table stays over the load cap until the next capture's transactional trim");
+    }
 
-    // Prime the entry-id counter above the highest loaded ID so new entries
-    // never collide with restored ones. This is safe even when loaded IDs are
-    // a sparse set from the backfill (SQLite rowids can have gaps from
-    // deletion): the AtomicU64 is monotonic and always moves forward.
+    // Prime the entry-id counter above every id this database has ever issued.
+    //
+    // The loaded rows are NOT sufficient on their own: after a clear (or after
+    // a trim that removed everything) nothing is loaded, and priming from 0
+    // would restart ids at 1 — walking straight through the ids recorded in
+    // Swift's Favorites list, so old favorites would light up on unrelated new
+    // captures. The persisted watermark is what survives a clear.
+    //
+    // Loaded ids still contribute (a database written by an older build has no
+    // watermark yet), and `prime_entry_id` is monotonic, so neither source can
+    // move the counter backwards.
     {
-        let max_id = saved.iter().map(|e| match e {
+        let max_loaded = saved.iter().map(|e| match e {
             ClipboardEntry::Text { id, .. } | ClipboardEntry::Image { id, .. } => *id,
         }).max().unwrap_or(0);
-        crate::backend::prime_entry_id(max_id + 1);
+        let watermark = entry_id_watermark(&conn);
+        let next = max_loaded.max(watermark) + 1;
+        crate::backend::prime_entry_id(next);
+        if watermark < max_loaded {
+            // Adopt this database's existing ids into the watermark so the next
+            // launch needs no loaded rows to stay collision-free.
+            if bump_entry_id_watermark(&conn, max_loaded).is_err() {
+                crate::error_log!("CopyAttach: entry-id watermark not recorded; ids stay safe only while history is non-empty");
+            }
+        }
     }
 
     let history: Arc<Mutex<Vec<ClipboardEntry>>> = Arc::new(Mutex::new(saved));
@@ -199,6 +217,10 @@ pub extern "C" fn clipboard_init() -> c_int {
     // purge only runs when an image paste happens, so a long stretch without
     // one leaves stale files until the OS cleans $TMPDIR.
     super::paste::purge_stale_paste_images();
+
+    // Same contract for drag PNGs, whose only other sweep happens when a new
+    // image drag materializes — i.e. never, for a user who dragged once.
+    super::paste::purge_stale_drag_images();
 
     // Purge stale materialized undo payloads once at launch: the in-memory
     // undo stack does not survive a restart, so every file in the directory

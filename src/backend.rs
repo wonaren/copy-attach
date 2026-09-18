@@ -194,7 +194,15 @@ pub(crate) fn read_undo_payload(path: &Path) -> Result<UndoPayload, ()> {
             let body = String::from_utf8(buf).map_err(|e| {
                 crate::error_log!("CopyAttach: undo payload {} is not UTF-8: {e}", path.display());
             })?;
-            crate::backend::claim_pages(body.as_ptr(), body.capacity());
+            // A rejected claim leaves the body on pages the kernel may still
+            // reclaim, so the restored text could read back zeroed. Fail the
+            // undo instead of handing the user corrupted content (the slot is
+            // re-pushed by the caller, so the retry stays available).
+            if !crate::backend::claim_pages(body.as_ptr(), body.capacity()) {
+                crate::backend::mark_pages_reusable(body.as_ptr(), body.capacity());
+                crate::error_log!("CopyAttach: undo text payload {} could not be claimed — treating as unreadable", path.display());
+                return Err(());
+            }
             Ok(UndoPayload::Text(body))
         }
         1 => {
@@ -210,8 +218,20 @@ pub(crate) fn read_undo_payload(path: &Path) -> Result<UndoPayload, ()> {
             read_exact_or(&mut file, &mut thumb, path)?;
             crate::debug_log!("CopyAttach: undo read ok png_len={png_len} thumb_len={thumb_len} png_first={} thumb_first={}",
                 png.first().copied().unwrap_or(0), thumb.first().copied().unwrap_or(0));
-            claim_pages(png.as_ptr(), png.capacity());
-            claim_pages(thumb.as_ptr(), thumb.capacity());
+            // Same rule as the text payload: an unclaimable blob is one the
+            // kernel may zero while it is live, so refuse rather than restore
+            // an image that renders as garbage.
+            let png_ok = claim_pages(png.as_ptr(), png.capacity());
+            let thumb_ok = claim_pages(thumb.as_ptr(), thumb.capacity());
+            if !png_ok || !thumb_ok {
+                // Release-side symmetry: whatever was claimed goes back to the
+                // system before these buffers drop, or the pass leaves the pages
+                // dirty in the footprint.
+                crate::backend::mark_pages_reusable(png.as_ptr(), png.capacity());
+                crate::backend::mark_pages_reusable(thumb.as_ptr(), thumb.capacity());
+                crate::error_log!("CopyAttach: undo image payload {} could not be claimed — treating as unreadable", path.display());
+                return Err(());
+            }
             Ok(UndoPayload::Image { png, thumb })
         }
         other => {
@@ -437,9 +457,15 @@ pub(crate) fn new_entry_id() -> u64 {
     NEXT_ENTRY_ID.fetch_add(1, Ordering::SeqCst)
 }
 
-/// Ensure new entry IDs won't collide with already-loaded IDs after restart.
+/// Ensure new entry IDs won't collide with ids already issued for this
+/// database.
+///
+/// Monotonic (`fetch_max`, not `store`): ids are the identity Swift records
+/// favorites against, so moving the counter backwards would hand out an id
+/// that a favorite still points at, and an unrelated new capture would come
+/// up already-starred.
 pub(crate) fn prime_entry_id(min_next: u64) {
-    NEXT_ENTRY_ID.store(min_next, Ordering::SeqCst);
+    NEXT_ENTRY_ID.fetch_max(min_next, Ordering::SeqCst);
 }
 
 /// The exact pasteboard change made by this app while selecting an item.
@@ -604,6 +630,13 @@ pub(crate) fn mark_pages_reusable(ptr: *const u8, byte_len: usize) -> bool {
 /// within the buffer bounds. Returns `false` when the kernel rejected the
 /// claim; the caller must then treat the buffer as unusable (its pages may
 /// still be reclaimable while live) and allocate afresh.
+///
+/// The result is `#[must_use]` because the failure is silent and severe: the
+/// allocator hands back freed-but-marked blocks as-is, so a buffer whose claim
+/// was rejected can be zeroed by the kernel while it is live. Ignoring the
+/// return is only correct where the buffer is about to be fully overwritten
+/// before any read — and that intent has to be written down, not implied.
+#[must_use = "a rejected claim leaves the buffer reclaimable while live; either branch on the result or document why the buffer is fully rewritten"]
 pub(crate) fn claim_pages(ptr: *const u8, byte_len: usize) -> bool {
     if byte_len < PAGE_SIZE {
         return true;
@@ -693,8 +726,17 @@ impl ImageDecodeBuffer {
     }
 
     /// Wrap a fresh buffer; it still returns to the pool on drop.
+    ///
+    /// An unclaimable buffer is dropped rather than carried: its pages may be
+    /// reclaimed while the decode pipeline writes into them. `Vec::new()` is
+    /// the honest representation of "no usable buffer" here, and the caller's
+    /// fill/allocate path handles the empty capacity.
     pub(crate) fn from_vec(v: Vec<u8>) -> Self {
-        claim_pages(v.as_ptr(), v.capacity());
+        if !claim_pages(v.as_ptr(), v.capacity()) {
+            crate::debug_log!("CopyAttach: from_vec claim failed cap={} release", v.capacity());
+            mark_pages_reusable(v.as_ptr(), v.capacity());
+            return ImageDecodeBuffer { buf: Some(Vec::new()) };
+        }
         ImageDecodeBuffer { buf: Some(v) }
     }
 

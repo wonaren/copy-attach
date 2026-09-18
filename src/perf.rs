@@ -222,6 +222,13 @@ pub(crate) fn format_record(
 /// this independent of the app's stderr redirect and of any long-lived handle;
 /// tracing volume is bounded by design (only user-issued actions are traced),
 /// so this is not a hot allocation path.
+///
+/// Rotation is deliberately NOT done here. It happens once per launch, on the
+/// Swift side, before any writer opens the file (see
+/// `AppDelegate.rotateDebugLogIfNeeded`) — rotating from this per-record path
+/// would race the app's own stderr fd, which stays pointed at the file it
+/// opened at startup. Records are self-describing (`pid=`), so a log that
+/// spans a rotation is still read correctly by the analyzer.
 fn emit(line: &str) {
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)

@@ -41,10 +41,15 @@ pub extern "C" fn clipboard_search_ids(query: *const c_char, out_count: *mut c_i
     let ptr = Box::into_raw(boxed) as *mut u64;
     // Same hand-off contract as `vec_to_raw`: claim any reusable-marked pages
     // the allocator may have handed back before Swift reads the ids.
-    crate::backend::claim_pages(
+    if !crate::backend::claim_pages(
         ptr as *const u8,
         len * std::mem::size_of::<u64>(),
-    );
+    ) {
+        crate::backend::mark_pages_reusable(ptr as *const u8, len * std::mem::size_of::<u64>());
+        crate::error_log!("CopyAttach: search result ids could not be claimed — returning null");
+        unsafe { drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len))) };
+        return std::ptr::null_mut();
+    }
     unsafe { *out_count = len as c_int; }
     ptr
 }

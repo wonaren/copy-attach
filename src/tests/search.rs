@@ -76,7 +76,7 @@ fn test_search_reflects_bulk_trim() {
     }
     assert_eq!(crate::db::search_history(&conn, "bulk").len(), 100);
 
-    crate::db::trim_db_history(&conn, 10);
+    crate::db::trim_db_history(&conn, 10).expect("bulk trim must succeed");
     assert_eq!(crate::db::search_history(&conn, "bulk").len(), 10, "FTS follows bulk trim");
 }
 

@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::ffi::{c_char, c_int, CStr};
 use std::sync::atomic::Ordering;
 
@@ -118,9 +119,15 @@ pub extern "C" fn clipboard_delete_by_id(entry_id: u64) -> c_int {
             match loaded {
                 Ok((png, thumb, tw, th)) => {
                     // Claim any reusable-marked pages the allocator handed
-                    // back: these blobs sit in the undo stack (long-lived).
-                    crate::backend::claim_pages(png.as_ptr(), png.capacity());
-                    crate::backend::claim_pages(thumb.as_ptr(), thumb.capacity());
+                    // back: these blobs are written into the undo payload file.
+                    // An unclaimable blob could be zeroed mid-write, so the
+                    // delete is refused (the entry stays listed and retryable).
+                    if !crate::backend::claim_pages(png.as_ptr(), png.capacity())
+                        || !crate::backend::claim_pages(thumb.as_ptr(), thumb.capacity())
+                    {
+                        crate::error_log!("CopyAttach: image blobs for entry {entry_id} could not be claimed — delete aborted");
+                        return 0;
+                    }
                     *thumb_width = tw as u32;
                     *thumb_height = th as u32;
                     undo_image = Some(crate::backend::MarkImageBlobsReusableOnDrop { png, thumb });
@@ -465,9 +472,18 @@ pub extern "C" fn clipboard_set_custom_label(entry_id: u64, label: *const c_char
     1
 }
 
-/// Trim the oldest N percent of entries from both in-memory history and DB.
-/// Returns the number of entries removed.
-/// Deletes from DB first, then memory — so a DB failure leaves memory intact.
+/// Trim the oldest N percent of entries from both DB and in-memory history.
+/// Returns the number of entries actually removed.
+///
+/// DB first, and a DB failure aborts the whole operation (returns 0) with
+/// memory untouched: the DB row is what makes a removal durable, so trimming
+/// memory after a failed DELETE would let every "removed" entry reappear on
+/// the next launch while the caller still reported success. Mirrors the
+/// contract of `clipboard_delete_by_id` / `clipboard_clear_history`.
+///
+/// The removal is by identity (db_id), not by tail position: an in-memory entry
+/// whose row the DELETE did not touch must survive, and synchronously-inserted
+/// captures during the window are never in the deleted id set.
 #[no_mangle]
 pub extern "C" fn clipboard_trim_oldest_percent(percent: i32) -> c_int {
     let b = match try_backend() {
@@ -485,36 +501,66 @@ pub extern "C" fn clipboard_trim_oldest_percent(percent: i32) -> c_int {
         count.min(total)
     };
 
-    // Step 1: Delete oldest entries from DB first.
-    // If this fails, we don't touch memory — no consistency gap.
-    match b.db.lock() {
+    // Step 1: delete the oldest rows from DB, resolving exactly which row ids
+    // go away. A failure leaves memory — and the durable state — untouched.
+    let deleted_ids: HashSet<i64> = match b.db.lock() {
         Ok(conn) => {
-            if let Err(e) = conn.execute(
-                "DELETE FROM clipboard_history WHERE id IN (
-                    SELECT id FROM clipboard_history ORDER BY id ASC LIMIT ?)",
-                rusqlite::params![count as i64],
+            let mut stmt = match conn.prepare(
+                "SELECT id FROM clipboard_history ORDER BY id ASC LIMIT ?",
             ) {
-                crate::error_log!("CopyAttach: failed to trim DB by {count} entries: {e}");
+                Ok(s) => s,
+                Err(e) => {
+                    crate::error_log!("CopyAttach: failed to prepare trim query: {e} — history left intact");
+                    return 0;
+                }
+            };
+            let ids: Vec<i64> = match stmt.query_map(rusqlite::params![count as i64], |row| row.get(0)) {
+                Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
+                Err(e) => {
+                    crate::error_log!("CopyAttach: failed to list rows to trim: {e} — history left intact");
+                    return 0;
+                }
+            };
+            drop(stmt);
+            if ids.is_empty() {
+                return 0;
+            }
+            let placeholders = vec!["?"; ids.len()].join(",");
+            let sql = format!("DELETE FROM clipboard_history WHERE id IN ({placeholders})");
+            match conn.execute(&sql, rusqlite::params_from_iter(ids.iter())) {
+                Ok(rows) => ids.iter().copied().take(rows).collect(),
+                Err(e) => {
+                    crate::error_log!("CopyAttach: failed to trim DB by {count} entries: {e} — history left intact");
+                    return 0;
+                }
             }
         }
         Err(e) => {
             crate::error_log!("CopyAttach: DB mutex poisoned in trim_oldest_percent: {e}");
+            return 0;
         }
+    };
+
+    if deleted_ids.is_empty() {
+        return 0;
     }
 
-    // Step 2: Remove from in-memory history.
-    let mut hist = b.history.lock().unwrap();
-    let actual = count.min(hist.len());
-    let split_at = hist.len() - actual;
-    let _removed = hist.split_off(split_at);
-    // Now also trim to threshold in case percent-trim left us over the cap.
-    // (This shouldn't normally happen since percent-based trim is user-initiated,
-    //  but keep the invariant that len <= threshold.)
-    while hist.len() > b.cleanup_threshold.load(Ordering::Relaxed) {
-        hist.pop();
-    }
-    // Publish under the history lock (entries were removed from the tail).
-    crate::backend::mark_history_changed();
+    // Step 2: drop exactly those rows from memory, by identity. The entries
+    // the DELETE did not remove keep their rows and must stay listed.
+    let actual = {
+        let mut hist = b.history.lock().unwrap();
+        let before = hist.len();
+        hist.retain(|e| !deleted_ids.contains(&e.db_id()));
+        // Also honour the tracked cap in case the caller trimmed while the
+        // list was already under it.
+        while hist.len() > b.cleanup_threshold.load(Ordering::Relaxed) {
+            hist.pop();
+        }
+        let removed = before - hist.len();
+        // Publish under the history lock (entries were removed).
+        crate::backend::mark_history_changed();
+        removed
+    };
 
     actual as c_int
 }

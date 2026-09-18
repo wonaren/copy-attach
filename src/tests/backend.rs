@@ -532,6 +532,87 @@ fn test_history_mutations_publish_a_revision() {
     }
 }
 
+/// Guards the DB-first contract of `clipboard_trim_oldest_percent`: when the
+/// DB DELETE fails, memory must be left untouched AND the call must report 0.
+///
+/// The write failure is produced for real (`PRAGMA query_only`), not mocked —
+/// the regression was that the old code logged the DB error and then removed
+/// the entries from memory anyway, so every "removed" entry reappeared on the
+/// next launch while the caller still reported a successful removal.
+///
+/// Cleanup runs BEFORE the assertions so a failing assert cannot leak the
+/// fixture into the shared history for the other tests in this file.
+#[test]
+fn test_trim_oldest_percent_leaves_memory_intact_when_db_delete_fails() {
+    let _shared = shared_state_guard();
+    ensure_test_backend();
+    let b = crate::backend::try_backend().expect("backend initialized");
+
+    // Reserved id range so cleanup can find exactly this test's entries.
+    let base: u64 = 910_000_000;
+    let n: u64 = 8;
+    let mut fixture_ids: Vec<i64> = Vec::new();
+    {
+        let conn = b.db.lock().unwrap();
+        for i in 0..n {
+            conn.execute(
+                "INSERT INTO clipboard_history
+                    (entry_type, text, hash, timestamp, source_name, source_bundle_id, entry_id)
+                 VALUES (0, ?1, ?2, 0, 'TrimTest', 'com.example.trimtest', ?3)",
+                rusqlite::params![format!("trim-{i}"), i as i64, (base + i) as i64],
+            ).expect("insert trim fixture row");
+            fixture_ids.push(conn.last_insert_rowid());
+        }
+    }
+    {
+        let mut hist = b.history.lock().unwrap();
+        for (i, db_id) in fixture_ids.iter().enumerate() {
+            hist.push(ClipboardEntry::Text {
+                id: base + i as u64,
+                preview: format!("trim-{i}"),
+                label: format!("trim-{i}"),
+                custom_label: String::new(),
+                text_hash: i as u64,
+                timestamp: 0,
+                source_name: "TrimTest".to_string(),
+                source_bundle_id: "com.example.trimtest".to_string(),
+                db_id: *db_id,
+            });
+        }
+    }
+    let before = b.history.lock().unwrap().len();
+
+    // Every write now fails inside SQLite.
+    {
+        let conn = b.db.lock().unwrap();
+        conn.pragma_update(None, "query_only", true).expect("enable query_only");
+    }
+    let removed = crate::ffi::clipboard_trim_oldest_percent(40);
+    let after = b.history.lock().unwrap().len();
+
+    // Restore writability and unwind the fixture before asserting.
+    {
+        let conn = b.db.lock().unwrap();
+        conn.pragma_update(None, "query_only", false).expect("disable query_only");
+        for db_id in &fixture_ids {
+            let _ = conn.execute(
+                "DELETE FROM clipboard_history WHERE id = ?1",
+                rusqlite::params![db_id],
+            );
+        }
+    }
+    {
+        let mut hist = b.history.lock().unwrap();
+        hist.retain(|e| !(e.entry_id() >= base && e.entry_id() < base + n));
+    }
+
+    assert_eq!(removed, 0, "a failed DB delete must report nothing removed");
+    assert_eq!(
+        after, before,
+        "memory must be untouched when the DB delete failed (was {before}, now {after})"
+    );
+}
+
 #[test]
 fn test_log_timestamp_is_utc_plus_8() {
     assert_eq!(crate::backend::format_log_timestamp(0), "1970-01-01 08:00:00 +0800");

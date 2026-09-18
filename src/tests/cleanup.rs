@@ -1,7 +1,53 @@
 // Auto-cleanup threshold, trim-oldest-percent, and dynamic threshold tests.
 
 use crate::history::add_to_history;
-use super::{fill_and_trim_to, make_text, simulate_trim_oldest_percent};
+use super::{assign_row_ids, fill_and_trim_to, make_text, simulate_trim_oldest_percent};
+
+/// Build `n` distinct text entries carrying real row ids, newest first — the
+/// shape the production list has (head = newest = largest db_id).
+fn with_rows(n: usize) -> Vec<crate::types::ClipboardEntry> {
+    let mut hist: Vec<_> = (0..n).map(|i| make_text(&format!("t-{}", i), i as u64)).collect();
+    hist.reverse();
+    assign_row_ids(&mut hist);
+    hist
+}
+
+/// Guards the temp-file TTL sweep used by both `Paste/` and `Drag/`.
+///
+/// The behaviour this pins down is the drag directory's old rule: it deleted
+/// every file at the START of the next image drag, so the last drag's PNG was
+/// retained forever for anyone who dragged an image only once (measured: a
+/// 207 KB PNG from the previous day still on disk across several restarts).
+/// The sweep must be age-based, and must leave fresh files alone — a drop
+/// destination can still be reading the file the current drag produced.
+#[test]
+fn test_temp_purge_removes_only_aged_out_files() {
+    use std::time::{Duration, SystemTime};
+
+    let dir = std::env::temp_dir().join(format!("CopyAttach-ttl-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create scratch dir");
+
+    let stale = dir.join("stale.png");
+    let fresh = dir.join("fresh.png");
+    std::fs::write(&stale, b"stale").expect("write stale");
+    std::fs::write(&fresh, b"fresh").expect("write fresh");
+
+    // Age one file past the TTL by writing its mtime directly.
+    let old_time = SystemTime::now() - Duration::from_secs(600);
+    let f = std::fs::File::options().write(true).open(&stale).expect("open stale");
+    f.set_modified(old_time).expect("set mtime");
+    drop(f);
+
+    crate::ffi::paste::purge_age_out(dir.clone(), Duration::from_secs(60));
+
+    let stale_exists = stale.exists();
+    let fresh_exists = fresh.exists();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(!stale_exists, "a file older than the TTL must be purged");
+    assert!(fresh_exists, "a file inside the TTL must survive (it may still be in use)");
+}
 
 #[test]
 fn test_auto_cleanup_at_threshold_100() {
@@ -72,7 +118,7 @@ fn test_auto_cleanup_exactly_at_threshold() {
 
 #[test]
 fn test_trim_percent_0() {
-    let hist: Vec<_> = (0..100).map(|i| make_text(&format!("t-{}", i), i as u64)).collect();
+    let hist = with_rows(100);
     let (kept, removed) = simulate_trim_oldest_percent(hist, 0);
     assert_eq!(kept.len(), 100);
     assert!(removed.is_empty());
@@ -80,7 +126,7 @@ fn test_trim_percent_0() {
 
 #[test]
 fn test_trim_percent_100() {
-    let hist: Vec<_> = (0..100).map(|i| make_text(&format!("t-{}", i), i as u64)).collect();
+    let hist = with_rows(100);
     let (kept, removed) = simulate_trim_oldest_percent(hist, 100);
     assert!(kept.is_empty());
     assert_eq!(removed.len(), 100);
@@ -93,6 +139,7 @@ fn test_trim_percent_40() {
         hist = add_to_history(hist, make_text(&format!("t-{:03}", i), i as u64));
     }
     assert_eq!(hist.len(), 100);
+    assign_row_ids(&mut hist);
     let (kept, removed) = simulate_trim_oldest_percent(hist, 40);
     assert_eq!(kept.len(), 60);
     assert_eq!(removed.len(), 40);
@@ -102,7 +149,7 @@ fn test_trim_percent_40() {
 
 #[test]
 fn test_trim_percent_50_even() {
-    let hist: Vec<_> = (0..50).map(|i| make_text(&format!("t-{}", i), i as u64)).collect();
+    let hist = with_rows(50);
     let (kept, removed) = simulate_trim_oldest_percent(hist, 50);
     assert_eq!(kept.len(), 25);
     assert_eq!(removed.len(), 25);
@@ -110,7 +157,7 @@ fn test_trim_percent_50_even() {
 
 #[test]
 fn test_trim_percent_ceil_small_count() {
-    let hist: Vec<_> = (0..3).map(|i| make_text(&format!("t-{}", i), i as u64)).collect();
+    let hist = with_rows(3);
     let (kept, removed) = simulate_trim_oldest_percent(hist, 40);
     assert_eq!(kept.len(), 1);
     assert_eq!(removed.len(), 2);
@@ -125,7 +172,8 @@ fn test_trim_percent_empty() {
 
 #[test]
 fn test_trim_percent_ceil_single_entry() {
-    let hist = vec![make_text("only", 0)];
+    let mut hist = vec![make_text("only", 0)];
+    assign_row_ids(&mut hist);
     let (kept, removed) = simulate_trim_oldest_percent(hist, 1);
     assert!(kept.is_empty());
     assert_eq!(removed.len(), 1);
@@ -137,6 +185,7 @@ fn test_trim_percent_all_thresholds_consistency() {
         let over = (threshold as f64 * 1.1) as usize;
         let mut hist = fill_and_trim_to(threshold, over);
         assert_eq!(hist.len(), threshold, "failed fill at threshold {}", threshold);
+        assign_row_ids(&mut hist);
         let kept_count = threshold - ((threshold as f64 * 0.4).ceil()) as usize;
         let (kept, _) = simulate_trim_oldest_percent(hist, 40);
         assert_eq!(kept.len(), kept_count, "failed trim at threshold {}", threshold);

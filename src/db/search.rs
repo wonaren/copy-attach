@@ -144,6 +144,14 @@ pub(crate) fn load_text_by_db_id(conn: &Connection, db_id: i64) -> Option<String
         .ok()?;
     // rusqlite may have grown this buffer over reusable-marked pages; claim
     // them before the caller reads the body (same contract as blob reads).
-    crate::backend::claim_pages(text.as_ptr(), text.capacity());
+    // A rejected claim leaves the body on pages the kernel may reclaim, so
+    // report no text: every caller already treats None as a load failure
+    // (delete aborts, paste aborts, preview declines) rather than silently
+    // acting on possibly-zeroed content.
+    if !crate::backend::claim_pages(text.as_ptr(), text.capacity()) {
+        crate::backend::mark_pages_reusable(text.as_ptr(), text.capacity());
+        crate::error_log!("CopyAttach: text body for db_id={db_id} could not be claimed — reported as unreadable");
+        return None;
+    }
     Some(text)
 }

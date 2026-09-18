@@ -14,7 +14,14 @@ pub(crate) fn encode_png_into(width: u32, height: u32, rgba_bytes: &[u8], output
     // size is an upper bound; pages the encoder never touches stay clean.
     if output.capacity() < rgba_bytes.len() {
         let fresh: Vec<u8> = Vec::with_capacity(rgba_bytes.len());
-        crate::backend::claim_pages(fresh.as_ptr(), fresh.capacity());
+        // Claim before the encoder writes. The encoder writes the whole PNG
+        // stream and the reader below never sees bytes it did not produce, so
+        // a rejected claim is not recoverable by reading around it — bail out
+        // and let the caller treat the encode as failed.
+        if !crate::backend::claim_pages(fresh.as_ptr(), fresh.capacity()) {
+            crate::error_log!("CopyAttach: encode scratch cap={} could not be claimed", fresh.capacity());
+            return None;
+        }
         let old = std::mem::replace(output, fresh);
         crate::backend::mark_pages_reusable(old.as_ptr(), old.capacity());
     }
@@ -55,7 +62,14 @@ pub(crate) fn decode_png_rgba8_into(png: &[u8], out: &mut Vec<u8>) -> Option<(u3
         // idle-pool footprint contract. A fresh whole allocation is always a
         // single mapping; claim it before the decoder writes.
         let fresh: Vec<u8> = Vec::with_capacity(needed);
-        crate::backend::claim_pages(fresh.as_ptr(), fresh.capacity());
+        // Same rule as the encode path: the decoder writes every byte the
+        // caller will read, so an unclaimable buffer means the decode cannot
+        // be trusted. Report it as a decode failure (callers fall back or
+        // decline) instead of decoding onto reclaimable pages.
+        if !crate::backend::claim_pages(fresh.as_ptr(), fresh.capacity()) {
+            crate::error_log!("CopyAttach: decode scratch cap={} could not be claimed", fresh.capacity());
+            return None;
+        }
         let old = std::mem::replace(out, fresh);
         crate::backend::mark_pages_reusable(old.as_ptr(), old.capacity());
     }
@@ -263,8 +277,14 @@ pub(crate) fn resize_rgba(
     // Horizontal pass: src -> tmp.
     let tmp_len = (dst_w as usize) * (height as usize) * 4;
     let mut tmp = vec![0u8; tmp_len];
-    // Claim pages before writing; every byte is rewritten below.
-    crate::backend::claim_pages(tmp.as_ptr(), tmp.capacity());
+    // Claim pages before writing: every byte of both passes is written before
+    // it is read, so a rejected claim would mean resampling from memory the
+    // kernel may zero mid-pass. Fail the resize rather than produce a
+    // possibly-corrupted image.
+    if !crate::backend::claim_pages(tmp.as_ptr(), tmp.capacity()) {
+        crate::error_log!("CopyAttach: resize horizontal scratch cap={} could not be claimed", tmp.capacity());
+        return None;
+    }
     for y in 0..height {
         let src_row = &src[(y as usize) * (width as usize) * 4..];
         let tmp_row = &mut tmp[(y as usize) * (dst_w as usize) * 4..];
@@ -276,7 +296,10 @@ pub(crate) fn resize_rgba(
 
     // Vertical pass: tmp -> out.
     let mut out = vec![0u8; (dst_w as usize) * (dst_h as usize) * 4];
-    crate::backend::claim_pages(out.as_ptr(), out.capacity());
+    if !crate::backend::claim_pages(out.as_ptr(), out.capacity()) {
+        crate::error_log!("CopyAttach: resize output cap={} could not be claimed", out.capacity());
+        return None;
+    }
     let row_bytes = (dst_w as usize) * 4;
     for y in 0..dst_h {
         let center = (y as f32 + 0.5) * scale_y - 0.5;

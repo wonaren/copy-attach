@@ -152,6 +152,28 @@ class ClipboardBackend {
         }
     }
 
+    /// Drop favorites whose entry no longer exists.
+    ///
+    /// Every publish of the list is the authoritative answer to "which ids
+    /// exist right now", so this is the single convergence point: it covers
+    /// deletion, undo, threshold trims, percent trims and clear — each of
+    /// which removes entries without knowing about favorites. Without it the
+    /// set only ever grows, and a stale id becomes dangerous rather than
+    /// merely useless: entry ids are persisted, so a re-issued id would
+    /// resurrect an old favorite on unrelated content.
+    ///
+    /// Deliberately idempotent and silent when nothing changed: it runs on
+    /// every reload, and writing UserDefaults on each one would be churn.
+    private func pruneFavorites(against items: [ClipboardItem]) {
+        guard !favoriteIds.isEmpty else { return }
+        let live = Set(items.map(\.id))
+        let stale = favoriteIds.subtracting(live)
+        guard !stale.isEmpty else { return }
+        favoriteIds.subtract(stale)
+        saveFavorites()
+        debugLog("pruneFavorites: dropped \(stale.count) favorite id(s) with no remaining entry")
+    }
+
     func toggleFavorite(_ entryId: Int) {
         if favoriteIds.contains(entryId) {
             favoriteIds.remove(entryId)
@@ -517,6 +539,7 @@ class ClipboardBackend {
                 MainActor.assumeIsolated {
                     guard gen == self.reloadGeneration.withLock({ $0 }) else { return }
                     self.items = newItems
+                    self.pruneFavorites(against: newItems)
                     // New base data — invalidate memoized display lists.
                     self.itemsGeneration &+= 1
                     // List published: paired with the Rust capture marker this is

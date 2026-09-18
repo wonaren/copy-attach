@@ -66,11 +66,20 @@ pub extern "C" fn clipboard_snapshot_acquire() -> *mut Snapshot {
     };
     let rows: Vec<SnapshotRow> = hist.iter().map(SnapshotRow::from_entry).collect();
     // Swift reads the rows across the FFI for the popup's lifetime; claim any
-    // reusable-marked pages the allocator handed back (see vec_to_raw).
-    crate::backend::claim_pages(
+    // reusable-marked pages the allocator handed back (see vec_to_raw). An
+    // unclaimable rows array would let the list render from reclaimable
+    // memory, so report "no snapshot" and let the reload be retried.
+    if !crate::backend::claim_pages(
         rows.as_ptr().cast::<u8>(),
         rows.capacity() * std::mem::size_of::<SnapshotRow>(),
-    );
+    ) {
+        crate::backend::mark_pages_reusable(
+            rows.as_ptr().cast::<u8>(),
+            rows.capacity() * std::mem::size_of::<SnapshotRow>(),
+        );
+        crate::error_log!("CopyAttach: snapshot rows could not be claimed — returning null");
+        return std::ptr::null_mut();
+    }
     Box::into_raw(Box::new(Snapshot(rows)))
 }
 // Packed snapshot wire format (one allocation, no per-field CString churn)
