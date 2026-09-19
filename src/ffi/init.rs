@@ -13,10 +13,12 @@ use crate::types::ClipboardEntry;
 //   1  = started
 //   0  = retryable (transient; the UI retries on a cooldown)
 //  -1  = corrupt database (replacing the file is the only fix)
-//  -2  = permanent environment failure (read-only / permissions / disk full /
-//        path not openable). Retrying cannot help; the user must fix the
-//        environment. Distinct from -1: the database is intact, so offering a
-//        "back up and rebuild" would needlessly destroy a good file.
+//  -2  = environment failure (read-only / permissions / disk full / path not
+//        openable). A classification, not a terminal state: the caller keeps
+//        retrying with backoff, so the app auto-recovers once the user fixes
+//        the environment out of band. Distinct from -1: the database is
+//        intact, so offering a "back up and rebuild" would needlessly destroy
+//        a good file.
 const INIT_OK: c_int = 1;
 const INIT_RETRYABLE: c_int = 0;
 const INIT_CORRUPT: c_int = -1;

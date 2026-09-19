@@ -2,7 +2,7 @@
 
 use crate::ffi::{clipboard_free_string, SnapshotRow};
 use rusqlite::Connection;
-use super::{insert_text, make_image, make_test_image_rgba, make_text, test_db};
+use super::{ClipboardEntry, insert_text, make_image, make_test_image_rgba, make_text, test_db};
 
 #[test]
 fn test_search_fts_case_insensitive_substring() {
@@ -257,11 +257,17 @@ fn test_search_matches_label_custom_label_and_source_name() {
         [],
     ).unwrap();
 
-    // 2. Insert an image entry from Photoshop with a custom label
+    // 2. Insert an image entry from Photoshop with a custom label.
+    // NOTE: `label` is deliberately left empty — this mirrors the real insert
+    // path (`db::persist_entry_to_db`), which never binds `label` for image
+    // rows. The "Image (W×H)" string the UI shows is synthesized at read time
+    // from width/height (see `types::ClipboardEntry::label`), so it is not a
+    // stored column and image size is NOT searchable. Inserting a label here
+    // would test a column production never fills.
     conn.execute(
         "INSERT INTO clipboard_history
-            (entry_type, label, custom_label, source_name, source_bundle_id, entry_id, timestamp)
-         VALUES (1, 'Image (1920×1080)', 'Architecture Diagram', 'Photoshop', 'com.adobe.photoshop', 5002, 200)",
+            (entry_type, custom_label, source_name, source_bundle_id, entry_id, timestamp)
+         VALUES (1, 'Architecture Diagram', 'Photoshop', 'com.adobe.photoshop', 5002, 200)",
         [],
     ).unwrap();
 
@@ -281,9 +287,11 @@ fn test_search_matches_label_custom_label_and_source_name() {
     let res = crate::db::search_history(&conn, "Safari");
     assert_eq!(res, vec![5001]);
 
-    // Matching label on image (dimensions)
+    // Image size is NOT searchable: the label column is empty on image rows,
+    // so a dimension query must not match the image (regression guard against
+    // re-introducing a size-search promise the storage cannot honour).
     let res = crate::db::search_history(&conn, "1920");
-    assert_eq!(res, vec![5002]);
+    assert!(res.is_empty(), "image size must not be searchable, got {res:?}");
 
     // Matching custom_label on image
     let res = crate::db::search_history(&conn, "Architecture");
@@ -297,7 +305,48 @@ fn test_search_matches_label_custom_label_and_source_name() {
     let res_ph = crate::db::search_history(&conn, "Ph"); // in "Alpha" (5001) and "Photoshop" (5002)
     assert_eq!(res_ph, vec![5001, 5002]);
 
-    let res_19 = crate::db::search_history(&conn, "19"); // only in "1920" (5002)
-    assert_eq!(res_19, vec![5002]);
+    // Short dimension query stays empty for the same reason as "1920" above.
+    let res_19 = crate::db::search_history(&conn, "19");
+    assert!(res_19.is_empty(), "image size must not be searchable, got {res_19:?}");
+}
+
+/// The image-size contract, exercised through the REAL insert path rather than a
+/// hand-written row: persist an image entry the way the capture pipeline does,
+/// then assert its dimensions are not searchable. `persist_entry_to_db` never
+/// binds `label` for image rows, so the "Image (W×H)" text the UI renders is
+/// read-time-only and cannot match a query.
+#[test]
+fn test_image_dimensions_are_not_searchable_via_insert_path() {
+    let conn = test_db();
+    let rgba = make_test_image_rgba(64, 48, 7);
+    let entry = make_image(&rgba, 64, 48, 900);
+    let png = crate::image::encode_png(64, 48, &rgba).unwrap();
+    let thumb = crate::image::create_thumbnail(64, 48, &rgba).unwrap();
+    let (tw, th) = match &entry {
+        ClipboardEntry::Image { thumb_width, thumb_height, .. } => (*thumb_width, *thumb_height),
+        _ => unreachable!("make_image must produce an image entry"),
+    };
+    crate::db::insert_entry_to_db(&conn, &entry, None, Some(&png), Some((&thumb.0, tw, th)))
+        .expect("insert image");
+
+    // The row exists and carries real dimensions, but no persisted `label`.
+    let (count, label): (i64, String) = conn
+        .query_row(
+            "SELECT COUNT(*), COALESCE(MAX(label), '') FROM clipboard_history WHERE entry_type = 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(count, 1, "image row should be persisted");
+    assert_eq!(label, "", "image rows must not persist a label");
+
+    // Neither the dimensions nor the synthesized label text is reachable.
+    for q in ["64", "48", "64×48", "Image"] {
+        let res = crate::db::search_history(&conn, q);
+        assert!(
+            res.is_empty(),
+            "query {q:?} must not match an image by size/label, got {res:?}"
+        );
+    }
 }
 

@@ -24,7 +24,7 @@ CopyAttach 是一个 macOS 剪贴板历史管理器：Rust 后端（cdylib）+ S
 # 构建全部（Rust + Swift）
 ./build.sh
 
-# 压力测试构建（生成 1 万条数据）
+# 压力测试构建（仅编译 stress-test 特性；1 万条数据由 stress_test.sh 或 App 内压力面板生成）
 STRESS=1 ./build.sh
 
 # 仅 Rust release 构建
@@ -46,7 +46,7 @@ open "CopyAttach.app"
 ```
 
 **版本号与 CHANGELOG 约定**：
-- **版本号**：唯一版本源在 `Cargo.toml` 的 `version` 字段，`build.sh` 自动注入到产物 `CopyAttach.app/Contents/Info.plist` 的 `CFBundleShortVersionString`（保持源码 `SwiftApp/Info.plist` 干净无脏 diff）。开发版本带 `-dev` 后缀（如 `0.93.0-dev`），发布版本去掉后缀。每次功能/修复提交都提升版本号并写入提交信息。
+- **版本号**：唯一**生效**版本源在 `Cargo.toml` 的 `version` 字段，`build.sh` 自动注入到产物 `CopyAttach.app/Contents/Info.plist` 的 `CFBundleShortVersionString`（源码 `SwiftApp/Info.plist` 里保留一个恒为 `0.0.0` 的死值占位，build.sh 不修改它）。开发版本带 `-dev` 后缀（如 `0.93.0-dev`），发布版本去掉后缀。每次功能/修复提交都提升版本号并写入提交信息。
 - **版本号改动范围（硬约束）**：**只允许改动末尾的 patch 数字**（如 `0.102.3` 中的 `3`），**绝不能改动中间的 minor 与前面的 major**（`102` 和 `0` 由人工决定）。需要联动大版本时必须停下等用户指示。
 - **CHANGELOG 规范**：内容必须**纯面向用户且简洁凝练**。
 
@@ -88,10 +88,10 @@ license-server 服务端代码**不在本仓库**（本机 `~/copy-attach-licens
 | 模块 | 职责 |
 |---|---|
 | `ffi/` | 所有 FFI 导出函数（目录模块）：`snapshot.rs` / `search.rs` / `init.rs` / `accessors.rs` / `paste.rs` / `history.rs` / `stress.rs` |
-| `db/` | SQLite write-through：`schema.rs`（连接/FTS5/迁移）、`crud.rs`（load/insert/dedup/trim）、`search.rs`（FTS/LIKE）。禁用 mmap，4MB LRU page cache；FTS 索引上限 512K 字符，超限行走 LIKE 兜底；text/image hash 均为稳定 FNV-1a 64 |
+| `db/` | SQLite write-through：`schema.rs`（连接/FTS5/`user_version` 迁移）、`migration.rs`（legacy `history.json` → SQLite 导入，feature-gated）、`crud.rs`（load/insert/dedup/trim）、`search.rs`（FTS/LIKE）。禁用 mmap，4MB LRU page cache；FTS 索引上限 512K 字符，超限行走 LIKE 兜底；text/image hash 均为稳定 FNV-1a 64 |
 | `monitor.rs` | 后台线程每 500ms 轮询剪贴板，changeCount 轻量检测，write-through DB，ignore rules 过滤。图片 Phase 2 单 worker + 单槽有界队列（背压） |
 | `ignore.rs` | 捕获时忽略规则：按 app bundle ID、类型、短文本阈值过滤 |
-| `image.rs` | PNG/JPEG/GIF/WebP/BMP/TIFF 编解码，CatmullRom 缩略图（等比 fit 进行显示框 920×200px），FNV-1a 内容哈希 |
+| `image.rs` | 解码 PNG/JPEG/GIF/WebP/BMP/TIFF，**编码只有 PNG**（存储 blob 恒为 PNG），CatmullRom 缩略图（等比 fit 进行显示框 920×200px），FNV-1a 内容哈希 |
 | `backend.rs` | `OnceLock<Backend>` 单例，entry_id（AtomicU64），HISTORY_REVISION / IMAGE_ENCODING_COUNTER 原子计数器，自写抑制 |
 | `macos.rs` | NSPasteboard changeCount + 文件 URL 读写，CGEventPost Cmd+V，AXIsProcessTrusted。cfg-gated，非 macOS 用空桩 |
 | `history.rs` | `add_to_history()` — 去重 + 头部插入，纯函数式 |
@@ -101,7 +101,7 @@ license-server 服务端代码**不在本仓库**（本机 `~/copy-attach-licens
 **关键机制**（详细原理见 `docs/engineering-notes.md`）：
 
 - **两阶段图片捕获**：Phase 1 同步 hash + 缩略图 → 内存；Phase 2 异步完整 PNG 编码 → DB（单槽有界队列背压，防内存无界增长）
-- **内存治理（0.99.10 起）**：启动不读剪贴板；图片捕获按 PNG→TIFF 顺序读最小表示；Phase 2 编码 scratch 复用；空闲池页标记可回收（`madvise MADV_FREE_REUSABLE`）；预览解码走 Rust 而非 ImageIO；自研 u8 resize 替代 `imageops::resize`（避免 f32 中转）。**改任何大缓冲路径前必读 `docs/engineering-notes.md` 的 madvise / claim 契约章节**
+- **内存治理（0.99.10 起）**：启动不读剪贴板；图片捕获按固定类型优先级 PNG→TIFF→JPEG→GIF→WebP→BMP 取第一个存在的表示（**只按类型优先级，不比较各表示的体积**）；Phase 2 编码 scratch 复用；空闲池页标记可回收（`madvise MADV_FREE_REUSABLE`）；预览解码走 Rust 而非 ImageIO；自研 u8 resize 替代 `imageops::resize`（避免 f32 中转）。**改任何大缓冲路径前必读 `docs/engineering-notes.md` 的 madvise / claim 契约章节**
 - **db_id 不变量**：内存条目的 `db_id` 必须指向 DB 中该条目的行，且赋值按内容 hash 匹配、绝不按头部位置
 - **Suppress re-capture**：select_and_paste 通过 `pending_self_write` 标记自身写入，监控线程跳过匹配的 changeCount
 - **undo 删除**：撤销栈 ≤1 条，`MAX_UNDO_BYTES`(48MB) 约束的是**磁盘载荷**——删除时先落盘（`$TMPDIR/CopyAttach/Undo/*.bin`），内存只留 `payload_path`/`payload_bytes` + 元数据，blobs 随即 `mark_pages_reusable`（实测删掉 4.19MB 大图后 footprint 反降 7MB）
@@ -112,25 +112,29 @@ license-server 服务端代码**不在本仓库**（本机 `~/copy-attach-licens
 
 ```
 SwiftApp/
-  ├── CopyAttachApp.swift              ← @main, MenuBarExtra
-  ├── ClipboardBackend.swift           ← Rust FFI 封装，@Observable，快照轮询/缓存
+  ├── CopyAttachApp.swift              ← @main, MenuBarExtra, 单实例守卫
+  ├── ClipboardBackend.swift           ← Rust FFI 封装，@Observable，快照/历史变更等待器
   ├── HotkeyManager.swift              ← Carbon + NSEvent 双注册，录制模式
   ├── ColorTheme.swift                 ← 深色/浅色颜色体系
-  ├── Licensing/                       ← 许可证体系（8 文件）
+  ├── Hotkey/HotkeyConfig.swift        ← 快捷键配置模型（键码/修饰键/展示串）
+  ├── Licensing/                       ← 许可证体系（11 文件：管理器/租约校验/设备身份/钥匙串/门禁窗/庆祝视图/设置）
   ├── App/AppDelegate.swift            ← 生命周期, 弹窗管理, entitlement 门控, 启动时 dup2 stderr → 日志
-  ├── Settings/InlineSettingsView.swift ← 5 标签页设置面板
-  ├── Onboarding/                      ← 核心操作引导（4 文件：引导模型/浮窗卡片/聚光灯遮罩）
-  ├── Popup/                           ← 主弹窗（7 文件：内容/窗口/事件/行/拖拽）
+  ├── Settings/                        ← InlineSettingsView（6 标签页：通用/快捷键/存储/忽略/许可证/关于）
+  │                                       + GeneralTab / ShortcutsTab / StorageTab / IgnoreTab / AboutTab / SheetDismissHelper
+  ├── Onboarding/                      ← 核心操作引导（5 文件：引导模型/浮窗卡片/聚光灯遮罩）
+  ├── Popup/                           ← 主弹窗（12 文件：内容/窗口/事件/行/拖拽/右键菜单/标签过滤/预览/动作）
   ├── Preview/                         ← 预览窗口（4 文件：窗口/内容/布局/缩放）
-  ├── Backend/                         ← ClipboardItem / ImageDecode / AppIcon 缓存
-  └── Utility/                         ← DebugLog / VisualWidth
+  ├── Backend/                         ← ClipboardItem / ImageDecode / AppIcon 缓存 / PackedSnapshot / PreviewDecodeGate
+  ├── Stress/                          ← 压力测试面板与视图模型（依赖 STRESS=1 构建）
+  ├── Update/                          ← 应用内更新下载（蓝奏云优先，GitHub 兜底）
+  └── Utility/                         ← DebugLog / VisualWidth / PerfTrace / PerfSelfCheck
 ```
 
 **关键 FFI 模式**：
 
 - **Snapshot API**（`clipboard_snapshot_acquire/release`）：Swift 批量读取时一次性加锁构建紧凑快照（`SnapshotRow`：类型/id/时间戳/label/source/图片尺寸 + preview，**不含全文**），后续无锁访问。新功能优先用此 API
 - **稳定 ID**：`entry_id`（u64，AtomicU64 单调递增），用于 `select_and_paste_by_id`，避免数组索引竞争
-- **图片加载**：缩略图走 `clipboard_get_image_thumb_by_db_id`（仅 SQLite 读），后台用 ImageIO 降采样到**行显示框**（460×100pt，按屏幕 backupScale 换算像素；Rust 端存储 blob 按 2× 上限 920×200 生成，双向镜像同一组常量）后存入 `NSCache`（countLimit 120、8MB，cost 按实际解码尺寸计），弹窗关闭立即清空；大图走 `clipboard_get_image_full_by_db_id`（优先内存，后备 DB）。预览大图由 Rust 降采样解码，预算 = 显示尺寸×scale 与 2048px 的较小值。**显示框是矩形而非「最长边」**：扁图由宽边限制、竖图由高边限制，按长/短边匹配会让竖图纵向溢出（曾实测 1362×1774 → 200×260 超出 200 高）。
+- **图片加载**：缩略图走 `clipboard_get_image_thumb_by_db_id`（仅 SQLite 读），后台用 ImageIO 降采样到**行显示框**（460×100pt，按屏幕 backupScale 换算像素；Rust 端存储 blob 按 2× 上限 920×200 生成，双向镜像同一组常量）后存入 `NSCache`（countLimit 120、8MB，cost 按实际解码尺寸计），弹窗关闭立即清空。**预览大图**走 `clipboard_decode_preview_by_db_id`，由 Rust 降采样解码（Rust 预览路径不用 ImageIO）；预算是 `min(源最长边, max(显示尺寸×scale, 2048px))` —— **2048px 是缩放下限（floor），不是上限**，实测交付缓冲的 `max_dim` 常见 2066–2348。`clipboard_get_image_full_by_db_id` 是另一条路（**仅 SQLite 读，没有任何内存层**），只用于 GIF 预览兜底与右键「复制图片」，不是预览主路径。**显示框是矩形而非「最长边」**：扁图由宽边限制、竖图由高边限制，按长/短边匹配会让竖图纵向溢出（曾实测 1362×1774 → 200×260 超出 200 高）。
 - **两阶段粘贴（prepare_paste_by_id + send_paste）**：先查 accessibility 权限（未授权直接 return 0 且不动剪贴板）→ 查 history（by entry_id）→ DB 加载（失败显式 return 0，不兜底）→ 写剪贴板（设 pending_self_write）→ DB write-through → move entry to top → 返回目标 pid；Swift 侧先关闭并失焦弹窗（dismiss）避免 panel 保持 key window 截断击键 → 调 send_paste(pid) 发送 Cmd+V。**图片粘贴走唯一的文件路径模式**：先写 `$TMPDIR/CopyAttach/Paste/` 临时 PNG，剪贴板放 `public.file-url`（Finder 复制文件同款）再 Cmd+V
 - **粘贴目标 pid 不变式**：Cmd+V 投递给 `source_app.pid`（由 `NSWorkspace.didActivateApplicationNotification` 事件驱动更新，不轮询）。该 pid 必须是用户打开弹窗前的 app，绝不能是 CopyAttach 自身
 - **粘贴后必须归还前台**：预览会强制 `NSApp.activate`（捏合手势只投给最前台 app），而系统**不会**自动归还 —— 不归还的话 Cmd+V 仍能投进目标 app（内容进去了），但该 app 留在后台，光标回不到输入框。`selectItem` 粘贴后调 `ClipboardBackend.restorePasteTargetFocus()`；它只在 `NSApp.isActive` 为真时才动手，所以从不激活的普通路径是 no-op
@@ -150,11 +154,11 @@ SwiftApp/
 - **弹窗关闭**：失焦走 `closeWithAnimation()`（popup 0.12s fade 与 preview 0.1s fade 独立并行，0.4s Timer 保证关闭必然执行）；关闭前必须 `makeFirstResponder(nil)`，停止 macOS 15+ 文本插入光标的 120Hz `CADisplayLink`；关闭时置空 `contentView` 和 `popupHostingView`，令整棵 SwiftUI 视图图及图片引用按会话释放。拖拽后自动关闭走直接 `close()`
 - **触控板双指滑动切换标签页**：`.scrollWheel` local monitor 在 ScrollView 前拦截，只认手指手势，水平 ≥50pt 且 h:v ≥ 1.5:1；切换请求在下一轮 run loop 合并，快速往返只提交最新状态；**切换 = 先滚到顶、再切 filter**（单一主流程，解决 scrollPosition 与 LazyVStack 行高估算竞速导致的滚动丢失），列表不再逐行做淡入淡出，仅底栏数量使用 `.numericText()`
 - **右键上下文菜单**：行 frame 按需一次性快照（`RowFramePreferenceKey`：仅武装期间行才挂 GeometryReader）——滚动全程无每行几何上报开销，菜单延迟仅一帧
-- **搜索**：统一在 Rust/SQLite 侧完成检索。正文搜索走 SQLite FTS5 trigram 索引（≥3 字符 `MATCH` + 超限行 LIKE 兜底；<3 字符 LIKE 全表扫描；LIKE 回退是有意保留的语义承诺：1-2 字符查询必须命中长文中段）。元数据字段（label、custom_label、source_name）跨文本与图片条目统一做 LIKE 子串匹配，Swift 侧仅需按 matchIds 筛选并辅以动态日期分组（DayGroup），彻底杜绝前端多字段遍历过滤开销。
+- **搜索**：统一在 Rust/SQLite 侧完成检索。正文搜索走 SQLite FTS5 trigram 索引（≥3 字符 `MATCH` + 超限行 LIKE 兜底；<3 字符 LIKE 全表扫描；LIKE 回退是有意保留的语义承诺：1-2 字符查询必须命中长文中段）。元数据字段（label、custom_label、source_name）走 LIKE 子串匹配，Swift 侧仅需按 matchIds 筛选并辅以动态日期分组（DayGroup），彻底杜绝前端多字段遍历过滤开销。**图片条目的 `label` 列恒为空**（不落库）：界面上的「Image (W×H)」是读取时由 `width`/`height` 合成的（`types.rs`），因此历史记录**不支持按尺寸搜索图片**，图片只能按 `custom_label`（备注）与 `source_name`（来源应用）命中——这是有意的产品边界，不要对外宣称按尺寸检索。
 - FocusState 双管理：isSearchFocused（selectedIndex=0）和 isContainerFocused（selectedIndex>0）。Escape 三层拦截：SwiftUI `.onKeyPress` → PopupHostingView local monitor → Notification。优先关预览，否则关弹窗
 - 选中高亮：`matchedGeometryEffect` 在行间滑动；hover 静态填充；删除模式（⌃⌫）高亮变红
 
-**许可证体系**（`SwiftApp/Licensing/`，8 文件）：
+**许可证体系**（`SwiftApp/Licensing/`，11 文件）：
 
 - **激活庆祝时序**：激活成功 → `celebration` → 窗口内播 ~2s 动画 → 回到确认视图，用户手动关闭（已许可时关闭不退出）
 - **在线状态轮询（仅试用/订阅）**：每 120s 查询 `/v1/licenses/status` 或 `/v1/trials/status`（无需签名），≤2 分钟内生效。**永久许可证不安排任何周期性检查**——签名 + 设备绑定即权威。关键约定：只有服务器明确返回非活跃状态才降级，`not_found` 和网络失败忽略
@@ -167,7 +171,7 @@ SwiftApp/
 
 ## 钥匙串弹窗
 
-钥匙串条目（Lease + 设备密钥，svce=`com.example.copyattach.licensing`）按创建应用的代码签名授权。**必须用正式签名身份构建**：ad-hoc 签名的 cdhash 每次构建都变，导致每次重开 App 都弹钥匙串授权。build.sh 自动用 `security find-identity` 找 Apple Development 身份，找不到才回退 ad-hoc。
+钥匙串条目（Lease + 设备密钥，svce=`com.example.copyattach.licensing`）按创建应用的代码签名授权。**必须用正式签名身份构建**：ad-hoc 签名的 cdhash 每次构建都变，导致每次重开 App 都弹钥匙串授权。build.sh 自动用 `security find-identity -v -p codesigning` 并按 **`Developer ID Application|Apple Development` 过滤**取第一个匹配身份（与 CI 同一套规则；过滤是必要的——不再"取第一个 codesigning 身份"，否则会静默选中与钥匙串 ACL 无关的自签名/他人证书），找不到才回退 ad-hoc 并打印告警。构建结束会回显 `codesign -dv` 的 `Authority`/`Signature` 行供确认。
 
 ### 严禁用覆盖的 HOME 启动 GUI（踩过的坑）
 

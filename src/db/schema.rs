@@ -191,7 +191,9 @@ pub(crate) fn ensure_history_table(conn: &Connection) -> Result<(), rusqlite::Er
     )?;
 
     // FTS5 trigram index with a size cap. Oversized rows are skipped and remain
-    // searchable via LIKE fallback; triggers keep the index in sync.
+    // searchable via LIKE fallback. AFTER INSERT and AFTER DELETE triggers keep
+    // the index in sync; there is no UPDATE trigger because `text` is never
+    // updated in place.
     let fts_sql = format!(
         "CREATE VIRTUAL TABLE IF NOT EXISTS clipboard_fts USING fts5(
              text,

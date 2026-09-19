@@ -400,8 +400,8 @@ pub(crate) fn clipboard_monitor(
                 let text = &text_guard.0;
                 if !text.is_empty() {
                     let trimmed = text.trim();
-                    // Pure whitespace is not meaningful clipboard history. Any
-                    // non-empty content is gated strictly by the configured ignore rules
+                    // Pure whitespace is not meaningful clipboard history. The
+                    // remaining non-empty content is gated by the configured ignore rules
                     // (which enforce short-text scalar thresholds, disabled text capture,
                     // or default capture of all valid text including single characters).
                     if !trimmed.is_empty() && !ignore_rules.lock().unwrap().ignores_text(text) {

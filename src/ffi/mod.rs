@@ -1,9 +1,14 @@
 //! C FFI exports — the interface between the Rust backend and the Swift frontend.
 //!
-//! All `#[no_mangle] pub extern "C"` functions live here. They are thin wrappers
-//! that lock the backend, perform the requested operation, and return results
-//! to the caller. Memory ownership follows the `*_free_string` / `*_free_bytes`
-//! contract documented on each group of functions.
+//! Most `#[no_mangle] pub extern "C"` functions live here — the FFI surface is
+//! split, with `clipboard_wait_for_history_change` and
+//! `clipboard_history_counters` in `backend.rs` and the perf controls
+//! (`clipboard_set_perf_enabled`, `clipboard_perf_enabled`,
+//! `clipboard_perf_emit_probe`, `clipboard_perf_selfcheck`) in `perf.rs`.
+//! They are thin wrappers that lock the backend, perform the requested
+//! operation, and return results to the caller. Memory ownership follows the
+//! `*_free_string` / `*_free_bytes` contract documented on each group of
+//! functions.
 //!
 //! The exports are grouped into submodules by responsibility (snapshot, search,
 //! init, accessors, paste, history, stress); the `pub(crate) use` re-exports

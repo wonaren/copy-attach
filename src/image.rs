@@ -9,9 +9,11 @@ pub(crate) fn encode_png_into(width: u32, height: u32, rgba_bytes: &[u8], output
     let img = ImageBuffer::<Rgba<u8>, &[u8]>::from_raw(width, height, rgba_bytes)?;
     output.clear();
     // Same rule as `decode_png_rgba8_into`: never let the pooled buffer grow
-    // through a realloc chain (the spliced mapping rejects madvise). PNG output
-    // never exceeds the raw RGBA size, so a single whole allocation of that
-    // size is an upper bound; pages the encoder never touches stay clean.
+    // through a realloc chain (the spliced mapping rejects madvise). Size the
+    // one fresh allocation to the raw RGBA byte count, the encoder's dominant
+    // input: PNG framing adds chunk headers and filter bytes, so a tiny or
+    // already-compressed source can overflow this capacity, and the encoder
+    // then reallocs — the accepted tradeoff.
     if output.capacity() < rgba_bytes.len() {
         let fresh: Vec<u8> = Vec::with_capacity(rgba_bytes.len());
         // Claim before the encoder writes. The encoder writes the whole PNG

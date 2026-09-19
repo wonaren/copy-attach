@@ -324,7 +324,9 @@ struct HistoryPopupContent: View {
             // popup.show_begin instant this is the hotkey -> visible latency.
             Perf.instant("swift", "popup.content_appear",
                          data: backend.items.isEmpty ? "empty" : "rows")
-            // Reset transient state in place; the hosting view is reused across sessions.
+            // Reset transient state in place. The hosting view and content view
+            // are rebuilt per session and nilled on close, so this state has
+            // exactly one session's lifetime.
             selectedIndex = backend.items.isEmpty ? 0 : 1
             searchText = ""
             effectiveSearchText = ""
@@ -491,8 +493,8 @@ struct HistoryPopupContent: View {
             commitPendingInlineEdit()
             closePreview()
             // A tab switch re-anchors the selection to the new list's first
-            // row. The list transition is a single composited fade, not a
-            // transition per row, so a large history stays cheap to render.
+            // row. The switch is a plain state change with no animation on the
+            // list (cheap by construction); only the tab pill animates.
             if selectedIndex != 0 {
                 selectedIndex = displayItems.isEmpty ? 0 : 1
             }
@@ -689,9 +691,9 @@ struct HistoryPopupContent: View {
             Spacer()
         }
         .padding(.vertical, 2)
-        // The pill is the CONTROL: it snaps instantly (0.08s) so the operation
-        // feels acknowledged the moment it is issued, while the list content
-        // below animates at its own adaptive, readable pace.
+        // The pill is the CONTROL: it snaps in 0.08s so the operation feels
+        // acknowledged the moment it is issued. This modifier animates the
+        // pill bar only; the list switches with no explicit animation.
         .animation(.easeOut(duration: 0.08), value: filterMode)
     }
 

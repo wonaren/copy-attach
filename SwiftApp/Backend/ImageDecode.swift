@@ -34,9 +34,10 @@ private final class PreviewBufferBox: @unchecked Sendable {
 /// The preview window displays images at most ~720 pt tall / 85% of the
 /// visible frame, but decoding the stored full-resolution PNG (up to many
 /// tens of MB of RGBA for a large photo) wastes memory and stalls the main
-/// thread. `previewImage(dbId:maxPixel:)` decodes in the Rust backend with a
-/// hard cap on the longest decoded edge, so the delivered buffer is at most
-/// `maxPixel²×4` bytes (~16 MB at the 2048 px budget).
+/// thread. `previewImage(dbId:maxPixel:)` decodes in the Rust backend down to
+/// the caller's budget, which is a floor rather than a ceiling: `previewBudget`
+/// is `max(display size × scale, 2048 px)`, clamped only by the source, so the
+/// delivered buffer's longest edge can exceed 2048 px.
 ///
 /// Why the Rust path instead of ImageIO: ImageIO's thumbnail decode keeps its
 /// full-resolution decode plus the resized buffer in malloc'd regions that
@@ -50,10 +51,12 @@ private final class PreviewBufferBox: @unchecked Sendable {
 enum ImageDecode {
     /// Longest decoded edge (pixels) floor for previews: keeps enough real
     /// pixels for the pinch-zoom view to inspect detail (a 720 pt-tall window
-    /// at 2× shows ~1440 px; 2048 px ≈ 2.8× zoom headroom) while still
-    /// bounding the decoded buffer hard (~2048²×4 ≈ 16 MB worst case, vs tens
-    /// of MB for a full-res 4K decode and hundreds of MB for very large
-    /// photos).
+    /// at 2× shows ~1440 px; 2048 px ≈ 2.8× zoom headroom). It is a floor on
+    /// the *scale factor*, not a cap on the buffer: `previewBudget` takes
+    /// `max(display size × scale, this)`, so a source whose display size × scale
+    /// exceeds 2048 px decodes larger than 2048 px (up to the source's own
+    /// longest edge). Sizing still stays far below a full-res 4K decode, which
+    /// is the point — but do not read this as a hard 16 MB ceiling.
     private static let zoomHeadroomPx: Int = 2048
 
     /// The largest point dimension a preview window will ever display an

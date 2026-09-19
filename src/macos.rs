@@ -27,7 +27,7 @@ pub(crate) fn open_preferences() {
         .spawn();
 }
 
-/// Read the first supported image representation, preferring smaller formats.
+/// Read the first supported image representation in fixed preference order.
 pub(crate) fn pasteboard_image_data() -> Option<Vec<u8>> {
     use objc2::rc::autoreleasepool;
     autoreleasepool(|_| unsafe {
@@ -37,7 +37,8 @@ pub(crate) fn pasteboard_image_data() -> Option<Vec<u8>> {
             return None;
         }
         let nsstr_cls = objc2::runtime::AnyClass::get(c"NSString")?;
-        // Smallest full-resolution representation first.
+        // Fixed priority order, not a size comparison: the first type present
+        // on the pasteboard wins (so PNG wins over a smaller JPEG).
         for uti in [c"public.png", c"public.tiff", c"public.jpeg",
                     c"com.compuserve.gif", c"org.webmproject.webp", c"com.microsoft.bmp"] {
             let ns_uti: *mut objc2::runtime::NSObject =

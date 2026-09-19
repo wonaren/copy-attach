@@ -279,9 +279,12 @@ class ClipboardBackend {
     }
 
     /// Popup lifecycle hook: while the popup is visible its list must track
-    /// new captures (0.5s poll of pure FFI atomics); with it closed there is
-    /// nothing to refresh, so the poll is stopped entirely — the background
-    /// app performs no UI polling at all.
+    /// new captures. `startHistoryWaiter()` blocks a detached task in
+    /// `clipboard_wait_for_history_change(revision, refreshLifelineMs)` and
+    /// reloads when the revision advances; the 3s lifeline exists only to
+    /// bound a missed publish, not as a poll. Closing the popup stops the
+    /// waiter, so the background app runs no refresh loop at all — the
+    /// startup refresh is independent of the popup.
     @MainActor
     func setPopupVisible(_ visible: Bool) {
         if visible {

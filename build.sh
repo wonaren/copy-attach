@@ -144,18 +144,26 @@ cp "${SWIFT_SRC}/CopyAttach-Bridging-Header.h" "${APP_NAME}.app/Contents/Resourc
 install_name_tool -add_rpath "@executable_path/../Frameworks" "${APP_NAME}.app/Contents/MacOS/CopyAttach" 2>/dev/null || true
 
 echo "==> Signing app bundle…"
-# 优先用已安装的正式签名身份（Apple Development / Developer ID）签名。
+# 优先用已安装的正式签名身份（Developer ID Application / Apple Development）签名。
 # 正式身份让钥匙串 ACL 按稳定标识匹配：ad-hoc 签名的 cdhash 每次构建都会变，
 # 导致每次重新打开 App 都弹「CopyAttach想要使用钥匙串中的机密信息」。
 # 用正式身份后重建/重装都不会再弹（首次启动对旧条目点一次「始终允许」即可）。
-SIGN_IDENTITY=$(security find-identity -v -p codesigning 2>/dev/null | grep -oE '[0-9A-F]{40}' | head -1 || true)
+#
+# 必须按类型过滤，不能取第一个 codesigning 身份：钥匙串里可能还装着与钥匙串 ACL
+# 无关的身份（自签名、团队其他人的证书），取第一个会静默签错身份。
+# 与 CI 的过滤规则保持一致（.github/workflows/build.yml）。
+SIGN_LIST=$(security find-identity -v -p codesigning 2>/dev/null || true)
+SIGN_IDENTITY=$(printf '%s\n' "$SIGN_LIST" \
+    | grep -E 'Developer ID Application|Apple Development' \
+    | head -1 | sed 's/.*"\(.*\)".*/\1/' || true)
 if [ -n "$SIGN_IDENTITY" ]; then
     echo "  Using signing identity: $SIGN_IDENTITY"
     codesign --force --deep --sign "$SIGN_IDENTITY" "${APP_NAME}.app" 2>&1
 else
-    echo "  No signing identity found, falling back to ad-hoc signature"
+    echo "  No Apple Development / Developer ID Application identity found; falling back to ad-hoc signature"
     codesign --force --deep --sign - "${APP_NAME}.app" 2>&1
 fi
+codesign -dv --verbose=4 "${APP_NAME}.app" 2>&1 | grep -E '^(Authority|Signature)=' | sed 's/^/  /' || true
 
 echo "==> Done! App bundle at '${APP_NAME}.app'"
 echo "==> Run: open \"${APP_NAME}.app\""

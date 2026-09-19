@@ -366,7 +366,10 @@ pub(crate) static RUNTIME_ENTITLEMENT: AtomicUsize = AtomicUsize::new(0);
 /// Monotonic counter for assigning stable, unique IDs to clipboard entries.
 static NEXT_ENTRY_ID: AtomicU64 = AtomicU64::new(1);
 
-/// Incremented when Phase 2 image encoding finishes and updates `db_id`.
+/// Incremented when Phase 2 persists a full-resolution image and assigns the
+/// entry's `db_id` — on both the encode path and the `ExistingPng` path, where
+/// the pasteboard already carried PNG and nothing is re-encoded. It signals
+/// that a row's image blob became loadable, not that encoding ran.
 pub(crate) static IMAGE_ENCODING_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Incremented whenever history ordering or metadata changes.

@@ -8,8 +8,8 @@ use crate::backend::try_backend;
 /// 1-2 char queries keep matching the middle of long documents, not just the
 /// rendered previews). Returns a malloc'd array of matching entry_ids
 /// (`out_count` = number of ids), or null when there are no matches. Caller
-/// must free with `clipboard_free_u64_array()`. Label/source-name matching is
-/// done on the Swift side, which already holds those fields.
+/// must free with `clipboard_free_u64_array()`. Metadata matching (label,
+/// custom_label, source_name) runs in this same call, inside `db::search_history`.
 #[no_mangle]
 pub extern "C" fn clipboard_search_ids(query: *const c_char, out_count: *mut c_int) -> *mut u64 {
     if !out_count.is_null() {
