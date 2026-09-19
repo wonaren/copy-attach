@@ -6,11 +6,11 @@ import Observation
 // MARK: - Global Hotkey Manager
 //
 // Uses two mechanisms for reliability:
-// 1. Carbon RegisterEventHotKey (primary) - works with Accessibility permissions
-// 2. NSEvent global monitor (fallback) - also needs Accessibility permissions
+// 1. Carbon RegisterEventHotKey (primary) - works without Accessibility permissions
+// 2. NSEvent global monitor (fallback) - needs Accessibility permissions
 //
-// Both require Accessibility permissions on modern macOS. If neither works,
-// the app will prompt the user to grant permissions.
+// Carbon handles background hotkeys without requiring Accessibility on modern macOS;
+// the NSEvent monitor serves as an AX-dependent fallback if Carbon registration fails.
 
 @MainActor
 @Observable
