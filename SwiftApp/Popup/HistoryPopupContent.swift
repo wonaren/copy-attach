@@ -527,20 +527,15 @@ struct HistoryPopupContent: View {
                 try await Task.sleep(nanoseconds: debounceNs)
                 try Task.checkCancellation()
 
-                // Full-text matching runs in Rust against the FTS5 index (the
-                // in-memory history no longer holds full text). Label and
-                // source-name matching stay here — the backend never had them
-                // for the list row, and images are findable only via their
-                // generated label ("Image (WxH)") / source name.
+                // Core matching runs in Rust against SQLite (FTS5 trigram + LIKE for
+                // full text, label, custom_label, and source_name).
+                // Swift only supplements view-local dynamic DayGroup dates.
                 let filtered: [ClipboardItem] = await Task.detached(priority: .userInitiated) { [items, backend, query] in
                     guard !Task.isCancelled else { return [ClipboardItem]() }
                     let perfFilter = PerfSpan.start("swift", "search.filter")
                     let matchIds = backend.searchIds(query)
                     let result = items.filter {
                         matchIds.contains($0.id) ||
-                        $0.customLabel.localizedCaseInsensitiveContains(query) ||
-                        $0.label.localizedCaseInsensitiveContains(query) ||
-                        $0.sourceName.localizedCaseInsensitiveContains(query) ||
                         DayGroup.label(for: $0.timestamp)
                             .localizedCaseInsensitiveContains(query)
                     }

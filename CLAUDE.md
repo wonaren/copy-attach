@@ -150,7 +150,7 @@ SwiftApp/
 - **弹窗关闭**：失焦走 `closeWithAnimation()`（popup 0.12s fade 与 preview 0.1s fade 独立并行，0.4s Timer 保证关闭必然执行）；关闭前必须 `makeFirstResponder(nil)`，停止 macOS 15+ 文本插入光标的 120Hz `CADisplayLink`；关闭时置空 `contentView` 和 `popupHostingView`，令整棵 SwiftUI 视图图及图片引用按会话释放。拖拽后自动关闭走直接 `close()`
 - **触控板双指滑动切换标签页**：`.scrollWheel` local monitor 在 ScrollView 前拦截，只认手指手势，水平 ≥50pt 且 h:v ≥ 1.5:1；切换请求在下一轮 run loop 合并，快速往返只提交最新状态；**切换 = 先滚到顶、再切 filter**（单一主流程，解决 scrollPosition 与 LazyVStack 行高估算竞速导致的滚动丢失），列表不再逐行做淡入淡出，仅底栏数量使用 `.numericText()`
 - **右键上下文菜单**：行 frame 按需一次性快照（`RowFramePreferenceKey`：仅武装期间行才挂 GeometryReader）——滚动全程无每行几何上报开销，菜单延迟仅一帧
-- **搜索**：全文搜索走 SQLite FTS5 trigram 索引（≥3 字符 `MATCH` + 超限行 LIKE 兜底；<3 字符 LIKE 全表扫描）。LIKE 回退是有意保留的语义承诺：1-2 字符查询必须命中长文中段（`test_search_short_query_matches_full_text_middle` 是语义绊线）
+- **搜索**：统一在 Rust/SQLite 侧完成检索。正文搜索走 SQLite FTS5 trigram 索引（≥3 字符 `MATCH` + 超限行 LIKE 兜底；<3 字符 LIKE 全表扫描；LIKE 回退是有意保留的语义承诺：1-2 字符查询必须命中长文中段）。元数据字段（label、custom_label、source_name）跨文本与图片条目统一做 LIKE 子串匹配，Swift 侧仅需按 matchIds 筛选并辅以动态日期分组（DayGroup），彻底杜绝前端多字段遍历过滤开销。
 - FocusState 双管理：isSearchFocused（selectedIndex=0）和 isContainerFocused（selectedIndex>0）。Escape 三层拦截：SwiftUI `.onKeyPress` → PopupHostingView local monitor → Notification。优先关预览，否则关弹窗
 - 选中高亮：`matchedGeometryEffect` 在行间滑动；hover 静态填充；删除模式（⌃⌫）高亮变红
 

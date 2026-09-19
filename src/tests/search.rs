@@ -244,3 +244,60 @@ fn test_snapshot_row_image() {
 fn test_free_string_null_safe() {
     clipboard_free_string(std::ptr::null_mut());
 }
+
+#[test]
+fn test_search_matches_label_custom_label_and_source_name() {
+    let conn = test_db();
+
+    // 1. Insert a text entry from Safari with a custom label
+    conn.execute(
+        "INSERT INTO clipboard_history
+            (entry_type, text, label, custom_label, source_name, source_bundle_id, entry_id, timestamp)
+         VALUES (0, 'content-alpha', 'Alpha Document', 'Important Work', 'Safari', 'com.apple.Safari', 5001, 100)",
+        [],
+    ).unwrap();
+
+    // 2. Insert an image entry from Photoshop with a custom label
+    conn.execute(
+        "INSERT INTO clipboard_history
+            (entry_type, label, custom_label, source_name, source_bundle_id, entry_id, timestamp)
+         VALUES (1, 'Image (1920×1080)', 'Architecture Diagram', 'Photoshop', 'com.adobe.photoshop', 5002, 200)",
+        [],
+    ).unwrap();
+
+    // Matching text content
+    let res = crate::db::search_history(&conn, "content-alpha");
+    assert_eq!(res, vec![5001]);
+
+    // Matching label on text
+    let res = crate::db::search_history(&conn, "Alpha");
+    assert_eq!(res, vec![5001]);
+
+    // Matching custom_label on text
+    let res = crate::db::search_history(&conn, "Important");
+    assert_eq!(res, vec![5001]);
+
+    // Matching source_name on text
+    let res = crate::db::search_history(&conn, "Safari");
+    assert_eq!(res, vec![5001]);
+
+    // Matching label on image (dimensions)
+    let res = crate::db::search_history(&conn, "1920");
+    assert_eq!(res, vec![5002]);
+
+    // Matching custom_label on image
+    let res = crate::db::search_history(&conn, "Architecture");
+    assert_eq!(res, vec![5002]);
+
+    // Matching source_name on image
+    let res = crate::db::search_history(&conn, "Photoshop");
+    assert_eq!(res, vec![5002]);
+
+    // Short query (<3 chars) matching metadata
+    let res_ph = crate::db::search_history(&conn, "Ph"); // in "Alpha" (5001) and "Photoshop" (5002)
+    assert_eq!(res_ph, vec![5001, 5002]);
+
+    let res_19 = crate::db::search_history(&conn, "19"); // only in "1920" (5002)
+    assert_eq!(res_19, vec![5002]);
+}
+

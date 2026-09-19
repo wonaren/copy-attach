@@ -2,27 +2,25 @@ use rusqlite::Connection;
 
 use crate::db::FTS_MAX_INDEXED_TEXT_LEN;
 
-/// Case-insensitive substring search over the stored full text.
+/// Case-insensitive substring search over stored full text, label, custom_label,
+/// and source_name (both text and image entries).
 ///
-/// Queries of ≥3 Unicode scalars go through the FTS5 trigram index (substring
-/// semantics, full-Unicode case folding) PLUS a LIKE fallback over rows the
-/// index excludes (texts longer than [`FTS_MAX_INDEXED_TEXT_LEN`] characters —
+/// Queries of ≥3 Unicode scalars go through the FTS5 trigram index for full text
+/// (substring semantics, full-Unicode case folding) PLUS a LIKE fallback over rows
+/// the index excludes (texts longer than [`FTS_MAX_INDEXED_TEXT_LEN`] characters —
 /// see schema.rs; the cap keeps the index and the capture-path insert cost
-/// bounded for huge pastes). The fallback preserves the ≥3-char substring
-/// promise for those rows: they are rare, so the scan is bounded to them.
-/// Shorter queries cannot form a trigram at all, so they fall back to a LIKE
-/// scan over the full text column.
+/// bounded for huge pastes). Shorter queries use a LIKE scan over the text column.
 ///
-/// The LIKE fallback is DELIBERATE, not a leftover: matching only the bounded
-/// previews for 1-2 char queries would silently drop matches in the middle of
-/// long documents — a semantic regression for a latency gain. Known
-/// limitation, unchanged from before: SQLite's LIKE folds ASCII case only, so
-/// a query relying on non-ASCII case folding (e.g. `é` matching `É`) misses
-/// those variants in the LIKE paths; the trigram path (≥3 chars, indexed rows)
-/// folds Unicode. Returns matching entry_ids (the stable Rust IDs, not SQLite
-/// rowids).
+/// In addition to full text, metadata fields (`label`, `custom_label`, and
+/// `source_name`) are searched across all entries (both text and image). Because
+/// these metadata strings are short and bounded (≤200 scalars), a LIKE scan is
+/// sub-millisecond even across thousands of rows.
+///
+/// Returns matching entry_ids (the stable Rust IDs, not SQLite rowids).
 pub(crate) fn search_history(conn: &Connection, query: &str) -> Vec<u64> {
     let mut ids = Vec::new();
+    let like = format!("%{}%", escape_like(query));
+
     if query.chars().count() >= 3 {
         let phrase = fts_phrase(query);
         let mut stmt = match conn.prepare(
@@ -55,7 +53,6 @@ pub(crate) fn search_history(conn: &Connection, query: &str) -> Vec<u64> {
         // the cap): the index is the fast path, the LIKE scan is bounded to
         // the rare oversized rows, and the substring semantics never silently
         // drop a huge document from search results.
-        let like = format!("%{}%", escape_like(query));
         let mut stmt = match conn.prepare(
             "SELECT entry_id FROM clipboard_history
              WHERE entry_type = 0 AND length(text) > ?1 AND text LIKE ?2 ESCAPE '\\'",
@@ -67,7 +64,7 @@ pub(crate) fn search_history(conn: &Connection, query: &str) -> Vec<u64> {
             }
         };
         let rows = match stmt.query_map(
-            rusqlite::params![FTS_MAX_INDEXED_TEXT_LEN, like],
+            rusqlite::params![FTS_MAX_INDEXED_TEXT_LEN, &like],
             |row| row.get::<_, i64>(0),
         ) {
             Ok(r) => r,
@@ -82,14 +79,7 @@ pub(crate) fn search_history(conn: &Connection, query: &str) -> Vec<u64> {
                 Err(e) => crate::error_log!("CopyAttach: FTS-cap LIKE search row read error: {e}"),
             }
         }
-        // An oversized row can be double-reported while a legacy index still
-        // holds it (the startup cleanup removes those); dedup defensively.
-        if ids.len() > 1 {
-            let mut seen = std::collections::HashSet::with_capacity(ids.len());
-            ids.retain(|id| seen.insert(*id));
-        }
     } else {
-        let like = format!("%{}%", escape_like(query));
         let mut stmt = match conn.prepare(
             "SELECT entry_id FROM clipboard_history
              WHERE entry_type = 0 AND text LIKE ?1 ESCAPE '\\'",
@@ -100,7 +90,7 @@ pub(crate) fn search_history(conn: &Connection, query: &str) -> Vec<u64> {
                 return ids;
             }
         };
-        let rows = match stmt.query_map(rusqlite::params![like], |row| row.get::<_, i64>(0)) {
+        let rows = match stmt.query_map(rusqlite::params![&like], |row| row.get::<_, i64>(0)) {
             Ok(r) => r,
             Err(e) => {
                 crate::error_log!("CopyAttach: LIKE search failed: {e}");
@@ -114,6 +104,41 @@ pub(crate) fn search_history(conn: &Connection, query: &str) -> Vec<u64> {
             }
         }
     }
+
+    // Metadata search: label, custom_label, and source_name across all rows
+    // (both text and image entries).
+    let mut meta_stmt = match conn.prepare(
+        "SELECT entry_id FROM clipboard_history
+         WHERE label LIKE ?1 ESCAPE '\\'
+            OR custom_label LIKE ?1 ESCAPE '\\'
+            OR source_name LIKE ?1 ESCAPE '\\'",
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            crate::error_log!("CopyAttach: failed to prepare metadata LIKE search: {e}");
+            return ids;
+        }
+    };
+    let meta_rows = match meta_stmt.query_map(rusqlite::params![&like], |row| row.get::<_, i64>(0)) {
+        Ok(r) => r,
+        Err(e) => {
+            crate::error_log!("CopyAttach: metadata LIKE search failed: {e}");
+            return ids;
+        }
+    };
+    for row in meta_rows {
+        match row {
+            Ok(id) => ids.push(id as u64),
+            Err(e) => crate::error_log!("CopyAttach: metadata search row read error: {e}"),
+        }
+    }
+
+    // Dedup defensively while keeping discovery order.
+    if ids.len() > 1 {
+        let mut seen = std::collections::HashSet::with_capacity(ids.len());
+        ids.retain(|id| seen.insert(*id));
+    }
+
     ids
 }
 

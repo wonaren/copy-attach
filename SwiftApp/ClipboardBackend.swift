@@ -576,10 +576,10 @@ class ClipboardBackend {
         return str
     }
 
-    /// Full-text search in SQLite via Rust (FTS5 trigram index for ≥3 chars,
-    /// with LIKE fallback for shorter queries and oversized documents).
-    /// Returns the matched entry_ids; the caller (HistoryPopupContent) unions
-    /// these with its own in-memory label, customLabel, sourceName, and date matches.
+    /// Substring search in SQLite via Rust over full text (FTS5 trigram index
+    /// for ≥3 chars, with LIKE fallback for shorter queries and oversized
+    /// documents), plus metadata fields (label, customLabel, and sourceName)
+    /// across both text and image entries.
     /// Pure FFI, so the offline search thread can call it directly.
     nonisolated func searchIds(_ query: String) -> Set<Int> {
         guard !query.isEmpty else { return [] }
