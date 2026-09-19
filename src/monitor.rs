@@ -212,44 +212,6 @@ fn ingest_rgba_image(
     }
 }
 
-/// Decode image files from Finder copies and run them through the image pipeline.
-/// Returns true if any file was ingested; non-image files are skipped.
-#[allow(clippy::too_many_arguments)]
-fn try_ingest_image_files(
-    paths: &[String],
-    history: &Arc<Mutex<Vec<ClipboardEntry>>>,
-    db: &Arc<Mutex<rusqlite::Connection>>,
-    src: &crate::types::SourceApp,
-    now: u64,
-    cleanup_threshold: &Arc<AtomicUsize>,
-    ignore_rules: &Arc<Mutex<IgnoreRules>>,
-) -> bool {
-    if ignore_rules.lock().unwrap().ignores_image() {
-        return false;
-    }
-    for path in paths {
-        // Skip our own temp files so they don't re-enter history as Finder copies.
-        if crate::backend::is_copyattach_temp_path(path) {
-            continue;
-        }
-        let img = match image::open(path) {
-            Ok(img) => img,
-            Err(_) => continue,
-        };
-
-        let rgba = img.to_rgba8();
-        let (w, h) = rgba.dimensions();
-        let pixels = crate::backend::ImageDecodeBuffer::from_vec(rgba.into_raw());
-
-        crate::debug_log!("CopyAttach: captured image file: {path} ({w}x{h})");
-        ingest_rgba_image(
-            pixels, w, h, None,
-            history, db, src, now, cleanup_threshold, ignore_rules,
-        );
-        return true;
-    }
-    false
-}
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn clipboard_monitor(
@@ -331,14 +293,12 @@ pub(crate) fn clipboard_monitor(
             continue;
         }
 
-        // Handle Finder file copies: decode the files instead of the file icon.
+        // File copies: until a dedicated "File Clipboard" feature is built,
+        // safely ignore file copy operations and their attached icon previews.
+        // Do NOT attempt to read/open files from disk (which triggers macOS TCC
+        // Desktop/Documents permission dialogs), and do NOT capture the icon.
         if macos::pasteboard_has_files() {
-            let paths = macos::pasteboard_file_paths();
-            try_ingest_image_files(
-                &paths,
-                &history,
-                &db, &src, now, &cleanup_threshold, &ignore_rules,
-            );
+            crate::debug_log!("CopyAttach: ignored file/icon clipboard content");
             continue;
         }
 

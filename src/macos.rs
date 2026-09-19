@@ -31,6 +31,13 @@ pub(crate) fn open_preferences() {
 pub(crate) fn pasteboard_image_data() -> Option<Vec<u8>> {
     use objc2::rc::autoreleasepool;
     autoreleasepool(|_| unsafe {
+        // If the pasteboard represents a file copy or carries a file/app icon
+        // preview (e.g. `com.apple.icns` auto-bridged by macOS to `public.tiff`),
+        // reject it: this is an icon representation, not a user image copy.
+        if pasteboard_has_files() {
+            return None;
+        }
+
         let cls = nspasteboard_class()?;
         let pasteboard: *mut objc2::runtime::NSObject = msg_send![cls, generalPasteboard];
         if pasteboard.is_null() {
@@ -145,10 +152,55 @@ pub(crate) fn pasteboard_has_sensitive_content() -> bool {
     })
 }
 
-/// Whether the pasteboard contains file URLs (to skip capturing the icon).
+/// Whether the pasteboard represents a file copy or file/app icon preview.
+///
+/// In macOS, copying files (in Finder, WPS, Office, etc.) populates the pasteboard
+/// with file URLs or filename types, and attaches `com.apple.icns` (auto-bridged
+/// to `public.tiff` for legacy compatibility). Checking `types` directly is O(1)
+/// and catches both modern and legacy file representations.
 pub(crate) fn pasteboard_has_files() -> bool {
     use objc2::rc::autoreleasepool;
-    autoreleasepool(|_| unsafe { !pasteboard_file_url_strings().is_empty() })
+    autoreleasepool(|_| unsafe {
+        let cls = match nspasteboard_class() {
+            Some(c) => c,
+            None => return false,
+        };
+        let pasteboard: *mut objc2::runtime::NSObject = msg_send![cls, generalPasteboard];
+        if pasteboard.is_null() {
+            return false;
+        }
+        let types: *mut objc2::runtime::NSObject = msg_send![pasteboard, types];
+        if types.is_null() {
+            return false;
+        }
+        let count: usize = msg_send![types, count];
+        if count == 0 {
+            return false;
+        }
+        let nsstr_cls = match objc2::runtime::AnyClass::get(c"NSString") {
+            Some(c) => c,
+            None => return false,
+        };
+        for uti in [
+            c"public.file-url",
+            c"NSFilenamesPboardType",
+            c"com.apple.finder.noderef",
+            c"com.apple.pasteboard.promised-file-url",
+            c"Apple URL pasteboard type",
+            c"com.apple.icns",
+        ] {
+            let ns_uti: *mut objc2::runtime::NSObject =
+                msg_send![nsstr_cls, stringWithUTF8String: uti.as_ptr()];
+            if ns_uti.is_null() {
+                continue;
+            }
+            let contains: bool = msg_send![types, containsObject: ns_uti];
+            if contains {
+                return true;
+            }
+        }
+        !pasteboard_file_url_strings().is_empty()
+    })
 }
 
 /// Extract absolute file paths from pasteboard file URLs; skips unusable ones.
@@ -379,10 +431,14 @@ pub(crate) fn simulate_cmd_v(pid: i32) -> bool {
 mod paste_tests {
     use super::*;
     use arboard::Clipboard;
+    use std::sync::Mutex;
+
+    static PASTEBOARD_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     /// Roundtrip file-URL pasteboard write/read, restoring the user's clipboard.
     #[test]
     fn test_set_pasteboard_file_url_roundtrip() {
+        let _guard = PASTEBOARD_TEST_LOCK.lock().unwrap();
         let mut cb = Clipboard::new().unwrap();
         let saved_text = cb.get_text().ok();
         let saved_image = cb.get_image().ok();
@@ -403,5 +459,106 @@ mod paste_tests {
             vec![path.to_string()],
             "pasteboard must expose exactly the written path"
         );
+    }
+
+    #[test]
+    fn test_pasteboard_has_files_detects_file_url_and_rejects_image() {
+        let _guard = PASTEBOARD_TEST_LOCK.lock().unwrap();
+        let mut cb = Clipboard::new().unwrap();
+        let saved_text = cb.get_text().ok();
+        let saved_image = cb.get_image().ok();
+
+        let path = "/tmp/copyattach-paste-check.png";
+        let ok_set = set_pasteboard_file_url(path);
+        assert!(ok_set, "set_pasteboard_file_url must succeed");
+
+        assert!(pasteboard_has_files(), "pasteboard_has_files must detect file URL");
+        assert!(pasteboard_image_data().is_none(), "pasteboard_image_data must reject file URL pasteboard");
+
+        if let Some(img) = saved_image {
+            cb.set_image(img).unwrap();
+        } else if let Some(text) = saved_text {
+            cb.set_text(text).unwrap();
+        }
+    }
+
+    #[test]
+    fn test_pasteboard_has_files_detects_filenames_pboard_type() {
+        use objc2::rc::autoreleasepool;
+        let _guard = PASTEBOARD_TEST_LOCK.lock().unwrap();
+        let mut cb = Clipboard::new().unwrap();
+        let saved_text = cb.get_text().ok();
+        let saved_image = cb.get_image().ok();
+
+        autoreleasepool(|_| unsafe {
+            let cls = nspasteboard_class().unwrap();
+            let pb: *mut objc2::runtime::NSObject = msg_send![cls, generalPasteboard];
+            let _: isize = msg_send![pb, clearContents];
+            let nsstr_cls = objc2::runtime::AnyClass::get(c"NSString").unwrap();
+            let filenames_type: *mut objc2::runtime::NSObject =
+                msg_send![nsstr_cls, stringWithUTF8String: c"NSFilenamesPboardType".as_ptr()];
+            let array_cls = objc2::runtime::AnyClass::get(c"NSArray").unwrap();
+            let types_arr: *mut objc2::runtime::NSObject =
+                msg_send![array_cls, arrayWithObject: filenames_type];
+            let _: isize = msg_send![pb, declareTypes: types_arr, owner: core::ptr::null::<objc2::runtime::NSObject>()];
+        });
+
+        assert!(pasteboard_has_files(), "pasteboard_has_files must detect NSFilenamesPboardType");
+        assert!(pasteboard_image_data().is_none(), "pasteboard_image_data must reject NSFilenamesPboardType");
+
+        if let Some(img) = saved_image {
+            cb.set_image(img).unwrap();
+        } else if let Some(text) = saved_text {
+            cb.set_text(text).unwrap();
+        }
+    }
+
+    #[test]
+    fn test_pasteboard_has_files_detects_icns_and_blocks_icon_capture() {
+        use objc2::rc::autoreleasepool;
+        let _guard = PASTEBOARD_TEST_LOCK.lock().unwrap();
+        let mut cb = Clipboard::new().unwrap();
+        let saved_text = cb.get_text().ok();
+        let saved_image = cb.get_image().ok();
+
+        autoreleasepool(|_| unsafe {
+            let cls = nspasteboard_class().unwrap();
+            let pb: *mut objc2::runtime::NSObject = msg_send![cls, generalPasteboard];
+            let _: isize = msg_send![pb, clearContents];
+            let nsstr_cls = objc2::runtime::AnyClass::get(c"NSString").unwrap();
+            let icns_type: *mut objc2::runtime::NSObject =
+                msg_send![nsstr_cls, stringWithUTF8String: c"com.apple.icns".as_ptr()];
+            let nsdata_cls = objc2::runtime::AnyClass::get(c"NSData").unwrap();
+            let dummy_bytes = b"dummy_icns_bytes";
+            let data_obj: *mut objc2::runtime::NSObject =
+                msg_send![nsdata_cls, dataWithBytes: dummy_bytes.as_ptr().cast::<core::ffi::c_void>(), length: dummy_bytes.len()];
+            let _: bool = msg_send![pb, setData: data_obj, forType: icns_type];
+        });
+
+        assert!(pasteboard_has_files(), "pasteboard_has_files must detect com.apple.icns");
+        assert!(pasteboard_image_data().is_none(), "pasteboard_image_data must reject com.apple.icns");
+
+        if let Some(img) = saved_image {
+            cb.set_image(img).unwrap();
+        } else if let Some(text) = saved_text {
+            cb.set_text(text).unwrap();
+        }
+    }
+
+    #[test]
+    fn test_pasteboard_has_files_returns_false_for_plain_text() {
+        let _guard = PASTEBOARD_TEST_LOCK.lock().unwrap();
+        let mut cb = Clipboard::new().unwrap();
+        let saved_text = cb.get_text().ok();
+        let saved_image = cb.get_image().ok();
+
+        cb.set_text("regular text without files").unwrap();
+        assert!(!pasteboard_has_files(), "pasteboard_has_files must be false for plain text");
+
+        if let Some(img) = saved_image {
+            cb.set_image(img).unwrap();
+        } else if let Some(text) = saved_text {
+            cb.set_text(text).unwrap();
+        }
     }
 }
