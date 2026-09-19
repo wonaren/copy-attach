@@ -30,7 +30,7 @@ extension InlineSettingsView {
                     .foregroundColor(backend.permissionGranted ? Color(nsColor: .systemGreen) : Color(nsColor: .systemOrange))
             }
             if !backend.permissionGranted {
-                Text("应用需要辅助功能权限才能使用全局快捷键和自动粘贴")
+                Text("应用需要辅助功能权限才能自动粘贴（模拟 ⌘V）；唤出快捷键无需授权即可使用。")
                     .font(.system(size: 11.5))
                     .foregroundColor(theme.secondaryText)
                     .lineSpacing(2)

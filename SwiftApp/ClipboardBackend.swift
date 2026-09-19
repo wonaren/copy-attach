@@ -931,8 +931,13 @@ class ClipboardBackend {
     ///
     /// No-op unless this app actually took the foreground: the normal path uses
     /// non-activating panels and never becomes active, so nothing is stolen.
-    func restorePasteTargetFocus() {
+    func restorePasteTargetFocus(force: Bool = false) {
         guard NSApp.isActive, let pid = pasteTargetPID else { return }
+        if !force, let appDelegate = AppDelegate.shared,
+           (appDelegate.hasVisibleAppWindow || appDelegate.isPresentingAppWindow) {
+            debugLog("Suppressing focus restore: app has visible/presenting window")
+            return
+        }
         guard let app = NSRunningApplication(processIdentifier: pid) else { return }
         debugLog("Handing the foreground back to pid \(pid) after paste")
         app.activate()

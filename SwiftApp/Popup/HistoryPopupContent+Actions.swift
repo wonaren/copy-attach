@@ -52,7 +52,7 @@ extension HistoryPopupContent {
         }
         // The popup is gone; hand the foreground back so the caret returns
         // to whatever the user was typing in.
-        backend.restorePasteTargetFocus()
+        backend.restorePasteTargetFocus(force: true)
     }
 
     // MARK: - Undo

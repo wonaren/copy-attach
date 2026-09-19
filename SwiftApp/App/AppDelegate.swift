@@ -83,12 +83,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         // Register local ⌘+, monitor for when app windows are active (popup, settings, etc.)
         localKeyDownMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            if event.keyCode == 43 && event.modifierFlags.contains(.command) { // kVK_ANSI_Comma = 43
+            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            if event.keyCode == 43 && flags.contains(.command) && !flags.contains(.control) && !flags.contains(.option) { // kVK_ANSI_Comma = 43
                 self?.openSettings()
                 return nil
             }
             // ⌥⌘S opens stress-test panel (debug/benchmark use)
-            if event.keyCode == 1 && event.modifierFlags.contains(.command) && event.modifierFlags.contains(.option) {
+            if event.keyCode == 1 && flags.contains(.command) && flags.contains(.option) && !flags.contains(.control) {
                 self?.toggleStressPanel()
                 return nil
             }
@@ -486,6 +487,26 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if !runInBackground { NSApp.terminate(nil) }
     }
 
+    /// True when an interactive window of this application (Settings, License Gate,
+    /// Stress Test) is currently visible.
+    @MainActor
+    var hasVisibleAppWindow: Bool {
+        if let window = settingsWindow, window.isVisible { return true }
+        if let window = licenseGateWindow, window.isVisible { return true }
+        if let wc = stressWindowController, let window = wc.window, window.isVisible { return true }
+        for window in NSApp.windows {
+            if !(window is NSPanel) && window.isVisible && window.title == "CopyAttach" {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// True while presenting an app window, preventing concurrent popup closure
+    /// from surrendering foreground focus to the previous application.
+    @MainActor
+    private(set) var isPresentingAppWindow: Bool = false
+
     /// Bring the settings window to front and activate the app.
     /// Called automatically when accessibility permission is newly granted.
     func focusSettingsWindow() {
@@ -531,26 +552,43 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             alert.runModal()
             return
         }
-        if let wc = stressWindowController, let window = wc.window, window.isVisible {
-            window.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
-        } else {
-            let wc = StressTestWindowController()
-            stressWindowController = wc
-            wc.showWindow(nil)
-            NSApp.activate(ignoringOtherApps: true)
+        MainActor.assumeIsolated {
+            isPresentingAppWindow = true
+            defer { isPresentingAppWindow = false }
+            if HistoryPopupWindow.shared.isVisible {
+                HistoryPopupWindow.shared.close()
+            }
+            if let wc = stressWindowController, let window = wc.window, window.isVisible {
+                window.makeKeyAndOrderFront(nil)
+                NSApp.activate(ignoringOtherApps: true)
+            } else {
+                let wc = StressTestWindowController()
+                stressWindowController = wc
+                wc.showWindow(nil)
+                NSApp.activate(ignoringOtherApps: true)
+            }
         }
     }
 
     // MARK: - Settings
 
     @MainActor @objc func openSettings() {
+        isPresentingAppWindow = true
+        defer { isPresentingAppWindow = false }
+        if HistoryPopupWindow.shared.isVisible {
+            HistoryPopupWindow.shared.close()
+        }
         if LicenseManager.shared.state.permitsCoreFeatures { openSettingsWindow() }
         else { showLicenseGate() }
     }
 
     @MainActor
     func openLicenseWindow() {
+        isPresentingAppWindow = true
+        defer { isPresentingAppWindow = false }
+        if HistoryPopupWindow.shared.isVisible {
+            HistoryPopupWindow.shared.close()
+        }
         if LicenseManager.shared.state.permitsCoreFeatures { openSettingsWindow(initialTab: 4) }
         else { showLicenseGate() }
     }
@@ -613,6 +651,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             if !(window is NSPanel) && window.title == "CopyAttach" {
                 debugLog("Found existing settings window by title")
                 settingsWindow = window
+                if initialTab == 4 {
+                    window.contentViewController = makeSettingsContent(initialTab: 4)
+                }
+                window.center()
                 window.makeKeyAndOrderFront(nil)
                 NSApp.activate(ignoringOtherApps: true)
                 return

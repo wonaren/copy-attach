@@ -481,9 +481,13 @@ class HistoryPopupWindow: NSPanel {
         OnboardingGuide.shared.refreshSpotlight()
 
         // Hand the foreground back if this app took activation (e.g. preview pinch
-        // gesture required NSApp.activate). If this app was never activated,
-        // restorePasteTargetFocus is an immediate no-op.
-        ClipboardBackend.shared.restorePasteTargetFocus()
+        // gesture required NSApp.activate), provided no interactive app window
+        // (Settings, License Gate, etc.) is visible or presenting.
+        if let appDelegate = AppDelegate.shared,
+           !appDelegate.hasVisibleAppWindow,
+           !appDelegate.isPresentingAppWindow {
+            ClipboardBackend.shared.restorePasteTargetFocus()
+        }
 
         perfClose?.end()
     }

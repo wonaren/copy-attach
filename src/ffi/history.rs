@@ -551,11 +551,6 @@ pub extern "C" fn clipboard_trim_oldest_percent(percent: i32) -> c_int {
         let mut hist = b.history.lock().unwrap();
         let before = hist.len();
         hist.retain(|e| !deleted_ids.contains(&e.db_id()));
-        // Also honour the tracked cap in case the caller trimmed while the
-        // list was already under it.
-        while hist.len() > b.cleanup_threshold.load(Ordering::Relaxed) {
-            hist.pop();
-        }
         let removed = before - hist.len();
         // Publish under the history lock (entries were removed).
         crate::backend::mark_history_changed();

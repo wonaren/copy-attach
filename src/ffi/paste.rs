@@ -317,37 +317,36 @@ fn prepare_paste_impl(mut item: ClipboardEntry, as_path: bool) -> c_int {
     // that did not.
     let Some(b) = try_backend() else { return 0 };
     let mut db_guard = match b.db.lock() {
-        Ok(c) => Some(c),
+        Ok(c) => c,
         Err(e) => {
-            crate::error_log!("CopyAttach: DB mutex poisoned in select_and_paste persist: {e} — entry stays with db_id=0");
-            None
+            crate::error_log!("CopyAttach: DB mutex poisoned in select_and_paste persist: {e} — paste aborted");
+            return 0;
         }
     };
-    if let Some(conn) = db_guard.as_mut() {
-        let png_for_db = image_blobs.as_ref().map(|b| b.png.as_slice());
-        let thumb_for_db = image_blobs.as_ref().and_then(|b| {
-            image_thumb_dims.map(|(tw, th)| (b.thumb.as_slice(), tw, th))
-        });
+    let png_for_db = image_blobs.as_ref().map(|b| b.png.as_slice());
+    let thumb_for_db = image_blobs.as_ref().and_then(|b| {
+        image_thumb_dims.map(|(tw, th)| (b.thumb.as_slice(), tw, th))
+    });
 
-        match crate::db::persist_entry_to_db(
-            conn,
-            &item,
-            full_text.as_ref().map(|g| g.0.as_str()),
-            png_for_db,
-            thumb_for_db,
-            b.cleanup_threshold.load(Ordering::Relaxed),
-        ) {
-            Ok(new_row_id) => {
-                match &mut item {
-                    ClipboardEntry::Image { ref mut db_id, .. } |
-                    ClipboardEntry::Text { ref mut db_id, .. } => {
-                        *db_id = new_row_id;
-                    }
-                }
-            }
-            Err(()) => {
-                crate::error_log!("CopyAttach: select_and_paste DB insert failed — entry stays with db_id=0");
-            }
+    let new_row_id = match crate::db::persist_entry_to_db(
+        &mut db_guard,
+        &item,
+        full_text.as_ref().map(|g| g.0.as_str()),
+        png_for_db,
+        thumb_for_db,
+        b.cleanup_threshold.load(Ordering::Relaxed),
+    ) {
+        Ok(id) => id,
+        Err(()) => {
+            crate::error_log!("CopyAttach: select_and_paste DB insert failed — paste aborted");
+            return 0;
+        }
+    };
+
+    match &mut item {
+        ClipboardEntry::Image { ref mut db_id, .. } |
+        ClipboardEntry::Text { ref mut db_id, .. } => {
+            *db_id = new_row_id;
         }
     }
 
