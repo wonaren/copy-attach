@@ -95,8 +95,13 @@ pub(crate) fn pasteboard_change_count() -> Option<i64> {
     })
 }
 
-/// Check whether the pasteboard contains sensitive types (passwords, concealed,
-/// transient types from 1Password, Bitwarden, KeePassXC, Apple Keychain, etc.).
+/// Check whether the pasteboard carries a sensitive-content marker.
+///
+/// Four types are matched, and only these four: the three standard
+/// nspasteboard.org opt-out markers, plus 1Password's own legacy type.
+/// Bitwarden, KeePassXC and Apple Keychain are *not* matched by name — they
+/// are covered only as far as they honour the standard `ConcealedType` /
+/// `TransientType` markers, so an app that bypasses them is captured.
 pub(crate) fn pasteboard_has_sensitive_content() -> bool {
     use objc2::rc::autoreleasepool;
     autoreleasepool(|_| unsafe {

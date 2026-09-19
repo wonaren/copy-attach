@@ -135,7 +135,7 @@ SwiftApp/
 - **Snapshot API**（`clipboard_snapshot_acquire/release`）：Swift 批量读取时一次性加锁构建紧凑快照（`SnapshotRow`：类型/id/时间戳/label/source/图片尺寸 + preview，**不含全文**），后续无锁访问。新功能优先用此 API
 - **稳定 ID**：`entry_id`（u64，AtomicU64 单调递增），用于 `select_and_paste_by_id`，避免数组索引竞争
 - **图片加载**：缩略图走 `clipboard_get_image_thumb_by_db_id`（仅 SQLite 读），后台用 ImageIO 降采样到**行显示框**（460×100pt，按屏幕 backupScale 换算像素；Rust 端存储 blob 按 2× 上限 920×200 生成，双向镜像同一组常量）后存入 `NSCache`（countLimit 120、8MB，cost 按实际解码尺寸计），弹窗关闭立即清空。**预览大图**走 `clipboard_decode_preview_by_db_id`，由 Rust 降采样解码（Rust 预览路径不用 ImageIO）；预算是 `min(源最长边, max(显示尺寸×scale, 2048px))` —— **2048px 是缩放下限（floor），不是上限**，实测交付缓冲的 `max_dim` 常见 2066–2348。`clipboard_get_image_full_by_db_id` 是另一条路（**仅 SQLite 读，没有任何内存层**），只用于 GIF 预览兜底与右键「复制图片」，不是预览主路径。**显示框是矩形而非「最长边」**：扁图由宽边限制、竖图由高边限制，按长/短边匹配会让竖图纵向溢出（曾实测 1362×1774 → 200×260 超出 200 高）。
-- **两阶段粘贴（prepare_paste_by_id + send_paste）**：先查 accessibility 权限（未授权直接 return 0 且不动剪贴板）→ 查 history（by entry_id）→ DB 加载（失败显式 return 0，不兜底）→ 写剪贴板（设 pending_self_write）→ DB write-through → move entry to top → 返回目标 pid；Swift 侧先关闭并失焦弹窗（dismiss）避免 panel 保持 key window 截断击键 → 调 send_paste(pid) 发送 Cmd+V。**图片粘贴走唯一的文件路径模式**：先写 `$TMPDIR/CopyAttach/Paste/` 临时 PNG，剪贴板放 `public.file-url`（Finder 复制文件同款）再 Cmd+V
+- **两阶段粘贴（prepare_paste_by_id + send_paste）**：先按 entry_id 查 history（未命中直接 return 0）→ 再查 accessibility 权限（未授权直接 return 0）→ DB 加载正文/图片 blob（失败显式 return 0，不兜底）→ 写剪贴板（设 pending_self_write）→ DB write-through → move entry to top → 返回目标 pid；Swift 侧先关闭并失焦弹窗（dismiss）避免 panel 保持 key window 截断击键 → 调 send_paste(pid) 发送 Cmd+V。**权限检查必须早于任何剪贴板写入**——写入会替换用户剪贴板，未授权时的写入等于毁掉用户内容却永远粘贴不成。**图片粘贴走唯一的文件路径模式**：先写 `$TMPDIR/CopyAttach/Paste/` 临时 PNG，剪贴板放 `public.file-url`（Finder 复制文件同款）再 Cmd+V
 - **粘贴目标 pid 不变式**：Cmd+V 投递给 `source_app.pid`（由 `NSWorkspace.didActivateApplicationNotification` 事件驱动更新，不轮询）。该 pid 必须是用户打开弹窗前的 app，绝不能是 CopyAttach 自身
 - **粘贴后必须归还前台**：预览会强制 `NSApp.activate`（捏合手势只投给最前台 app），而系统**不会**自动归还 —— 不归还的话 Cmd+V 仍能投进目标 app（内容进去了），但该 app 留在后台，光标回不到输入框。`selectItem` 粘贴后调 `ClipboardBackend.restorePasteTargetFocus()`；它只在 `NSApp.isActive` 为真时才动手，所以从不激活的普通路径是 no-op
 
@@ -228,4 +228,6 @@ CI（`.github/workflows/build.yml`）签名步骤关键：`build` job 必须声�
 
 ## 安装的 Skills
 
-`.claude/skills/`（软链接，实际源在 `.agents/skills/`）：`apple-design` / `emil-design-eng`（Apple 风格 UI 设计原则）；`animation-vocabulary` / `improve-animations` / `review-animations` / `find-animation-opportunities`（动画分析与改进）。
+`.claude/skills/`（软链接，实际源在 `.agents/skills/`，共 6 个）：`emil-design-eng`（UI 设计原则）；`animation-vocabulary` / `improve-animations` / `review-animations` / `find-animation-opportunities`（动画分析与改进）；`i-have-adhd`（输出风格，`disable-model-invocation`，需 `/i-have-adhd` 显式调用）。
+
+**清单以 `.agents/skills/` 实际目录为准，不要信 `skills-lock.json`**：lock 声称有 `apple-design`（目录不存在，从未装上）却漏记 `i-have-adhd`，两者已漂移。

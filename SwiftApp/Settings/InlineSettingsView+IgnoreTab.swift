@@ -392,7 +392,7 @@ extension InlineSettingsView {
                 icon: "lock.shield",
                 iconColor: Color(nsColor: .systemBlue),
                 title: "忽略密码与敏感内容",
-                desc: "自动过滤 1Password、Bitwarden、钥匙串等密码管理器标记为敏感或临时（Concealed/Transient）的剪贴板内容。",
+                desc: "过滤标记为敏感或临时（Concealed/Transient）的剪贴板内容，如 1Password 等遵循 nspasteboard.org 约定、或带有自身标记的密码管理器。",
                 isOn: $ignoreSensitive
             )
             .onChange(of: ignoreSensitive) { _, _ in persistIgnoreRules() }

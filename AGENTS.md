@@ -51,5 +51,4 @@ CopyAttach 是一个 macOS 剪贴板历史管理器：Rust cdylib 后端（`src/
 | [docs/engineering-notes.md](docs/engineering-notes.md) | 从 CLAUDE.md 精简时移出的原理与实测数据：DB / 两阶段图片捕获与内存治理 / 预览解码 / 粘贴 / 原生拖拽 / 弹窗 UI / 许可证 / 签名分发 |
 | [docs/perf-instrumentation.md](docs/perf-instrumentation.md) | 流畅度仪表的埋点契约、门禁与基线；[perf/BASELINE.md](perf/BASELINE.md) 是已实测基线 |
 | [docs/licensing-protocol.md](docs/licensing-protocol.md) | 设备身份、Lease、签名信封、HTTP 端点 |
-| [docs/consistency-audit-2026-09-19.md](docs/consistency-audit-2026-09-19.md) | **改文档或对外宣称产品能力前必读**：以运行中 App 为准的言行一致性审计 |
 | [README.md](README.md) | 面向用户的功能、快捷键与设计原则 |

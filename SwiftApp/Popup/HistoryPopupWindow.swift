@@ -166,8 +166,9 @@ class HistoryPopupWindow: NSPanel {
         // Record the app the user was interacting with before the popup surfaces.
         ClipboardBackend.shared.recordFrontmostApp()
 
-        // Start the popup-driven UI poll (0.5s refresh of pure FFI atomics)
-        // and refresh the accessibility-permission state while we're at it.
+        // Start the popup-driven history waiter — event-driven off the Rust
+        // revision counter, with a 3s lifeline that only bounds a missed
+        // publish — and refresh the accessibility-permission state with it.
         ClipboardBackend.shared.setPopupVisible(true)
 
         // Cancel a pending close-guarantee from a prior closeWithAnimation: if
@@ -446,7 +447,7 @@ class HistoryPopupWindow: NSPanel {
 
     override func close() {
         let perfClose = PerfSpan.start("swift", "popup.close")
-        // Stop the popup-driven UI poll: the list is no longer visible.
+        // Stop the popup-driven history waiter: the list is no longer visible.
         ClipboardBackend.shared.setPopupVisible(false)
 
         NotificationCenter.default.removeObserver(self, name: NSWindow.didResignKeyNotification, object: self)

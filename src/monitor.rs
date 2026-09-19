@@ -324,7 +324,8 @@ pub(crate) fn clipboard_monitor(
             continue;
         }
 
-        // Sensitive content filtering (passwords, concealed, transient types from 1Password, Bitwarden, Keychain, etc.)
+        // Sensitive content filtering: the nspasteboard.org opt-out markers
+        // plus 1Password's own type (see `macos::pasteboard_has_sensitive_content`).
         if ignore_rules.lock().unwrap().ignores_sensitive() && macos::pasteboard_has_sensitive_content() {
             crate::debug_log!("CopyAttach: skipped sensitive clipboard content (Concealed/Transient type detected)");
             continue;
