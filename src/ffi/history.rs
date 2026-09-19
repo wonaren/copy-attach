@@ -191,20 +191,13 @@ pub extern "C" fn clipboard_delete_by_id(entry_id: u64) -> c_int {
                     rusqlite::params![*db_id],
                 )
             }
-            ClipboardEntry::Image { db_id, hash, .. } => {
-                if *db_id != 0 {
-                    conn.execute(
-                        "DELETE FROM clipboard_history WHERE id = ?1",
-                        rusqlite::params![*db_id],
-                    )
-                } else {
-                    // db_id not yet set (Phase 2 async persist still in
-                    // progress). Fall back to hash-based deletion.
-                    conn.execute(
-                        "DELETE FROM clipboard_history WHERE entry_type = 1 AND hash = ?1",
-                        rusqlite::params![*hash as i64],
-                    )
-                }
+            ClipboardEntry::Image { db_id, .. } => {
+                // Step 2 rejected unpersisted images (db_id=0) up front, so this
+                // is always the rowid delete.
+                conn.execute(
+                    "DELETE FROM clipboard_history WHERE id = ?1",
+                    rusqlite::params![*db_id],
+                )
             }
         } {
             crate::error_log!("CopyAttach: failed to delete entry {entry_id} from DB: {e}");

@@ -17,7 +17,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var databaseCorrupt = false
     private var corruptDialogShowing = false
     /// Set when clipboard_init reported a permanent environment failure (-2);
-    /// blocks the retry loop until the user fixes it and asks to retry.
+    /// prompts the user on hotkey press while the background retry loop
+    /// continues binary exponential backoff for auto-recovery.
     private var databaseUnusable = false
     private var databaseUnusableDialogShowing = false
     /// Last backend start attempt, for retry cooldown.

@@ -25,7 +25,8 @@ int32_t clipboard_perf_selfcheck(void);
 // ─── Lifecycle ───
 int32_t clipboard_set_runtime_entitlement(int32_t state);
 // 1 = running, 0 = retryable failure, -1 = database corrupt (call
-// clipboard_recover_corrupt_db and re-init, or quit).
+// clipboard_recover_corrupt_db and re-init, or quit), -2 = environment failure
+// (read-only / permissions / disk full; auto-recovering via backoff).
 int32_t clipboard_init(void);
 // Moves history.db (+ -wal/-shm) aside as history.db.corrupt-<secs>. Only
 // valid after clipboard_init returned -1. Returns 1 on success.
@@ -40,8 +41,6 @@ int32_t clipboard_is_debug_logging(void);
 int32_t clipboard_get_count(void);
 uint64_t clipboard_get_image_encoding_counter(void);
 uint64_t clipboard_get_history_revision(void);
-
-// Image data (caller must free with clipboard_free_bytes)
 
 // ─── Free ───
 void clipboard_free_string(char* s);
@@ -121,7 +120,7 @@ int32_t clipboard_check_permission(void);
 void clipboard_open_preferences(void);
 
 // ─── History Management ───
-int clipboard_clear_history(void);
+int32_t clipboard_clear_history(void);
 int32_t clipboard_trim_oldest_percent(int32_t percent);
 int32_t clipboard_get_cleanup_threshold(void);
 void clipboard_set_cleanup_threshold(int32_t threshold);

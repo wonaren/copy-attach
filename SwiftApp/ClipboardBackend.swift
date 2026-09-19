@@ -200,9 +200,10 @@ class ClipboardBackend {
         /// The database file is not usable; only replacing it can help.
         case corruptDatabase
         /// The environment makes the database unusable (read-only, permissions,
-        /// disk full). Retrying cannot help and the file is intact, so this is
-        /// distinct from corruptDatabase: offering a rebuild would destroy a
-        /// good database over a fixable environment problem.
+        /// disk full). The database is intact and recovers automatically once
+        /// the user fixes the environment, so this is distinct from corruptDatabase:
+        /// offering a rebuild would destroy a good database over a fixable
+        /// environment problem.
         case permanentEnvironment
     }
 

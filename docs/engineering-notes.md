@@ -19,7 +19,7 @@
 - searchText → CJK 感知 debounce（CJK 150ms / ASCII 80ms）→ 离线线程过滤 → cached searchResults。
 - 全文搜索走 SQLite FTS5 trigram 索引（`db::search_history`：≥3 字符用 `MATCH` 子串匹配 + 对超出索引上限的超大文本行做 LIKE 兜底；<3 字符退回 LIKE 全表扫描，`clipboard_search_ids` 返回匹配 entry_id）。全文只存在 DB，内存历史 Vec 不持正文（Text 条目只带 preview/label/text_hash，粘贴/预览/拖拽按 `db_id` 从 DB 按需载入，与图片同约定）。
 - **LIKE 回退是有意保留的语义承诺**：1-2 字符查询必须命中长文中段（曾提议改扫内存 preview 换取无磁盘读，因静默丢失长文中段匹配被否——`test_search_short_query_matches_full_text_middle` 是语义绊线）；已知代价是首两次击键的全表扫描与 LIKE 仅 ASCII 大小写折叠。
-- 标签/来源名匹配在 Swift 侧并集（`$0.label`/`$0.sourceName`，图片靠 label "Image (WxH)" 可搜），日期 label 亦在 Swift（DayGroup 是 UI 派生文本）。FTS 索引同步用 SQLite 触发器（AFTER INSERT/DELETE on `clipboard_history`，触发器 DROP+CREATE 以替换旧版无上限触发器，backfill 只跑一次且含上限条件，启动时清理存量超大行）。
+- 元数据字段匹配（label、custom_label、source_name）统一在 Rust/SQLite 侧由 LIKE 子串检索完成（图片条目 label 列恒为 NULL 不落库，不支持按尺寸检索，图片按备注与来源应用匹配），Swift 侧仅需按 matchIds 筛选并辅以动态日期分组（DayGroup 是 UI 派生文本）。FTS 索引同步用 SQLite 触发器（AFTER INSERT/DELETE on `clipboard_history`，触发器 DROP+CREATE 以替换旧版无上限触发器，backfill 只跑一次且含上限条件，启动时清理存量超大行）。
 - 行渲染：`ItemRowView` 无 `#` 的文本跳过正则、hex 色票 NSImage 按色值缓存（`swatchCache`，countLimit 64）——不再每帧 lockFocus 现画。搜索栏固定 index 0，项目从 index 1 开始。
 
 ## 两阶段图片捕获与内存治理
@@ -168,7 +168,7 @@ CI（`.github/workflows/build.yml`）已修复的关键坑：
 
 ## 其他前端细节
 
-- Swift 解码一律离主线程（0.99.16）：列表行缩略图经 `ClipboardBackend.loadThumbnail`（Task.detached 内 FFI 读 + PNG 解码 → 10MB NSCache），行 body 只做同步 NSCache 命中检查；预览大图经 `ImageDecode.previewImage`（预算 = 显示尺寸×scale 与 2048px 的较小值）。
+- Swift 解码一律离主线程（0.99.16）：列表行缩略图经 `ClipboardBackend.loadThumbnail`（Task.detached 内 FFI 读 + PNG 解码 → 8MB NSCache，countLimit 120），行 body 只做同步 NSCache 命中检查；预览大图经 `ImageDecode.previewImage`（预算 = min(源最长边, max(显示尺寸×scale, 2048px))，2048px 是下限 floor 而非上限）。
 - `AppIcon+Ext.swift`：bundleId → 36pt 单尺寸图标缓存（NSWorkspace 图标多尺寸全量可达数百 KB/张，18pt 行只用 36px，缓存前降采样）。
 - 日期分组：`DayGroup` 按日历日分组，`PopupRow` 在扁平列表中渲染分隔符+条目行。底栏计数用 `.contentTransition(.numericText())`。
 - swiftc 必须 `-O -whole-module-optimization`——缺省 `-Onone` 会让 SwiftUI 前端全速跑在未优化代码上（build.sh 已处理）。
@@ -300,7 +300,7 @@ db.write after recovery: 1        <- 恢复后捕获写入正常
 3. **`monitor.rs` 的 `unreachable!`（text capture 得到非 text 条目）**：属不变量断言，当前调用链不可达，暂留。
 
 
-## 事件驱动刷新（0.106.0-dev，capture → UI 实测 p95 522ms → 0.46ms）
+## 事件驱动刷新（0.105.6-dev，capture → UI 实测 p95 522ms → 0.46ms）
 
 - **问题**：`ClipboardBackend` 在弹窗打开期间用 0.5s Timer 轮询三个计数器；实测一次捕获
   从落到 DB（`db.write` p95 0.9ms）到 UI 察觉 p50 135ms / p95 522ms——延迟全部来自轮询周期。

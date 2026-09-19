@@ -23,7 +23,7 @@ pub extern "C" fn clipboard_get_history_revision() -> u64 {
     HISTORY_REVISION.load(Ordering::Relaxed)
 }
 
-// Image Loading (Index-Based & by db_id)
+// Image Loading (by db_id)
 
 /// Load full image directly by database row id (no history lock).
 /// Caller must free with `clipboard_free_bytes()`.

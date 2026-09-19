@@ -365,14 +365,4 @@ extension InlineSettingsView {
         updateState = result
         if showAlert { updateAlert = result }
     }
-
-    private var todoBadge: some View {
-        Text("TODO")
-            .font(.system(size: 9, weight: .bold))
-            .foregroundColor(Color(red: 0.92, green: 0.58, blue: 0.20))
-            .padding(.horizontal, 5)
-            .padding(.vertical, 2)
-            .background(Color(red: 0.92, green: 0.58, blue: 0.20).opacity(0.15))
-            .cornerRadius(4)
-    }
 }
