@@ -576,9 +576,10 @@ class ClipboardBackend {
         return str
     }
 
-    /// Case-insensitive substring search over label, source name, and full text
-    /// (fields Swift no longer keeps for text entries). Returns the matched
-    /// entry_ids; the caller unions these with its own date-label matches.
+    /// Full-text search in SQLite via Rust (FTS5 trigram index for ≥3 chars,
+    /// with LIKE fallback for shorter queries and oversized documents).
+    /// Returns the matched entry_ids; the caller (HistoryPopupContent) unions
+    /// these with its own in-memory label, customLabel, sourceName, and date matches.
     /// Pure FFI, so the offline search thread can call it directly.
     nonisolated func searchIds(_ query: String) -> Set<Int> {
         guard !query.isEmpty else { return [] }

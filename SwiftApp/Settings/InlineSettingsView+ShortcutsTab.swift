@@ -114,9 +114,11 @@ extension InlineSettingsView {
                 sectionDivider()
                 shortcutGuideRow(label: "收藏 / 取消收藏", keycaps: ["⌥", "P"])
                 sectionDivider()
+                shortcutGuideRow(label: "添加 / 编辑备注", keycaps: ["⌥", "R"])
+                sectionDivider()
                 shortcutGuideRow(label: "快速删除选中条目", keycaps: ["⌃", "⌫"])
                 sectionDivider()
-                shortcutGuideRow(label: "撤销删除(最多10步)", keycaps: ["⌘", "Z"])
+                shortcutGuideRow(label: "撤销删除 (最近 1 条)", keycaps: ["⌘", "Z"])
                 sectionDivider()
                 shortcutGuideRow(label: "快速选择第 1 ~ 9 项", keycaps: ["⌘", "1~9"])
             }

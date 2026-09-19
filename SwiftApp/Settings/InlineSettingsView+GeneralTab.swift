@@ -177,7 +177,7 @@ extension InlineSettingsView {
                 icon: runInBackground ? "circle.fill" : "circle",
                 iconColor: runInBackground ? Color(nsColor: .systemGreen) : theme.secondaryText,
                 title: "后台运行",
-                desc: "关闭主窗口后，保持应用在后台状态栏运行。",
+                desc: "关闭设置面板后，保持应用在菜单栏与后台继续运行。",
                 isOn: $runInBackground
             )
             .onChange(of: runInBackground) { _, newValue in

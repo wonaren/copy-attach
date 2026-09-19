@@ -359,8 +359,8 @@ fn prepare_paste_impl(mut item: ClipboardEntry, as_path: bool) -> c_int {
         }
         mark_history_changed();
     }
-    // Release the DB lock before the 50ms paste delay so the capture monitor
-    // is never blocked on it.
+    // Release the DB lock before returning so the capture monitor is never
+    // blocked while the caller dismisses the window and sends keystrokes.
     drop(db_guard);
 
     // The caller owns the keystroke: it must not be posted until the popup has
