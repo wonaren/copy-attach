@@ -525,8 +525,11 @@ class ClipboardBackend {
             // allocation; the old per-row API allocated + freed one CString
             // per string field (9k-12k tiny allocations per 3000-row refresh).
             var packedLength: Int32 = 0
-            guard let packed = clipboard_snapshot_packed_acquire(&packedLength),
-                  packedLength > 0 else { return }
+            guard let packed = clipboard_snapshot_packed_acquire(&packedLength) else { return }
+            guard packedLength > 0 else {
+                clipboard_free_bytes(packed, packedLength)
+                return
+            }
             defer { clipboard_free_bytes(packed, packedLength) }
 
             let perfDecode = PerfSpan.start("swift", "snapshot.decode")
@@ -665,8 +668,14 @@ class ClipboardBackend {
                 autoreleasepool {
                     var len: Int32 = 0
                     let perfFfi = PerfSpan.start("swift", "thumb.ffi_read")
-                    guard let ptr = clipboard_get_image_thumb_by_db_id(Int64(dbId), &len), len > 0 else {
+                    guard let ptr = clipboard_get_image_thumb_by_db_id(Int64(dbId), &len) else {
                         perfFfi?.end()
+                        continuation.resume(returning: nil)
+                        return
+                    }
+                    guard len > 0 else {
+                        perfFfi?.end()
+                        clipboard_free_bytes(ptr, len)
                         continuation.resume(returning: nil)
                         return
                     }
@@ -816,34 +825,33 @@ class ClipboardBackend {
 
         let restoredId = Int(clipboard_last_restored_id())
         guard restoredId > 0 else {
-            // Rust didn't record a restored ID — use first-snapshot fallback.
-            guard let restoredItem = readFirstSnapshotItem(snap) else { return false }
-            items.insert(restoredItem, at: 0)
-            itemsGeneration &+= 1
-            reloadGeneration.withLock { $0 &+= 1 }
-            return true
+            errorLog("undoDelete: clipboard_undo_delete succeeded but last_restored_id is invalid (\(restoredId))")
+            return false
         }
 
         // Scan the snapshot for the entry matching the restored ID.
         let c = Int(clipboard_snapshot_count(snap))
+        var restoredItem: ClipboardItem? = nil
         for i in 0..<c {
             let sid = Int(clipboard_snapshot_item_id(snap, Int32(i)))
             if sid == restoredId {
-                if let restoredItem = readSnapshotItem(snap, at: Int32(i)) {
-                    items.insert(restoredItem, at: 0)
-                }
+                restoredItem = readSnapshotItem(snap, at: Int32(i))
                 break
             }
         }
 
+        guard let item = restoredItem else {
+            errorLog("undoDelete: restored entry \(restoredId) not found in snapshot")
+            return false
+        }
+
+        // Remove any existing copy in the local items list (mirroring Rust-side
+        // add_to_history dedup) to prevent duplicate IDs in SwiftUI rendering.
+        items.removeAll { $0.id == restoredId }
+        items.insert(item, at: 0)
         itemsGeneration &+= 1
         reloadGeneration.withLock { $0 &+= 1 }
         return true
-    }
-
-    /// Read the first entry from a snapshot and build a ClipboardItem (O(1)).
-    private func readFirstSnapshotItem(_ snap: UnsafeMutableRawPointer) -> ClipboardItem? {
-        return readSnapshotItem(snap, at: 0)
     }
 
     /// Read the entry at index `i` from a snapshot and build a ClipboardItem.

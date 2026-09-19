@@ -330,7 +330,7 @@ class HotkeyManager {
         stopRecording()
     }
 
-    /// Reset to default hotkey (⌥⌘V)
+    /// Reset to default hotkey (⌥X)
     func resetToDefault() {
         config = .default
     }
