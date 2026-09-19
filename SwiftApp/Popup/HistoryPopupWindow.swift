@@ -163,6 +163,9 @@ class HistoryPopupWindow: NSPanel {
         let perfShow = PerfSpan.start("swift", "popup.show")
         closeSessionGeneration &+= 1
 
+        // Record the app the user was interacting with before the popup surfaces.
+        ClipboardBackend.shared.recordFrontmostApp()
+
         // Start the popup-driven UI poll (0.5s refresh of pure FFI atomics)
         // and refresh the accessibility-permission state while we're at it.
         ClipboardBackend.shared.setPopupVisible(true)
@@ -476,6 +479,11 @@ class HistoryPopupWindow: NSPanel {
         // tour's scrim stuck in its hidden state.
         OnboardingGuide.shared.setItemDragInProgress(false)
         OnboardingGuide.shared.refreshSpotlight()
+
+        // Hand the foreground back if this app took activation (e.g. preview pinch
+        // gesture required NSApp.activate). If this app was never activated,
+        // restorePasteTargetFocus is an immediate no-op.
+        ClipboardBackend.shared.restorePasteTargetFocus()
 
         perfClose?.end()
     }

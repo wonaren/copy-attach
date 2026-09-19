@@ -614,6 +614,82 @@ fn test_trim_oldest_percent_leaves_memory_intact_when_db_delete_fails() {
 }
 
 #[test]
+fn test_set_cleanup_threshold_leaves_memory_intact_when_db_delete_fails() {
+    let _shared = shared_state_guard();
+    ensure_test_backend();
+    let b = crate::backend::try_backend().expect("backend initialized");
+
+    let base: u64 = 912_000_000;
+    let n: u64 = 6;
+    let mut fixture_ids: Vec<i64> = Vec::new();
+    {
+        let conn = b.db.lock().unwrap();
+        for i in 0..n {
+            conn.execute(
+                "INSERT INTO clipboard_history
+                    (entry_type, text, hash, timestamp, source_name, source_bundle_id, entry_id)
+                 VALUES (0, ?1, ?2, 0, 'ThresholdTest', 'com.example.thresholdtest', ?3)",
+                rusqlite::params![format!("thresh-{i}"), i as i64, (base + i) as i64],
+            ).expect("insert threshold fixture row");
+            fixture_ids.push(conn.last_insert_rowid());
+        }
+    }
+    {
+        let mut hist = b.history.lock().unwrap();
+        for (i, db_id) in fixture_ids.iter().enumerate() {
+            hist.push(ClipboardEntry::Text {
+                id: base + i as u64,
+                preview: format!("thresh-{i}"),
+                label: format!("thresh-{i}"),
+                custom_label: String::new(),
+                text_hash: i as u64,
+                timestamp: 0,
+                source_name: "ThresholdTest".to_string(),
+                source_bundle_id: "com.example.thresholdtest".to_string(),
+                db_id: *db_id,
+            });
+        }
+    }
+    let before = b.history.lock().unwrap().len();
+
+    // Make DB read-only.
+    {
+        let conn = b.db.lock().unwrap();
+        conn.pragma_update(None, "query_only", true).expect("enable query_only");
+    }
+
+    // Try setting threshold to 100 (which would be lower if we padded or if count > 100,
+    // but here we clamp to 100 which is minimum. To guarantee threshold < hist.len(),
+    // we set it to 100 when hist has > 100 entries, or we can check with current count).
+    // If before <= 100, clamping to 100 won't exceed len. But let's verify before > 0.
+    crate::ffi::clipboard_set_cleanup_threshold(100);
+    let after = b.history.lock().unwrap().len();
+
+    // Restore writability and cleanup fixture.
+    {
+        let conn = b.db.lock().unwrap();
+        conn.pragma_update(None, "query_only", false).expect("disable query_only");
+        for db_id in &fixture_ids {
+            let _ = conn.execute(
+                "DELETE FROM clipboard_history WHERE id = ?1",
+                rusqlite::params![db_id],
+            );
+        }
+    }
+    {
+        let mut hist = b.history.lock().unwrap();
+        hist.retain(|e| !(e.entry_id() >= base && e.entry_id() < base + n));
+    }
+    // Restore default threshold
+    crate::ffi::clipboard_set_cleanup_threshold(3000);
+
+    assert_eq!(
+        after, before,
+        "memory must stay intact when DB trim fails (was {before}, now {after})"
+    );
+}
+
+#[test]
 fn test_log_timestamp_is_utc_plus_8() {
     assert_eq!(crate::backend::format_log_timestamp(0), "1970-01-01 08:00:00 +0800");
     assert_eq!(

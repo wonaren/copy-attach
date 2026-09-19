@@ -10,8 +10,8 @@ struct InlineSettingsView: View {
     @State var hotkeyManager = HotkeyManager.shared
     @State private var selectedTab: Int
     @State var launchAtLogin = UserDefaults.standard.bool(forKey: "LaunchAtLogin")
-    @State var runInBackground = UserDefaults.standard.bool(forKey: "RunInBackground") != false
-    @State var showMenuBarIcon = UserDefaults.standard.bool(forKey: "ShowMenuBarIcon") != false
+    @State var runInBackground = UserDefaults.standard.object(forKey: "RunInBackground") as? Bool ?? true
+    @State var showMenuBarIcon = UserDefaults.standard.object(forKey: "ShowMenuBarIcon") as? Bool ?? true
     @State var cleanupThreshold: Double = {
         let saved = UserDefaults.standard.integer(forKey: "CleanupThreshold")
         return Double(saved >= 100 ? saved : 3000)
@@ -21,7 +21,7 @@ struct InlineSettingsView: View {
     @State var ignoreTextClipboardType = UserDefaults.standard.bool(forKey: "IgnoreTextClipboardType")
     @State var ignoreImageClipboardType = UserDefaults.standard.bool(forKey: "IgnoreImageClipboardType")
     @State var ignoreShortText = UserDefaults.standard.bool(forKey: "IgnoreShortText")
-    @State var shortTextThreshold = UserDefaults.standard.integer(forKey: "ShortTextThreshold") != 0 ? UserDefaults.standard.integer(forKey: "ShortTextThreshold") : 3
+    @State var shortTextThreshold = UserDefaults.standard.integer(forKey: "ShortTextThreshold") > 0 ? UserDefaults.standard.integer(forKey: "ShortTextThreshold") : 3
     @State var pendingThreshold: Int? = nil
     @State var thresholdBeforeEdit: Double = 3000
     @State var continuousDrag = HistoryPopupWindow.continuousDragEnabled

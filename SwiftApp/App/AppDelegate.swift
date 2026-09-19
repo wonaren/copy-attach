@@ -482,7 +482,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             NSApp.terminate(nil)
             return
         }
-        let runInBackground = UserDefaults.standard.bool(forKey: "RunInBackground") != false
+        let runInBackground = UserDefaults.standard.object(forKey: "RunInBackground") as? Bool ?? true
         if !runInBackground { NSApp.terminate(nil) }
     }
 

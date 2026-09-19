@@ -400,7 +400,11 @@ pub(crate) fn clipboard_monitor(
                 let text = &text_guard.0;
                 if !text.is_empty() {
                     let trimmed = text.trim();
-                    if trimmed.len() >= 2 && !ignore_rules.lock().unwrap().ignores_text(text) {
+                    // Pure whitespace is not meaningful clipboard history. Any
+                    // non-empty content is gated strictly by the configured ignore rules
+                    // (which enforce short-text scalar thresholds, disabled text capture,
+                    // or default capture of all valid text including single characters).
+                    if !trimmed.is_empty() && !ignore_rules.lock().unwrap().ignores_text(text) {
                         let item = ClipboardEntry::text_entry(
                             crate::backend::new_entry_id(),
                             text,

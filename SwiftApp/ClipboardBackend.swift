@@ -379,7 +379,8 @@ class ClipboardBackend {
         let ignoreText = UserDefaults.standard.bool(forKey: "IgnoreTextClipboardType")
         let ignoreImages = UserDefaults.standard.bool(forKey: "IgnoreImageClipboardType")
         let ignoreShortText = UserDefaults.standard.bool(forKey: "IgnoreShortText")
-        let shortTextThreshold = UserDefaults.standard.integer(forKey: "ShortTextThreshold")
+        let rawThreshold = UserDefaults.standard.integer(forKey: "ShortTextThreshold")
+        let shortTextThreshold = rawThreshold > 0 ? rawThreshold : 3
         let minimum = ignoreShortText ? max(shortTextThreshold, 1) : 0
         let ignoreSensitive = UserDefaults.standard.object(forKey: "IgnoreSensitiveClipboard") as? Bool ?? true
         let result = payload.withCString {
@@ -408,7 +409,7 @@ class ClipboardBackend {
     /// Detect the current frontmost app and tell Rust about it. The pid is
     /// also the paste target for CGEventPostToPid, so it must stay the app
     /// the user was using before the popup opened — never this app itself.
-    private func updateSourceApp() {
+    func recordFrontmostApp() {
         if let app = NSWorkspace.shared.frontmostApplication {
             // When the preview window activates this agent app (so pinch
             // gestures are delivered), the frontmost app IS CopyAttach.
@@ -425,6 +426,10 @@ class ClipboardBackend {
             sourceAppBundleID = bundleId
             clipboard_set_source_app(name, bundleId, pid)
         }
+    }
+
+    private func updateSourceApp() {
+        recordFrontmostApp()
     }
 
     // MARK: - Drag flavour (plain vs rich text)

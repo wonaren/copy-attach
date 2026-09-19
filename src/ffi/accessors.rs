@@ -318,30 +318,41 @@ pub extern "C" fn clipboard_get_cleanup_threshold() -> i32 {
 }
 
 /// Clamped to [100, 10000]. Immediately trims both DB and in-memory history.
+///
+/// Conforms to the "DB failure leaves memory intact" contract: the DB trim
+/// is executed first. If the DB operation fails (e.g. read-only or locked),
+/// in-memory history is left untouched so entries never "resurrect" on restart.
 #[no_mangle]
 pub extern "C" fn clipboard_set_cleanup_threshold(threshold: i32) {
     if let Some(b) = try_backend() {
         let t = threshold.clamp(100, 10000) as usize;
         b.cleanup_threshold.store(t, Ordering::Relaxed);
-        {
+
+        // Step 1: trim DB first. If DB fails, leave memory intact.
+        let db_trimmed = match b.db.lock() {
+            Ok(conn) => match crate::db::trim_db_history(&conn, t) {
+                Ok(()) => true,
+                Err(()) => {
+                    crate::error_log!("CopyAttach: set_cleanup_threshold DB trim failed — history left intact");
+                    false
+                }
+            },
+            Err(e) => {
+                crate::error_log!("CopyAttach: DB mutex poisoned in set_cleanup_threshold: {e} — history left intact");
+                false
+            }
+        };
+
+        // Step 2: only trim memory when DB trim succeeded.
+        if db_trimmed {
             let mut hist = b.history.lock().unwrap();
             let before = hist.len();
             while hist.len() > t {
                 hist.pop();
             }
-            // Publish under the history lock, and only when rows were actually
-            // removed: the UI must observe the shortened list atomically (same
-            // contract as every other history mutation). A no-op raise of the
-            // threshold must not cost a needless full reload.
             if hist.len() != before {
                 crate::backend::mark_history_changed();
             }
-        }
-        if let Ok(conn) = b.db.lock() {
-            // A failure here is self-healing: the in-memory list is already
-            // bounded, and the next capture's transactional trim (same
-            // threshold) removes whatever rows are still over it.
-            let _ = crate::db::trim_db_history(&conn, t);
         }
     }
 }

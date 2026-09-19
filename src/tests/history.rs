@@ -240,3 +240,25 @@ fn test_remove_deleted_entry_no_match_is_noop() {
     assert_eq!(hist.len(), 1);
     assert_eq!(hist[0].db_id(), 7);
 }
+
+#[test]
+fn test_text_capture_predicate_allows_single_char_and_rejects_pure_whitespace() {
+    let rules = crate::ignore::IgnoreRules::default();
+
+    // Helper mirroring monitor.rs capture guard:
+    // !trimmed.is_empty() && !rules.ignores_text(text)
+    let should_capture = |text: &str| -> bool {
+        let trimmed = text.trim();
+        !trimmed.is_empty() && !rules.ignores_text(text)
+    };
+
+    assert!(should_capture("a"), "single ASCII char must be captured by default");
+    assert!(should_capture("1"), "single digit must be captured by default");
+    assert!(should_capture("中"), "single CJK char must be captured by default");
+    assert!(should_capture(" a "), "padded single char must be captured");
+
+    assert!(!should_capture(""), "empty text must not be captured");
+    assert!(!should_capture("   "), "whitespace-only text must not be captured");
+    assert!(!should_capture("\n\t  \r\n"), "mixed whitespace must not be captured");
+}
+
