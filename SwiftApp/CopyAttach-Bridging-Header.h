@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 
 // ─── History change events (event-driven UI refresh) ───
 // Block until history changes after `since`, or timeout_ms elapses. Returns the
@@ -140,3 +141,9 @@ int32_t clipboard_stress_available(void);
 int32_t clipboard_stress_inject(int32_t count, double text_ratio, int64_t seed);
 void clipboard_stress_reset(void);
 char* clipboard_stress_run_bench(void);
+
+// ─── Data Backup & Restore ───
+int32_t clipboard_export_backup(const char* target_path, const char* favorite_ids_str);
+int32_t clipboard_inspect_backup(const char* backup_path, int32_t* out_item_count, int32_t* out_fav_count, uint64_t* out_timestamp);
+int32_t clipboard_restore_backup_overwrite(const char* backup_path, char** out_fav_str);
+int32_t clipboard_restore_backup_merge(const char* backup_path, const char* current_fav_str, char** out_fav_str);

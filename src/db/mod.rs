@@ -13,6 +13,7 @@ mod schema;
 mod crud;
 mod migration;
 mod search;
+pub(crate) mod backup;
 
 pub(crate) use schema::{classify_db_error, ensure_history_table, open_db, DbFailure};
 // The image-hash migration driver lives in ffi/init.rs and is compiled out of

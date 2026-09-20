@@ -25,6 +25,7 @@ mod accessors;
 pub(crate) mod paste;
 mod history;
 mod stress;
+mod backup;
 
 // Re-export so `crate::ffi::*` paths stay stable for the test suite and any
 // internal callers. Most exports are consumed by Swift purely as C symbols, so
@@ -44,6 +45,8 @@ pub(crate) use paste::*;
 pub(crate) use history::*;
 #[allow(unused_imports)]
 pub(crate) use stress::*;
+#[allow(unused_imports)]
+pub(crate) use backup::*;
 
 pub(super) fn vec_to_raw(v: Vec<u8>) -> *mut u8 {
     let len = v.len();

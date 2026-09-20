@@ -501,7 +501,7 @@ class ClipboardBackend {
         }
     }
 
-    private func reloadItems() {
+    func reloadItems() {
         // End-to-end reload latency: request -> the new list published on main.
         let perfReload = PerfSpan.start("swift", "popup.reload")
         let gen = reloadGeneration.withLock { generation in
@@ -1005,6 +1005,89 @@ class ClipboardBackend {
     /// Returns total storage size in bytes of all clipboard entries in the database.
     func getStorageSize() -> Int64 {
         clipboard_get_storage_size()
+    }
+
+    // MARK: - Backup & Restore
+
+    struct BackupInfo {
+        let totalItems: Int
+        let favoriteItems: Int
+        let createdAt: Date
+    }
+
+    enum RestoreMode {
+        case merge
+        case overwrite
+    }
+
+    /// Export the entire clipboard database and current favorites to a standalone backup file.
+    func exportBackup(to url: URL) throws -> Int {
+        let path = (url.path as NSString).utf8String
+        let favStr = favoriteIds.map(String.init).joined(separator: ",")
+        let favCStr = (favStr as NSString).utf8String
+
+        let count = clipboard_export_backup(path, favCStr)
+        if count < 0 {
+            throw NSError(domain: "CopyAttachBackup", code: Int(count), userInfo: [
+                NSLocalizedDescriptionKey: "导出备份失败，请检查目标存储路径写入权限或可用空间。"
+            ])
+        }
+        return Int(count)
+    }
+
+    /// Inspect a backup file and extract metadata without modifying current database.
+    func inspectBackup(at url: URL) throws -> BackupInfo {
+        let path = (url.path as NSString).utf8String
+        var totalItems: Int32 = 0
+        var favItems: Int32 = 0
+        var createdAtSec: UInt64 = 0
+
+        let ret = clipboard_inspect_backup(path, &totalItems, &favItems, &createdAtSec)
+        if ret == 0 {
+            throw NSError(domain: "CopyAttachBackup", code: -1, userInfo: [
+                NSLocalizedDescriptionKey: "无法解析该备份文件，文件可能已损坏或非 CopyAttach 格式。"
+            ])
+        }
+
+        let date = createdAtSec > 0 ? Date(timeIntervalSince1970: TimeInterval(createdAtSec)) : Date()
+        return BackupInfo(
+            totalItems: Int(totalItems),
+            favoriteItems: Int(favItems),
+            createdAt: date
+        )
+    }
+
+    /// Restore clipboard history and favorites from a backup file.
+    func restoreBackup(from url: URL, mode: RestoreMode) throws -> Int {
+        let path = (url.path as NSString).utf8String
+        var outFavCStr: UnsafeMutablePointer<CChar>? = nil
+        let result: Int32
+
+        switch mode {
+        case .overwrite:
+            result = clipboard_restore_backup_overwrite(path, &outFavCStr)
+        case .merge:
+            let favStr = favoriteIds.map(String.init).joined(separator: ",")
+            let favCStr = (favStr as NSString).utf8String
+            result = clipboard_restore_backup_merge(path, favCStr, &outFavCStr)
+        }
+
+        if result < 0 {
+            throw NSError(domain: "CopyAttachBackup", code: Int(result), userInfo: [
+                NSLocalizedDescriptionKey: "恢复备份失败，请检查备份文件是否完整有效。"
+            ])
+        }
+
+        if let ptr = outFavCStr {
+            let favStr = String(cString: ptr)
+            clipboard_free_string(ptr)
+            let newFavs = Set(favStr.split(separator: ",").compactMap { Int($0) })
+            self.favoriteIds = newFavs
+            saveFavorites()
+        }
+
+        reloadItems()
+        return Int(result)
     }
 }
 

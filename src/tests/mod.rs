@@ -19,6 +19,7 @@ mod cleanup;
 mod db;
 mod migration;
 mod backend;
+mod backup;
 
 fn make_text(text: &str, ts: u64) -> ClipboardEntry {
     ClipboardEntry::text_entry(
