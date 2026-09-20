@@ -33,6 +33,7 @@ struct InlineSettingsView: View {
     @State var debugLogging = UserDefaults.standard.object(forKey: "DebugLogging") as? Bool ?? (clipboard_is_debug_logging() != 0)
     @State var showDragGuide = false
     @State var isHoveringDragIcon = false
+    @State var backupStatusMessage: String? = nil
     @State var updateState: UpdateCheckState = .idle
     /// Alert item, decoupled from `updateState` so dismissing an alert does not
     /// clear the badge / download button (which persist until a re-check).

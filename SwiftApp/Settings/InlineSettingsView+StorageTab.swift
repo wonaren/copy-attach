@@ -232,79 +232,90 @@ extension InlineSettingsView {
 
     private var backupRestoreCard: some View {
         settingsCard {
-            cardTitle(icon: "externaldrive.fill.badge.checkmark", text: "数据备份与恢复")
+            cardTitle(icon: "externaldrive", text: "备份与恢复")
 
-            VStack(alignment: .leading, spacing: 10) {
-                Text("完整备份所有剪贴板记录，包含文本、图片数据、收藏状态以及每条记录的备注。备份文件可随时用于本机恢复或跨设备迁移。")
-                    .font(.system(size: 11.5))
-                    .foregroundColor(theme.secondaryText)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                HStack(spacing: 12) {
-                    Button {
-                        handleExportBackup()
-                    } label: {
-                        Label("备份数据...", systemImage: "square.and.arrow.up")
-                            .font(.system(size: 12, weight: .medium))
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 7)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(Color.accentColor)
-
-                    Button {
-                        handleImportBackup()
-                    } label: {
-                        Label("导入恢复...", systemImage: "square.and.arrow.down")
-                            .font(.system(size: 12, weight: .medium))
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 7)
-                    }
-                    .buttonStyle(.bordered)
+            HStack(spacing: 12) {
+                Image(systemName: "arrow.up.doc")
+                    .font(.system(size: 15))
+                    .foregroundColor(Color.accentColor)
+                    .frame(width: 22)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("导出备份")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(theme.primaryText)
+                    Text("将全部剪贴板历史、收藏与备注保存为独立文件。")
+                        .font(.system(size: 11.5))
+                        .foregroundColor(theme.secondaryText)
                 }
-                .padding(.top, 2)
-
-                HStack(spacing: 14) {
-                    HStack(spacing: 4) {
-                        Image(systemName: "star.fill")
-                            .font(.system(size: 9))
-                            .foregroundColor(.orange)
-                        Text("完整保留收藏")
-                            .font(.system(size: 10))
-                            .foregroundColor(theme.secondaryText)
-                    }
-                    HStack(spacing: 4) {
-                        Image(systemName: "note.text")
-                            .font(.system(size: 9))
-                            .foregroundColor(.accentColor)
-                        Text("完整保留备注")
-                            .font(.system(size: 10))
-                            .foregroundColor(theme.secondaryText)
-                    }
-                    HStack(spacing: 4) {
-                        Image(systemName: "arrow.triangle.merge")
-                            .font(.system(size: 9))
-                            .foregroundColor(Color(nsColor: .systemGreen))
-                        Text("合并或覆盖恢复")
-                            .font(.system(size: 10))
-                            .foregroundColor(theme.secondaryText)
-                    }
+                Spacer()
+                Button("导出备份...") {
+                    handleExportBackup()
                 }
-                .padding(.top, 1)
+                .buttonStyle(.bordered)
+            }
+            .padding(.vertical, 4)
+
+            sectionDivider().padding(.vertical, 7)
+
+            HStack(spacing: 12) {
+                Image(systemName: "arrow.down.doc")
+                    .font(.system(size: 15))
+                    .foregroundColor(Color(nsColor: .systemGreen))
+                    .frame(width: 22)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("从备份恢复")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(theme.primaryText)
+                    Text("从备份文件中恢复记录，支持与现有历史合并。")
+                        .font(.system(size: 11.5))
+                        .foregroundColor(theme.secondaryText)
+                }
+                Spacer()
+                Button("恢复备份...") {
+                    handleImportBackup()
+                }
+                .buttonStyle(.bordered)
+            }
+            .padding(.vertical, 4)
+
+            if let msg = backupStatusMessage {
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 12))
+                        .foregroundColor(Color(nsColor: .systemGreen))
+                    Text(msg)
+                        .font(.system(size: 11.5))
+                        .foregroundColor(theme.primaryText)
+                    Spacer()
+                }
+                .padding(.top, 6)
+                .transition(.opacity)
+            }
+        }
+    }
+
+    private func showBackupStatus(_ message: String) {
+        withAnimation(.easeInOut(duration: 0.2)) {
+            backupStatusMessage = message
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) {
+            withAnimation(.easeInOut(duration: 0.3)) {
+                if backupStatusMessage == message {
+                    backupStatusMessage = nil
+                }
             }
         }
     }
 
     private func handleExportBackup() {
         let savePanel = NSSavePanel()
-        savePanel.title = "备份剪贴板历史数据"
-        savePanel.prompt = "导出备份"
-        savePanel.message = "请选择保存 CopyAttach 备份文件的位置："
+        savePanel.title = "导出剪贴板备份"
+        savePanel.prompt = "导出"
 
         let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd_HHmm"
+        formatter.dateFormat = "yyyy-MM-dd"
         let dateStr = formatter.string(from: Date())
-        savePanel.nameFieldStringValue = "CopyAttach-Backup-\(dateStr).cabackup"
+        savePanel.nameFieldStringValue = "CopyAttach_\(dateStr).cabackup"
 
         if #available(macOS 11.0, *) {
             if let type = UTType(filenameExtension: "cabackup") {
@@ -316,15 +327,10 @@ extension InlineSettingsView {
             guard response == .OK, let targetURL = savePanel.url else { return }
             do {
                 let count = try backend.exportBackup(to: targetURL)
-                let alert = NSAlert()
-                alert.messageText = "数据备份成功"
-                alert.informativeText = "已成功导出 \(count) 条剪贴板历史记录（包含所有图片、收藏和备注）至：\n\(targetURL.lastPathComponent)"
-                alert.alertStyle = .informational
-                alert.addButton(withTitle: "好")
-                alert.runModal()
+                showBackupStatus("已成功备份 \(count) 条记录")
             } catch {
                 let alert = NSAlert()
-                alert.messageText = "备份失败"
+                alert.messageText = "导出失败"
                 alert.informativeText = error.localizedDescription
                 alert.alertStyle = .critical
                 alert.addButton(withTitle: "好")
@@ -336,8 +342,7 @@ extension InlineSettingsView {
     private func handleImportBackup() {
         let openPanel = NSOpenPanel()
         openPanel.title = "选择 CopyAttach 备份文件"
-        openPanel.prompt = "选择备份"
-        openPanel.message = "请选择之前导出的 .cabackup 备份文件："
+        openPanel.prompt = "选择"
         openPanel.allowsMultipleSelection = false
         openPanel.canChooseDirectories = false
         openPanel.canChooseFiles = true
@@ -353,58 +358,36 @@ extension InlineSettingsView {
 
             do {
                 let info = try backend.inspectBackup(at: backupURL)
-                let dateFmt = DateFormatter()
-                dateFmt.dateStyle = .medium
-                dateFmt.timeStyle = .short
-                let timeStr = dateFmt.string(from: info.createdAt)
+                let timeStr = DateFormatter.localizedString(from: info.createdAt, dateStyle: .medium, timeStyle: .short)
 
                 let alert = NSAlert()
-                alert.messageText = "确认恢复剪贴板记录？"
-                alert.informativeText = """
-                检测到有效备份文件：\(backupURL.lastPathComponent)
-                • 记录总数：\(info.totalItems) 条
-                • 包含收藏：\(info.favoriteItems) 条
-                • 备份时间：\(timeStr)
-
-                请选择恢复模式：
-                • 合并导入：保留当前记录，仅合并去重并保留最新备注与收藏
-                • 全量覆盖：清空当前所有历史记录，完全还原为备份状态
-                """
-                alert.alertStyle = .warning
-                alert.addButton(withTitle: "合并导入 (推荐)")
-                alert.addButton(withTitle: "全量覆盖")
+                alert.messageText = "要如何恢复剪贴板历史？"
+                alert.informativeText = "备份创建于 \(timeStr)，包含 \(info.totalItems) 条记录（\(info.favoriteItems) 条收藏）。\n\n您可以将备份内容与现有历史合并，或完全替换当前内容。"
+                alert.alertStyle = .informational
+                alert.addButton(withTitle: "合并")
                 alert.addButton(withTitle: "取消")
+                alert.addButton(withTitle: "替换...")
 
                 let choice = alert.runModal()
                 if choice == .alertFirstButtonReturn {
                     let count = try backend.restoreBackup(from: backupURL, mode: .merge)
-                    let resultAlert = NSAlert()
-                    resultAlert.messageText = "合并恢复完成"
-                    resultAlert.informativeText = "成功合并备份数据，新增 \(count) 条记录，并已同步更新收藏与备注。"
-                    resultAlert.alertStyle = .informational
-                    resultAlert.addButton(withTitle: "好")
-                    resultAlert.runModal()
-                } else if choice == .alertSecondButtonReturn {
+                    showBackupStatus("已合并恢复（新增 \(count) 条记录）")
+                } else if choice == .alertThirdButtonReturn {
                     let confirmAlert = NSAlert()
-                    confirmAlert.messageText = "⚠️ 确认全量覆盖？"
-                    confirmAlert.informativeText = "当前所有的剪贴板历史记录将被清空，并由备份文件（\(info.totalItems) 条记录）完全替换。该操作不可撤销！"
+                    confirmAlert.messageText = "确定要替换所有剪贴板记录吗？"
+                    confirmAlert.informativeText = "当前历史将被备份中的 \(info.totalItems) 条记录完全替换。此操作无法撤销。"
                     confirmAlert.alertStyle = .critical
-                    confirmAlert.addButton(withTitle: "确认覆盖")
+                    confirmAlert.addButton(withTitle: "替换")
                     confirmAlert.addButton(withTitle: "取消")
 
                     if confirmAlert.runModal() == .alertFirstButtonReturn {
                         let count = try backend.restoreBackup(from: backupURL, mode: .overwrite)
-                        let resultAlert = NSAlert()
-                        resultAlert.messageText = "全量恢复完成"
-                        resultAlert.informativeText = "成功还原 \(count) 条记录，收藏与备注已完整恢复。"
-                        resultAlert.alertStyle = .informational
-                        resultAlert.addButton(withTitle: "好")
-                        resultAlert.runModal()
+                        showBackupStatus("已全量恢复备份（共 \(count) 条记录）")
                     }
                 }
             } catch {
                 let alert = NSAlert()
-                alert.messageText = "无法读取备份文件"
+                alert.messageText = "无法打开备份文件"
                 alert.informativeText = error.localizedDescription
                 alert.alertStyle = .critical
                 alert.addButton(withTitle: "好")
