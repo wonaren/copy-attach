@@ -8,6 +8,10 @@ git push origin v0.xxx.x --force
 
 ## [Unreleased]
 
+### 修复
+
+- **恢复复制链接与按钮复制的采集**：修复文件类型检测误将 `Apple URL pasteboard type` 当作本地文件过滤的严重缺陷，并增强对 `public.url` 独立链接对象的解析，完整记录各类应用及网页中点击“复制链接 / 复制 URL”按钮的内容。
+
 ## [0.106.0] - 2026-09-19
 
 ### 功能与交互

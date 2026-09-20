@@ -186,7 +186,6 @@ pub(crate) fn pasteboard_has_files() -> bool {
             c"NSFilenamesPboardType",
             c"com.apple.finder.noderef",
             c"com.apple.pasteboard.promised-file-url",
-            c"Apple URL pasteboard type",
             c"com.apple.icns",
         ] {
             let ns_uti: *mut objc2::runtime::NSObject =
@@ -200,6 +199,40 @@ pub(crate) fn pasteboard_has_files() -> bool {
             }
         }
         !pasteboard_file_url_strings().is_empty()
+    })
+}
+
+/// Read URL string from pasteboard when `public.url` is present and does not represent a local file.
+pub(crate) fn pasteboard_url_string() -> Option<String> {
+    use objc2::rc::autoreleasepool;
+    autoreleasepool(|_| unsafe {
+        let cls = nspasteboard_class()?;
+        let pasteboard: *mut objc2::runtime::NSObject = msg_send![cls, generalPasteboard];
+        if pasteboard.is_null() {
+            return None;
+        }
+        let nsstr_cls = objc2::runtime::AnyClass::get(c"NSString")?;
+        let uti = c"public.url";
+        let ns_uti: *mut objc2::runtime::NSObject =
+            msg_send![nsstr_cls, stringWithUTF8String: uti.as_ptr()];
+        if ns_uti.is_null() {
+            return None;
+        }
+        let ns_string: *mut objc2::runtime::NSObject =
+            msg_send![pasteboard, stringForType: ns_uti];
+        if ns_string.is_null() {
+            return None;
+        }
+        let c_str: *const i8 = msg_send![ns_string, UTF8String];
+        if c_str.is_null() {
+            return None;
+        }
+        let s = std::ffi::CStr::from_ptr(c_str).to_string_lossy().into_owned();
+        if s.is_empty() || s.starts_with("file://") {
+            None
+        } else {
+            Some(s)
+        }
     })
 }
 
@@ -554,6 +587,70 @@ mod paste_tests {
 
         cb.set_text("regular text without files").unwrap();
         assert!(!pasteboard_has_files(), "pasteboard_has_files must be false for plain text");
+
+        if let Some(img) = saved_image {
+            cb.set_image(img).unwrap();
+        } else if let Some(text) = saved_text {
+            cb.set_text(text).unwrap();
+        }
+    }
+
+    #[test]
+    fn test_pasteboard_has_files_returns_false_for_web_url() {
+        use objc2::rc::autoreleasepool;
+        let _guard = PASTEBOARD_TEST_LOCK.lock().unwrap();
+        let mut cb = Clipboard::new().unwrap();
+        let saved_text = cb.get_text().ok();
+        let saved_image = cb.get_image().ok();
+
+        autoreleasepool(|_| unsafe {
+            let cls = nspasteboard_class().unwrap();
+            let pb: *mut objc2::runtime::NSObject = msg_send![cls, generalPasteboard];
+            let _: isize = msg_send![pb, clearContents];
+            let nsstr_cls = objc2::runtime::AnyClass::get(c"NSString").unwrap();
+            let url_type: *mut objc2::runtime::NSObject =
+                msg_send![nsstr_cls, stringWithUTF8String: c"Apple URL pasteboard type".as_ptr()];
+            let array_cls = objc2::runtime::AnyClass::get(c"NSArray").unwrap();
+            let types_arr: *mut objc2::runtime::NSObject =
+                msg_send![array_cls, arrayWithObject: url_type];
+            let _: isize = msg_send![pb, declareTypes: types_arr, owner: core::ptr::null::<objc2::runtime::NSObject>()];
+        });
+
+        assert!(!pasteboard_has_files(), "pasteboard_has_files must be false for Apple URL pasteboard type");
+
+        if let Some(img) = saved_image {
+            cb.set_image(img).unwrap();
+        } else if let Some(text) = saved_text {
+            cb.set_text(text).unwrap();
+        }
+    }
+
+    #[test]
+    fn test_pasteboard_url_string_reads_public_url() {
+        use objc2::rc::autoreleasepool;
+        let _guard = PASTEBOARD_TEST_LOCK.lock().unwrap();
+        let mut cb = Clipboard::new().unwrap();
+        let saved_text = cb.get_text().ok();
+        let saved_image = cb.get_image().ok();
+
+        let test_url = "https://example.com/test-path";
+        autoreleasepool(|_| unsafe {
+            let cls = nspasteboard_class().unwrap();
+            let pb: *mut objc2::runtime::NSObject = msg_send![cls, generalPasteboard];
+            let _: isize = msg_send![pb, clearContents];
+            let nsstr_cls = objc2::runtime::AnyClass::get(c"NSString").unwrap();
+            let url_type: *mut objc2::runtime::NSObject =
+                msg_send![nsstr_cls, stringWithUTF8String: c"public.url".as_ptr()];
+            let url_val: *mut objc2::runtime::NSObject =
+                msg_send![nsstr_cls, stringWithUTF8String: c"https://example.com/test-path".as_ptr()];
+            let array_cls = objc2::runtime::AnyClass::get(c"NSArray").unwrap();
+            let types_arr: *mut objc2::runtime::NSObject =
+                msg_send![array_cls, arrayWithObject: url_type];
+            let _: isize = msg_send![pb, declareTypes: types_arr, owner: core::ptr::null::<objc2::runtime::NSObject>()];
+            let _: bool = msg_send![pb, setString: url_val, forType: url_type];
+        });
+
+        assert_eq!(pasteboard_url_string().as_deref(), Some(test_url));
 
         if let Some(img) = saved_image {
             cb.set_image(img).unwrap();

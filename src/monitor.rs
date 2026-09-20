@@ -356,7 +356,8 @@ pub(crate) fn clipboard_monitor(
 
         // Text (always sync: no PNG encoding).
         if !captured {
-            if let Ok(raw_text) = cb.get_text() {
+            let text_opt = cb.get_text().ok().or_else(macos::pasteboard_url_string);
+            if let Some(raw_text) = text_opt {
                 let text_guard = crate::backend::MarkStringReusableOnDrop(raw_text);
                 let text = &text_guard.0;
                 if !text.is_empty() {
