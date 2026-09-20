@@ -232,7 +232,29 @@ extension InlineSettingsView {
 
     private var backupRestoreCard: some View {
         settingsCard {
-            cardTitle(icon: "externaldrive", text: "备份与恢复")
+            HStack(spacing: 8) {
+                Image(systemName: "externaldrive")
+                    .font(.system(size: 16))
+                    .foregroundColor(Color.accentColor)
+                Text("备份与恢复")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(theme.primaryText)
+
+                if let msg = backupStatusMessage {
+                    HStack(spacing: 4) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 11))
+                            .foregroundColor(Color(nsColor: .systemGreen))
+                        Text(msg)
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(Color(nsColor: .systemGreen))
+                    }
+                    .transition(.opacity)
+                }
+
+                Spacer()
+            }
+            .padding(.bottom, 12)
 
             HStack(spacing: 12) {
                 Image(systemName: "arrow.up.doc")
@@ -277,20 +299,6 @@ extension InlineSettingsView {
                 .buttonStyle(.bordered)
             }
             .padding(.vertical, 4)
-
-            if let msg = backupStatusMessage {
-                HStack(spacing: 6) {
-                    Image(systemName: "checkmark.circle.fill")
-                        .font(.system(size: 12))
-                        .foregroundColor(Color(nsColor: .systemGreen))
-                    Text(msg)
-                        .font(.system(size: 11.5))
-                        .foregroundColor(theme.primaryText)
-                    Spacer()
-                }
-                .padding(.top, 6)
-                .transition(.opacity)
-            }
         }
     }
 
