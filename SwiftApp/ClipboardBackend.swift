@@ -313,7 +313,26 @@ class ClipboardBackend {
                     debugLog("shrink_db_memory failed (see Rust log)")
                 }
             }
-            clearThumbnailCache()
+            // The decoded-thumbnail cache is deliberately NOT cleared here.
+            //
+            // Clearing it made every popup open a cold start: the first rows
+            // materialize before any decode can finish, so they paint the
+            // "图片编码中" placeholder and only swap to the image once the
+            // worker returns. Measured A/B on the real path (same library, 12
+            // real open/close cycles each, perf instrument gates VALID):
+            // hit rate 0% -> 92%, decodes 24 -> 2, placeholder flashes in the
+            // first 250 ms of an open 2 -> 0. A longer session showed the same
+            // shape at scale: 373 images decoded 1834 times (3-9x each), 21%
+            // hit rate.
+            //
+            // `thumbnailCache` is already bounded by countLimit 120 /
+            // totalCostLimit 8 MB and evicts under system memory pressure, so
+            // keeping it warm does not raise the ceiling — measured resident
+            // memory was unchanged (37.2 MB popup-open before and after). It
+            // only stops discarding work the user has already paid for. Keys
+            // are db_ids, valid for the process lifetime; the paths that
+            // actually invalidate rows (clear history, undo delete, restore
+            // backup) still call `clearThumbnailCache()` explicitly.
         }
     }
 
@@ -1085,6 +1104,12 @@ class ClipboardBackend {
             self.favoriteIds = newFavs
             saveFavorites()
         }
+
+        // A restore rewrites the rows, and the overwrite mode re-inserts the
+        // backup's own ids — so a db_id that held one image before the restore
+        // can hold a different one after it. Cached thumbnails are keyed by
+        // db_id, so keeping them would draw the pre-restore image in the row.
+        clearThumbnailCache()
 
         reloadItems()
         return Int(result)
