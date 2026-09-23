@@ -40,9 +40,12 @@ venv/
 .reasonix/
 .jspace/history.json
 .jspace/WORKSPACE.md
+.wrangler/
 thinking-effort-loaded.json
 
 # 蓝奏跳转服务运行时产物（状态缓存 / 滚动日志）
 scripts/lanzou-redirect/state.json
 scripts/lanzou-redirect/redirect.log
+
+
 
