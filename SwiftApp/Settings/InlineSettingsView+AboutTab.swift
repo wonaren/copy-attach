@@ -119,7 +119,7 @@ extension InlineSettingsView {
                     )
                 } else {
                     return Alert(
-                        title: Text("发现新版本 \(latestVersion)"),
+                        title: Text("发现新版本 v\(latestVersion)"),
                         message: Text("当前版本：v\(appVersion)\n是否立即下载并安装？"),
                         primaryButton: .default(Text("立即下载")) {
                             startDirectDownload()
@@ -173,7 +173,7 @@ extension InlineSettingsView {
             .overlay(alignment: .topTrailing) {
                 // Red badge showing the latest version when an update exists.
                 if case .updateAvailable(let latestVersion, _, _) = updateState {
-                    Text(latestVersion)
+                    Text("v\(latestVersion)")
                         .font(.system(size: 9, weight: .bold, design: .rounded))
                         .foregroundColor(.white)
                         .padding(.horizontal, 5).padding(.vertical, 2)
@@ -374,14 +374,17 @@ extension InlineSettingsView {
         }.resume()
     }
 
-    /// Pull the tag out of a `…/releases/tag/<tag>` URL. Tags may contain
-    /// slashes, so everything after `tag` is rejoined rather than taking one
-    /// path component.
+    /// Pull the tag out of a `…/releases/tag/<tag>` URL, stripping any
+    /// leading "v" or "V" so the version string is purely numeric ("0.107.0").
     private static func releaseTag(from url: URL) -> String? {
         let parts = url.pathComponents
         guard let i = parts.firstIndex(of: "tag"), i + 1 < parts.count else { return nil }
         let tag = parts[(i + 1)...].joined(separator: "/")
-        return tag.isEmpty ? nil : tag
+        guard !tag.isEmpty else { return nil }
+        if tag.hasPrefix("v") || tag.hasPrefix("V") {
+            return String(tag.dropFirst())
+        }
+        return tag
     }
 
     /// Terminal-state sink: drives the badge / download button, and optionally

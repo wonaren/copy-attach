@@ -84,7 +84,16 @@ final class UpdateDownloader: NSObject, ObservableObject, URLSessionDownloadDele
 
     // MARK: - Public API
 
+    private static func normalizeVersion(_ version: String) -> String {
+        var v = version.trimmingCharacters(in: .whitespacesAndNewlines)
+        while v.hasPrefix("v") || v.hasPrefix("V") {
+            v.removeFirst()
+        }
+        return v
+    }
+
     func startDownload(version: String) {
+        let cleanVersion = Self.normalizeVersion(version)
         switch phase {
         case .downloading, .installing:
             return
@@ -92,24 +101,25 @@ final class UpdateDownloader: NSObject, ObservableObject, URLSessionDownloadDele
             break
         }
         phase = .downloading(0)
-        debugLog("[update] start download of v\(version)")
+        debugLog("[update] start download of v\(cleanVersion)")
         Self.cleanupLegacyArtifacts()
-        Task { await performDownload(version: version) }
+        Task { await performDownload(version: cleanVersion) }
     }
 
     // MARK: - Download pipeline
 
     private func performDownload(version: String) async {
+        let cleanVersion = Self.normalizeVersion(version)
         do {
             // 1) 蓝奏云 via NFD cloud parser (primary — stable, no anti-bot);
             //    GitHub release asset as fallback.
             let package: URL
             do {
-                debugLog("[update] downloading from lanzou (NFD): v\(version)")
-                package = try await downloadFromLanzou(version: version)
+                debugLog("[update] downloading from lanzou (NFD): v\(cleanVersion)")
+                package = try await downloadFromLanzou(version: cleanVersion)
             } catch {
                 debugLog("[update] lanzou failed: \(error.localizedDescription); falling back to GitHub")
-                package = try await downloadFromGitHub(version: version)
+                package = try await downloadFromGitHub(version: cleanVersion)
             }
 
             // 2) verify + install
@@ -117,7 +127,7 @@ final class UpdateDownloader: NSObject, ObservableObject, URLSessionDownloadDele
                 throw UpdateError.install("下载的安装包无效（文件不完整）")
             }
             phase = .installing
-            try install(package: package, version: version)
+            try install(package: package, version: cleanVersion)
         } catch {
             let message = (error as? UpdateError)?.errorDescription ?? error.localizedDescription
             debugLog("[update] FAILED: \(message)")
@@ -126,9 +136,13 @@ final class UpdateDownloader: NSObject, ObservableObject, URLSessionDownloadDele
     }
 
     private func downloadFromGitHub(version: String) async throws -> URL {
-        let url = githubAssetURL(version: version)
-        guard await githubReachable(url) else {
-            throw UpdateError.github("GitHub 下载失败：无法连接")
+        let cleanVersion = Self.normalizeVersion(version)
+        let url = githubAssetURL(version: cleanVersion)
+        switch await checkGitHubAssetReachable(url) {
+        case .failure(let err):
+            throw err
+        case .success:
+            break
         }
         debugLog("[update] downloading from GitHub: \(url.absoluteString)")
         return try await downloadFile(from: url)
@@ -139,23 +153,32 @@ final class UpdateDownloader: NSObject, ObservableObject, URLSessionDownloadDele
     /// filename — omitting it asked for an asset that has never existed and
     /// made the fallback path 404 even when GitHub was fully reachable.
     private func githubAssetURL(version: String) -> URL {
+        let cleanVersion = Self.normalizeVersion(version)
         #if arch(arm64)
         let arch = "arm64"
         #else
         let arch = "x86_64"
         #endif
-        return URL(string: "https://github.com/wonaren/copyattach-release/releases/download/v\(version)/CopyAttach-\(version)-macos-\(arch).dmg")!
+        return URL(string: "https://github.com/wonaren/copyattach-release/releases/download/v\(cleanVersion)/CopyAttach-\(cleanVersion)-macos-\(arch).dmg")!
     }
 
-    /// Cheap preflight so a blocked GitHub (DNS pollution / GFW) falls back to
-    /// lanzou without making the user stare at 0% progress.
-    private func githubReachable(_ url: URL) async -> Bool {
+    /// Cheap preflight so a blocked GitHub (DNS pollution / GFW) or missing asset
+    /// surfaces accurate diagnostics without making the user stare at 0% progress.
+    private func checkGitHubAssetReachable(_ url: URL) async -> Result<Void, UpdateError> {
         var request = URLRequest(url: url)
         request.httpMethod = "HEAD"
         request.timeoutInterval = 8
         guard let (_, response) = try? await dataSession.data(for: request),
-              let http = response as? HTTPURLResponse else { return false }
-        return (200..<400).contains(http.statusCode)
+              let http = response as? HTTPURLResponse else {
+            return .failure(.github("GitHub 下载失败：无法连接"))
+        }
+        if http.statusCode == 404 {
+            return .failure(.github("GitHub 下载失败：安装包未找到 (404)"))
+        }
+        guard (200..<400).contains(http.statusCode) else {
+            return .failure(.github("GitHub 返回错误 (HTTP \(http.statusCode))"))
+        }
+        return .success(())
     }
 
     // MARK: - Lanzou flow (via NFD cloud parser)
@@ -164,6 +187,7 @@ final class UpdateDownloader: NSObject, ObservableObject, URLSessionDownloadDele
     /// version → direct link on NFD's CDN. The direct hop is a plain HTTPS
     /// download with progress reporting.
     private func downloadFromLanzou(version: String) async throws -> URL {
+        let cleanVersion = Self.normalizeVersion(version)
         // 1) folder listing (password-protected share)
         let listURL = URL(string: "\(Self.nfdBase)/v2/getFileList?url=\(Self.urlEncode(Self.lanzouShareURL.absoluteString))&pwd=\(Self.lanzouPassword)")!
         let listJSON = try await fetchJSON(listURL)
@@ -182,7 +206,7 @@ final class UpdateDownloader: NSObject, ObservableObject, URLSessionDownloadDele
         let otherArch = "arm64"
         #endif
         // The trailing separator is what kills the version-prefix ambiguity.
-        let versionTokens = ["v\(version)-", "\(version)-"]
+        let versionTokens = ["v\(cleanVersion)-", "\(cleanVersion)-"]
         let candidates: [(name: String, id: String)] = files.compactMap { file in
             guard let name = file["fileName"] as? String,
                   let id = file["fileId"] as? String,
@@ -194,7 +218,7 @@ final class UpdateDownloader: NSObject, ObservableObject, URLSessionDownloadDele
             ?? candidates.first { !$0.name.contains(otherArch) }
         guard let entry = chosen else {
             let seen = candidates.map(\.name).prefix(5).joined(separator: ", ")
-            throw UpdateError.lanzou("蓝奏云上未找到版本 \(version) 的 \(wantedArch) 安装包（候选：\(seen.isEmpty ? "无" : seen)）")
+            throw UpdateError.lanzou("蓝奏云上未找到版本 \(cleanVersion) 的 \(wantedArch) 安装包（候选：\(seen.isEmpty ? "无" : seen)）")
         }
         let fileName = entry.name
         let fileID = entry.id
