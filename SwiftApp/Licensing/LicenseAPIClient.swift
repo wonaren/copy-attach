@@ -4,10 +4,28 @@ struct LicenseAPIClient {
     private let session: URLSession
 
     init() {
-        let configuration = URLSessionConfiguration.ephemeral
+        let configuration = URLSessionConfiguration.default
+        // 关闭磁盘 HTTP 响应缓存，保证鉴权接口每次拿到真实服务端数据
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.urlCache = nil
         configuration.timeoutIntervalForRequest = 10
         configuration.timeoutIntervalForResource = 20
+        configuration.httpAdditionalHeaders = [
+            "User-Agent": "CopyAttach/\(Self.appVersion) (Macintosh; Mac OS X)",
+            "Accept": "application/json"
+        ]
         session = URLSession(configuration: configuration)
+    }
+
+    /// 预热网络连接（提前完成 QUIC / TLS 会话建立），使用户触发操作时免于冷启动建连延迟
+    func prewarm() {
+        Task.detached(priority: .utility) {
+            let url = LicenseConfiguration.baseURL.appendingPathComponent("v1/health")
+            var request = URLRequest(url: url)
+            request.httpMethod = "GET"
+            request.assumesHTTP3Capable = true
+            _ = try? await session.data(for: request)
+        }
     }
 
     func startTrial(device: DeviceIdentity) async throws -> SignedLease {
@@ -70,6 +88,8 @@ struct LicenseAPIClient {
     private func post<Response: Decodable>(_ path: String, body: [String: String], as: Response.Type) async throws -> Response {
         var request = URLRequest(url: LicenseConfiguration.baseURL.appendingPathComponent(path))
         request.httpMethod = "POST"
+        // 开启 HTTP/3 (QUIC / UDP) 支持：消除 TCP 队头阻塞与 SYN 握手丢包重传延迟
+        request.assumesHTTP3Capable = true
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         let (data, response) = try await session.data(for: request)

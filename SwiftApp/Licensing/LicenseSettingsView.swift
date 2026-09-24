@@ -52,6 +52,7 @@ struct LicenseSettingsView: View {
             }
             .padding(24)
         }
+        .onAppear { manager.prewarm() }
     }
 
     private var statusHeader: some View {

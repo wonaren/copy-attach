@@ -41,6 +41,7 @@ struct LicenseGateView: View {
         .frame(width: 500, height: 470)
         .background(theme.background)
         .animation(.easeInOut(duration: 0.35), value: manager.celebration)
+        .onAppear { manager.prewarm() }
     }
 
     /// Post-activation confirmation, shown once the celebration ends. The gate

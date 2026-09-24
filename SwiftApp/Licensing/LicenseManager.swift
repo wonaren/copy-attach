@@ -43,6 +43,7 @@ final class LicenseManager {
                 currentPayload = nil
                 nextRefreshAt = nil
                 state = .notStarted
+                api.prewarm()
                 return
             }
             let lease = try JSONDecoder().decode(SignedLease.self, from: leaseData)
@@ -63,6 +64,7 @@ final class LicenseManager {
                           payload.entitlement == "trial", let ends = payload.trialEndsAt {
                     if ends <= Int64(Date().timeIntervalSince1970) {
                         state = .trialExpired
+                        api.prewarm()
                     } else {
                         // /trials/start is idempotent for the same device and
                         // returns a fresh short lease without restarting trial time.
@@ -186,6 +188,11 @@ final class LicenseManager {
             break
         }
         return candidates.min()
+    }
+
+    /// 预热网络连接，消除进入激活界面后的建连等待。
+    func prewarm() {
+        api.prewarm()
     }
 
     func startTrial() async {
