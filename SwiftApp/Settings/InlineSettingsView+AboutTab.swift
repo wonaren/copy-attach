@@ -119,7 +119,7 @@ extension InlineSettingsView {
                     )
                 } else {
                     return Alert(
-                        title: Text("发现新版本 v\(latestVersion)"),
+                        title: Text("发现新版本 \(latestVersion)"),
                         message: Text("当前版本：v\(appVersion)\n是否立即下载并安装？"),
                         primaryButton: .default(Text("立即下载")) {
                             startDirectDownload()
@@ -291,59 +291,74 @@ extension InlineSettingsView {
     }
     private func stripDevSuffix(_ version: String) -> String { Self.stripDevSuffix(version) }
 
+    /// Update check through GitHub's *web* endpoint, never the REST API.
+    ///
+    /// `api.github.com/repos/…/releases/latest` is anonymous-rate-limited to 60
+    /// requests per hour **per source IP**, and that budget is shared by every
+    /// other unauthenticated client behind the same NAT — campus, office and
+    /// carrier networks exhaust it routinely. Once spent, the API answers 403
+    /// and the check fails although nothing is wrong with the release. Measured
+    /// here: `x-ratelimit-remaining: 0` on a shared egress IP, while the same
+    /// machine's web requests were unaffected.
+    ///
+    /// `github.com/<repo>/releases/latest` is the plain web endpoint. It is not
+    /// subject to that quota, and its 302 `Location` carries the same tag the
+    /// API would have returned — both endpoints skip pre-releases and drafts,
+    /// verified against repos whose newest release is a pre-release. A HEAD
+    /// request follows the redirect for zero bytes, so the tag is read straight
+    /// off the final URL.
     private func checkForUpdates(showAlert: Bool = true) {
         guard updateState != .checking else { return }
         updateState = .checking
 
-        let url = URL(string: "https://api.github.com/repos/wonaren/copyattach-release/releases/latest")!
+        let url = URL(string: "https://github.com/wonaren/copyattach-release/releases/latest")!
         var request = URLRequest(url: url)
-        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        request.httpMethod = "HEAD"
         request.timeoutInterval = 15
 
         URLSession.shared.dataTask(with: request) { [self] data, response, error in
             DispatchQueue.main.async {
                 if let error {
+                    debugLog("[update] check failed: \(error.localizedDescription)")
                     finishUpdateCheck(.error("无法连接到更新服务器：\(error.localizedDescription)"), showAlert: showAlert)
                     return
                 }
 
                 guard let httpResponse = response as? HTTPURLResponse else {
+                    debugLog("[update] check failed: non-HTTP response")
                     finishUpdateCheck(.error("无效的服务器响应"), showAlert: showAlert)
                     return
                 }
 
                 switch httpResponse.statusCode {
                 case 200:
-                    break // continue parsing
+                    break // redirect resolved; the final URL carries the tag
                 case 404:
+                    debugLog("[update] check failed: HTTP 404 (no published release)")
                     finishUpdateCheck(.error("未找到版本信息（仓库中尚无正式 Release）"), showAlert: showAlert)
                     return
-                case 403:
-                    finishUpdateCheck(.error("API 请求过于频繁，请稍后再试"), showAlert: showAlert)
+                case 403, 429:
+                    debugLog("[update] check failed: HTTP \(httpResponse.statusCode) (throttled)")
+                    finishUpdateCheck(.error("请求过于频繁，请稍后再试"), showAlert: showAlert)
                     return
                 default:
+                    debugLog("[update] check failed: HTTP \(httpResponse.statusCode)")
                     finishUpdateCheck(.error("服务器返回错误 (HTTP \(httpResponse.statusCode))"), showAlert: showAlert)
                     return
                 }
 
-                guard let data,
-                      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                      let tagName = json["tag_name"] as? String else {
+                // Redirect target is the release page itself: …/releases/tag/v0.106.0
+                guard let releaseURL = httpResponse.url,
+                      let latestVersion = Self.releaseTag(from: releaseURL) else {
+                    debugLog("[update] check failed: no tag in \(httpResponse.url?.absoluteString ?? "nil")")
                     finishUpdateCheck(.error("无法解析更新信息"), showAlert: showAlert)
                     return
                 }
+                debugLog("[update] latest release is v\(latestVersion) (local v\(appVersion))")
 
-                let latestVersion = tagName.hasPrefix("v") ? String(tagName.dropFirst()) : tagName
                 let currentVersion = self.appVersion
                 let currentBase = stripDevSuffix(currentVersion)
                 let isDev = currentVersion != currentBase
-
-                let releaseURL: URL
-                if let htmlURL = json["html_url"] as? String, let url = URL(string: htmlURL) {
-                    releaseURL = url
-                } else {
-                    releaseURL = URL(string: "https://github.com/wonaren/copyattach-release/releases/tag/v\(latestVersion)")!
-                }
 
                 if latestVersion.compare(currentBase, options: .numeric) == .orderedDescending {
                     // Normal upgrade: a newer version exists
@@ -357,6 +372,16 @@ extension InlineSettingsView {
                 }
             }
         }.resume()
+    }
+
+    /// Pull the tag out of a `…/releases/tag/<tag>` URL. Tags may contain
+    /// slashes, so everything after `tag` is rejoined rather than taking one
+    /// path component.
+    private static func releaseTag(from url: URL) -> String? {
+        let parts = url.pathComponents
+        guard let i = parts.firstIndex(of: "tag"), i + 1 < parts.count else { return nil }
+        let tag = parts[(i + 1)...].joined(separator: "/")
+        return tag.isEmpty ? nil : tag
     }
 
     /// Terminal-state sink: drives the badge / download button, and optionally

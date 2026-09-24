@@ -134,8 +134,17 @@ final class UpdateDownloader: NSObject, ObservableObject, URLSessionDownloadDele
         return try await downloadFile(from: url)
     }
 
+    /// The release workflow uploads `CopyAttach-<version>-macos-<arch>.dmg`
+    /// (`.github/workflows/build.yml`), so the arch segment is part of the
+    /// filename — omitting it asked for an asset that has never existed and
+    /// made the fallback path 404 even when GitHub was fully reachable.
     private func githubAssetURL(version: String) -> URL {
-        URL(string: "https://github.com/wonaren/copyattach-release/releases/download/v\(version)/CopyAttach-\(version).dmg")!
+        #if arch(arm64)
+        let arch = "arm64"
+        #else
+        let arch = "x86_64"
+        #endif
+        return URL(string: "https://github.com/wonaren/copyattach-release/releases/download/v\(version)/CopyAttach-\(version)-macos-\(arch).dmg")!
     }
 
     /// Cheap preflight so a blocked GitHub (DNS pollution / GFW) falls back to
