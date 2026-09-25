@@ -496,10 +496,13 @@ pub extern "C" fn clipboard_trim_oldest_percent(percent: i32) -> c_int {
 
     // Step 1: delete the oldest rows from DB, resolving exactly which row ids
     // go away. A failure leaves memory — and the durable state — untouched.
+    // "Oldest" is by `(timestamp, id)`, the same order the list uses: trimming
+    // by rowid instead would evict the user's own newer rows first whenever the
+    // table holds rows inserted out of chronological order (a merge).
     let deleted_ids: HashSet<i64> = match b.db.lock() {
         Ok(conn) => {
             let mut stmt = match conn.prepare(
-                "SELECT id FROM clipboard_history ORDER BY id ASC LIMIT ?",
+                "SELECT id FROM clipboard_history ORDER BY timestamp ASC, id ASC LIMIT ?",
             ) {
                 Ok(s) => s,
                 Err(e) => {

@@ -190,6 +190,19 @@ pub(crate) fn ensure_history_table(conn: &Connection) -> Result<(), rusqlite::Er
          ON clipboard_history(entry_type, hash);"
     )?;
 
+    // Ordering index for the list and both trim cutoffs.
+    //
+    // The list is newest-first by `(timestamp, id)` (see `db::crud::ORDER_NEWEST_FIRST`)
+    // and `trim_db_history` / `clipboard_trim_oldest_percent` cut on the same key.
+    // Without this index those become a full sort of the whole table — and
+    // `trim_db_history` runs inside every capture's write transaction, so the
+    // cost lands on the capture path. Covered: all three key columns are in the
+    // index, so the cutoff lookups never touch the table.
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_history_timestamp
+         ON clipboard_history(timestamp DESC, id DESC);"
+    )?;
+
     // FTS5 trigram index with a size cap. Oversized rows are skipped and remain
     // searchable via LIKE fallback. AFTER INSERT and AFTER DELETE triggers keep
     // the index in sync; there is no UPDATE trigger because `text` is never

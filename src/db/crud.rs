@@ -83,6 +83,19 @@ pub(crate) fn seed_first_launch_tips(conn: &Connection) {
     );
 }
 
+/// Newest-first row order for both the list and the trim cutoff.
+///
+/// Keyed on `timestamp`, not on `id`. Row order and time order diverge as soon
+/// as rows are inserted out of chronological order — which `restore_backup_merge`
+/// does by definition (it appends older history to a live DB). With `id` as the
+/// key, merged rows took the largest rowids, so they displaced the user's own
+/// newer rows from the visible window and were evicted last instead of first.
+/// `paste` and `undo` already re-stamp an entry's timestamp when they move it to
+/// the head, so `timestamp` is the ordering the rest of the app maintains.
+/// `id` is only the tiebreaker, which keeps the order identical to the previous
+/// `id`-based one for a DB whose timestamps are in insertion order.
+const ORDER_NEWEST_FIRST: &str = "ORDER BY timestamp DESC, id DESC";
+
 /// Load up to `threshold` entries from the DB, newest first.
 ///
 /// Only metadata is read: the full `text` column is never touched at load.
@@ -92,14 +105,16 @@ pub(crate) fn seed_first_launch_tips(conn: &Connection) {
 /// carry only metadata (`png_data` is empty, loaded on demand).
 pub(crate) fn load_history_from_db(conn: &Connection, threshold: usize) -> Vec<ClipboardEntry> {
     let mut stmt = match conn.prepare(
-        "SELECT id, entry_id, entry_type, preview, label, hash,
-                width, height,
-                thumb_width, thumb_height,
-                timestamp, source_name, source_bundle_id,
-                custom_label
-         FROM clipboard_history
-         ORDER BY id DESC
-         LIMIT ?"
+        &format!(
+            "SELECT id, entry_id, entry_type, preview, label, hash,
+                    width, height,
+                    thumb_width, thumb_height,
+                    timestamp, source_name, source_bundle_id,
+                    custom_label
+             FROM clipboard_history
+             {ORDER_NEWEST_FIRST}
+             LIMIT ?"
+        )
     ) {
         Ok(s) => s,
         Err(e) => {
@@ -325,15 +340,20 @@ pub(crate) fn delete_matching_entry(conn: &Connection, entry: &ClipboardEntry, t
 /// Trim the DB to at most `threshold` entries (keeps the newest rows).
 ///
 /// Range deletion, not a full scan: the subquery walks `threshold + 1` rows in
-/// rowid order to find the cutoff id, then the DELETE touches only the rows
-/// older than that cutoff. When the table holds ≤ threshold rows the subquery
-/// yields NULL and nothing is visited at all — the previous `id NOT IN
-/// (SELECT ...)` form scanned every record on every capture.
+/// newest-first order to find the cutoff `(timestamp, id)`, then the DELETE
+/// touches only the rows at or older than that cutoff. When the table holds ≤
+/// threshold rows the subquery yields NULL and nothing is visited at all — the
+/// previous `id NOT IN (SELECT ...)` form scanned every record on every capture.
+///
+/// The cutoff is a row value, not a bare `id`, because the ordering key is
+/// `(timestamp, id)` (see `ORDER_NEWEST_FIRST`). Comparing on `id` alone would
+/// delete a row whose timestamp is newer than the cutoff whenever row order and
+/// time order disagree — exactly the state a merge leaves behind.
 pub(crate) fn trim_db_history(conn: &Connection, threshold: usize) -> Result<(), ()> {
     if let Err(e) = conn.execute(
         "DELETE FROM clipboard_history
-         WHERE id <= (SELECT id FROM clipboard_history
-                      ORDER BY id DESC LIMIT 1 OFFSET ?)",
+         WHERE (timestamp, id) <= (SELECT timestamp, id FROM clipboard_history
+                      ORDER BY timestamp DESC, id DESC LIMIT 1 OFFSET ?)",
         rusqlite::params![threshold as i64],
     ) {
         crate::error_log!("CopyAttach: failed to trim DB history: {e}");

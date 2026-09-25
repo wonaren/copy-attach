@@ -167,7 +167,7 @@ SwiftApp/
 
 ## FFI 接口
 
-`CopyAttach-Bridging-Header.h` 声明 62 个 `extern "C"` 函数：生命周期、查询、快照、图片加载、粘贴、权限、删除/撤销/收藏、ignore rules 同步。新接口需在此文件添加声明，并更新 Swift 侧调用封装。
+`CopyAttach-Bridging-Header.h` 声明 66 个 `extern "C"` 函数：生命周期、查询、快照、图片加载、粘贴、权限、删除/撤销/收藏、ignore rules 同步。新接口需在此文件添加声明，并更新 Swift 侧调用封装。
 
 ## 钥匙串弹窗
 

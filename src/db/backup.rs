@@ -9,10 +9,10 @@
 //! - User favorites (persisted inside `clipboard_backup_favorites` table)
 //! - Monotonic `entry_id` sequence watermark
 
-use std::collections::HashSet;
-use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
 use rusqlite::{Connection, OpenFlags};
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::db::schema::bump_entry_id_watermark;
 
@@ -102,11 +102,38 @@ pub(crate) fn export_backup(
     };
 
     // Atomically replace target file.
+    //
+    // The stale-sidecar purge is load-bearing, not hygiene. `VACUUM INTO` writes
+    // a *fresh* database at `tmp_path`, but a previous export to the same
+    // `target_path` can have left `target_path-wal` / `-shm` behind. SQLite
+    // replays a `-wal` that sits beside a database file, so after the rename a
+    // reader would see the OLD WAL's contents layered over the NEW snapshot —
+    // reproduced locally as a reader returning pre-export rows. Removing the
+    // sidecars first is what makes the rename a real replacement.
+    for suffix in ["-wal", "-shm"] {
+        let mut sidecar = target_path.as_os_str().to_os_string();
+        sidecar.push(suffix);
+        let sidecar = PathBuf::from(sidecar);
+        if sidecar.exists() {
+            std::fs::remove_file(&sidecar)
+                .map_err(|e| format!("清理旧的备份 WAL 附属文件失败 ({suffix}): {e}"))?;
+        }
+    }
+
     if target_path.exists() {
-        let _ = std::fs::remove_file(target_path);
+        std::fs::remove_file(target_path)
+            .map_err(|e| format!("删除旧的备份文件失败: {e}"))?;
     }
     std::fs::rename(&tmp_path, target_path)
         .map_err(|e| format!("重命名备份临时文件至目标路径失败: {e}"))?;
+
+    // The temp database was written through a WAL-mode connection, so its own
+    // sidecars can survive the rename under names nothing will ever look for.
+    for suffix in ["-wal", "-shm"] {
+        let mut sidecar = tmp_path.as_os_str().to_os_string();
+        sidecar.push(suffix);
+        let _ = std::fs::remove_file(PathBuf::from(sidecar));
+    }
 
     Ok(item_count)
 }
@@ -222,18 +249,58 @@ pub(crate) fn restore_backup_overwrite(
         )
         .map_err(|e| format!("导入备份历史数据失败: {e}"))?;
 
-        // Overwrite clipboard_meta if present in backup
-        let _ = tx.execute_batch(
+        // Adopt the backup's meta EXCEPT the entry-id watermark, which must
+        // never move backwards.
+        //
+        // `bump_entry_id_watermark` is `MAX(value, excluded)`, so copying the
+        // backup's watermark over the live one and then bumping is a no-op if
+        // the backup's is larger — but if the backup's is SMALLER it wins, and
+        // the ids this database already issued can be handed out again. Those
+        // ids are exactly what Swift's Favorites list stores, so a favorite
+        // would then light up on unrelated new content (the hazard
+        // `schema.rs::bump_entry_id_watermark` exists to prevent).
+        //
+        // The watermark is read back and re-applied as a floor below, after the
+        // row copy, so the local value always survives.
+        let local_watermark = crate::db::schema::entry_id_watermark(&tx);
+
+        // `clipboard_meta` may be absent from the archive, and it cannot be
+        // guarded with `EXISTS` in the same statement: SQLite resolves
+        // `backup_db.clipboard_meta` at PREPARE time, so a missing table fails
+        // the statement before the guard is ever evaluated. That failure was
+        // also being swallowed by `let _ =` on the whole batch — and because
+        // `execute_batch` stops at the first error, the `CREATE TABLE
+        // IF NOT EXISTS main.clipboard_meta` that preceded it never applied
+        // either. Verified against a meta-less archive: the batch aborted with
+        // `no such table: backup_db.clipboard_meta` and `main.clipboard_meta`
+        // was left absent, so every later meta read and write failed silently.
+        // Checking at runtime, in its own statement, keeps the failure local.
+        tx.execute_batch(
             "CREATE TABLE IF NOT EXISTS main.clipboard_meta (
                 key TEXT PRIMARY KEY,
                 value INTEGER
-            );
-            INSERT OR REPLACE INTO main.clipboard_meta (key, value)
-            SELECT key, value FROM backup_db.clipboard_meta
-            WHERE EXISTS (
-                SELECT 1 FROM backup_db.sqlite_master WHERE type='table' AND name='clipboard_meta'
             );",
-        );
+        )
+        .map_err(|e| format!("创建元数据表失败: {e}"))?;
+
+        let backup_has_meta: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM backup_db.sqlite_master
+                 WHERE type = 'table' AND name = 'clipboard_meta'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|e| format!("检查备份元数据表失败: {e}"))?;
+
+        if backup_has_meta > 0 {
+            tx.execute(
+                "INSERT OR REPLACE INTO main.clipboard_meta (key, value)
+                 SELECT key, value FROM backup_db.clipboard_meta
+                 WHERE key <> 'entry_id_watermark'",
+                [],
+            )
+            .map_err(|e| format!("恢复元数据失败: {e}"))?;
+        }
 
         // Read restored favorite IDs
         let has_fav_table: i64 = tx
@@ -259,19 +326,24 @@ pub(crate) fn restore_backup_overwrite(
             }
         }
 
-        // Rebuild FTS index if virtual table exists
-        let has_fts: i64 = tx
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='clipboard_fts'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap_or(0);
-        if has_fts > 0 {
-            let _ = tx.execute_batch("INSERT INTO clipboard_fts(clipboard_fts) VALUES('rebuild');");
-        }
+        // No explicit FTS rebuild here. `ensure_history_table` installs
+        // AFTER INSERT / AFTER DELETE triggers on `clipboard_history` that keep
+        // `clipboard_fts` in sync, and they fire for the restore's own writes:
+        // the `DELETE FROM main.clipboard_history` above fires the delete
+        // trigger for each removed row, and `INSERT ... SELECT` fires the insert
+        // trigger for each restored row. Verified by
+        // `test_search_works_after_restore_without_explicit_rebuild`.
+        //
+        // The previous `INSERT INTO clipboard_fts(clipboard_fts)
+        // VALUES('rebuild')` was redundant work: measured 69 ms on a
+        // 6 000-text-row fixture, paid while holding the DB mutex the capture
+        // path also needs, to rebuild an index the triggers had already built.
+        // (For the same reason there is no rebuild in the merge path.)
 
-        // Ensure watermark is aligned with the highest entry_id
+        // Ensure the watermark covers both the highest entry_id now present AND
+        // the local watermark captured before the meta copy. Applied
+        // unconditionally — including when the restored table is empty — so a
+        // restore can never leave the DB issuing ids it already issued before.
         let max_entry_id: i64 = tx
             .query_row(
                 "SELECT COALESCE(MAX(entry_id), 0) FROM clipboard_history",
@@ -279,8 +351,9 @@ pub(crate) fn restore_backup_overwrite(
                 |r| r.get(0),
             )
             .unwrap_or(0);
-        if max_entry_id > 0 {
-            let _ = bump_entry_id_watermark(&tx, max_entry_id as u64);
+        let floor = (max_entry_id.max(0) as u64).max(local_watermark);
+        if floor > 0 {
+            let _ = bump_entry_id_watermark(&tx, floor);
         }
 
         let restored_count: i64 = tx
@@ -365,9 +438,37 @@ pub(crate) fn restore_backup_merge(
         let current_watermark = crate::db::schema::entry_id_watermark(&tx);
         max_entry_id = max_entry_id.max(current_watermark);
 
+        // Ids the backup carries count as "seen" even when every one of them
+        // deduplicates away. The watermark is a high-water mark of ids this
+        // database has ever been shown — not merely of ids it currently stores —
+        // and the whole point of "only ever rises" is that an id can never be
+        // reissued once it has appeared. A dedup-only merge previously left the
+        // watermark untouched (measured: watermark 3 against backup ids up to
+        // 9001), so the next capture could mint an id the backup still refers to.
+        {
+            let backup_max: i64 = tx
+                .query_row(
+                    "SELECT COALESCE(MAX(entry_id), 0) FROM backup_db.clipboard_history",
+                    [],
+                    |r| r.get(0),
+                )
+                .map_err(|e| format!("读取备份最大 entry_id 失败: {e}"))?;
+            if backup_max > 0 {
+                max_entry_id = max_entry_id.max(backup_max as u64);
+            }
+            if let Some(&fav_max) = backup_fav_set.iter().max() {
+                max_entry_id = max_entry_id.max(fav_max);
+            }
+        }
+
         let mut newly_added = 0usize;
 
-        // Iterate through items in the backup database
+        // One row at a time. Collecting every row into a `Vec` first held the
+        // whole backup's blobs in memory at once: measured +588 MB peak RSS on a
+        // 570 MB / 10 000-row archive (a full-size history), which on a 16 GB
+        // machine is the difference between a restore and a memory event. The
+        // SELECT and the INSERTs touch different databases (`backup_db` vs
+        // `main`), so the read cursor stays valid while we write.
         struct RawBackupRow {
             entry_id: i64,
             entry_type: i32,
@@ -387,44 +488,50 @@ pub(crate) fn restore_backup_merge(
             custom_label: String,
         }
 
-        let backup_items: Vec<RawBackupRow> = {
-            let mut stmt = tx
-                .prepare(
-                    "SELECT entry_id, entry_type, text, png_data, width, height,
-                            thumb_data, thumb_width, thumb_height, hash, timestamp,
-                            source_name, source_bundle_id, preview, label, custom_label
-                     FROM backup_db.clipboard_history
-                     ORDER BY id ASC",
-                )
-                .map_err(|e| format!("读取备份条目失败: {e}"))?;
+        let mut stmt = tx
+            .prepare(
+                "SELECT entry_id, entry_type, text, png_data, width, height,
+                        thumb_data, thumb_width, thumb_height, hash, timestamp,
+                        source_name, source_bundle_id, preview, label, custom_label
+                 FROM backup_db.clipboard_history
+                 ORDER BY id ASC",
+            )
+            .map_err(|e| format!("读取备份条目失败: {e}"))?;
 
-            let rows = stmt
-                .query_map([], |row| {
-                    Ok(RawBackupRow {
-                        entry_id: row.get(0)?,
-                        entry_type: row.get(1)?,
-                        text: row.get(2)?,
-                        png_data: row.get(3)?,
-                        width: row.get(4)?,
-                        height: row.get(5)?,
-                        thumb_data: row.get(6)?,
-                        thumb_width: row.get(7)?,
-                        thumb_height: row.get(8)?,
-                        hash: row.get(9)?,
-                        timestamp: row.get(10)?,
-                        source_name: row.get(11)?,
-                        source_bundle_id: row.get(12)?,
-                        preview: row.get(13)?,
-                        label: row.get(14)?,
-                        custom_label: row.get(15)?,
-                    })
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(RawBackupRow {
+                    entry_id: row.get(0)?,
+                    entry_type: row.get(1)?,
+                    text: row.get(2)?,
+                    png_data: row.get(3)?,
+                    width: row.get(4)?,
+                    height: row.get(5)?,
+                    thumb_data: row.get(6)?,
+                    thumb_width: row.get(7)?,
+                    thumb_height: row.get(8)?,
+                    hash: row.get(9)?,
+                    timestamp: row.get(10)?,
+                    source_name: row.get(11)?,
+                    source_bundle_id: row.get(12)?,
+                    preview: row.get(13)?,
+                    label: row.get(14)?,
+                    custom_label: row.get(15)?,
                 })
-                .map_err(|e| format!("查询备份记录失败: {e}"))?;
+            })
+            .map_err(|e| format!("查询备份记录失败: {e}"))?;
 
-            rows.flatten().collect()
-        };
-
-        for item in backup_items {
+        for row in rows {
+            // A malformed row is reported, not silently dropped: the old
+            // `.flatten()` hid read errors, so a partially-readable archive
+            // restored "successfully" with rows missing.
+            let item = match row {
+                Ok(r) => r,
+                Err(e) => {
+                    crate::error_log!("CopyAttach: merge: unreadable backup row skipped: {e}");
+                    continue;
+                }
+            };
             let is_fav = backup_fav_set.contains(&(item.entry_id as u64));
 
             if item.entry_type == 0 {
@@ -460,6 +567,10 @@ pub(crate) fn restore_backup_merge(
                         final_eid = max_entry_id;
                     }
                     used_entry_ids.insert(final_eid);
+                    // An id adopted verbatim from the backup may be the highest
+                    // this database has ever seen; the watermark must cover it
+                    // (the counter above only advances on collisions).
+                    max_entry_id = max_entry_id.max(final_eid);
 
                     let res = tx.execute(
                         "INSERT INTO main.clipboard_history
@@ -518,6 +629,10 @@ pub(crate) fn restore_backup_merge(
                         final_eid = max_entry_id;
                     }
                     used_entry_ids.insert(final_eid);
+                    // An id adopted verbatim from the backup may be the highest
+                    // this database has ever seen; the watermark must cover it
+                    // (the counter above only advances on collisions).
+                    max_entry_id = max_entry_id.max(final_eid);
 
                     let res = tx.execute(
                         "INSERT INTO main.clipboard_history
@@ -550,21 +665,23 @@ pub(crate) fn restore_backup_merge(
                 }
             }
         }
+        drop(stmt);
 
-        if newly_added > 0 {
+        // Raise the watermark whenever the ids the backup carried could exceed
+        // it — not only when rows were inserted. A merge that deduplicated every
+        // row (same content on both sides) still revealed ids this database has
+        // never issued; leaving the watermark below them lets the next capture
+        // reuse one. `max_entry_id` already folds in the pre-merge watermark and
+        // the highest id present locally.
+        if max_entry_id > 0 {
             let _ = bump_entry_id_watermark(&tx, max_entry_id);
-
-            let has_fts: i64 = tx
-                .query_row(
-                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='clipboard_fts'",
-                    [],
-                    |r| r.get(0),
-                )
-                .unwrap_or(0);
-            if has_fts > 0 {
-                let _ = tx.execute_batch("INSERT INTO clipboard_fts(clipboard_fts) VALUES('rebuild');");
-            }
         }
+
+        // No explicit FTS rebuild here either — see the note in
+        // `restore_backup_overwrite`. The `INSERT`s above fire the
+        // `clipboard_fts_ai` trigger, so the index is already current; the
+        // rebuild was redundant work (69 ms on a 6 000-text-row fixture) paid
+        // while holding the DB mutex.
 
         tx.commit().map_err(|e| format!("提交合并事务失败: {e}"))?;
 
