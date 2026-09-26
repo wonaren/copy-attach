@@ -34,7 +34,11 @@ extension HistoryPopupContent {
         // sessions accumulate nothing beyond a one-time decode-pool resize.)
         let preview = PreviewWindow(item: previewItem, centerAt: popupCenter)
         popup.previewPanel = preview
+        // Start transparent before ordering on screen so the fade always runs
+        // from 0 (same ordering the popup window uses for its own fade).
+        preview.alphaValue = 0
         preview.orderFront(nil)
+        preview.fadeIn()
         // Trackpad pinch (magnify) events are delivered only to the truly
         // frontmost application. This LSUIElement agent app never receives
         // applicationDidBecomeActive while its nonactivating panels are up —
@@ -58,7 +62,10 @@ extension HistoryPopupContent {
     func closePreview() {
         guard showPreview else { return }
         showPreview = false
-        popupWindow?.previewPanel?.close()
+        // Fade the panel out rather than snapping it away. The panel retains
+        // itself through the fade's completion; `nil`ing the popup's reference
+        // only drops the popup's own handle.
+        popupWindow?.previewPanel?.fadeOutAndClose()
         popupWindow?.previewPanel = nil
         OnboardingGuide.shared.refreshSpotlight()
     }

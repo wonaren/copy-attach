@@ -59,6 +59,48 @@ class PreviewWindow: NSPanel {
         self.hostingView = hosting
     }
 
+    /// Fade the panel in from transparent. Mirrors the popup's window-level
+    /// alpha fade (content scale stays with the popup); the window is created
+    /// per session, so this only ever runs on a fresh panel.
+    func fadeIn(duration: TimeInterval = 0.14) {
+        alphaValue = 0
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = duration
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            animator().alphaValue = 1
+        }
+        // Same hazard as the popup's fade-in: a CA transaction on a window's
+        // first frame can be silently dropped, which would leave this panel on
+        // screen at alpha 0 — invisible but present. Verify and snap.
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration + 0.1) { [weak self] in
+            guard let self, self.isVisible, self.alphaValue < 0.5 else { return }
+            self.alphaValue = 1
+        }
+    }
+
+    /// Fade out, then close. Mirrors the popup's `closeWithAnimation`: the fade
+    /// is best-effort, and a backstop timer guarantees the close even when the
+    /// CA completion is never delivered (event-tracking run loop mode), so the
+    /// panel can never linger invisible on screen.
+    func fadeOutAndClose(duration: TimeInterval = 0.1) {
+        guard isVisible else { close(); return }
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = duration
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
+            self.animator().alphaValue = 0
+        }, completionHandler: {
+            MainActor.assumeIsolated { self.close() }
+        })
+        // A closed window reports isVisible == false, so this is a no-op when
+        // the completion above already ran.
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration + 0.15) { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, self.isVisible else { return }
+                self.close()
+            }
+        }
+    }
+
     /// Update displayed content and resize window — called by popup on selection change.
     func updateContent(item: ClipboardItem) {
         guard currentItemId != item.id else { return }

@@ -127,14 +127,20 @@ struct ItemRowView: View {
                     .foregroundColor(Color(nsColor: .systemTeal))
                     .frame(width: 14, alignment: .center)
                     .help("备注: \(item.customLabel)")
-                    .transition(.scale.combined(with: .opacity))
+                    // Never from scale(0): nothing in the real world appears
+                    // from nothing. 0.9 + opacity reads as the badge growing
+                    // into place rather than materializing.
+                    .transition(.scale(scale: 0.9).combined(with: .opacity))
             }
             if isFavorite {
                 Image(systemName: "star.fill")
                     .font(.system(size: 10))
                     .foregroundColor(Color(nsColor: .systemYellow))
                     .frame(width: 16, alignment: .center)
-                    .transition(.scale.combined(with: .opacity))
+                    // Never from scale(0): nothing in the real world appears
+                    // from nothing. 0.9 + opacity reads as the badge growing
+                    // into place rather than materializing.
+                    .transition(.scale(scale: 0.9).combined(with: .opacity))
             }
             if isSelected && isDeleteModifierPressed {
                 Image(systemName: "delete.left.fill")
@@ -142,14 +148,20 @@ struct ItemRowView: View {
                     .foregroundColor(Color.white)
                     .frame(minWidth: 20, alignment: .center)
                     .padding(.trailing, 6)
-                    .transition(.scale.combined(with: .opacity))
+                    // Never from scale(0): nothing in the real world appears
+                    // from nothing. 0.9 + opacity reads as the badge growing
+                    // into place rather than materializing.
+                    .transition(.scale(scale: 0.9).combined(with: .opacity))
             } else if let hint = shortcutHint {
                 Text(hint)
                     .font(.system(size: 13, weight: .regular))
                     .foregroundColor(isSelected ? sourceNameColor(true) : Color(nsColor: .controlAccentColor))
                     .lineLimit(1)
                     .monospacedDigit()
-                    .transition(.scale.combined(with: .opacity))
+                    // Never from scale(0): nothing in the real world appears
+                    // from nothing. 0.9 + opacity reads as the badge growing
+                    // into place rather than materializing.
+                    .transition(.scale(scale: 0.9).combined(with: .opacity))
             } else if !item.sourceName.isEmpty {
                 Text(item.sourceName)
                     .font(.system(size: 9.5, weight: .medium))
@@ -158,7 +170,10 @@ struct ItemRowView: View {
                     .padding(.horizontal, 2)
                     .padding(.vertical, 1.5)
                     .background(Capsule().fill(theme.popupTagBackground))
-                    .transition(.scale.combined(with: .opacity))
+                    // Never from scale(0): nothing in the real world appears
+                    // from nothing. 0.9 + opacity reads as the badge growing
+                    // into place rather than materializing.
+                    .transition(.scale(scale: 0.9).combined(with: .opacity))
             }
         }
         .padding(.horizontal, 2)
@@ -166,6 +181,11 @@ struct ItemRowView: View {
         // Content flips its selection color quickly instead of riding the
         // container's spring — a springing text crossfade reads as slow/floaty.
         .animation(.easeOut(duration: 0.1), value: isSelected)
+        // The star/tag badges insert and remove on these values; without a
+        // transaction their `.transition` never runs and they pop. Scoped to
+        // the value so nothing else on the row animates.
+        .animation(.easeOut(duration: 0.15), value: isFavorite)
+        .animation(.easeOut(duration: 0.15), value: item.hasCustomLabel)
         .background(selectionBackground)
         .onHover { hovering in
             isHovering = hovering

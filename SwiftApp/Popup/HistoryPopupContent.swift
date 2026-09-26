@@ -177,27 +177,36 @@ struct HistoryPopupContent: View {
     /// The highest valid selectedIndex (search bar + item count).
     var maxIndex: Int { displayItems.count }
 
+    /// Entering/leaving the inline editor swaps one row's content. A short
+    /// ease-out cross-fade keeps it from popping (the tag badge rides the same
+    /// transaction). The field's own focus hop is asynchronous — see
+    /// `InlineRemarkField.makeNSView` — and is unaffected by this.
+    private static var inlineEditAnimation: Animation { .easeOut(duration: 0.12) }
+
     func startInlineEditing(for item: ClipboardItem) {
         if showPreview { closePreview() }
-        editingItemId = item.id
-        editingText = item.customLabel
+        withAnimation(Self.inlineEditAnimation) {
+            editingItemId = item.id
+            editingText = item.customLabel
+        }
     }
 
     func commitInlineEditing(entryId: Int, newText: String, restoreFocus: Bool = true) {
         guard editingItemId == entryId else { return }
-        editingItemId = nil
         let trimmed = newText.trimmingCharacters(in: .whitespacesAndNewlines)
-        // A failed save must not look like a success: the row would silently
-        // revert while the user believes the remark is stored.
-        let saved = backend.setCustomLabel(entryId: entryId, label: trimmed)
-        if saved {
-            if !effectiveSearchText.isEmpty {
-                if let sIdx = searchResults.firstIndex(where: { $0.id == entryId }) {
-                    searchResults[sIdx] = searchResults[sIdx].withUpdatedCustomLabel(trimmed)
-                    searchResultsGeneration &+= 1
-                }
+        var saved = false
+        withAnimation(Self.inlineEditAnimation) {
+            editingItemId = nil
+            // A failed save must not look like a success: the row would silently
+            // revert while the user believes the remark is stored.
+            saved = backend.setCustomLabel(entryId: entryId, label: trimmed)
+            if saved, !effectiveSearchText.isEmpty,
+               let sIdx = searchResults.firstIndex(where: { $0.id == entryId }) {
+                searchResults[sIdx] = searchResults[sIdx].withUpdatedCustomLabel(trimmed)
+                searchResultsGeneration &+= 1
             }
-        } else {
+        }
+        if !saved {
             errorLog("commitInlineEditing: remark for entry \(entryId) was not saved")
             NSSound.beep()
         }
@@ -217,7 +226,9 @@ struct HistoryPopupContent: View {
     }
 
     func cancelInlineEditing() {
-        editingItemId = nil
+        withAnimation(Self.inlineEditAnimation) {
+            editingItemId = nil
+        }
         restoreContainerFocus()
     }
 
@@ -258,12 +269,20 @@ struct HistoryPopupContent: View {
                         .padding(.horizontal, 5)
 
                     filterPageContent
+                        // Per-tab empty state <-> list is a structural swap too.
+                        // Keyed on emptiness (not on the row count) so ordinary
+                        // capture/delete list updates stay un-animated.
+                        .animation(.easeOut(duration: 0.18), value: displayItems.isEmpty)
                 }
                 .padding(.all, 3)
             }
         }
         .scaleEffect(openingScale, anchor: .center)
         .frame(width: popupWidth, height: popupHeight)
+        // Empty <-> populated and per-tab empty <-> list are structural swaps:
+        // cross-fade them instead of popping. Scoped by value so ordinary list
+        // updates never pick up a transition.
+        .animation(.easeOut(duration: 0.18), value: backend.items.isEmpty)
         // Spotlight target geometry for the onboarding tour (empty when it is
         // not running — the reporters are only mounted while it is).
         .onPreferenceChange(SpotlightFramePreferenceKey.self) { geometry in
@@ -616,6 +635,7 @@ struct HistoryPopupContent: View {
                         .foregroundColor(theme.popupMutedText)
                 }
                 .buttonStyle(.plain)
+                .transition(.scale(scale: 0.9).combined(with: .opacity))
             }
         }
         .padding(.horizontal, 7)
@@ -637,6 +657,9 @@ struct HistoryPopupContent: View {
             selectedIndex = 0
             isSearchFocused = true
         }
+        // The clear button inserts/removes on emptiness; give its `.transition`
+        // a transaction. Scoped to the boolean so typing never animates.
+        .animation(.easeOut(duration: 0.15), value: searchText.isEmpty)
         .reportSpotlightFrame(.searchField)
     }
 
@@ -717,6 +740,9 @@ struct HistoryPopupContent: View {
                 itemsList
                 bottomBar
             }
+            // Cross-fade against the empty states (which carry .opacity), so
+            // neither side pops out of the structural swap.
+            .transition(.opacity)
         }
     }
 
