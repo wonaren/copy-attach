@@ -100,6 +100,13 @@ struct HistoryPopupContent: View {
     @State var editingItemId: Int? = nil
     @State var editingText: String = ""
 
+    /// False until the open animation has settled. `show()` triggers a backend
+    /// reload before this content mounts, so without the gate the first
+    /// published list would animate its rows in on top of the deliberate
+    /// Spotlight open scale — two entrances fighting in the same 0.2s window.
+    /// Row-change animation is armed only after the open spring finishes.
+    @State private var rowsReadyForAnimation = false
+
     // MARK: - Display-list memo
     //
     // Memoize derived rows/counts per data generation to avoid repeated O(n)
@@ -363,6 +370,7 @@ struct HistoryPopupContent: View {
             displayMemoBox.memo = nil
             editingItemId = nil
             editingText = ""
+            rowsReadyForAnimation = false
             openingScale = 1.10
             isControlPressed = NSEvent.modifierFlags.contains(.control)
             isCommandPressed = NSEvent.modifierFlags.contains(.command)
@@ -380,6 +388,10 @@ struct HistoryPopupContent: View {
 
             // Focus first item (or search bar if empty) after animation
             DispatchQueue.main.asyncAfter(deadline: .now() + openDuration + 0.05) {
+                // The open spring has settled: arm row-change animation. Set
+                // outside any animation transaction so arming itself is not
+                // animated.
+                self.rowsReadyForAnimation = true
                 if self.backend.items.isEmpty {
                     // Empty state: focus container so onKeyPress (e.g. Escape)
                     // works even without a search field or items.
@@ -774,6 +786,21 @@ struct HistoryPopupContent: View {
             .reportSpotlightFrame(.list, hasSelectedRow: selectedIndex > 0)
     }
 
+    /// A row entering/leaving the list on a data change (capture, delete,
+    /// undo, restore, favorite). Never from scale(0) — a small scale plus fade
+    /// reads as the row growing into place. Applied to both items and date
+    /// separators so a new day arrives with its first entry.
+    ///
+    /// Deliberately NOT applied on search or tab-filter changes: those move
+    /// many rows at once and must stay a single composited update. Per-row
+    /// transitions there were removed in 0.100.4 after rapid swipes stalled
+    /// and retained transition graphs — see the `.animation(value:)` below,
+    /// which keys on `itemsGeneration` precisely because it does not bump on
+    /// search or filter.
+    private static var rowChangeTransition: AnyTransition {
+        .opacity.combined(with: .scale(scale: 0.96))
+    }
+
     private var itemsListScrollView: some View {
         ScrollView {
             VStack(spacing: 0) {
@@ -794,6 +821,7 @@ struct HistoryPopupContent: View {
                             // Date separators keep their stable day identity;
                             // only their text is allowed to update.
                             .id(row.id)
+                            .transition(Self.rowChangeTransition)
                     case .item(let index, let item):
                         let shortcut: String? = isCommandPressed && index < 9 ? "⌘\(index + 1)" : nil
                         let spotlightRowArmed = OnboardingGuide.shared.isActive && selectedIndex == index + 1
@@ -862,6 +890,7 @@ struct HistoryPopupContent: View {
                             }
                         }
                         .id(item.id)
+                        .transition(Self.rowChangeTransition)
                     }
                 }
                 }
@@ -875,6 +904,17 @@ struct HistoryPopupContent: View {
             // ItemRowView so it doesn't ride this spring's settle tail.
             .animation(.spring(response: 0.18, dampingFraction: 0.82, blendDuration: 0),
                        value: selectedIndex)
+            // Row insertion/removal on a data change: a capture lands at the
+            // top, a delete collapses its row, undo grows it back. Keyed on
+            // `itemsGeneration`, which bumps for data mutations (capture,
+            // delete, undo, restore, favorite) but NOT for search or tab
+            // filtering — those keep the single composited update described
+            // above. Gated until the open spring settles so the first published
+            // list does not animate on top of the Spotlight open scale.
+            .animation(rowsReadyForAnimation
+                       ? .spring(response: 0.28, dampingFraction: 0.82, blendDuration: 0)
+                       : nil,
+                       value: backend.itemsGeneration)
         }
         .onPreferenceChange(RowFramePreferenceKey.self) { frames in
             // Resolve the armed right-click against the fresh snapshot, then

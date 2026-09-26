@@ -16,17 +16,16 @@ extension HistoryPopupContent {
             editingText = ""
         }
         closePreview()
-        var deleted = false
-        withAnimation(.easeInOut(duration: 0.2)) {
-            deleted = backend.deleteEntry(at: backendIdx)
-            // When search is active, displayItems draws from the cached
-            // searchResults snapshot. Mutate it inside the animation block
-            // so the item removal animates with the same transition.
-            // Only mutate searchResults when the delete actually succeeded,
-            // otherwise the in-memory cache desyncs from backend.items.
-            if deleted, !effectiveSearchText.isEmpty {
-                searchResults.removeAll { $0.id == item.id }
-            }
+        // The row's removal animates from the list's single
+        // `.animation(value: backend.itemsGeneration)` (see
+        // itemsListScrollView) — no `withAnimation` here, so this path cannot
+        // fight that authority with a second, differently-tuned curve.
+        let deleted = backend.deleteEntry(at: backendIdx)
+        // When search is active, displayItems draws from the cached
+        // searchResults snapshot; keep it in step with backend.items. Only
+        // mutate on success, otherwise the in-memory cache desyncs.
+        if deleted, !effectiveSearchText.isEmpty {
+            searchResults.removeAll { $0.id == item.id }
         }
         guard deleted else { return }
         OnboardingGuide.shared.record(.deleted)
@@ -66,9 +65,11 @@ extension HistoryPopupContent {
         defer { perfUndo?.end() }
         let savedSearchText = searchText
 
-        let success = withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) {
-            backend.undoDelete()
-        }
+        // The restored row's insertion animates from the list's single
+        // `.animation(value: backend.itemsGeneration)` (see itemsListScrollView)
+        // — the previous local `withAnimation` is gone so there is exactly one
+        // authority for row enter/leave motion.
+        let success = backend.undoDelete()
         guard success else {
             // Undo failed (DB error, entry gone, etc.). CanUndo returned true but
             // by the time we popped the stack something went wrong.
