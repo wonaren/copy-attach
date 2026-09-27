@@ -228,6 +228,4 @@ CI（`.github/workflows/build.yml`）签名步骤关键：`build` job 必须声�
 
 ## 安装的 Skills
 
-`.claude/skills/`（软链接，实际源在 `.agents/skills/`，共 6 个）：`emil-design-eng`（UI 设计原则）；`animation-vocabulary` / `improve-animations` / `review-animations` / `find-animation-opportunities`（动画分析与改进）；`i-have-adhd`（输出风格，`disable-model-invocation`，需 `/i-have-adhd` 显式调用）。
-
-**清单以 `.agents/skills/` 实际目录为准，不要信 `skills-lock.json`**：lock 声称有 `apple-design`（目录不存在，从未装上）却漏记 `i-have-adhd`，两者已漂移。
+`.claude/skills/`（软链接，实际源在 `.agents/skills/`，共 5 个）：`emil-design-eng`（UI 设计原则）；`animation-vocabulary` / `improve-animations` / `review-animations` / `find-animation-opportunities`（动画分析与改进）
