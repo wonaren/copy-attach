@@ -54,7 +54,12 @@ final class UpdateDownloader: NSObject, ObservableObject, URLSessionDownloadDele
     }
 
     // 蓝奏云 share constants (fixed share + fixed password, per release distribution)
-    private static let lanzouShareURL = URL(string: "https://wwbvw.lanzouv.com/b0341lhs5g")!
+    private static let lanzouShareURL: URL = {
+        guard let url = URL(string: "https://wwbvw.lanzouv.com/b0341lhs5g") else {
+            preconditionFailure("Invalid built-in Lanzou share URL")
+        }
+        return url
+    }()
     private static let lanzouPassword = "1234"
     private static let lanzouFileBase = "https://wwbvw.lanzouv.com/"
     /// NFD cloud parser: resolves lanzou shares to plain HTTPS direct links
@@ -159,7 +164,10 @@ final class UpdateDownloader: NSObject, ObservableObject, URLSessionDownloadDele
         #else
         let arch = "x86_64"
         #endif
-        return URL(string: "https://github.com/wonaren/copyattach-release/releases/download/v\(cleanVersion)/CopyAttach-\(cleanVersion)-macos-\(arch).dmg")!
+        guard let url = URL(string: "https://github.com/wonaren/copyattach-release/releases/download/v\(cleanVersion)/CopyAttach-\(cleanVersion)-macos-\(arch).dmg") else {
+            preconditionFailure("Invalid generated GitHub asset URL")
+        }
+        return url
     }
 
     /// Cheap preflight so a blocked GitHub (DNS pollution / GFW) or missing asset
@@ -189,7 +197,9 @@ final class UpdateDownloader: NSObject, ObservableObject, URLSessionDownloadDele
     private func downloadFromLanzou(version: String) async throws -> URL {
         let cleanVersion = Self.normalizeVersion(version)
         // 1) folder listing (password-protected share)
-        let listURL = URL(string: "\(Self.nfdBase)/v2/getFileList?url=\(Self.urlEncode(Self.lanzouShareURL.absoluteString))&pwd=\(Self.lanzouPassword)")!
+        guard let listURL = URL(string: "\(Self.nfdBase)/v2/getFileList?url=\(Self.urlEncode(Self.lanzouShareURL.absoluteString))&pwd=\(Self.lanzouPassword)") else {
+            throw UpdateError.lanzou("蓝奏云列表地址无效")
+        }
         let listJSON = try await fetchJSON(listURL)
         guard let files = listJSON["data"] as? [[String: Any]] else {
             throw UpdateError.lanzou("蓝奏云文件列表解析失败")
@@ -226,7 +236,9 @@ final class UpdateDownloader: NSObject, ObservableObject, URLSessionDownloadDele
 
         // 2) resolve the direct link
         let fileURL = Self.lanzouFileBase + fileID  // fileID may carry ?webpage=…
-        let parserURL = URL(string: "\(Self.nfdBase)/json/parser?url=\(Self.urlEncode(fileURL))&pwd=\(Self.lanzouPassword)")!
+        guard let parserURL = URL(string: "\(Self.nfdBase)/json/parser?url=\(Self.urlEncode(fileURL))&pwd=\(Self.lanzouPassword)") else {
+            throw UpdateError.lanzou("蓝奏云解析地址无效")
+        }
         let parserJSON = try await fetchJSON(parserURL)
         guard let data = parserJSON["data"] as? [String: Any],
               let directLink = data["directLink"] as? String,

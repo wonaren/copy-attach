@@ -23,7 +23,9 @@ struct ItemRowView: View {
     @Environment(\.colorSchemeContrast) private var colorSchemeContrast
     @Environment(\.displayScale) private var displayScale
 
-    private static let hexColorRegex = try! NSRegularExpression(pattern: "#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})\\b")
+    private static let hexColorRegex: NSRegularExpression? = {
+        try? NSRegularExpression(pattern: "#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})\\b")
+    }()
 
     /// 10×10 color swatches are drawn once per unique hex color and cached —
     /// the per-render `lockFocus` path (a fresh graphics context per match)
@@ -248,8 +250,9 @@ struct ItemRowView: View {
         // selection moves, and scroll refreshes of every visible row).
         guard text.contains("#") else { return Text(text) }
 
+        guard let regex = Self.hexColorRegex else { return Text(text) }
         let nsRange = NSRange(text.startIndex..., in: text)
-        let matches = Self.hexColorRegex.matches(in: text, range: nsRange)
+        let matches = regex.matches(in: text, range: nsRange)
 
         if matches.isEmpty { return Text(text) }
 

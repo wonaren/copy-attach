@@ -6,15 +6,15 @@ import SwiftUI
 /// Kept outside any View to avoid `@MainActor` isolation — these are called
 /// from background search tasks as well as the main thread.
 enum DayGroup {
-    private static func dayComponents(for date: Date, calendar: Calendar) -> DateComponents {
+    private static func dayComponents(for date: Date, calendar: Calendar) -> (era: Int, year: Int, month: Int, day: Int)? {
         let components = calendar.dateComponents([.era, .year, .month, .day], from: date)
-        guard components.era != nil,
-              components.year != nil,
-              components.month != nil,
-              components.day != nil else {
-            preconditionFailure("Unable to derive calendar day for date \(date)")
+        guard let era = components.era,
+              let year = components.year,
+              let month = components.month,
+              let day = components.day else {
+            return nil
         }
-        return components
+        return (era, year, month, day)
     }
 
     /// "7月21日 今天" / "7月20日 昨天" / "7月19日" / "2025年12月23日"
@@ -28,13 +28,14 @@ enum DayGroup {
     /// positive. Encoding calendar components avoids timestamp truncation.
     static func separatorID(for timestamp: UInt64) -> Int {
         let date = Date(timeIntervalSince1970: TimeInterval(timestamp))
-        let components = dayComponents(for: date, calendar: Calendar.current)
-        let era = Int64(components.era!)
-        let year = Int64(components.year!)
-        let month = Int64(components.month!)
-        let day = Int64(components.day!)
-        let key = era * 1_000_000_000 + year * 10_000 + month * 100 + day
-        precondition(key > 0 && key <= Int64(Int.max), "Calendar day ID overflow")
+        guard let components = dayComponents(for: date, calendar: Calendar.current) else {
+            return Int.min
+        }
+        let key = Int64(components.era) * 1_000_000_000
+            + Int64(components.year) * 10_000
+            + Int64(components.month) * 100
+            + Int64(components.day)
+        guard key > 0, key <= Int64(Int.max) else { return Int.min }
         return Int(Int64.min + key)
     }
 
@@ -43,13 +44,15 @@ enum DayGroup {
     static func labelParts(for timestamp: UInt64) -> (date: String, relative: String?) {
         let date = Date(timeIntervalSince1970: TimeInterval(timestamp))
         let cal = Calendar.current
-        let comps = dayComponents(for: date, calendar: cal)
+        guard let comps = dayComponents(for: date, calendar: cal) else {
+            return ("", nil)
+        }
         let nowYear = cal.component(.year, from: Date())
         let dateText: String
         if comps.year == nowYear {
-            dateText = "\(comps.month!)月\(comps.day!)日"
+            dateText = "\(comps.month)月\(comps.day)日"
         } else {
-            dateText = "\(comps.year!)年\(comps.month!)月\(comps.day!)日"
+            dateText = "\(comps.year)年\(comps.month)月\(comps.day)日"
         }
         if cal.isDateInToday(date) { return (dateText, "今天") }
         if cal.isDateInYesterday(date) { return (dateText, "昨天") }

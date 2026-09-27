@@ -566,9 +566,9 @@ struct HistoryPopupContent: View {
                 let filtered: [ClipboardItem] = await Task.detached(priority: .userInitiated) { [items, backend, query] in
                     guard !Task.isCancelled else { return [ClipboardItem]() }
                     let perfFilter = PerfSpan.start("swift", "search.filter")
-                    let matchIds = backend.searchIds(query)
+                    let matchIDs = backend.searchIds(query)
                     let result = items.filter {
-                        matchIds.contains($0.id) ||
+                        matchIDs.contains($0.id) ||
                         DayGroup.label(for: $0.timestamp)
                             .localizedCaseInsensitiveContains(query)
                     }

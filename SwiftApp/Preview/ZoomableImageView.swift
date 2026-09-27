@@ -98,7 +98,9 @@ final class ZoomableImageNSView: NSView {
     }
 
     required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
+        // This view is constructed programmatically. Coder-based construction
+        // is unsupported, so fail initialization without aborting the process.
+        return nil
     }
 
     deinit {

@@ -32,7 +32,9 @@ extension InlineSettingsView {
                     .font(.system(size: 13))
 
                     Button {
-                        NSWorkspace.shared.open(authorGitHubURL)
+                        if let authorGitHubURL {
+                            NSWorkspace.shared.open(authorGitHubURL)
+                        }
                     } label: {
                         HStack(spacing: 5) {
                             if let img = githubIconImage() {
@@ -85,7 +87,9 @@ extension InlineSettingsView {
                         // Manual escape hatch when programmatic download fails:
                         // open the release page / lanzou share in the browser.
                         Button {
+                        if let repoURL {
                             NSWorkspace.shared.open(repoURL)
+                        }
                         } label: {
                             Text("在浏览器中打开下载页")
                                 .font(.system(size: 11, weight: .medium))
@@ -257,10 +261,15 @@ extension InlineSettingsView {
         return img
     }
 
-    private var repoURL: URL { URL(string: "https://github.com/wonaren/copyattach-release")! }
-    private var authorGitHubURL: URL { URL(string: "https://github.com/wonaren")! }
+    private var repoURL: URL? {
+        URL(string: "https://github.com/wonaren/copyattach-release")
+    }
+    private var authorGitHubURL: URL? {
+        URL(string: "https://github.com/wonaren")
+    }
 
     private func openWebsite() {
+        guard let repoURL else { return }
         NSWorkspace.shared.open(repoURL)
     }
 
@@ -311,7 +320,10 @@ extension InlineSettingsView {
         guard updateState != .checking else { return }
         updateState = .checking
 
-        let url = URL(string: "https://github.com/wonaren/copyattach-release/releases/latest")!
+        guard let url = URL(string: "https://github.com/wonaren/copyattach-release/releases/latest") else {
+            updateState = .error("更新地址无效")
+            return
+        }
         var request = URLRequest(url: url)
         request.httpMethod = "HEAD"
         request.timeoutInterval = 15

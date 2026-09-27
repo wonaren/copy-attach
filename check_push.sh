@@ -113,9 +113,8 @@ fi
 
 if [[ "${DEV_MODE}" -eq 1 ]]; then
   echo
-  echo "${C_YEL}版本仍处于 -dev 开发态，跳过 CHANGELOG 发布章节检查（Unreleased 有内容属正常）${C_RST}"
-  summary
-fi
+  echo "${C_YEL}版本仍处于 -dev 开发态，跳过 CHANGELOG 发布章节检查，但继续执行代码质量门禁${C_RST}"
+else
 
 # ---------- 4. CHANGELOG 发布章节 ----------
 if [[ ! -f CHANGELOG.md ]]; then
@@ -199,6 +198,8 @@ if [[ "${UNRELEASED_LINES}" -gt 0 ]]; then
   fail "[Unreleased] 章节仍有 ${UNRELEASED_LINES} 行未整理内容——请全部移入「## [${VERSION}]」发布章节"
 else
   ok "[Unreleased] 章节为空（或不存在），无遗漏条目"
+fi
+
 fi
 
 # ---------- 6. git tag ----------

@@ -59,7 +59,13 @@ enum LicenseConfiguration {
         return fallback
     }
 
-    static let baseURL = URL(string: value(for: "CopyAttachLicenseServerURL", fallback: "https://api.abovepast.shop"))!
+    static let baseURL: URL = {
+        let configured = value(for: "CopyAttachLicenseServerURL", fallback: "https://api.abovepast.shop")
+        guard let url = URL(string: configured), let scheme = url.scheme, !scheme.isEmpty else {
+            preconditionFailure("Invalid license server URL")
+        }
+        return url
+    }()
     static let signingKeyID = value(for: "CopyAttachLicenseSigningKeyID", fallback: "production-2026-08")
     static let signingPublicKey = value(for: "CopyAttachLicenseSigningPublicKey", fallback: "efsKYx9a7urNlr-UXR7b0-Fl9w0mJNKe3RME-OeseOs")
 }

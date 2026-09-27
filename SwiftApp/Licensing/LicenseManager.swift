@@ -6,7 +6,12 @@ import Observation
 final class LicenseManager {
     static let shared = LicenseManager()
     /// 激活密钥购买页面。
-    static let purchaseURL = URL(string: "https://pay.ldxp.cn/shop/F5T5GUPN")!
+    static let purchaseURL: URL = {
+        guard let url = URL(string: "https://pay.ldxp.cn/shop/F5T5GUPN") else {
+            preconditionFailure("Invalid built-in purchase URL")
+        }
+        return url
+    }()
 
     private(set) var state: EntitlementState = .loading
     private(set) var isWorking = false

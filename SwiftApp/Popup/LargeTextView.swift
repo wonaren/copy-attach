@@ -25,8 +25,12 @@ struct LargeTextView: NSViewRepresentable {
         textView.textContainerInset = NSSize(width: 16, height: 14)
         textView.layoutManager?.allowsNonContiguousLayout = true
         textView.isHorizontallyResizable = false
-        textView.textContainer!.widthTracksTextView = true
-        textView.textContainer!.lineFragmentPadding = 0
+        guard let textContainer = textView.textContainer else {
+            scrollView.documentView = textView
+            return scrollView
+        }
+        textContainer.widthTracksTextView = true
+        textContainer.lineFragmentPadding = 0
 
         // Set attributed string with font + line spacing + color (shared metrics)
         textView.textStorage?.setAttributedString(
@@ -47,7 +51,8 @@ struct LargeTextView: NSViewRepresentable {
         let clipWidth = scrollView.bounds.width
         textView.frame.size.width = clipWidth
         let inset = textView.textContainerInset
-        textView.textContainer!.containerSize.width = clipWidth - inset.width * 2
+        guard let textContainer = textView.textContainer else { return }
+        textContainer.containerSize.width = clipWidth - inset.width * 2
 
         if textView.string != text {
             textView.textStorage?.setAttributedString(

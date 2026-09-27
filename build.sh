@@ -122,7 +122,8 @@ $SWIFTC $SDK \
 # Keep the tracked source plist (${SWIFT_SRC}/Info.plist) completely clean and unmodified.
 TARGET_PLIST="${APP_NAME}.app/Contents/Info.plist"
 cp "${SWIFT_SRC}/Info.plist" "${TARGET_PLIST}"
-/usr/libexec/PlistBuddy -c "Set CFBundleShortVersionString ${CARGO_VERSION}" "${TARGET_PLIST}" 2>/dev/null || true
+# Critical plist writes must fail the build; only deleting an optional old key is allowed to be idempotent.
+/usr/libexec/PlistBuddy -c "Set CFBundleShortVersionString ${CARGO_VERSION}" "${TARGET_PLIST}"
 /usr/libexec/PlistBuddy -c "Delete CopyAttachLicenseServerURL" "${TARGET_PLIST}" 2>/dev/null || true
 /usr/libexec/PlistBuddy -c "Add CopyAttachLicenseServerURL string ${LICENSE_SERVER_URL}" "${TARGET_PLIST}"
 /usr/libexec/PlistBuddy -c "Delete CopyAttachLicenseSigningKeyID" "${TARGET_PLIST}" 2>/dev/null || true
@@ -140,8 +141,15 @@ fi
 # Copy bridging header for reference
 cp "${SWIFT_SRC}/CopyAttach-Bridging-Header.h" "${APP_NAME}.app/Contents/Resources/"
 
-# Set rpath if not already set
-install_name_tool -add_rpath "@executable_path/../Frameworks" "${APP_NAME}.app/Contents/MacOS/CopyAttach" 2>/dev/null || true
+# This is a required runtime search path for the bundled dylib.
+install_name_tool -add_rpath "@executable_path/../Frameworks" "${APP_NAME}.app/Contents/MacOS/CopyAttach" 2>/dev/null || {
+    # The path may already exist; verify that it is present instead of hiding
+    # an unrelated install_name_tool failure.
+    otool -l "${APP_NAME}.app/Contents/MacOS/CopyAttach" | grep -Fq '@executable_path/../Frameworks' || {
+        echo "error: required Frameworks rpath is missing" >&2
+        exit 1
+    }
+}
 
 echo "==> Signing app bundle…"
 # 优先用已安装的正式签名身份（Developer ID Application / Apple Development）签名。
