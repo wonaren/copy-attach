@@ -50,12 +50,30 @@ final class ZoomableImageNSView: NSView {
     /// Local event monitor for magnification + scroll-wheel events.
     private var gestureMonitor: Any?
 
+    /// Track current item dbId to distinguish item switches from image resolution upgrades.
+    private var currentDbId: Int = 0
+
     // MARK: - Image property
 
     var image: NSImage? {
         get { imageView.image }
         set {
-            imageView.image = newValue
+            setImage(newValue, dbId: 0)
+        }
+    }
+
+    func setImage(_ newImage: NSImage?, dbId: Int) {
+        let isDifferentItem = (currentDbId != dbId || dbId == 0)
+        currentDbId = dbId
+
+        if imageView.image !== newImage {
+            imageView.image = newImage
+            if isDifferentItem {
+                resetZoom()
+            } else {
+                commitTransform()
+            }
+        } else if isDifferentItem {
             resetZoom()
         }
     }
@@ -377,18 +395,15 @@ extension CGFloat {
 /// which happens naturally when navigating between items in the preview window.
 struct ZoomableImageView: NSViewRepresentable {
     let image: NSImage?
+    var dbId: Int = 0
 
     func makeNSView(context: Context) -> ZoomableImageNSView {
         let view = ZoomableImageNSView()
-        view.image = image
+        view.setImage(image, dbId: dbId)
         return view
     }
 
     func updateNSView(_ nsView: ZoomableImageNSView, context: Context) {
-        // Identity check: only reset if the image object actually changed.
-        // `image` becoming nil (during async load) is also a change.
-        if nsView.image !== image {
-            nsView.image = image
-        }
+        nsView.setImage(image, dbId: dbId)
     }
 }

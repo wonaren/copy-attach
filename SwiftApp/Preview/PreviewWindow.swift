@@ -44,7 +44,7 @@ class PreviewWindow: NSPanel {
         self.hasShadow = true
         self.isMovableByWindowBackground = true
 
-        let content = AnyView(PreviewContent(item: item).withAppTheme())
+        let content = AnyView(PreviewContent(item: item).id(item.id).withAppTheme())
         let hosting = NSHostingView(rootView: content)
         let contentRect = self.contentRect(forFrameRect: self.frame)
         hosting.frame = contentRect
@@ -113,7 +113,7 @@ class PreviewWindow: NSPanel {
         // previews, some of which never got released after close. Direct root
         // replacement is visually equivalent for 150 ms and keeps the window
         // to a single backing store.
-        hostingView?.rootView = AnyView(PreviewContent(item: item).withAppTheme())
+        hostingView?.rootView = AnyView(PreviewContent(item: item).id(item.id).withAppTheme())
         resizeToFitContent(for: item)
     }
 
