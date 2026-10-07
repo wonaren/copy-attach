@@ -8,6 +8,7 @@ git push origin v0.xxx.x --force
 
 ## [Unreleased]
 
+## [0.107.4] - 2026-10-07
 ### 体验优化
 
 - **文本预览可读性与结构感知升级**：
