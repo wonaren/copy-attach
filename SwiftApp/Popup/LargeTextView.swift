@@ -1,17 +1,31 @@
 import AppKit
 import SwiftUI
 
-// MARK: - Large Text Preview (NSTextView-backed, non-contiguous layout)
+// MARK: - Large Text Preview (NSTextView-backed, non-contiguous layout with adaptive typography)
 
 struct LargeTextView: NSViewRepresentable {
-    let text: String
+    let preparedText: PreparedPreviewText
     let textColor: NSColor
+    let isDark: Bool
+
+    init(preparedText: PreparedPreviewText, textColor: NSColor, isDark: Bool = true) {
+        self.preparedText = preparedText
+        self.textColor = textColor
+        self.isDark = isDark
+    }
+
+    init(text: String, textColor: NSColor, isDark: Bool = true) {
+        self.preparedText = PreviewTextLayout.prepare(text)
+        self.textColor = textColor
+        self.isDark = isDark
+    }
 
     func makeNSView(context: Context) -> NSScrollView {
         let scrollView = NSScrollView()
-        scrollView.hasVerticalScroller = false
+        scrollView.hasVerticalScroller = true
         scrollView.hasHorizontalScroller = false
         scrollView.autohidesScrollers = true
+        scrollView.scrollerStyle = .overlay
         scrollView.borderType = .noBorder
         scrollView.backgroundColor = .clear
         scrollView.drawsBackground = false
@@ -32,13 +46,7 @@ struct LargeTextView: NSViewRepresentable {
         textContainer.widthTracksTextView = true
         textContainer.lineFragmentPadding = 0
 
-        // Set attributed string with font + line spacing + color (shared metrics)
-        textView.textStorage?.setAttributedString(
-            NSAttributedString(string: text, attributes: PreviewTextLayout.attributes(textColor: textColor)))
-        // Also set NSTextView-level font/color so readers of textView.font and the
-        // else-if comparison in updateNSView get the expected value.
-        textView.font = PreviewTextLayout.font
-        textView.textColor = textColor
+        applyContent(to: textView)
 
         scrollView.documentView = textView
         return scrollView
@@ -49,20 +57,34 @@ struct LargeTextView: NSViewRepresentable {
 
         // Force text view width to match scroll view's clip view width.
         let clipWidth = scrollView.bounds.width
-        textView.frame.size.width = clipWidth
-        let inset = textView.textContainerInset
-        guard let textContainer = textView.textContainer else { return }
-        textContainer.containerSize.width = clipWidth - inset.width * 2
-
-        if textView.string != text {
-            textView.textStorage?.setAttributedString(
-                NSAttributedString(string: text, attributes: PreviewTextLayout.attributes(textColor: textColor)))
-        } else if textView.textColor != textColor {
-            textView.textColor = textColor
-            let len = textView.textStorage?.length ?? 0
-            if len > 0 {
-                textView.textStorage?.addAttribute(.foregroundColor, value: textColor, range: NSRange(location: 0, length: len))
+        if clipWidth > 0 {
+            textView.frame.size.width = clipWidth
+            let inset = textView.textContainerInset
+            if let textContainer = textView.textContainer {
+                textContainer.containerSize.width = max(clipWidth - inset.width * 2, 0)
             }
         }
+
+        if textView.string != preparedText.displayText || textView.textColor != textColor {
+            applyContent(to: textView)
+        }
+    }
+
+    private func applyContent(to textView: NSTextView) {
+        let attrString = NSMutableAttributedString(
+            string: preparedText.displayText,
+            attributes: PreviewTextLayout.attributes(for: preparedText.kind, textColor: textColor)
+        )
+        if let storage = textView.textStorage {
+            storage.setAttributedString(attrString)
+            PreviewHighlighter.highlight(
+                storage: storage,
+                kind: preparedText.kind,
+                baseTextColor: textColor,
+                isDark: isDark
+            )
+        }
+        textView.font = PreviewTextLayout.font(for: preparedText.kind)
+        textView.textColor = textColor
     }
 }

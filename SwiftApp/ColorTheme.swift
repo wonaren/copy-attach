@@ -72,7 +72,7 @@ struct AppTheme {
         popupFilterTabBackgroundSelected: Color(nsColor: .controlAccentColor).opacity(0.20),
 
         // Preview
-        previewBackground: Color(nsColor: NSColor(calibratedRed: 0.118, green: 0.118, blue: 0.118, alpha: 0.94)),
+        previewBackground: Color(nsColor: NSColor(calibratedRed: 0.118, green: 0.118, blue: 0.118, alpha: 1.0)),
         previewPrimaryText: Color(white: 0.90),
         previewSecondaryText: Color(white: 0.65)
     )
@@ -111,7 +111,7 @@ struct AppTheme {
         popupFilterTabBackgroundSelected: Color(nsColor: .controlAccentColor).opacity(0.16),
 
         // Preview — clean light reading panel
-        previewBackground: Color(nsColor: NSColor(calibratedRed: 1.0, green: 1.0, blue: 1.0, alpha: 0.92)),
+        previewBackground: Color(nsColor: NSColor(calibratedRed: 1.0, green: 1.0, blue: 1.0, alpha: 1.0)),
         previewPrimaryText: Color(white: 0.15),
         previewSecondaryText: Color(white: 0.35)
     )

@@ -55,10 +55,31 @@ struct PreviewContent: View {
 
             switch item {
             case .text:
-                LargeTextView(text: item.preview, textColor: previewTextNSColor)
+                textContent
             case .image:
                 imageContent(dbId: currentDbId)
             }
+        }
+    }
+
+    private var textContent: some View {
+        let prepared = PreviewTextLayout.prepare(item.preview)
+        let isDark = colorScheme == .dark
+        return VStack(spacing: 0) {
+            LargeTextView(
+                preparedText: prepared,
+                textColor: previewTextNSColor,
+                isDark: isDark
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            Divider()
+                .opacity(isDark ? 0.12 : 0.08)
+
+            PreviewFooterBar(
+                item: item,
+                prepared: prepared
+            )
         }
     }
 

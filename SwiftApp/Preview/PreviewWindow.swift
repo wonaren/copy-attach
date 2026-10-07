@@ -160,28 +160,38 @@ class PreviewWindow: NSPanel {
 
         switch item {
         case .text(let entryId, _, _, _, _, _, let text, _):
+            let prepared = PreviewTextLayout.prepare(text)
             let pad: CGFloat = 32
-            // Find the longest line in the text to determine adaptive window width.
-            // Single-pass, line-at-a-time: the old `components(separatedBy: .newlines)`
-            // copied the ENTIRE text into an array of per-line strings held
-            // simultaneously — a multi-MB paste doubled its resident size just to
-            // measure the width. `enumerateLines` keeps one line alive at a time,
-            // and the scan stops early once a line already saturates the width
-            // cap (the final width is clamped to `maxW` anyway, so later lines
-            // can no longer change the result).
-            let widthLimit = maxW - pad
+            // Comfortable typographic measure: clamp maximum line measure to avoid
+            // excessively wide lines that hurt readability on wide displays.
+            let maxErgonomicWidth: CGFloat = (prepared.kind == .prose) ? 680 : 880
+            let effectiveMaxW = min(maxErgonomicWidth, maxW)
+            let widthLimit = effectiveMaxW - pad
+
             var longestLineWidth: CGFloat = 0
-            text.enumerateLines { line, stop in
+            let font = PreviewTextLayout.font(for: prepared.kind)
+            prepared.displayText.enumerateLines { line, stop in
                 let lineWidth = (line as NSString)
-                    .size(withAttributes: [.font: PreviewTextLayout.font]).width
+                    .size(withAttributes: [.font: font]).width
                 if lineWidth > longestLineWidth { longestLineWidth = lineWidth }
                 if longestLineWidth >= widthLimit { stop = true }
             }
-            let textWidth = min(max(longestLineWidth + pad, 300), maxW)
+            let minW: CGFloat = (prepared.kind == .prose) ? 360 : 400
+            let textWidth = min(max(longestLineWidth + pad, minW), effectiveMaxW)
             let containerW = textWidth - pad
-            let textH = calculateTextHeight(text, width: containerW, entryId: entryId, maxHeight: maxH)
-            let totalH = min(textH + pad, maxH)
-            return NSSize(width: textWidth, height: max(totalH, 100))
+
+            // Vertical budget: 28pt top+bottom textContainerInset + 29pt footer (28pt footer + 1pt divider) = 57pt overhead
+            let verticalOverhead: CGFloat = 57
+            let maxTextH = max(maxH - verticalOverhead, 50)
+            let textH = calculateTextHeight(
+                prepared.displayText,
+                kind: prepared.kind,
+                width: containerW,
+                entryId: entryId,
+                maxHeight: maxTextH
+            )
+            let totalH = min(textH + verticalOverhead, maxH)
+            return NSSize(width: textWidth, height: max(totalH, 110))
 
         case .image(_, _, let w, let h, _, _, _, _, _):
             guard w > 0, h > 0 else {
@@ -199,9 +209,15 @@ class PreviewWindow: NSPanel {
         }
     }
 
-    private static func calculateTextHeight(_ text: String, width: CGFloat, entryId: Int, maxHeight: CGFloat) -> CGFloat {
+    private static func calculateTextHeight(
+        _ text: String,
+        kind: TextContentKind,
+        width: CGFloat,
+        entryId: Int,
+        maxHeight: CGFloat
+    ) -> CGFloat {
         if let cached = textHeightCache[entryId] { return cached }
-        let height = PreviewTextLayout.measureHeight(text, width: width, maxHeight: maxHeight) + 28
+        let height = PreviewTextLayout.measureHeight(text, kind: kind, width: width, maxHeight: maxHeight)
         if textHeightCache.count >= textHeightCacheMaxEntries,
            let key = textHeightCache.keys.first {
             textHeightCache.removeValue(forKey: key)
