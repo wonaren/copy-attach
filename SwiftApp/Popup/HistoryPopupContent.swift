@@ -8,6 +8,7 @@ enum FilterMode: String, CaseIterable {
     case all
     case image
     case text
+    case remarks
 
     var icon: String {
         switch self {
@@ -15,6 +16,17 @@ enum FilterMode: String, CaseIterable {
         case .all: return "line.3.horizontal"
         case .image: return "photo"
         case .text: return "doc.text"
+        case .remarks: return "tag.fill"
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .favorites: return "收藏"
+        case .all: return "全部"
+        case .image: return "图片"
+        case .text: return "文本"
+        case .remarks: return "备注"
         }
     }
 }
@@ -216,6 +228,9 @@ struct HistoryPopupContent: View {
         if !saved {
             errorLog("commitInlineEditing: remark for entry \(entryId) was not saved")
             NSSound.beep()
+        }
+        if selectedIndex > maxIndex {
+            selectedIndex = max(0, maxIndex)
         }
         if restoreFocus { restoreContainerFocus() }
     }
@@ -722,6 +737,7 @@ struct HistoryPopupContent: View {
                         )
                 }
                 .buttonStyle(.plain)
+                .help(mode.title)
             }
             Spacer()
         }
@@ -747,6 +763,8 @@ struct HistoryPopupContent: View {
             emptyMessageView(icon: "photo", title: "暂无图片")
         } else if displayItems.isEmpty && filterMode == .text {
             emptyMessageView(icon: "doc.text", title: "暂无文本")
+        } else if displayItems.isEmpty && filterMode == .remarks {
+            emptyMessageView(icon: "tag.slash", title: "暂无备注")
         } else {
             VStack(spacing: 4) {
                 itemsList

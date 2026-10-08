@@ -42,6 +42,7 @@ extension HistoryPopupContent {
         case .favorites: backend.favoriteIds.contains(item.id)
         case .image: item.isImage
         case .text: item.isText
+        case .remarks: item.hasCustomLabel
         }
     }
 
