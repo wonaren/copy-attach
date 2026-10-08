@@ -988,10 +988,13 @@ class ClipboardBackend {
         itemsGeneration &+= 1
     }
 
-    /// Trim the oldest N percent of entries from history and DB.
+    /// Trim the oldest N percent of entries from history and DB, preserving favorites.
     /// Returns the number of entries removed.
     func trimOldestPercent(_ percent: Int) -> Int {
-        let removed = Int(clipboard_trim_oldest_percent(Int32(percent)))
+        let favStr = favoriteIds.map(String.init).joined(separator: ",")
+        let removed = favStr.withCString { favCStr in
+            Int(clipboard_trim_oldest_percent(Int32(percent), favCStr))
+        }
         if removed > 0 {
             DispatchQueue.main.async {
                 self.refresh()

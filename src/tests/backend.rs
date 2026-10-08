@@ -587,7 +587,7 @@ fn test_trim_oldest_percent_leaves_memory_intact_when_db_delete_fails() {
         let conn = b.db.lock().unwrap();
         conn.pragma_update(None, "query_only", true).expect("enable query_only");
     }
-    let removed = crate::ffi::clipboard_trim_oldest_percent(40);
+    let removed = crate::ffi::clipboard_trim_oldest_percent(40, std::ptr::null());
     let after = b.history.lock().unwrap().len();
 
     // Restore writability and unwind the fixture before asserting.
@@ -611,6 +611,109 @@ fn test_trim_oldest_percent_leaves_memory_intact_when_db_delete_fails() {
         after, before,
         "memory must be untouched when the DB delete failed (was {before}, now {after})"
     );
+}
+
+#[test]
+fn test_trim_oldest_percent_preserves_favorites() {
+    let _shared = shared_state_guard();
+    ensure_test_backend();
+    let b = crate::backend::try_backend().expect("backend initialized");
+
+    let base: u64 = 920_000_000;
+    let n: u64 = 10;
+    let mut fixture_ids: Vec<i64> = Vec::new();
+    {
+        let conn = b.db.lock().unwrap();
+        for i in 0..n {
+            conn.execute(
+                "INSERT INTO clipboard_history
+                    (entry_type, text, hash, timestamp, source_name, source_bundle_id, entry_id)
+                 VALUES (0, ?1, ?2, ?3, 'TrimFavTest', 'com.example.trimfav', ?4)",
+                rusqlite::params![format!("trim-fav-{i}"), (base + i) as i64, (i + 100) as i64, (base + i) as i64],
+            ).expect("insert trim fav fixture row");
+            fixture_ids.push(conn.last_insert_rowid());
+        }
+    }
+    {
+        let mut hist = b.history.lock().unwrap();
+        for (i, db_id) in fixture_ids.iter().enumerate() {
+            hist.push(ClipboardEntry::Text {
+                id: base + i as u64,
+                preview: format!("trim-fav-{i}"),
+                label: format!("trim-fav-{i}"),
+                custom_label: String::new(),
+                text_hash: base + i as u64,
+                timestamp: (i + 100) as u64,
+                source_name: "TrimFavTest".to_string(),
+                source_bundle_id: "com.example.trimfav".to_string(),
+                db_id: *db_id,
+            });
+        }
+    }
+
+    // Favorite the two oldest entries: base+0 and base+1.
+    // Total entries = 10. Cleanable = 8.
+    // 40% of 8 = ceil(3.2) = 4.
+    // Oldest cleanable entries to be removed: base+2, base+3, base+4, base+5.
+    let fav_str = std::ffi::CString::new(format!("{},{}", base, base + 1)).unwrap();
+    let removed = crate::ffi::clipboard_trim_oldest_percent(40, fav_str.as_ptr());
+
+    // Verify DB: favorites (base+0, base+1) must still exist; unfavorited base+2 must be removed!
+    let fav0_db: bool;
+    let fav1_db: bool;
+    let nonfav2_db: bool;
+    {
+        let conn = b.db.lock().unwrap();
+        fav0_db = conn.query_row(
+            "SELECT COUNT(*) FROM clipboard_history WHERE entry_id = ?1",
+            rusqlite::params![(base) as i64],
+            |r| r.get::<_, i64>(0),
+        ).unwrap() > 0;
+        fav1_db = conn.query_row(
+            "SELECT COUNT(*) FROM clipboard_history WHERE entry_id = ?1",
+            rusqlite::params![(base + 1) as i64],
+            |r| r.get::<_, i64>(0),
+        ).unwrap() > 0;
+        nonfav2_db = conn.query_row(
+            "SELECT COUNT(*) FROM clipboard_history WHERE entry_id = ?1",
+            rusqlite::params![(base + 2) as i64],
+            |r| r.get::<_, i64>(0),
+        ).unwrap() > 0;
+    }
+
+    // Verify Memory: favorites must still exist; unfavorited base+2 must be removed!
+    let fav0_mem: bool;
+    let fav1_mem: bool;
+    let nonfav2_mem: bool;
+    {
+        let hist = b.history.lock().unwrap();
+        fav0_mem = hist.iter().any(|e| e.entry_id() == base);
+        fav1_mem = hist.iter().any(|e| e.entry_id() == base + 1);
+        nonfav2_mem = hist.iter().any(|e| e.entry_id() == base + 2);
+    }
+
+    // Unwind fixture before assertions
+    {
+        let conn = b.db.lock().unwrap();
+        for db_id in &fixture_ids {
+            let _ = conn.execute(
+                "DELETE FROM clipboard_history WHERE id = ?1",
+                rusqlite::params![db_id],
+            );
+        }
+    }
+    {
+        let mut hist = b.history.lock().unwrap();
+        hist.retain(|e| !(e.entry_id() >= base && e.entry_id() < base + n));
+    }
+
+    assert_eq!(removed, 4);
+    assert!(fav0_db, "favorite 0 must be preserved in DB");
+    assert!(fav1_db, "favorite 1 must be preserved in DB");
+    assert!(!nonfav2_db, "unfavorited entry 2 must be deleted from DB");
+    assert!(fav0_mem, "favorite 0 must be preserved in memory");
+    assert!(fav1_mem, "favorite 1 must be preserved in memory");
+    assert!(!nonfav2_mem, "unfavorited entry 2 must be deleted from memory");
 }
 
 #[test]

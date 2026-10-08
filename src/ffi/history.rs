@@ -477,32 +477,61 @@ pub extern "C" fn clipboard_set_custom_label(entry_id: u64, label: *const c_char
 /// The removal is by identity (db_id), not by tail position: an in-memory entry
 /// whose row the DELETE did not touch must survive, and synchronously-inserted
 /// captures during the window are never in the deleted id set.
+/// Trim the oldest N percent of entries from history and DB, preserving any
+/// entries referenced by `favorite_ids_str`.
+/// Returns the number of entries actually removed.
+///
+/// DB first, and a DB failure aborts the whole operation (returns 0) with
+/// memory untouched: the DB row is what makes a removal durable, so trimming
+/// memory after a failed DELETE would let every "removed" entry reappear on
+/// the next launch while the caller still reported success. Mirrors the
+/// contract of `clipboard_delete_by_id` / `clipboard_clear_history`.
+///
+/// The removal is by identity (db_id), not by tail position: an in-memory entry
+/// whose row the DELETE did not touch must survive, and synchronously-inserted
+/// captures during the window are never in the deleted id set.
 #[no_mangle]
-pub extern "C" fn clipboard_trim_oldest_percent(percent: i32) -> c_int {
+pub extern "C" fn clipboard_trim_oldest_percent(
+    percent: i32,
+    favorite_ids_str: *const c_char,
+) -> c_int {
     let b = match try_backend() {
         Some(b) => b,
         None => return 0,
     };
 
+    if percent <= 0 {
+        return 0;
+    }
+
+    let fav_set: HashSet<u64> = super::parse_ids_set(favorite_ids_str);
+
     let count = {
         let hist = b.history.lock().unwrap();
-        let total = hist.len();
-        if total == 0 {
+        let cleanable_total = hist
+            .iter()
+            .filter(|e| !fav_set.contains(&e.entry_id()))
+            .count();
+        if cleanable_total == 0 {
             return 0;
         }
-        let count = ((total as f64 * f64::from(percent) / 100.0).ceil()) as usize;
-        count.min(total)
+        let count = ((cleanable_total as f64 * f64::from(percent) / 100.0).ceil()) as usize;
+        count.min(cleanable_total)
     };
 
-    // Step 1: delete the oldest rows from DB, resolving exactly which row ids
-    // go away. A failure leaves memory — and the durable state — untouched.
-    // "Oldest" is by `(timestamp, id)`, the same order the list uses: trimming
-    // by rowid instead would evict the user's own newer rows first whenever the
+    if count == 0 {
+        return 0;
+    }
+
+    // Step 1: delete the oldest rows from DB, excluding any rows in fav_set.
+    // Resolving exactly which row ids go away. A failure leaves memory — and the durable
+    // state — untouched. "Oldest" is by `(timestamp, id)`, the same order the list uses:
+    // trimming by rowid instead would evict the user's own newer rows first whenever the
     // table holds rows inserted out of chronological order (a merge).
     let deleted_ids: HashSet<i64> = match b.db.lock() {
         Ok(conn) => {
             let mut stmt = match conn.prepare(
-                "SELECT id FROM clipboard_history ORDER BY timestamp ASC, id ASC LIMIT ?",
+                "SELECT id, entry_id FROM clipboard_history ORDER BY timestamp ASC, id ASC",
             ) {
                 Ok(s) => s,
                 Err(e) => {
@@ -510,26 +539,61 @@ pub extern "C" fn clipboard_trim_oldest_percent(percent: i32) -> c_int {
                     return 0;
                 }
             };
-            let ids: Vec<i64> = match stmt.query_map(rusqlite::params![count as i64], |row| row.get(0)) {
-                Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
+            let mut rows = match stmt.query([]) {
+                Ok(r) => r,
                 Err(e) => {
-                    crate::error_log!("CopyAttach: failed to list rows to trim: {e} — history left intact");
+                    crate::error_log!("CopyAttach: failed to query rows to trim: {e} — history left intact");
                     return 0;
                 }
             };
+            let mut ids = Vec::with_capacity(count);
+            while let Ok(Some(row)) = rows.next() {
+                let db_id: i64 = match row.get(0) {
+                    Ok(id) => id,
+                    Err(_) => continue,
+                };
+                let entry_id: i64 = match row.get(1) {
+                    Ok(id) => id,
+                    Err(_) => continue,
+                };
+                if !fav_set.contains(&(entry_id as u64)) {
+                    ids.push(db_id);
+                    if ids.len() >= count {
+                        break;
+                    }
+                }
+            }
+            drop(rows);
             drop(stmt);
+
             if ids.is_empty() {
                 return 0;
             }
-            let placeholders = vec!["?"; ids.len()].join(",");
-            let sql = format!("DELETE FROM clipboard_history WHERE id IN ({placeholders})");
-            match conn.execute(&sql, rusqlite::params_from_iter(ids.iter())) {
-                Ok(rows) => ids.iter().copied().take(rows).collect(),
+
+            let tx = match conn.unchecked_transaction() {
+                Ok(t) => t,
                 Err(e) => {
-                    crate::error_log!("CopyAttach: failed to trim DB by {count} entries: {e} — history left intact");
+                    crate::error_log!("CopyAttach: failed to begin trim transaction: {e} — history left intact");
                     return 0;
                 }
+            };
+            let mut deleted_count = 0;
+            for chunk in ids.chunks(500) {
+                let placeholders = vec!["?"; chunk.len()].join(",");
+                let sql = format!("DELETE FROM clipboard_history WHERE id IN ({placeholders})");
+                match tx.execute(&sql, rusqlite::params_from_iter(chunk.iter())) {
+                    Ok(c) => deleted_count += c,
+                    Err(e) => {
+                        crate::error_log!("CopyAttach: failed to trim DB by {} entries: {e} — history left intact", ids.len());
+                        return 0;
+                    }
+                }
             }
+            if let Err(e) = tx.commit() {
+                crate::error_log!("CopyAttach: failed to commit trim transaction: {e} — history left intact");
+                return 0;
+            }
+            ids.into_iter().take(deleted_count).collect()
         }
         Err(e) => {
             crate::error_log!("CopyAttach: DB mutex poisoned in trim_oldest_percent: {e}");
@@ -543,10 +607,11 @@ pub extern "C" fn clipboard_trim_oldest_percent(percent: i32) -> c_int {
 
     // Step 2: drop exactly those rows from memory, by identity. The entries
     // the DELETE did not remove keep their rows and must stay listed.
+    // Favorites are preserved both in DB and memory.
     let actual = {
         let mut hist = b.history.lock().unwrap();
         let before = hist.len();
-        hist.retain(|e| !deleted_ids.contains(&e.db_id()));
+        hist.retain(|e| !deleted_ids.contains(&e.db_id()) || fav_set.contains(&e.entry_id()));
         let removed = before - hist.len();
         // Publish under the history lock (entries were removed).
         crate::backend::mark_history_changed();

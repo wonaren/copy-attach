@@ -1,7 +1,7 @@
 // Auto-cleanup threshold, trim-oldest-percent, and dynamic threshold tests.
 
 use crate::history::add_to_history;
-use super::{assign_row_ids, fill_and_trim_to, make_text, simulate_trim_oldest_percent};
+use super::{assign_row_ids, fill_and_trim_to, make_text, simulate_trim_oldest_percent, simulate_trim_oldest_percent_with_favorites};
 
 /// Build `n` distinct text entries carrying real row ids, newest first — the
 /// shape the production list has (head = newest = largest db_id).
@@ -229,4 +229,52 @@ fn test_threshold_reduction_to_minimum() {
         hist.pop();
     }
     assert!(hist.is_empty());
+}
+
+#[test]
+fn test_trim_percent_40_preserves_favorites() {
+    let mut hist = Vec::new();
+    for i in 0..100 {
+        hist = add_to_history(hist, make_text(&format!("t-{:03}", i), i as u64));
+    }
+    assert_eq!(hist.len(), 100);
+    assign_row_ids(&mut hist);
+
+    // Pick 4 favorites: the two oldest entries (at the tail), one in the middle, and newest (head).
+    let fav_0 = hist[99].entry_id();
+    let fav_1 = hist[98].entry_id();
+    let fav_50 = hist[50].entry_id();
+    let fav_new = hist[0].entry_id();
+    let mut favorites = std::collections::HashSet::new();
+    favorites.insert(fav_0);
+    favorites.insert(fav_1);
+    favorites.insert(fav_50);
+    favorites.insert(fav_new);
+
+    let (kept, removed) = simulate_trim_oldest_percent_with_favorites(hist, 40, &favorites);
+
+    // Cleanable entries = 100 - 4 = 96.
+    // 40% of 96 = ceil(38.4) = 39 removed.
+    // Kept = 100 - 39 = 61.
+    assert_eq!(removed.len(), 39);
+    assert_eq!(kept.len(), 61);
+
+    for &fav_id in &favorites {
+        assert!(kept.iter().any(|e| e.entry_id() == fav_id), "favorite {fav_id} must be kept");
+        assert!(!removed.iter().any(|e| e.entry_id() == fav_id), "favorite {fav_id} must not be removed");
+    }
+}
+
+#[test]
+fn test_trim_percent_all_favorited() {
+    let mut hist = Vec::new();
+    for i in 0..10 {
+        hist = add_to_history(hist, make_text(&format!("t-fav-{:02}", i), i as u64));
+    }
+    assign_row_ids(&mut hist);
+    let favorites: std::collections::HashSet<u64> = hist.iter().map(|e| e.entry_id()).collect();
+
+    let (kept, removed) = simulate_trim_oldest_percent_with_favorites(hist, 40, &favorites);
+    assert_eq!(kept.len(), 10);
+    assert!(removed.is_empty());
 }

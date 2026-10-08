@@ -5,21 +5,7 @@ use std::sync::atomic::Ordering;
 use crate::backend::try_backend;
 use crate::db::backup::{export_backup, inspect_backup, restore_backup_merge, restore_backup_overwrite};
 use crate::db::{entry_id_watermark, load_history_from_db};
-
-fn parse_ids_str(s: *const c_char) -> Vec<u64> {
-    if s.is_null() {
-        return Vec::new();
-    }
-    let c_str = match unsafe { CStr::from_ptr(s) }.to_str() {
-        Ok(s) => s,
-        Err(_) => return Vec::new(),
-    };
-    c_str
-        .split(|c: char| !c.is_ascii_digit())
-        .filter(|part| !part.is_empty())
-        .filter_map(|part| part.parse::<u64>().ok())
-        .collect()
-}
+use super::parse_ids_str;
 
 /// Export full database and favorites to a standalone `.cabackup` file.
 ///

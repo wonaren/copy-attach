@@ -113,19 +113,31 @@ fn fill_and_trim_to(threshold: usize, count: usize) -> Vec<ClipboardEntry> {
 /// actually removed", and memory removal is by identity (db_id) rather than by
 /// position. Tests can therefore assert the DB/memory consistency invariant.
 fn simulate_trim_oldest_percent(
-    mut hist: Vec<ClipboardEntry>, percent: usize,
+    hist: Vec<ClipboardEntry>,
+    percent: usize,
 ) -> (Vec<ClipboardEntry>, Vec<ClipboardEntry>) {
-    let total = hist.len();
-    if total == 0 {
+    simulate_trim_oldest_percent_with_favorites(hist, percent, &std::collections::HashSet::new())
+}
+
+fn simulate_trim_oldest_percent_with_favorites(
+    mut hist: Vec<ClipboardEntry>,
+    percent: usize,
+    favorites: &std::collections::HashSet<u64>,
+) -> (Vec<ClipboardEntry>, Vec<ClipboardEntry>) {
+    let cleanable_total = hist
+        .iter()
+        .filter(|e| !favorites.contains(&e.entry_id()))
+        .count();
+    if cleanable_total == 0 {
         return (hist, vec![]);
     }
-    let count = ((total as f64 * percent as f64 / 100.0).ceil()) as usize;
-    let count = count.min(total);
-    // Which rows the DELETE would have removed: oldest by row order.
+    let count = ((cleanable_total as f64 * percent as f64 / 100.0).ceil()) as usize;
+    let count = count.min(cleanable_total);
+    // Which rows the DELETE would have removed: oldest by row order, skipping favorites.
     let mut by_row: Vec<(i64, usize)> = hist
         .iter()
         .enumerate()
-        .filter(|(_, e)| e.db_id() != 0)
+        .filter(|(_, e)| e.db_id() != 0 && !favorites.contains(&e.entry_id()))
         .map(|(i, e)| (e.db_id(), i))
         .collect();
     by_row.sort_by_key(|(db_id, _)| *db_id);

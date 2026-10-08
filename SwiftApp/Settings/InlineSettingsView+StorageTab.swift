@@ -168,11 +168,23 @@ extension InlineSettingsView {
             HStack(spacing: 12) {
                 Button {
                     let total = backend.items.count
-                    let estimated = Int((Double(total) * 0.4).rounded(.up))
                     guard total > 0 else { return }
+                    let favorites = backend.favoriteIds
+                    let cleanableCount = backend.items.filter { !favorites.contains($0.id) }.count
+                    if cleanableCount == 0 {
+                        let alert = NSAlert()
+                        alert.messageText = "无需清理"
+                        alert.informativeText = "当前所有剪贴板记录均已收藏，收藏的条目不会被清理。"
+                        alert.alertStyle = .informational
+                        alert.addButton(withTitle: "好")
+                        alert.runModal()
+                        return
+                    }
+                    let estimated = Int((Double(cleanableCount) * 0.4).rounded(.up))
+                    let favNote = favorites.isEmpty ? "" : "，已收藏的条目将保留"
                     let alert = NSAlert()
                     alert.messageText = "清理前 40% 的剪贴板历史?"
-                    alert.informativeText = "将从 \(total) 条记录中移除最旧的 \(estimated) 条（约前 40%），且无法撤销。"
+                    alert.informativeText = "将从 \(total) 条记录中移除最旧的 \(estimated) 条（约前 40%\(favNote)），且无法撤销。"
                     alert.alertStyle = .warning
                     alert.addButton(withTitle: "确认清理")
                     alert.addButton(withTitle: "取消")

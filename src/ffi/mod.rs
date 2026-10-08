@@ -97,3 +97,22 @@ fn to_ffi_cstring(s: &str) -> *mut c_char {
     }
     raw
 }
+
+pub(super) fn parse_ids_str(s: *const c_char) -> Vec<u64> {
+    if s.is_null() {
+        return Vec::new();
+    }
+    let c_str = match unsafe { std::ffi::CStr::from_ptr(s) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    c_str
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|part| !part.is_empty())
+        .filter_map(|part| part.parse::<u64>().ok())
+        .collect()
+}
+
+pub(super) fn parse_ids_set(s: *const c_char) -> std::collections::HashSet<u64> {
+    parse_ids_str(s).into_iter().collect()
+}
