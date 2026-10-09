@@ -61,8 +61,9 @@ extension HistoryPopupContent {
         addContextMenuItem(to: menu,
                            title: item.isImage ? "复制图片" : "复制内容",
                            symbol: item.isImage ? "photo" : "doc.on.doc") {
-            self.copyItemContent(item)
-            self.showToast("已复制到剪贴板", icon: "checkmark.circle.fill")
+            if self.copyItemContent(item) {
+                self.showToast("已复制到剪贴板", icon: "checkmark.circle.fill")
+            }
         }
         if item.isImage {
             addContextMenuItem(to: menu, title: "另存为…", symbol: "square.and.arrow.down") {
@@ -120,22 +121,22 @@ extension HistoryPopupContent {
     }
 
     /// Copy the entry's full content to the system pasteboard without pasting.
-    /// The monitor re-captures it as a normal clipboard write: dedup keeps the
-    /// same entry id and moves it to the top of history (natural "re-copy"
-    /// semantics).
-    private func copyItemContent(_ item: ClipboardItem) {
+    /// Returns true on success, false if the payload could not be loaded or materialized.
+    @discardableResult
+    private func copyItemContent(_ item: ClipboardItem) -> Bool {
         switch item {
         case .text:
             guard let full = item.fullText else {
                 debugLog("copyItemContent: failed to load full text for entry \(item.id)")
-                return
+                return false
             }
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(full, forType: .string)
+            return true
         case .image:
             guard let data = item.imageData else {
                 debugLog("copyItemContent: image not ready (entry \(item.id))")
-                return
+                return false
             }
             // File-URL clipboard write — the same convention as the paste and
             // drag paths. Putting the raw PNG DATA on the pasteboard instead
@@ -158,10 +159,11 @@ extension HistoryPopupContent {
                 try data.write(to: url, options: .atomic)
             } catch {
                 debugLog("copyItemContent: failed to materialize copy image \(item.id): \(error)")
-                return
+                return false
             }
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(url.absoluteString, forType: .fileURL)
+            return true
         }
     }
 

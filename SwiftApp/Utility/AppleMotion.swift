@@ -24,11 +24,6 @@ enum AppleMotion {
     static var tactilePress: Animation {
         .spring(response: 0.16, dampingFraction: 0.70, blendDuration: 0)
     }
-
-    /// Clean, crisp ease-out for asynchronous content delivery.
-    static var crispReveal: Animation {
-        .easeOut(duration: 0.14)
-    }
 }
 
 // MARK: - Crisp Micro-Scale & Fade Transition (纯净微缩放淡入淡出转场 - 清晰不晃眼)

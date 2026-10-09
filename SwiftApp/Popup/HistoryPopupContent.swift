@@ -352,7 +352,7 @@ struct HistoryPopupContent: View {
         .focusEffectDisabled()
         .focused($isContainerFocused)
         .onKeyPress(.upArrow) {
-            guard editingItemId == nil else { return .ignored }
+            guard !isDismissing, editingItemId == nil else { return .ignored }
             Perf.instant("swift", "nav.input", data: "up")
             if selectedIndex > 0 {
                 selectedIndex -= 1
@@ -360,7 +360,7 @@ struct HistoryPopupContent: View {
             return .handled
         }
         .onKeyPress(.downArrow) {
-            guard editingItemId == nil else { return .ignored }
+            guard !isDismissing, editingItemId == nil else { return .ignored }
             Perf.instant("swift", "nav.input", data: "down")
             if selectedIndex < maxIndex {
                 selectedIndex += 1
@@ -368,7 +368,7 @@ struct HistoryPopupContent: View {
             return .handled
         }
         .onKeyPress(keys: [.return], phases: .down) { press in
-            guard editingItemId == nil else { return .ignored }
+            guard !isDismissing, editingItemId == nil else { return .ignored }
             if selectedIndex > 0 {
                 selectItem(at: selectedIndex - 1, asPath: press.modifiers.contains(.shift))
                 return .handled
@@ -376,23 +376,24 @@ struct HistoryPopupContent: View {
             return .ignored
         }
         .onKeyPress(.escape) {
+            guard !isDismissing else { return .handled }
             handleEscape()
             return .handled
         }
         .onKeyPress(.space) {
-            guard editingItemId == nil else { return .ignored }
+            guard !isDismissing, editingItemId == nil else { return .ignored }
             if selectedIndex == 0 { return .ignored }
             togglePreview()
             return .handled
         }
         .onKeyPress(.leftArrow) {
-            guard editingItemId == nil else { return .ignored }
+            guard !isDismissing, editingItemId == nil else { return .ignored }
             guard selectedIndex > 0 else { return .ignored }
             switchFilterTab(direction: "left")
             return .handled
         }
         .onKeyPress(.rightArrow) {
-            guard editingItemId == nil else { return .ignored }
+            guard !isDismissing, editingItemId == nil else { return .ignored }
             guard selectedIndex > 0 else { return .ignored }
             switchFilterTab(direction: "right")
             return .handled
