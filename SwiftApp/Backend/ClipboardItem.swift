@@ -1,6 +1,6 @@
 import Foundation
 
-enum ClipboardItem: Identifiable {
+enum ClipboardItem: Identifiable, Equatable {
     case text(entryId: Int, timestamp: UInt64, customLabel: String, label: String, sourceName: String, sourceBundleId: String, preview: String, displayPreview: String)
     case image(entryId: Int, dbId: Int, width: Int, height: Int, timestamp: UInt64, customLabel: String, label: String, sourceName: String, sourceBundleId: String)
 

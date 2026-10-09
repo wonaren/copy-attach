@@ -100,9 +100,6 @@ struct HistoryPopupContent: View {
     @Namespace private var filterTabNamespace
 
     @State private var openingScale: CGFloat = 1.10
-    @State private var openingBlur: CGFloat = 6.0
-    /// Transient optical blur flag during category tab switches to mask list row swapping
-    @State var isTabTransitioning: Bool = false
 
     @FocusState private var isSearchFocused: Bool
     @FocusState private var isContainerFocused: Bool
@@ -295,9 +292,6 @@ struct HistoryPopupContent: View {
                         .padding(.horizontal, 5)
 
                     filterPageContent
-                        .blur(radius: isTabTransitioning ? 2.8 : 0.0)
-                        .scaleEffect(isTabTransitioning ? 0.995 : 1.0)
-                        .animation(AppleMotion.tabBlurTransition, value: isTabTransitioning)
                         // Per-tab empty state <-> list is a structural swap too.
                         // Keyed on emptiness (not on the row count) so ordinary
                         // capture/delete list updates stay un-animated.
@@ -307,7 +301,6 @@ struct HistoryPopupContent: View {
             }
         }
         .scaleEffect(openingScale, anchor: .center)
-        .blur(radius: openingBlur)
         .frame(width: popupWidth, height: popupHeight)
         // Empty <-> populated and per-tab empty <-> list are structural swaps:
         // cross-fade them instead of popping. Scoped by value so ordinary list
@@ -395,19 +388,18 @@ struct HistoryPopupContent: View {
             editingText = ""
             rowsReadyForAnimation = false
             openingScale = 1.10
-            openingBlur = 6.0
-            isTabTransitioning = false
             isControlPressed = NSEvent.modifierFlags.contains(.control)
             isCommandPressed = NSEvent.modifierFlags.contains(.command)
 
-            // Spotlight opening: scale 1.10 → 1.0 with optical depth bloom (blur 6 → 0)
-            // Settles smoothly in 0.2s without overshoot, like native macOS HUDs.
+            // Spotlight opening: scale 1.10 → 1.0 with a spring that settles in
+            // the same ~0.2s window as the window alpha fade (see
+            // HistoryPopupWindow.fadeInDuration). Damping 0.85 keeps the scale
+            // from visibly overshooting — Spotlight settles smoothly, no bounce.
             let openDuration = 0.2
             withAnimation(.spring(response: openDuration,
                                   dampingFraction: 0.85,
                                   blendDuration: 0)) {
                 openingScale = 1.0
-                openingBlur = 0.0
             }
 
             // Focus first item (or search bar if empty) after animation
@@ -876,6 +868,7 @@ struct HistoryPopupContent: View {
                             },
                             selectionNamespace: selectionNamespace
                         )
+                        .equatable()
                         // Rows exclusively own drag gestures. PopupHostingView
                         // exposes only its outer 3 pt border for moving the
                         // window, so this native drag cannot move the popup.

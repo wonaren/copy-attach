@@ -18,8 +18,6 @@ struct ItemRowView: View {
     /// The row's decoded thumbnail once loaded (async, off-main). Also keeps
     /// the row from re-looking up the cache on every body evaluation.
     @State private var thumbImage: NSImage?
-    /// Controls the blur-to-focus reveal animation when a thumbnail decodes.
-    @State private var isThumbnailLoaded = false
     @Environment(\.appTheme) private var theme
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.colorSchemeContrast) private var colorSchemeContrast
@@ -131,7 +129,6 @@ struct ItemRowView: View {
                     .foregroundColor(Color(nsColor: .systemTeal))
                     .frame(width: 14, alignment: .center)
                     .help("备注: \(item.customLabel)")
-                    .symbolEffect(.bounce, value: item.hasCustomLabel)
                     // Never from scale(0): nothing in the real world appears
                     // from nothing. 0.9 + opacity reads as the badge growing
                     // into place rather than materializing.
@@ -142,7 +139,6 @@ struct ItemRowView: View {
                     .font(.system(size: 10))
                     .foregroundColor(Color(nsColor: .systemYellow))
                     .frame(width: 16, alignment: .center)
-                    .symbolEffect(.bounce, value: isFavorite)
                     // Never from scale(0): nothing in the real world appears
                     // from nothing. 0.9 + opacity reads as the badge growing
                     // into place rather than materializing.
@@ -154,7 +150,6 @@ struct ItemRowView: View {
                     .foregroundColor(Color.white)
                     .frame(minWidth: 20, alignment: .center)
                     .padding(.trailing, 6)
-                    .symbolEffect(.pulse, isActive: isDeleteModifierPressed)
                     // Never from scale(0): nothing in the real world appears
                     // from nothing. 0.9 + opacity reads as the badge growing
                     // into place rather than materializing.
@@ -185,9 +180,6 @@ struct ItemRowView: View {
         }
         .padding(.horizontal, 2)
         .padding(.vertical, 3)
-        // Subtle micro-scale on hover gives tactile responsiveness without shifting layout
-        .scaleEffect(isHovering && !isSelected ? 1.004 : 1.0)
-        .animation(AppleMotion.snappy, value: isHovering)
         // Content flips its selection color quickly instead of riding the
         // container's spring — a springing text crossfade reads as slow/floaty.
         .animation(.easeOut(duration: 0.1), value: isSelected)
@@ -341,25 +333,28 @@ struct ItemRowView: View {
     private func imageContent(dbId: Int, width: Int, height: Int) -> some View {
         HStack(spacing: 8) {
             // Synchronous cache hit renders instantly (no IO); a miss shows
-            // the placeholder with linear shimmer while `loadThumbnail` decodes off-main.
+            // the placeholder while `loadThumbnail` decodes off-main.
             if let nsImage = thumbImage ?? ClipboardBackend.shared.cachedThumbnail(dbId: dbId) {
                 Image(nsImage: nsImage).resizable().aspectRatio(contentMode: .fit)
                     .frame(maxHeight: 100)
                     .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
                     .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous)
                         .stroke(theme.popupRowBorder, lineWidth: 0.5))
-                    .opacity(isThumbnailLoaded ? 1.0 : 0.6)
-                    .blur(radius: isThumbnailLoaded ? 0 : 4)
-                    .scaleEffect(isThumbnailLoaded ? 1.0 : 0.98)
-            } else if dbId == 0 {
-                ShimmerPlaceholderCard(title: "图片编码中…", iconName: "photo")
             } else {
-                ShimmerPlaceholderCard(title: "载入预览中…", iconName: "photo")
-            }
-        }
-        .onAppear {
-            if ClipboardBackend.shared.cachedThumbnail(dbId: dbId) != nil {
-                isThumbnailLoaded = true
+                ZStack {
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .stroke(theme.popupRowBorder, style: StrokeStyle(lineWidth: 1, dash: [4, 4]))
+                        .frame(maxHeight: 100)
+                    HStack(spacing: 8) {
+                        Image(systemName: "photo")
+                            .font(.system(size: 16))
+                            .foregroundColor(theme.popupSecondaryText)
+                        Text(dbId == 0 ? "图片编码中…" : "载入预览中…")
+                            .font(.system(size: 11))
+                            .foregroundColor(theme.popupSecondaryText)
+                    }
+                }
+                .frame(maxWidth: .infinity)
             }
         }
         // Load the thumbnail off the main thread (FFI read + PNG decode).
@@ -372,16 +367,25 @@ struct ItemRowView: View {
             let img = await ClipboardBackend.shared.loadThumbnail(dbId: dbId, box: thumbnailBox)
             guard !Task.isCancelled else { return }
             thumbImage = img
-            withAnimation(AppleMotion.blurReveal) {
-                isThumbnailLoaded = true
-            }
         }
         .onDisappear {
             // Release the row's strong image reference immediately. NSCache is
             // intentionally the only owner after a row leaves the viewport.
             thumbImage = nil
-            isThumbnailLoaded = false
         }
+    }
+}
+
+extension ItemRowView: @preconcurrency Equatable {
+    @MainActor
+    static func == (lhs: ItemRowView, rhs: ItemRowView) -> Bool {
+        lhs.item == rhs.item &&
+        lhs.isSelected == rhs.isSelected &&
+        lhs.isDeleteModifierPressed == rhs.isDeleteModifierPressed &&
+        lhs.shortcutHint == rhs.shortcutHint &&
+        lhs.isFavorite == rhs.isFavorite &&
+        lhs.isEditingRemark == rhs.isEditingRemark &&
+        (!lhs.isEditingRemark || lhs.editingText == rhs.editingText)
     }
 }
 

@@ -91,8 +91,6 @@ struct PreviewContent: View {
                 ZoomableImageView(image: img, dbId: dbId)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .padding(12)
-                    .blur(radius: isFullResolutionReady ? 0 : 3.5)
-                    .linearShimmer(isActive: !isFullResolutionReady, duration: 1.4)
             } else if hasFailed {
                 Image(systemName: "photo.badge.exclamationmark")
                     .font(.system(size: 24))
