@@ -160,12 +160,7 @@ struct InlineSettingsView: View {
                 EmptyView()
             } else {
                 liquidGlassSelectedBackground
-                    .transition(
-                        .asymmetric(
-                            insertion: .scale(scale: 0.94).combined(with: .opacity).combined(with: .offset(y: 2)),
-                            removal: .scale(scale: 0.90).combined(with: .opacity).combined(with: .offset(y: 3))
-                        )
-                    )
+                    .matchedGeometryEffect(id: "settingsSelectedTab", in: tabGlassNamespace)
             }
         } else if hoveredTab == index {
             RoundedRectangle(cornerRadius: tabCornerRadius, style: .continuous)
@@ -262,10 +257,10 @@ struct InlineSettingsView: View {
             else if selectedTab == 4 { LicenseSettingsView() }
             else { aboutTab }
         }
-        // Native cross-dissolve on section change (System Settings behavior);
+        // Native cross-dissolve with micro-scale on section change (System Settings behavior);
         // animated by the same `.smooth` transaction as the glass pill morph.
         .id(selectedTab)
-        .transition(.opacity)
+        .transition(.opacity.combined(with: .scale(scale: 0.99)))
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 

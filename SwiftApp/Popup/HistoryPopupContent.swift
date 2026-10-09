@@ -97,8 +97,12 @@ struct HistoryPopupContent: View {
     @State var pendingContextMenuRequest: PopupContextMenuRequest?
 
     @Namespace private var selectionNamespace
+    @Namespace private var filterTabNamespace
 
     @State private var openingScale: CGFloat = 1.10
+    @State private var openingBlur: CGFloat = 6.0
+    /// Transient optical blur flag during category tab switches to mask list row swapping
+    @State var isTabTransitioning: Bool = false
 
     @FocusState private var isSearchFocused: Bool
     @FocusState private var isContainerFocused: Bool
@@ -291,6 +295,9 @@ struct HistoryPopupContent: View {
                         .padding(.horizontal, 5)
 
                     filterPageContent
+                        .blur(radius: isTabTransitioning ? 2.8 : 0.0)
+                        .scaleEffect(isTabTransitioning ? 0.995 : 1.0)
+                        .animation(AppleMotion.tabBlurTransition, value: isTabTransitioning)
                         // Per-tab empty state <-> list is a structural swap too.
                         // Keyed on emptiness (not on the row count) so ordinary
                         // capture/delete list updates stay un-animated.
@@ -300,6 +307,7 @@ struct HistoryPopupContent: View {
             }
         }
         .scaleEffect(openingScale, anchor: .center)
+        .blur(radius: openingBlur)
         .frame(width: popupWidth, height: popupHeight)
         // Empty <-> populated and per-tab empty <-> list are structural swaps:
         // cross-fade them instead of popping. Scoped by value so ordinary list
@@ -387,18 +395,19 @@ struct HistoryPopupContent: View {
             editingText = ""
             rowsReadyForAnimation = false
             openingScale = 1.10
+            openingBlur = 6.0
+            isTabTransitioning = false
             isControlPressed = NSEvent.modifierFlags.contains(.control)
             isCommandPressed = NSEvent.modifierFlags.contains(.command)
 
-            // Spotlight opening: scale 1.10 → 1.0 with a spring that settles in
-            // the same ~0.2s window as the window alpha fade (see
-            // HistoryPopupWindow.fadeInDuration). Damping 0.85 keeps the scale
-            // from visibly overshooting — Spotlight settles smoothly, no bounce.
+            // Spotlight opening: scale 1.10 → 1.0 with optical depth bloom (blur 6 → 0)
+            // Settles smoothly in 0.2s without overshoot, like native macOS HUDs.
             let openDuration = 0.2
             withAnimation(.spring(response: openDuration,
                                   dampingFraction: 0.85,
                                   blendDuration: 0)) {
                 openingScale = 1.0
+                openingBlur = 0.0
             }
 
             // Focus first item (or search bar if empty) after animation
@@ -642,7 +651,9 @@ struct HistoryPopupContent: View {
         HStack(spacing: 6) {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 11, weight: .medium))
-                .foregroundColor(theme.popupMutedText)
+                .foregroundColor(selectedIndex == 0 ? Color(nsColor: .controlAccentColor) : theme.popupMutedText)
+                .scaleEffect(selectedIndex == 0 ? 1.08 : 1.0)
+                .animation(AppleMotion.snappy, value: selectedIndex == 0)
 
             TextField("搜索", text: $searchText)
                 .textFieldStyle(.plain)
@@ -680,6 +691,7 @@ struct HistoryPopupContent: View {
                     lineWidth: selectedIndex == 0 ? 2.0 : 1.0
                 )
         )
+        .animation(AppleMotion.snappy, value: selectedIndex == 0)
         .onTapGesture {
             selectedIndex = 0
             isSearchFocused = true
@@ -718,23 +730,30 @@ struct HistoryPopupContent: View {
                         .foregroundColor(mode == filterMode
                             ? Color(nsColor: .controlAccentColor)
                             : theme.popupFilterTabInactive)
+                        .scaleEffect(mode == filterMode ? 1.06 : 1.0)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 4)
-                        .background(
-                            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                .fill(mode == filterMode
-                                    ? theme.popupFilterTabBackgroundSelected
-                                    : theme.popupFilterTabBackground)
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                .strokeBorder(
-                                    mode == filterMode
-                                        ? Color(nsColor: .controlAccentColor).opacity(0.35)
-                                        : theme.popupRowBorder,
-                                    lineWidth: 1
-                                )
-                        )
+                        .background {
+                            if mode == filterMode {
+                                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                    .fill(theme.popupFilterTabBackgroundSelected)
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                            .strokeBorder(
+                                                Color(nsColor: .controlAccentColor).opacity(0.35),
+                                                lineWidth: 1
+                                            )
+                                    )
+                                    .matchedGeometryEffect(id: "activeFilterPill", in: filterTabNamespace)
+                            } else {
+                                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                    .fill(theme.popupFilterTabBackground)
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                            .strokeBorder(theme.popupRowBorder, lineWidth: 1)
+                                    )
+                            }
+                        }
                 }
                 .buttonStyle(.plain)
                 .help(mode.title)
@@ -742,10 +761,8 @@ struct HistoryPopupContent: View {
             Spacer()
         }
         .padding(.vertical, 2)
-        // The pill is the CONTROL: it snaps in 0.08s so the operation feels
-        // acknowledged the moment it is issued. This modifier animates the
-        // pill bar only; the list switches with no explicit animation.
-        .animation(.easeOut(duration: 0.08), value: filterMode)
+        // The sliding pill uses Apple-grade snappy spring to smoothly glide across tabs
+        .animation(AppleMotion.snappy, value: filterMode)
     }
 
     // MARK: - Items List

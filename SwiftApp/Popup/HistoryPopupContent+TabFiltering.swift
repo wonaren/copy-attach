@@ -16,6 +16,7 @@ extension HistoryPopupContent {
         if target == filterMode {
             pendingFilterMode = nil
             filterSwitchGeneration &+= 1
+            isTabTransitioning = false
             return
         }
 
@@ -26,11 +27,19 @@ extension HistoryPopupContent {
         // height-estimation race condition when list size changes.
         scrollTarget = listTopAnchorID
 
+        // Transient optical blur softens the visual swap between category lists
+        withAnimation(.easeOut(duration: 0.06)) {
+            isTabTransitioning = true
+        }
+
         DispatchQueue.main.async {
             guard self.filterSwitchGeneration == generation,
                   self.pendingFilterMode == target else { return }
             self.filterMode = target
             self.pendingFilterMode = nil
+            withAnimation(AppleMotion.tabBlurTransition) {
+                self.isTabTransitioning = false
+            }
         }
     }
 

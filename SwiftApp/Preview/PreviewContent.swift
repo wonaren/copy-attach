@@ -9,6 +9,7 @@ struct PreviewContent: View {
     @State private var image: NSImage?
     @State private var hasFailed = false
     @State private var showSpinner = false
+    @State private var isFullResolutionReady = false
     @Environment(\.appTheme) private var theme
     @Environment(\.colorScheme) private var colorScheme
 
@@ -90,20 +91,31 @@ struct PreviewContent: View {
                 ZoomableImageView(image: img, dbId: dbId)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .padding(12)
+                    .blur(radius: isFullResolutionReady ? 0 : 3.5)
+                    .linearShimmer(isActive: !isFullResolutionReady, duration: 1.4)
             } else if hasFailed {
                 Image(systemName: "photo.badge.exclamationmark")
                     .font(.system(size: 24))
                     .foregroundColor(theme.previewSecondaryText)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if showSpinner {
-                ProgressView()
-                    .progressViewStyle(.circular)
-                    .scaleEffect(0.6)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .foregroundColor(theme.previewSecondaryText)
             } else {
-                Color.clear
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                // Sleek Apple QuickLook placeholder canvas with linear shimmer while decoding
+                ZStack {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(theme.previewBackground)
+                    VStack(spacing: 12) {
+                        Image(systemName: "photo")
+                            .font(.system(size: 32))
+                            .foregroundColor(theme.previewSecondaryText)
+                            .symbolEffect(.pulse)
+                        Text("载入预览中…")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundColor(theme.previewSecondaryText)
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .padding(24)
+                .linearShimmer(isActive: true, duration: 1.3)
             }
         }
         // Auto-cancels previous task and restarts when dbId changes
@@ -116,6 +128,7 @@ struct PreviewContent: View {
             image = nil
             hasFailed = false
             showSpinner = false
+            isFullResolutionReady = false
         }
     }
 
@@ -160,6 +173,9 @@ struct PreviewContent: View {
         if let decoded {
             image = decoded.image
             hasFailed = false
+            withAnimation(AppleMotion.blurReveal) {
+                isFullResolutionReady = true
+            }
         } else if image == nil {
             hasFailed = true
         }
