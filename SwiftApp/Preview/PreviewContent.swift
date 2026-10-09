@@ -8,8 +8,6 @@ struct PreviewContent: View {
 
     @State private var image: NSImage?
     @State private var hasFailed = false
-    @State private var showSpinner = false
-    @State private var isFullResolutionReady = false
     @Environment(\.appTheme) private var theme
     @Environment(\.colorScheme) private var colorScheme
 
@@ -125,8 +123,6 @@ struct PreviewContent: View {
             // as soon as this preview content leaves the hosting view.
             image = nil
             hasFailed = false
-            showSpinner = false
-            isFullResolutionReady = false
         }
     }
 
@@ -136,15 +132,6 @@ struct PreviewContent: View {
         // Fast check if thumbnail became available right after init
         if image == nil, let cached = ClipboardBackend.shared.cachedThumbnail(dbId: dbId) {
             image = cached
-        }
-
-        // Delay showing the spinner to avoid 1-frame flickering on fast decodes (<150ms).
-        // If an image (e.g. cached thumbnail) is already displayed, no spinner is needed.
-        let spinnerTask = Task {
-            try? await Task.sleep(nanoseconds: 150_000_000)
-            if !Task.isCancelled, currentDbId == dbId, image == nil, !hasFailed {
-                showSpinner = true
-            }
         }
 
         // The decode budget depends on the display constraints and the item's
@@ -163,7 +150,6 @@ struct PreviewContent: View {
         // decode buffers, since cancelling this task cannot interrupt a decode
         // already running in Rust.
         let decoded = await ImageDecode.previewImageAsync(dbId: dbId, maxPixel: maxPixel)
-        spinnerTask.cancel()
 
         guard currentDbId == dbId, !Task.isCancelled else { return }
 
@@ -171,12 +157,8 @@ struct PreviewContent: View {
         if let decoded {
             image = decoded.image
             hasFailed = false
-            withAnimation(AppleMotion.blurReveal) {
-                isFullResolutionReady = true
-            }
         } else if image == nil {
             hasFailed = true
         }
-        showSpinner = false
     }
 }

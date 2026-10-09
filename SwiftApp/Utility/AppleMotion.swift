@@ -19,18 +19,6 @@ enum AppleMotion {
     static var smooth: Animation {
         .spring(response: 0.30, dampingFraction: 0.82, blendDuration: 0)
     }
-
-    /// Crisp ease-out for blur-to-focus reveals (e.g. decoded image arriving).
-    /// Emil Kowalski rule: ease-out starts immediately, giving instant feedback.
-    static var blurReveal: Animation {
-        .easeOut(duration: 0.22)
-    }
-
-    /// Transient container-level Gaussian blur transition for tab switches.
-    /// 140ms duration bridges the visual gap between lists without per-row graphs.
-    static var tabBlurTransition: Animation {
-        .easeOut(duration: 0.14)
-    }
 }
 
 // MARK: - Linear Shimmer Sweep Modifier (线性扫光动效 - 偷时间/感知流畅度)
@@ -80,44 +68,5 @@ extension View {
     /// Completely inactive when `isActive` is false to avoid GPU overhead.
     func linearShimmer(isActive: Bool = true, duration: Double = 1.35) -> some View {
         modifier(LinearShimmerModifier(isActive: isActive, duration: duration))
-    }
-}
-
-// MARK: - Shimmer Placeholder Card (图片加载与编码的骨架微光卡片)
-
-/// A sleek, translucent placeholder card with a linear shimmer sweep and pulsing icon.
-/// Used in ItemRowView while thumbnails decode or images undergo Phase 2 encoding.
-struct ShimmerPlaceholderCard: View {
-    let title: String
-    let iconName: String
-    var maxHeight: CGFloat = 100
-
-    @Environment(\.appTheme) private var theme
-    @Environment(\.colorScheme) private var colorScheme
-
-    var body: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(theme.popupRowHover.opacity(colorScheme == .dark ? 0.45 : 0.65))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .strokeBorder(theme.popupRowBorder, lineWidth: 0.8)
-                )
-
-            VStack(spacing: 6) {
-                Image(systemName: iconName)
-                    .font(.system(size: 20))
-                    .foregroundColor(theme.popupSecondaryText)
-                    .symbolEffect(.pulse)
-
-                Text(title)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(theme.popupSecondaryText)
-            }
-            .padding(.vertical, 12)
-        }
-        .frame(maxHeight: maxHeight)
-        .frame(maxWidth: .infinity)
-        .linearShimmer(isActive: true, duration: 1.3)
     }
 }
