@@ -79,6 +79,7 @@ extension HistoryPopupContent {
         }
 
         OnboardingGuide.shared.record(.undone)
+        showToast("已恢复删除记录", icon: "arrow.uturn.backward.circle.fill")
 
         // Clear search only on success so the user sees the restored item
         if !searchText.isEmpty {

@@ -215,7 +215,7 @@ struct InlineSettingsView: View {
                         .contentShape(RoundedRectangle(cornerRadius: tabCornerRadius, style: .continuous))
                         .background { tabItemBackground(for: i) }
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(AppleTactileButtonStyle(scale: 0.95))
                 .foregroundColor(
                     selectedTab == i
                     ? Color.accentColor
@@ -257,10 +257,10 @@ struct InlineSettingsView: View {
             else if selectedTab == 4 { LicenseSettingsView() }
             else { aboutTab }
         }
-        // Native cross-dissolve with micro-scale on section change (System Settings behavior);
+        // Native cross-dissolve with crisp optical scale-fade on section change (System Settings behavior);
         // animated by the same `.smooth` transaction as the glass pill morph.
         .id(selectedTab)
-        .transition(.opacity.combined(with: .scale(scale: 0.99)))
+        .transition(.appleScaleFade)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 

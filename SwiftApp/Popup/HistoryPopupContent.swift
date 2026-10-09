@@ -99,7 +99,28 @@ struct HistoryPopupContent: View {
     @Namespace private var selectionNamespace
     @Namespace private var filterTabNamespace
 
-    @State private var openingScale: CGFloat = 1.10
+    @State private var openingScale: CGFloat = 1.06
+
+    /// Transient Apple-grade HUD toast message shown on copy, favorite, undo, etc.
+    @State var toastMessage: String? = nil
+    @State var toastIcon: String = "checkmark.circle.fill"
+    @State private var toastDismissTask: Task<Void, Never>? = nil
+
+    func showToast(_ message: String, icon: String = "checkmark.circle.fill") {
+        toastDismissTask?.cancel()
+        withAnimation(AppleMotion.snappy) {
+            toastIcon = icon
+            toastMessage = message
+        }
+        toastDismissTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 1_200_000_000)
+            if !Task.isCancelled {
+                withAnimation(AppleMotion.snappy) {
+                    toastMessage = nil
+                }
+            }
+        }
+    }
 
     @FocusState private var isSearchFocused: Bool
     @FocusState private var isContainerFocused: Bool
@@ -282,6 +303,7 @@ struct HistoryPopupContent: View {
 
             if backend.items.isEmpty {
                 emptyStateView
+                    .transition(.appleScaleFade)
             } else {
                 VStack(spacing: 4) {
                     searchField
@@ -298,6 +320,17 @@ struct HistoryPopupContent: View {
                         .animation(.easeOut(duration: 0.18), value: displayItems.isEmpty)
                 }
                 .padding(.all, 3)
+                .transition(.appleScaleFade)
+            }
+
+            if let msg = toastMessage {
+                VStack {
+                    Spacer()
+                    AppleToastCard(message: msg, iconName: toastIcon)
+                        .padding(.bottom, 28)
+                }
+                .transition(.appleScaleFade)
+                .zIndex(999)
             }
         }
         .scaleEffect(openingScale, anchor: .center)
@@ -387,14 +420,16 @@ struct HistoryPopupContent: View {
             editingItemId = nil
             editingText = ""
             rowsReadyForAnimation = false
-            openingScale = 1.10
+            openingScale = 1.06
+            toastDismissTask?.cancel()
+            toastDismissTask = nil
+            toastMessage = nil
             isControlPressed = NSEvent.modifierFlags.contains(.control)
             isCommandPressed = NSEvent.modifierFlags.contains(.command)
 
-            // Spotlight opening: scale 1.10 → 1.0 with a spring that settles in
-            // the same ~0.2s window as the window alpha fade (see
-            // HistoryPopupWindow.fadeInDuration). Damping 0.85 keeps the scale
-            // from visibly overshooting — Spotlight settles smoothly, no bounce.
+            // Spotlight opening: scale 1.06 → 1.0 with a crisp spring that settles in
+            // the same ~0.2s window as the window alpha fade. Damping 0.85 keeps the scale
+            // from visibly overshooting — Spotlight settles smoothly and clearly, no bounce, no blur.
             let openDuration = 0.2
             withAnimation(.spring(response: openDuration,
                                   dampingFraction: 0.85,
@@ -423,6 +458,9 @@ struct HistoryPopupContent: View {
             isSearchFocused = false
             isContainerFocused = false
             closePreview()
+            toastDismissTask?.cancel()
+            toastDismissTask = nil
+            toastMessage = nil
         }
         .onReceive(NotificationCenter.default.publisher(for: escapeKeyNotification)) { _ in
             handleEscape()
@@ -518,7 +556,9 @@ struct HistoryPopupContent: View {
                 let itemIdx = selectedIndex - 1
                 if itemIdx < displayItems.count {
                     let item = displayItems[itemIdx]
+                    let isFav = backend.favoriteIds.contains(item.id)
                     backend.toggleFavorite(item.id)
+                    showToast(!isFav ? "已加入收藏" : "已取消收藏", icon: !isFav ? "star.fill" : "star.slash.fill")
                 }
             }
             // Reclamp after favorites change: displayItems may have shrunk
@@ -664,8 +704,8 @@ struct HistoryPopupContent: View {
                         .font(.system(size: 12))
                         .foregroundColor(theme.popupMutedText)
                 }
-                .buttonStyle(.plain)
-                .transition(.scale(scale: 0.9).combined(with: .opacity))
+                .buttonStyle(AppleTactileButtonStyle(scale: 0.90))
+                .transition(.scale(scale: 0.85).combined(with: .opacity))
             }
         }
         .padding(.horizontal, 7)
@@ -747,7 +787,7 @@ struct HistoryPopupContent: View {
                             }
                         }
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(AppleTactileButtonStyle(scale: 0.94))
                 .help(mode.title)
             }
             Spacer()

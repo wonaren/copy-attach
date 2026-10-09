@@ -62,6 +62,7 @@ extension HistoryPopupContent {
                            title: item.isImage ? "复制图片" : "复制内容",
                            symbol: item.isImage ? "photo" : "doc.on.doc") {
             self.copyItemContent(item)
+            self.showToast("已复制到剪贴板", icon: "checkmark.circle.fill")
         }
         if item.isImage {
             addContextMenuItem(to: menu, title: "另存为…", symbol: "square.and.arrow.down") {
@@ -74,6 +75,7 @@ extension HistoryPopupContent {
                            title: isFavorite ? "取消收藏" : "收藏",
                            symbol: isFavorite ? "star.slash" : "star") {
             self.backend.toggleFavorite(item.id)
+            self.showToast(!isFavorite ? "已加入收藏" : "已取消收藏", icon: !isFavorite ? "star.fill" : "star.slash.fill")
             // Favorites may shrink displayItems; keep the selection valid.
             if self.selectedIndex > self.maxIndex {
                 self.selectedIndex = max(0, self.maxIndex)

@@ -68,6 +68,7 @@ struct OnboardingGuideView: View {
                 Capsule()
                     .fill(guide.completedSteps.contains(step) ? Color.accentColor : theme.popupRowBorder)
                     .frame(height: 4)
+                    .animation(AppleMotion.snappy, value: guide.completedSteps.contains(step))
             }
         }
     }

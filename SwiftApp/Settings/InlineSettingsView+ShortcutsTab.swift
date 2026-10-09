@@ -38,6 +38,7 @@ extension InlineSettingsView {
                             HStack(spacing: 6) {
                                 Image(systemName: "record.circle")
                                     .foregroundColor(.red).font(.system(size: 14))
+                                    .symbolEffect(.pulse)
                                 Text("按下快捷键...")
                                     .font(.system(size: 14)).foregroundColor(.red)
                                     .padding(.vertical, 6)

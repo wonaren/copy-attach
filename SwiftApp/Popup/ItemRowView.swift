@@ -129,6 +129,7 @@ struct ItemRowView: View {
                     .foregroundColor(Color(nsColor: .systemTeal))
                     .frame(width: 14, alignment: .center)
                     .help("备注: \(item.customLabel)")
+                    .symbolEffect(.bounce, value: item.hasCustomLabel)
                     // Never from scale(0): nothing in the real world appears
                     // from nothing. 0.9 + opacity reads as the badge growing
                     // into place rather than materializing.
@@ -139,6 +140,7 @@ struct ItemRowView: View {
                     .font(.system(size: 10))
                     .foregroundColor(Color(nsColor: .systemYellow))
                     .frame(width: 16, alignment: .center)
+                    .symbolEffect(.bounce, value: isFavorite)
                     // Never from scale(0): nothing in the real world appears
                     // from nothing. 0.9 + opacity reads as the badge growing
                     // into place rather than materializing.
@@ -150,6 +152,7 @@ struct ItemRowView: View {
                     .foregroundColor(Color.white)
                     .frame(minWidth: 20, alignment: .center)
                     .padding(.trailing, 6)
+                    .symbolEffect(.pulse, isActive: isDeleteModifierPressed)
                     // Never from scale(0): nothing in the real world appears
                     // from nothing. 0.9 + opacity reads as the badge growing
                     // into place rather than materializing.
@@ -333,28 +336,17 @@ struct ItemRowView: View {
     private func imageContent(dbId: Int, width: Int, height: Int) -> some View {
         HStack(spacing: 8) {
             // Synchronous cache hit renders instantly (no IO); a miss shows
-            // the placeholder while `loadThumbnail` decodes off-main.
+            // the shimmer placeholder card while `loadThumbnail` decodes off-main.
             if let nsImage = thumbImage ?? ClipboardBackend.shared.cachedThumbnail(dbId: dbId) {
                 Image(nsImage: nsImage).resizable().aspectRatio(contentMode: .fit)
                     .frame(maxHeight: 100)
                     .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
                     .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous)
                         .stroke(theme.popupRowBorder, lineWidth: 0.5))
+            } else if dbId == 0 {
+                ShimmerPlaceholderCard(title: "图片编码中…", iconName: "photo")
             } else {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 7, style: .continuous)
-                        .stroke(theme.popupRowBorder, style: StrokeStyle(lineWidth: 1, dash: [4, 4]))
-                        .frame(maxHeight: 100)
-                    HStack(spacing: 8) {
-                        Image(systemName: "photo")
-                            .font(.system(size: 16))
-                            .foregroundColor(theme.popupSecondaryText)
-                        Text(dbId == 0 ? "图片编码中…" : "载入预览中…")
-                            .font(.system(size: 11))
-                            .foregroundColor(theme.popupSecondaryText)
-                    }
-                }
-                .frame(maxWidth: .infinity)
+                ShimmerPlaceholderCard(title: "载入预览中…", iconName: "photo")
             }
         }
         // Load the thumbnail off the main thread (FFI read + PNG decode).
