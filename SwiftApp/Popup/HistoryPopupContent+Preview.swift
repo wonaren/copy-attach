@@ -11,7 +11,11 @@ extension HistoryPopupContent {
             closePreview()
         } else {
             searchText = ""
-            onClose()
+            if let popup = popupWindow {
+                popup.closeWithAnimation()
+            } else {
+                onClose()
+            }
         }
     }
 

@@ -100,6 +100,8 @@ struct HistoryPopupContent: View {
     @Namespace private var filterTabNamespace
 
     @State private var openingScale: CGFloat = 1.06
+    /// Spotlight-grade optical defocus blur & scale exit flag when dismissing
+    @State private var isDismissing: Bool = false
 
     /// Transient Apple-grade HUD toast message shown on copy, favorite, undo, etc.
     @State var toastMessage: String? = nil
@@ -333,7 +335,9 @@ struct HistoryPopupContent: View {
                 .zIndex(999)
             }
         }
-        .scaleEffect(openingScale, anchor: .center)
+        .scaleEffect(isDismissing ? 1.04 : openingScale, anchor: .center)
+        .blur(radius: isDismissing ? 16.0 : 0.0)
+        .opacity(isDismissing ? 0.0 : 1.0)
         .frame(width: popupWidth, height: popupHeight)
         // Empty <-> populated and per-tab empty <-> list are structural swaps:
         // cross-fade them instead of popping. Scoped by value so ordinary list
@@ -421,6 +425,7 @@ struct HistoryPopupContent: View {
             editingText = ""
             rowsReadyForAnimation = false
             openingScale = 1.06
+            isDismissing = false
             toastDismissTask?.cancel()
             toastDismissTask = nil
             toastMessage = nil
@@ -458,9 +463,15 @@ struct HistoryPopupContent: View {
             isSearchFocused = false
             isContainerFocused = false
             closePreview()
+            isDismissing = false
             toastDismissTask?.cancel()
             toastDismissTask = nil
             toastMessage = nil
+        }
+        .onReceive(NotificationCenter.default.publisher(for: popupWillDismissNotification)) { _ in
+            withAnimation(.easeOut(duration: 0.15)) {
+                isDismissing = true
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: escapeKeyNotification)) { _ in
             handleEscape()

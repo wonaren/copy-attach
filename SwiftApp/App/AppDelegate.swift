@@ -534,7 +534,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return
         }
         if popup.isVisible {
-            popup.close()
+            popup.closeWithAnimation()
         } else {
             popup.show()
             OnboardingGuide.shared.record(.popupOpened)

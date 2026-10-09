@@ -16,6 +16,7 @@ let focusSearchAndBackspaceNotification = Notification.Name("PopupFocusSearchAnd
 let escapeKeyNotification = Notification.Name("PopupEscapeKeyPressed")
 let popupContextMenuNotification = Notification.Name("PopupContextMenuRequested")
 let popupSwipeNotification = Notification.Name("PopupSwipe")
+let popupWillDismissNotification = Notification.Name("PopupWillDismiss")
 
 /// Payload for `popupContextMenuNotification`: where the user right-clicked
 /// and where to position the NSMenu. `entryId` is nil on the raw click — the

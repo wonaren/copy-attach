@@ -196,7 +196,7 @@ class HistoryPopupWindow: NSPanel {
         hosting.frame = contentRect
 
         hosting.wantsLayer = true
-        hosting.layer?.masksToBounds = true
+        hosting.layer?.masksToBounds = false
         hosting.layer?.cornerRadius = 14
         hosting.layer?.cornerCurve = .continuous
 
@@ -402,9 +402,12 @@ class HistoryPopupWindow: NSPanel {
         // CADisplayLink UpdateCycle ticks immediately.
         self.makeFirstResponder(nil)
 
+        // Inform the SwiftUI content to play the Spotlight optical outward dispersion blur exit
+        NotificationCenter.default.post(name: popupWillDismissNotification, object: nil)
+
         NSAnimationContext.runAnimationGroup({ ctx in
-            ctx.duration = 0.12
-            ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
+            ctx.duration = 0.15
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
             self.animator().alphaValue = 0
         }, completionHandler: { [weak self] in
             MainActor.assumeIsolated {
