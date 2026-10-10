@@ -11,6 +11,7 @@ struct ItemRowView: View {
     let isFavorite: Bool
     let isEditingRemark: Bool
     @Binding var editingText: String
+    let searchQuery: String
     let onCommitRemark: (String) -> Void
     let onCancelRemark: () -> Void
     let selectionNamespace: Namespace.ID
@@ -168,7 +169,9 @@ struct ItemRowView: View {
                     // into place rather than materializing.
                     .transition(.scale(scale: 0.9).combined(with: .opacity))
             } else if !item.sourceName.isEmpty {
-                Text(item.sourceName)
+                let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+                let nameText: Text = query.isEmpty ? Text(item.sourceName) : Text(highlightedAttributedString(item.sourceName, query: query))
+                nameText
                     .font(.system(size: 9.5, weight: .medium))
                     .foregroundColor(sourceNameColor(isSelected))
                     .lineLimit(1)
@@ -238,6 +241,40 @@ struct ItemRowView: View {
         .frame(width: 20, height: 20).foregroundColor(.white)
     }
 
+    private var searchHighlightBackground: Color {
+        if isSelected {
+            return Color(nsColor: NSColor(calibratedRed: 1.0, green: 0.84, blue: 0.04, alpha: 0.90))
+        } else {
+            return theme.popupSearchHighlightBackground
+        }
+    }
+
+    private var searchHighlightForeground: Color {
+        if isSelected {
+            return Color(white: 0.30)
+        } else {
+            return theme.popupSearchHighlightText
+        }
+    }
+
+    private func highlightedAttributedString(_ text: String, query: String) -> AttributedString {
+        var attributed = AttributedString(text)
+        guard !query.isEmpty else { return attributed }
+
+        let bg = searchHighlightBackground
+        let fg = searchHighlightForeground
+
+        var searchStart = attributed.startIndex
+        while searchStart < attributed.endIndex,
+              let range = attributed[searchStart...].range(of: query, options: .caseInsensitive) {
+            attributed[range].backgroundColor = bg
+            attributed[range].foregroundColor = fg
+            guard range.upperBound > searchStart else { break }
+            searchStart = range.upperBound
+        }
+        return attributed
+    }
+
     private func textContent(_ displayText: String, color: Color? = nil) -> some View {
         coloredLabel(displayText)
             .font(.system(size: 13, weight: .regular))
@@ -246,18 +283,30 @@ struct ItemRowView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    /// Build a Text view with inline color swatches for hex color codes.
+    /// Build a Text view with inline color swatches for hex color codes and search highlights.
     private func coloredLabel(_ text: String) -> Text {
+        let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+
         // Most clipboard texts contain no '#' at all — skip the regex engine
         // for them (the regex runs on every body evaluation, i.e. hover,
         // selection moves, and scroll refreshes of every visible row).
-        guard text.contains("#") else { return Text(text) }
+        guard text.contains("#") else {
+            guard !query.isEmpty else { return Text(text) }
+            return Text(highlightedAttributedString(text, query: query))
+        }
 
-        guard let regex = Self.hexColorRegex else { return Text(text) }
+        guard let regex = Self.hexColorRegex else {
+            guard !query.isEmpty else { return Text(text) }
+            return Text(highlightedAttributedString(text, query: query))
+        }
+
         let nsRange = NSRange(text.startIndex..., in: text)
         let matches = regex.matches(in: text, range: nsRange)
 
-        if matches.isEmpty { return Text(text) }
+        if matches.isEmpty {
+            guard !query.isEmpty else { return Text(text) }
+            return Text(highlightedAttributedString(text, query: query))
+        }
 
         var result = Text("")
         var lastEnd = text.startIndex
@@ -266,20 +315,31 @@ struct ItemRowView: View {
             guard let range = Range(match.range, in: text) else { continue }
             // Text before this color code
             if lastEnd < range.lowerBound {
-                result = Text("\(result)\(String(text[lastEnd..<range.lowerBound]))")
+                let piece = String(text[lastEnd..<range.lowerBound])
+                if query.isEmpty {
+                    result = Text("\(result)\(piece)")
+                } else {
+                    result = Text("\(result)\(Text(highlightedAttributedString(piece, query: query)))")
+                }
             }
             // Color code with swatch
             let code = String(text[range])
+            let codeText: Text = query.isEmpty ? Text(code) : Text(highlightedAttributedString(code, query: query))
             if let swatch = Self.swatch(for: code) {
-                result = Text("\(result)\(Image(nsImage: swatch))\(code)")
+                result = Text("\(result)\(Image(nsImage: swatch))\(codeText)")
             } else {
-                result = Text("\(result)\(code)")
+                result = Text("\(result)\(codeText)")
             }
             lastEnd = range.upperBound
         }
 
         if lastEnd < text.endIndex {
-            result = Text("\(result)\(String(text[lastEnd...]))")
+            let piece = String(text[lastEnd...])
+            if query.isEmpty {
+                result = Text("\(result)\(piece)")
+            } else {
+                result = Text("\(result)\(Text(highlightedAttributedString(piece, query: query)))")
+            }
         }
 
         return result
@@ -377,7 +437,8 @@ extension ItemRowView: @preconcurrency Equatable {
         lhs.shortcutHint == rhs.shortcutHint &&
         lhs.isFavorite == rhs.isFavorite &&
         lhs.isEditingRemark == rhs.isEditingRemark &&
-        (!lhs.isEditingRemark || lhs.editingText == rhs.editingText)
+        (!lhs.isEditingRemark || lhs.editingText == rhs.editingText) &&
+        lhs.searchQuery == rhs.searchQuery
     }
 }
 

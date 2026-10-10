@@ -912,6 +912,7 @@ struct HistoryPopupContent: View {
                             isFavorite: backend.favoriteIds.contains(item.id),
                             isEditingRemark: editingItemId == item.id,
                             editingText: $editingText,
+                            searchQuery: effectiveSearchText,
                             onCommitRemark: { newText in
                                 commitInlineEditing(entryId: item.id, newText: newText)
                             },

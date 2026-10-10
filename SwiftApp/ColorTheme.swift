@@ -28,6 +28,8 @@ struct AppTheme {
     let popupRowDefault: Color
     let popupRowBorder: Color
     let popupSearchBackground: Color
+    let popupSearchHighlightBackground: Color
+    let popupSearchHighlightText: Color
     let popupTagBackground: Color
     let popupFilterTabInactive: Color
     let popupFilterTabBackground: Color
@@ -66,6 +68,8 @@ struct AppTheme {
         popupRowDefault: .clear,
         popupRowBorder: Color.white.opacity(0.14),
         popupSearchBackground: Color.white.opacity(0.08),
+        popupSearchHighlightBackground: Color(nsColor: NSColor(calibratedRed: 0.96, green: 0.74, blue: 0.18, alpha: 0.38)),
+        popupSearchHighlightText: Color.white.opacity(0.94),
         popupTagBackground: Color.black.opacity(0.25),
         popupFilterTabInactive: Color.white.opacity(0.60),
         popupFilterTabBackground: Color.white.opacity(0.06),
@@ -105,6 +109,8 @@ struct AppTheme {
         popupRowDefault: .clear,
         popupRowBorder: Color.black.opacity(0.14),
         popupSearchBackground: Color(nsColor: NSColor(calibratedRed: 0.88, green: 0.88, blue: 0.9, alpha: 0.70)),
+        popupSearchHighlightBackground: Color(nsColor: NSColor(calibratedRed: 1.0, green: 0.82, blue: 0.15, alpha: 0.48)),
+        popupSearchHighlightText: Color(white: 0.30),
         popupTagBackground: Color(nsColor: NSColor(calibratedRed: 0.83, green: 0.83, blue: 0.85, alpha: 1.0)),
         popupFilterTabInactive: Color(nsColor: NSColor(calibratedRed: 0.36, green: 0.36, blue: 0.38, alpha: 1.0)),
         popupFilterTabBackground: Color.black.opacity(0.05),
@@ -144,6 +150,8 @@ struct AppTheme {
         popupRowDefault: .clear,
         popupRowBorder: Color.white.opacity(0.40),
         popupSearchBackground: Color.white.opacity(0.14),
+        popupSearchHighlightBackground: Color(nsColor: NSColor(calibratedRed: 0.96, green: 0.74, blue: 0.18, alpha: 0.42)),
+        popupSearchHighlightText: Color.white.opacity(0.95),
         popupTagBackground: Color(nsColor: NSColor(calibratedRed: 0.20, green: 0.20, blue: 0.22, alpha: 1.0)),
         popupFilterTabInactive: Color.white.opacity(0.80),
         popupFilterTabBackground: Color.white.opacity(0.12),
@@ -183,6 +191,8 @@ struct AppTheme {
         popupRowDefault: .clear,
         popupRowBorder: Color.black.opacity(0.40),
         popupSearchBackground: Color(nsColor: NSColor(calibratedRed: 0.90, green: 0.90, blue: 0.92, alpha: 1.0)),
+        popupSearchHighlightBackground: Color(nsColor: NSColor(calibratedRed: 1.0, green: 0.80, blue: 0.10, alpha: 0.48)),
+        popupSearchHighlightText: Color(white: 0.30),
         popupTagBackground: Color(nsColor: NSColor(calibratedRed: 0.80, green: 0.80, blue: 0.82, alpha: 1.0)),
         popupFilterTabInactive: Color(white: 0.20),
         popupFilterTabBackground: Color.black.opacity(0.08),
@@ -230,6 +240,8 @@ struct AppTheme {
             popupSearchBackground: isDark
                 ? Color(nsColor: NSColor(calibratedRed: 0.16, green: 0.16, blue: 0.18, alpha: 1.0))
                 : Color(nsColor: NSColor(calibratedRed: 0.88, green: 0.88, blue: 0.90, alpha: 1.0)),
+            popupSearchHighlightBackground: self.popupSearchHighlightBackground,
+            popupSearchHighlightText: self.popupSearchHighlightText,
             popupTagBackground: self.popupTagBackground,
             popupFilterTabInactive: self.popupFilterTabInactive,
             popupFilterTabBackground: self.popupFilterTabBackground,
