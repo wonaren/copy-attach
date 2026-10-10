@@ -246,7 +246,7 @@ extension InlineSettingsView {
         settingsCard {
             HStack(spacing: 8) {
                 Image(systemName: "externaldrive")
-                    .font(.system(size: 16))
+                    .font(.system(size: 15))
                     .foregroundColor(Color.accentColor)
                 Text("备份与恢复")
                     .font(.system(size: 13, weight: .semibold))
@@ -269,48 +269,22 @@ extension InlineSettingsView {
             .padding(.bottom, 12)
 
             HStack(spacing: 12) {
-                Image(systemName: "arrow.up.doc")
-                    .font(.system(size: 15))
-                    .foregroundColor(Color.accentColor)
-                    .frame(width: 22)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("导出备份")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundColor(theme.primaryText)
-                    Text("将全部剪贴板历史、收藏与备注保存为独立文件。")
-                        .font(.system(size: 11.5))
-                        .foregroundColor(theme.secondaryText)
-                }
-                Spacer()
-                Button("导出备份...") {
-                    handleExportBackup()
-                }
-                .buttonStyle(.bordered)
-            }
-            .padding(.vertical, 4)
+                StorageActionTile(
+                    icon: "arrow.up.doc",
+                    iconColor: Color.accentColor,
+                    title: "导出备份...",
+                    subtitle: "保存为独立文件",
+                    action: handleExportBackup
+                )
 
-            sectionDivider().padding(.vertical, 7)
-
-            HStack(spacing: 12) {
-                Image(systemName: "arrow.down.doc")
-                    .font(.system(size: 15))
-                    .foregroundColor(Color(nsColor: .systemGreen))
-                    .frame(width: 22)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("从备份恢复")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundColor(theme.primaryText)
-                    Text("从备份文件中恢复记录，支持与现有历史合并。")
-                        .font(.system(size: 11.5))
-                        .foregroundColor(theme.secondaryText)
-                }
-                Spacer()
-                Button("恢复备份...") {
-                    handleImportBackup()
-                }
-                .buttonStyle(.bordered)
+                StorageActionTile(
+                    icon: "arrow.down.doc",
+                    iconColor: Color(nsColor: .systemGreen),
+                    title: "从备份恢复...",
+                    subtitle: "合并或替换记录",
+                    action: handleImportBackup
+                )
             }
-            .padding(.vertical, 4)
         }
     }
 
@@ -414,5 +388,81 @@ extension InlineSettingsView {
                 alert.runModal()
             }
         }
+    }
+}
+
+// MARK: - 🗂 Storage Action Tile
+
+private struct StorageActionTile: View {
+    let icon: String
+    let iconColor: Color
+    let title: String
+    let subtitle: String
+    let action: () -> Void
+
+    @Environment(\.appTheme) private var theme
+    @Environment(\.colorScheme) private var colorScheme
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 11) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(iconColor.opacity(colorScheme == .dark ? 0.16 : 0.12))
+                        .frame(width: 34, height: 34)
+                    Image(systemName: icon)
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundColor(iconColor)
+                }
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(theme.primaryText)
+                        .lineLimit(1)
+                    Text(subtitle)
+                        .font(.system(size: 11))
+                        .foregroundColor(theme.secondaryText)
+                        .lineLimit(1)
+                }
+
+                Spacer(minLength: 4)
+
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(isHovered ? theme.secondaryText : theme.tertiaryText)
+                    .offset(x: isHovered ? 1.5 : 0)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .frame(maxWidth: .infinity)
+            .background(
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .fill(isHovered ? theme.popupRowHover : theme.buttonBackground.opacity(0.55))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .stroke(
+                        isHovered ? iconColor.opacity(0.35) : theme.cardBorder,
+                        lineWidth: 1
+                    )
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+        }
+        .buttonStyle(StorageTileButtonStyle())
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.15)) {
+                isHovered = hovering
+            }
+        }
+    }
+}
+
+private struct StorageTileButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.985 : 1.0)
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
     }
 }
