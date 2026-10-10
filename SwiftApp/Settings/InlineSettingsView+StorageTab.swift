@@ -57,8 +57,6 @@ extension InlineSettingsView {
                             }
                             .frame(height: 12)
                             .clipShape(RoundedRectangle(cornerRadius: 6))
-                            .animation(AppleMotion.smooth, value: textPct)
-                            .animation(AppleMotion.smooth, value: imagePct)
                         }
                     }
                     .frame(height: 12)

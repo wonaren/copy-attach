@@ -25,7 +25,6 @@ extension InlineSettingsView {
                 Image(systemName: backend.permissionGranted ? "checkmark.shield.fill" : "exclamationmark.shield.fill")
                     .font(.system(size: 18))
                     .foregroundColor(backend.permissionGranted ? Color(nsColor: .systemGreen) : Color(nsColor: .systemOrange))
-                    .symbolEffect(.bounce, value: backend.permissionGranted)
                 Text(backend.permissionGranted ? "辅助功能：已授权" : "辅助功能：未授权")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundColor(backend.permissionGranted ? Color(nsColor: .systemGreen) : Color(nsColor: .systemOrange))
