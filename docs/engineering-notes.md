@@ -132,22 +132,22 @@ PopupHostingView 的 `.scrollWheel` local monitor 在 ScrollView 消费事件之
 - **激活窗口尺寸陷阱**：`LicenseGateView` 必须固定 `.frame(width: 500, height: 470)`，否则庆祝内容替换表单时窗口被 AppKit fitting-size 压缩、错位到屏幕角落；`showLicenseGate()` 在 `makeKeyAndOrderFront` 后需再次 `setContentSize` + `center()`。
 - 设置页永久许可证只显示「永久权益 · 最多 N 台设备」（刻意不展示联网验证期限）。
 
-### 生产构建配置
+### 商业版本构建配置（归档说明）
 
-生产配置内置为默认值，直接 `./build.sh` 即连接生产服务器。license-server 服务端代码不在本仓库（本机开发部署在 `~/copy-attach-license/`，生产在 `api.abovepast.shop`）。
+历史商业版本（<= v0.107.10，封存于 `archive/commercial-v0.107` 分支）曾依赖 License Server：
 
 ```bash
-# 本地开发
+# 本地开发示例
 LICENSE_ENV=local COPYATTACH_LICENSE_PUBLIC_KEY='<dev 公钥>' ./build.sh
 
-# 显式覆盖生产参数
-COPYATTACH_LICENSE_SERVER_URL='https://api.abovepast.shop' \
-COPYATTACH_LICENSE_KEY_ID='production-2026-08' \
-COPYATTACH_LICENSE_PUBLIC_KEY='efsKYx9a7urNlr-UXR7b0-Fl9w0mJNKe3RME-OeseOs' \
+# 生产参数示例
+COPYATTACH_LICENSE_SERVER_URL='https://license.example.com' \
+COPYATTACH_LICENSE_KEY_ID='production-key-id' \
+COPYATTACH_LICENSE_PUBLIC_KEY='<production Ed25519 public key>' \
 ./build.sh
 ```
 
-参数写入 App bundle 的 `Info.plist`（`CopyAttachLicenseServerURL/KeyID/PublicKey`），直接注入产物包（源码里的 `Info.plist` 保持干净不修改）；`LicenseConfiguration`（`LicenseLeaseVerifier.swift`）保留同一套生产值作为回退。协议细节见 `docs/licensing-protocol.md`。
+参数原写入 App bundle 的 `Info.plist`（`CopyAttachLicenseServerURL/KeyID/PublicKey`）；自 v0.108.0 起软件完全免费开源，客户端已不再需要此类配置。历史协议细节见 `docs/licensing-protocol.md`。
 
 ## 签名与分发
 

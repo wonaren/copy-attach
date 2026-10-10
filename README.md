@@ -13,15 +13,13 @@
   <img src="https://img.shields.io/badge/macOS-15.0%2B-000000?style=flat&logo=apple&logoColor=white" alt="macOS 15.0+">
   <img src="https://img.shields.io/badge/Swift-6%2B-f05138?style=flat&logo=swift&logoColor=white" alt="Swift 6+">
   <img src="https://img.shields.io/badge/Rust-1.75%2B-dea584?style=flat&logo=rust&logoColor=white" alt="Rust 1.75+">
-  <img src="https://img.shields.io/badge/license-Apache%202.0-3da639?style=flat" alt="License Apache 2.0">
+  <img src="https://img.shields.io/badge/license-GPLv3-3da639?style=flat" alt="License GPLv3">
 </p>
 
 ---
 
 <p align="center">
   <a href="https://copyattach.abovepast.shop/"><img src="assets/icon_inner.svg" alt="CopyAttach" height="14" style="vertical-align: -1px;"> 项目官网 copyattach.abovepast.shop</a>
-  &nbsp;&nbsp;·&nbsp;&nbsp;
-  <a href="https://pay.ldxp.cn/shop/F5T5GUPN"><img src="assets/ldxp.svg" alt="链动小铺" height="14" style="vertical-align: -1px;"> 购买许可证</a>
 </p>
 
 CopyAttach 是一个 macOS 剪贴板管理器。它默默记录你复制的一切——文本、代码、链接、图片——然后通过一个快捷键让你在任何应用中快速搜索、预览、粘贴。从渲染帧率到磁盘写入，从内存分配到功耗管理，每个环节都经过精心优化，做到真正的无负担。
@@ -175,13 +173,10 @@ cargo test
 
 构建要求：**macOS 15.0+（Sequoia）**、**Xcode 16+**、**Rust 1.75+**。
 
-> 默认连接生产许可证服务器；本地开发可用 `LICENSE_ENV=local COPYATTACH_LICENSE_PUBLIC_KEY='<dev 公钥>' ./build.sh` 指向本地 license-server。
+## 免费与开源
 
-## 购买与激活
-
-- **购买许可证**：前往 [<img src="assets/ldxp.svg" alt="链动小铺" height="14" style="vertical-align: -1px;"> 在线店铺](https://pay.ldxp.cn/shop/F5T5GUPN) 购买激活码。
-- **激活流程**：构建或下载的应用支持免费试用与激活码激活；激活码按设备绑定，Lease 离线验证，断网后仍可继续使用。
+CopyAttach 自 **v0.108.0** 起全面免费与开源，所有功能无需激活码、无需联网验证，永久离线可用。
 
 ## 许可证
 
-Apache 2.0
+[GNU General Public License v3.0](LICENSE) (GPL-3.0)

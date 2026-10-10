@@ -12,7 +12,7 @@
 #      - MACOS_CERTIFICATE_PWD:   证书导出密码
 #      - MACOS_NOTARIZATION_ACCOUNT: Apple ID 邮箱（用于公证，需 Developer ID）
 #      - MACOS_NOTARIZATION_PWD:  Apple ID 应用专用密码
-#      - APPLE_TEAM_ID:           团队 ID（如 U48NQ4655C）
+#      - APPLE_TEAM_ID:           团队 ID（如 XXXXXXXXXX）
 #      签名身份必须跨版本稳定（Developer ID 或 Apple Development）：
 #      否则每次更新发布版都会让用户重新弹钥匙串授权框。用稳定身份签名后，
 #      用户首次点一次「始终允许」即可，之后所有版本更新都不再弹。

@@ -2,7 +2,7 @@
 name = "copy-attach"
 version = "0.108.0"
 edition = "2021"
-license = "Apache-2.0"
+license = "GPL-3.0-or-later"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
