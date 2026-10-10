@@ -357,10 +357,6 @@ pub(crate) fn is_copyattach_temp_path(path: &str) -> bool {
     Path::new(path).starts_with(copyattach_temp_root())
 }
 
-/// Process-local entitlement gate set by the Swift license verifier before the
-/// clipboard core starts. 0 = denied/unknown, 1 = trial, 2 = perpetual.
-pub(crate) static RUNTIME_ENTITLEMENT: AtomicUsize = AtomicUsize::new(0);
-
 // Entry-ID Generator
 
 /// Monotonic counter for assigning stable, unique IDs to clipboard entries.

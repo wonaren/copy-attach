@@ -60,28 +60,9 @@ pub extern "C" fn clipboard_recover_corrupt_db() -> c_int {
     1
 }
 
-/// Set only after Swift has cryptographically verified a device-bound lease.
-/// Invalid values are rejected instead of being treated as licensed.
-#[no_mangle]
-pub extern "C" fn clipboard_set_runtime_entitlement(state: c_int) -> c_int {
-    if !(0..=2).contains(&state) { return 0; }
-    crate::backend::RUNTIME_ENTITLEMENT.store(state as usize, Ordering::SeqCst);
-    if state == 0 {
-        if let Some(b) = crate::backend::try_backend() {
-            b.running.store(false, Ordering::SeqCst);
-        }
-    }
-    1
-}
-
 #[no_mangle]
 pub extern "C" fn clipboard_init() -> c_int {
-    if crate::backend::RUNTIME_ENTITLEMENT.load(Ordering::SeqCst) == 0 {
-        crate::error_log!("CopyAttach: clipboard_init rejected: runtime entitlement is denied");
-        return 0;
-    }
-    // OnceLock intentionally retains the backend for process lifetime. A
-    // license transition may stop and later re-enable monitoring, so resume
+    // OnceLock intentionally retains the backend for process lifetime. Resume
     // the existing backend instead of attempting to replace the singleton.
     if let Some(b) = crate::backend::try_backend() {
         if b.running.swap(true, Ordering::SeqCst) {

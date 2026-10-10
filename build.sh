@@ -80,20 +80,6 @@ fi
 
 echo "==> Compiling Swift sources…"
 
-# License environment is selected at build time. The default is production
-# with baked-in values; override any COPYATTACH_* variable to point elsewhere.
-# Local development must pass the public key printed by license-server.
-LICENSE_ENV="${LICENSE_ENV:-production}"
-if [ "$LICENSE_ENV" = "local" ]; then
-    LICENSE_SERVER_URL="http://127.0.0.1:8787"
-    LICENSE_SIGNING_KEY_ID="${COPYATTACH_LICENSE_KEY_ID:-development-2026-01}"
-    COPYATTACH_LICENSE_PUBLIC_KEY="${COPYATTACH_LICENSE_PUBLIC_KEY:?Set COPYATTACH_LICENSE_PUBLIC_KEY to the local dev server Ed25519 public key}"
-else
-    LICENSE_SERVER_URL="${COPYATTACH_LICENSE_SERVER_URL:-https://api.abovepast.shop}"
-    LICENSE_SIGNING_KEY_ID="${COPYATTACH_LICENSE_KEY_ID:-production-2026-08}"
-    COPYATTACH_LICENSE_PUBLIC_KEY="${COPYATTACH_LICENSE_PUBLIC_KEY:-efsKYx9a7urNlr-UXR7b0-Fl9w0mJNKe3RME-OeseOs}"
-fi
-
 # Compile with explicit args
 $SWIFTC $SDK \
     -disable-sandbox \
@@ -103,9 +89,6 @@ $SWIFTC $SDK \
     -swift-version 6 \
     -O \
     -whole-module-optimization \
-    -framework CryptoKit \
-    -framework IOKit \
-    -framework Security \
     -o "${APP_NAME}.app/Contents/MacOS/CopyAttach" \
     -framework SwiftUI \
     -framework AppKit \
@@ -124,19 +107,6 @@ TARGET_PLIST="${APP_NAME}.app/Contents/Info.plist"
 cp "${SWIFT_SRC}/Info.plist" "${TARGET_PLIST}"
 # Critical plist writes must fail the build; only deleting an optional old key is allowed to be idempotent.
 /usr/libexec/PlistBuddy -c "Set CFBundleShortVersionString ${CARGO_VERSION}" "${TARGET_PLIST}"
-/usr/libexec/PlistBuddy -c "Delete CopyAttachLicenseServerURL" "${TARGET_PLIST}" 2>/dev/null || true
-/usr/libexec/PlistBuddy -c "Add CopyAttachLicenseServerURL string ${LICENSE_SERVER_URL}" "${TARGET_PLIST}"
-/usr/libexec/PlistBuddy -c "Delete CopyAttachLicenseSigningKeyID" "${TARGET_PLIST}" 2>/dev/null || true
-/usr/libexec/PlistBuddy -c "Add CopyAttachLicenseSigningKeyID string ${LICENSE_SIGNING_KEY_ID}" "${TARGET_PLIST}"
-/usr/libexec/PlistBuddy -c "Delete CopyAttachLicenseSigningPublicKey" "${TARGET_PLIST}" 2>/dev/null || true
-/usr/libexec/PlistBuddy -c "Add CopyAttachLicenseSigningPublicKey string ${COPYATTACH_LICENSE_PUBLIC_KEY}" "${TARGET_PLIST}"
-if [ "$LICENSE_ENV" = "local" ]; then
-    /usr/libexec/PlistBuddy -c "Delete NSAppTransportSecurity" "${TARGET_PLIST}" 2>/dev/null || true
-    /usr/libexec/PlistBuddy -c "Add NSAppTransportSecurity dict" "${TARGET_PLIST}"
-    /usr/libexec/PlistBuddy -c "Add NSAppTransportSecurity:NSAllowsLocalNetworking bool true" "${TARGET_PLIST}"
-else
-    /usr/libexec/PlistBuddy -c "Delete NSAppTransportSecurity" "${TARGET_PLIST}" 2>/dev/null || true
-fi
 
 # Copy bridging header for reference
 cp "${SWIFT_SRC}/CopyAttach-Bridging-Header.h" "${APP_NAME}.app/Contents/Resources/"

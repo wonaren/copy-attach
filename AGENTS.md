@@ -35,13 +35,13 @@ CopyAttach 是一个 macOS 剪贴板历史管理器：Rust cdylib 后端（`src/
 
 ## 边界与不变量
 
-- **FFI 三处同步**：`src/ffi/` 用 `#[no_mangle]` 定义（`pub use` 汇出）、`SwiftApp/CopyAttach-Bridging-Header.h` 声明（现有 66 个 `extern "C"`）、`ClipboardBackend.swift` 封装。加接口漏掉任一处就是断链。
+- **FFI 三处同步**：`src/ffi/` 用 `#[no_mangle]` 定义（`pub use` 汇出）、`SwiftApp/CopyAttach-Bridging-Header.h` 声明（现有 65 个 `extern "C"`）、`ClipboardBackend.swift` 封装。加接口漏掉任一处就是断链。
 - **FFI 边界不许 panic**：`extern "C"` 里 panic 会 abort 整个进程。用 `try_backend()` 返回哨兵值（`0` / `-1` / `null`）。
 - **内存所有权**（契约写在 bridging header 注释里）：C 字符串 → `clipboard_free_string`；字节缓冲 → `clipboard_free_bytes`；u64 数组 → `clipboard_free_u64_array`；快照 `acquire`/`release` 成对，且快照内的 `char*` 仍要各自 free；预览缓冲由 Rust 拥有，靠 `PreviewBufferBox.deinit` 释放。**长度为 0 时也必须走 FFI free**（`Data(bytesNoCopy:)` 在 count 为 0 时不保证触发 deallocator）。
 - **身份不变量**：条目的稳定身份是 `entry_id`（原子递增、水位持久化，Swift 收藏引用它）；`db_id` 必须按**内容 hash** 赋值，绝不按头部位置。
 - **自写抑制**：`select_and_paste` 设 `pending_self_write` 标记，监控线程按**精确匹配的 changeCount** 跳过自身写入。
 - `src/ffi/stress.rs` 始终编译，只有内部函数被 feature gate —— release 包里也存在 `clipboard_stress_available`。
-- 服务端许可证代码**不在本仓库**（本机 `~/copy-attach-license/`，生产 `api.abovepast.shop`）。
+- v0.108.0 起完全免费与开源（旧商业许可证体系封存在 `archive/commercial-v0.107` 分支）。
 
 ## 文档索引
 

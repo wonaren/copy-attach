@@ -24,7 +24,6 @@ uint64_t clipboard_perf_emit_probe(const char* token);
 int32_t clipboard_perf_selfcheck(void);
 
 // ─── Lifecycle ───
-int32_t clipboard_set_runtime_entitlement(int32_t state);
 // 1 = running, 0 = retryable failure, -1 = database corrupt (call
 // clipboard_recover_corrupt_db and re-init, or quit), -2 = environment failure
 // (read-only / permissions / disk full; auto-recovering via backoff).

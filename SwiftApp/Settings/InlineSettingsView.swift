@@ -97,8 +97,8 @@ struct InlineSettingsView: View {
         (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "0.0"
     }
 
-    private let tabTitles = ["通用", "快捷键", "存储", "忽略", "许可证", "关于"]
-    private let tabIcons = ["gearshape", "keyboard", "externaldrive", "eye.slash", "key", "info.circle"]
+    private let tabTitles = ["通用", "快捷键", "存储", "忽略", "关于"]
+    private let tabIcons = ["gearshape", "keyboard", "externaldrive", "eye.slash", "info.circle"]
 
     // MARK: - Tab Bar
     @State private var hoveredTab: Int? = nil
@@ -203,7 +203,7 @@ struct InlineSettingsView: View {
     private var tabButtons: some View {
         HStack(spacing: 4) {
             Spacer()
-            ForEach(0..<6, id: \.self) { i in
+            ForEach(tabTitles.indices, id: \.self) { i in
                 Button {
                     // System-standard smooth curve: bouncy springs visibly
                     // distort glass shapes while morphing (WWDC25 guidance).
@@ -254,7 +254,6 @@ struct InlineSettingsView: View {
             else if selectedTab == 1 { shortcutsTab }
             else if selectedTab == 2 { storageTab }
             else if selectedTab == 3 { ignoreTab }
-            else if selectedTab == 4 { LicenseSettingsView() }
             else { aboutTab }
         }
         // Native cross-dissolve with crisp optical scale-fade on section change (System Settings behavior);

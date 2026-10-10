@@ -1,5 +1,7 @@
 # CopyAttach Licensing Protocol v1
 
+> **说明**：自 v0.108.0 起，CopyAttach 已正式转为免费并开源，客户端不再包含此协议实现。本协议文档作为 <= v0.107.10 商业版本的归档参考（代码封存于 `archive/commercial-v0.107` 分支）。
+
 - 产品 ID：`copyattach`
 - 试用：服务端首次登记后连续 30 天
 - 正式许可证：永久权益，同时最多 3 个 active 设备

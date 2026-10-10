@@ -486,7 +486,7 @@ class HistoryPopupWindow: NSPanel {
 
         // Hand the foreground back if this app took activation (e.g. preview pinch
         // gesture required NSApp.activate), provided no interactive app window
-        // (Settings, License Gate, etc.) is visible or presenting.
+        // (Settings, Stress Test, etc.) is visible or presenting.
         if let appDelegate = AppDelegate.shared,
            !appDelegate.hasVisibleAppWindow,
            !appDelegate.isPresentingAppWindow {

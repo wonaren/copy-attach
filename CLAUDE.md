@@ -67,19 +67,15 @@ vmmap -summary $(pgrep -f 'CopyAttach.app/Contents/MacOS/CopyAttach') | head -16
 - `malloc_zone_pressure_relief` 不要加：实测它收不回任何东西——进程内 4 次调用、以及「512MB 已释放的 1MB 块仍计入 footprint」的合成场景，全部返回 `0 bytes`。
 - **缩略图迁移是一次性内存事件**（0.105.1 起，仅 user_version 3 的库首次启动触发一次）：真库 137 行 release 实测峰值 79MB、稳态回落至与 no-op 相当（~9–18MB vs ~8.7MB），完成后不再发生。它不是常驻泄漏；若在「刚升级后」看到后台内存偏高，先确认 `metadata migration complete` 日志是否已出现。实现细节与三条踩坑（绕过 madvise 契约、每行新建 blob、借用捕获池）见 `docs/engineering-notes.md`。
 
-### 生产构建
+### 构建与分发
 
-默认连接生产 License Server，无需环境变量。本地开发用 `LICENSE_ENV=local`：
+应用自 v0.108.0 起完全免费并开源，无需任何 License Server。直接执行 `./build.sh` 即可完成本地构建与签名：
 
 ```bash
-# 默认（生产）
 ./build.sh
-
-# 本地开发
-LICENSE_ENV=local COPYATTACH_LICENSE_PUBLIC_KEY='<dev 公钥>' ./build.sh
 ```
 
-license-server 服务端代码**不在本仓库**（本机 `~/copy-attach-license/`，生产 `api.abovepast.shop`）。协议细节见 `docs/licensing-protocol.md`。
+（历史商业版本的服务端与客户端授权体系已完整归档封存在 `archive/commercial-v0.107` 分支与 `v0.107.10-commercial-final` 标签）。
 
 ## 代码库架构
 
@@ -108,7 +104,7 @@ license-server 服务端代码**不在本仓库**（本机 `~/copy-attach-licens
 
 ### Swift 前端（`SwiftApp/`，LSUIElement agent app）
 
-**LSUIElement agent app**：`Info.plist` 设 `LSUIElement=true`，无 Dock 图标，只以 MenuBarExtra + 浮动 NSPanel 存在。级联后果：① 它不是合法粘贴目标——`CGEventPostToPid` 的目标 pid 绝不能是自身；② nonactivating panel 上浮期间 agent 收不到 `applicationDidBecomeActive`，预览捏合手势需 `NSApp.activate(ignoringOtherApps:)` 真实激活；③ 唯一有边框的窗口是许可证门禁窗，其余都是无边框 NSPanel。
+**LSUIElement agent app**：`Info.plist` 设 `LSUIElement=true`，无 Dock 图标，只以 MenuBarExtra + 浮动 NSPanel 存在。级联后果：① 它不是合法粘贴目标——`CGEventPostToPid` 的目标 pid 绝不能是自身；② nonactivating panel 上浮期间 agent 收不到 `applicationDidBecomeActive`，预览捏合手势需 `NSApp.activate(ignoringOtherApps:)` 真实激活；③ 弹窗与面板均为无边框 NSPanel。
 
 ```
 SwiftApp/
@@ -117,9 +113,8 @@ SwiftApp/
   ├── HotkeyManager.swift              ← Carbon + NSEvent 双注册，录制模式
   ├── ColorTheme.swift                 ← 深色/浅色颜色体系
   ├── Hotkey/HotkeyConfig.swift        ← 快捷键配置模型（键码/修饰键/展示串）
-  ├── Licensing/                       ← 许可证体系（11 文件：管理器/租约校验/设备身份/钥匙串/门禁窗/庆祝视图/设置）
-  ├── App/AppDelegate.swift            ← 生命周期, 弹窗管理, entitlement 门控, 启动时 dup2 stderr → 日志
-  ├── Settings/                        ← InlineSettingsView（6 标签页：通用/快捷键/存储/忽略/许可证/关于）
+  ├── App/AppDelegate.swift            ← 生命周期, 弹窗管理, 启动时 dup2 stderr → 日志
+  ├── Settings/                        ← InlineSettingsView（5 标签页：通用/快捷键/存储/忽略/关于）
   │                                       + GeneralTab / ShortcutsTab / StorageTab / IgnoreTab / AboutTab / SheetDismissHelper
   ├── Onboarding/                      ← 核心操作引导（5 文件：引导模型/浮窗卡片/聚光灯遮罩）
   ├── Popup/                           ← 主弹窗（12 文件：内容/窗口/事件/行/拖拽/右键菜单/标签过滤/预览/动作）
@@ -158,7 +153,7 @@ SwiftApp/
 - FocusState 双管理：isSearchFocused（selectedIndex=0）和 isContainerFocused（selectedIndex>0）。Escape 三层拦截：SwiftUI `.onKeyPress` → PopupHostingView local monitor → Notification。优先关预览，否则关弹窗
 - 选中高亮：`matchedGeometryEffect` 在行间滑动；hover 静态填充；删除模式（⌃⌫）高亮变红
 
-**许可证体系**（`SwiftApp/Licensing/`，11 文件）：
+**许可证体系归档**（<= v0.107.10 商业版，已封存至 `archive/commercial-v0.107` 分支）：
 
 - **激活庆祝时序**：激活成功 → `celebration` → 窗口内播 ~2s 动画 → 回到确认视图，用户手动关闭（已许可时关闭不退出）
 - **在线状态轮询（仅试用/订阅）**：每 120s 查询 `/v1/licenses/status` 或 `/v1/trials/status`（无需签名），≤2 分钟内生效。**永久许可证不安排任何周期性检查**——签名 + 设备绑定即权威。关键约定：只有服务器明确返回非活跃状态才降级，`not_found` 和网络失败忽略
@@ -167,7 +162,7 @@ SwiftApp/
 
 ## FFI 接口
 
-`CopyAttach-Bridging-Header.h` 声明 66 个 `extern "C"` 函数：生命周期、查询、快照、图片加载、粘贴、权限、删除/撤销/收藏、ignore rules 同步。新接口需在此文件添加声明，并更新 Swift 侧调用封装。
+`CopyAttach-Bridging-Header.h` 声明 65 个 `extern "C"` 函数：生命周期、查询、快照、图片加载、粘贴、权限、删除/撤销/收藏、ignore rules 同步。新接口需在此文件添加声明，并更新 Swift 侧调用封装。
 
 ## 钥匙串弹窗
 

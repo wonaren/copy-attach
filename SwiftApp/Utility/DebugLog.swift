@@ -13,7 +13,7 @@ func debugLog(_ message: String) {
     // Respect the same debug-logging switch as Rust: debug builds default on,
     // release/distribution builds default off, and the settings UI can enable
     // diagnostics explicitly. Prefer the persisted user preference so logs
-    // emitted before `ClipboardBackend.start()` (startup/license gate) honor
+    // emitted before `ClipboardBackend.start()` (startup diagnostics) honor
     // it too; fall back to Rust's current toggle when the user has no explicit
     // preference. This avoids disk writes from every debugLog call in production.
     if let preference = UserDefaults.standard.object(forKey: "DebugLogging") as? Bool {
