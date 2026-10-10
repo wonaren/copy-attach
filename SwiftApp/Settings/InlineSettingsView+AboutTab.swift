@@ -300,28 +300,66 @@ extension InlineSettingsView {
     }
     private func stripDevSuffix(_ version: String) -> String { Self.stripDevSuffix(version) }
 
-    /// Update check through GitHub's *web* endpoint, never the REST API.
-    ///
-    /// `api.github.com/repos/…/releases/latest` is anonymous-rate-limited to 60
-    /// requests per hour **per source IP**, and that budget is shared by every
-    /// other unauthenticated client behind the same NAT — campus, office and
-    /// carrier networks exhaust it routinely. Once spent, the API answers 403
-    /// and the check fails although nothing is wrong with the release. Measured
-    /// here: `x-ratelimit-remaining: 0` on a shared egress IP, while the same
-    /// machine's web requests were unaffected.
-    ///
-    /// `github.com/<repo>/releases/latest` is the plain web endpoint. It is not
-    /// subject to that quota, and its 302 `Location` carries the same tag the
-    /// API would have returned — both endpoints skip pre-releases and drafts,
-    /// verified against repos whose newest release is a pre-release. A HEAD
-    /// request follows the redirect for zero bytes, so the tag is read straight
-    /// off the final URL.
+    nonisolated private static let cloudflareUpdateURL = URL(string: "https://dl.abovepast.shop/healthz")
+    nonisolated private static let githubLatestReleaseURL = URL(string: "https://github.com/wonaren/copyattach-release/releases/latest")
+
+    private struct HealthzPayload: Decodable {
+        let version: String?
+    }
+
+    /// Two-phase update check:
+    /// 1. Primary: queries the Cloudflare-accelerated endpoint (dl.abovepast.shop/healthz)
+    ///    which provides cached version info in ~50ms, unaffected by GitHub DNS pollution or timeouts.
+    /// 2. Fallback: HEAD request to GitHub's web endpoint (releases/latest), which redirects
+    ///    to the latest tag page for zero bytes without REST API rate limits.
     private func checkForUpdates(showAlert: Bool = true) {
         guard updateState != .checking else { return }
         updateState = .checking
+        checkViaCloudflare(showAlert: showAlert)
+    }
 
-        guard let url = URL(string: "https://github.com/wonaren/copyattach-release/releases/latest") else {
-            updateState = .error("更新地址无效")
+    private func checkViaCloudflare(showAlert: Bool) {
+        guard let url = Self.cloudflareUpdateURL else {
+            checkViaGitHub(showAlert: showAlert)
+            return
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 6
+
+        URLSession.shared.dataTask(with: request) { [self] data, response, error in
+            if let error {
+                debugLog("[update] Cloudflare check failed: \(error.localizedDescription); falling back to GitHub")
+                DispatchQueue.main.async {
+                    checkViaGitHub(showAlert: showAlert)
+                }
+                return
+            }
+
+            guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200,
+                  let data,
+                  let payload = try? JSONDecoder().decode(HealthzPayload.self, from: data),
+                  let rawVersion = payload.version, !rawVersion.isEmpty else {
+                debugLog("[update] Cloudflare check returned invalid payload; falling back to GitHub")
+                DispatchQueue.main.async {
+                    checkViaGitHub(showAlert: showAlert)
+                }
+                return
+            }
+
+            let latestVersion = Self.cleanVersionTag(rawVersion)
+            let releaseURL = URL(string: "https://github.com/wonaren/copyattach-release/releases/tag/v\(latestVersion)")
+                ?? Self.githubLatestReleaseURL!
+
+            DispatchQueue.main.async {
+                evaluateVersion(latestVersion: latestVersion, releaseURL: releaseURL, showAlert: showAlert)
+            }
+        }.resume()
+    }
+
+    private func checkViaGitHub(showAlert: Bool) {
+        guard let url = Self.githubLatestReleaseURL else {
+            finishUpdateCheck(.error("更新地址无效"), showAlert: showAlert)
             return
         }
         var request = URLRequest(url: url)
@@ -331,7 +369,7 @@ extension InlineSettingsView {
         URLSession.shared.dataTask(with: request) { [self] data, response, error in
             DispatchQueue.main.async {
                 if let error {
-                    debugLog("[update] check failed: \(error.localizedDescription)")
+                    debugLog("[update] GitHub check failed: \(error.localizedDescription)")
                     finishUpdateCheck(.error("无法连接到更新服务器：\(error.localizedDescription)"), showAlert: showAlert)
                     return
                 }
@@ -366,37 +404,48 @@ extension InlineSettingsView {
                     finishUpdateCheck(.error("无法解析更新信息"), showAlert: showAlert)
                     return
                 }
-                debugLog("[update] latest release is v\(latestVersion) (local v\(appVersion))")
 
-                let currentVersion = self.appVersion
-                let currentBase = stripDevSuffix(currentVersion)
-                let isDev = currentVersion != currentBase
-
-                if latestVersion.compare(currentBase, options: .numeric) == .orderedDescending {
-                    // Normal upgrade: a newer version exists
-                    finishUpdateCheck(.updateAvailable(latestVersion: latestVersion, releaseURL: releaseURL, isDowngrade: false), showAlert: showAlert)
-                } else if isDev {
-                    // Dev → stable: offer the stable release even if it's the same
-                    // version number or slightly behind (downgrade from dev)
-                    finishUpdateCheck(.updateAvailable(latestVersion: latestVersion, releaseURL: releaseURL, isDowngrade: true), showAlert: showAlert)
-                } else {
-                    finishUpdateCheck(.upToDate(currentVersion: currentVersion), showAlert: showAlert)
-                }
+                evaluateVersion(latestVersion: latestVersion, releaseURL: releaseURL, showAlert: showAlert)
             }
         }.resume()
     }
 
+    private func evaluateVersion(latestVersion: String, releaseURL: URL, showAlert: Bool) {
+        debugLog("[update] latest release is v\(latestVersion) (local v\(appVersion))")
+
+        let currentVersion = self.appVersion
+        let currentBase = stripDevSuffix(currentVersion)
+        let isDev = currentVersion != currentBase
+
+        if latestVersion.compare(currentBase, options: .numeric) == .orderedDescending {
+            // Normal upgrade: a newer version exists
+            finishUpdateCheck(.updateAvailable(latestVersion: latestVersion, releaseURL: releaseURL, isDowngrade: false), showAlert: showAlert)
+        } else if isDev {
+            // Dev → stable: offer the stable release even if it's the same
+            // version number or slightly behind (downgrade from dev)
+            finishUpdateCheck(.updateAvailable(latestVersion: latestVersion, releaseURL: releaseURL, isDowngrade: true), showAlert: showAlert)
+        } else {
+            finishUpdateCheck(.upToDate(currentVersion: currentVersion), showAlert: showAlert)
+        }
+    }
+
+    /// Clean a raw tag string (e.g. "v0.107.0" or "0.107.0") to purely numeric version string.
+    nonisolated private static func cleanVersionTag(_ raw: String) -> String {
+        var v = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        while v.hasPrefix("v") || v.hasPrefix("V") {
+            v.removeFirst()
+        }
+        return v
+    }
+
     /// Pull the tag out of a `…/releases/tag/<tag>` URL, stripping any
     /// leading "v" or "V" so the version string is purely numeric ("0.107.0").
-    private static func releaseTag(from url: URL) -> String? {
+    nonisolated private static func releaseTag(from url: URL) -> String? {
         let parts = url.pathComponents
         guard let i = parts.firstIndex(of: "tag"), i + 1 < parts.count else { return nil }
         let tag = parts[(i + 1)...].joined(separator: "/")
         guard !tag.isEmpty else { return nil }
-        if tag.hasPrefix("v") || tag.hasPrefix("V") {
-            return String(tag.dropFirst())
-        }
-        return tag
+        return cleanVersionTag(tag)
     }
 
     /// Terminal-state sink: drives the badge / download button, and optionally
