@@ -65,6 +65,15 @@ extension HistoryPopupContent {
                 self.showToast("已复制到剪贴板", icon: "checkmark.circle.fill")
             }
         }
+        let inQueue = PasteQueueManager.shared.order(of: item) != nil
+        addContextMenuItem(to: menu,
+                           title: inQueue ? "移出粘贴队列" : "加入粘贴队列",
+                           symbol: "list.number") {
+            withAnimation(AppleMotion.snappy) {
+                PasteQueueManager.shared.toggle(item)
+            }
+            OnboardingGuide.shared.record(.queueToggled)
+        }
         if item.isImage {
             addContextMenuItem(to: menu, title: "另存为…", symbol: "square.and.arrow.down") {
                 self.saveImageItem(item)

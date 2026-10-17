@@ -7,6 +7,10 @@ extension HistoryPopupContent {
     func handleEscape() {
         if editingItemId != nil {
             cancelInlineEditing()
+        } else if PasteQueueManager.shared.hasItems {
+            withAnimation(AppleMotion.snappy) {
+                PasteQueueManager.shared.cancel()
+            }
         } else if showPreview {
             closePreview()
         } else {

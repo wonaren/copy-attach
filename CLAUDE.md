@@ -117,6 +117,7 @@ SwiftApp/
   ├── Settings/                        ← InlineSettingsView（5 标签页：通用/快捷键/存储/忽略/关于）
   │                                       + GeneralTab / ShortcutsTab / StorageTab / IgnoreTab / AboutTab / SheetDismissHelper
   ├── Onboarding/                      ← 核心操作引导（5 文件：引导模型/浮窗卡片/聚光灯遮罩）
+  ├── Queue/                           ← 粘贴队列（4 文件：状态管理/HUD窗口/HUD视图/CGEventTap拦截器）
   ├── Popup/                           ← 主弹窗（12 文件：内容/窗口/事件/行/拖拽/右键菜单/标签过滤/预览/动作）
   ├── Preview/                         ← 预览窗口（4 文件：窗口/内容/布局/缩放）
   ├── Backend/                         ← ClipboardItem / ImageDecode / AppIcon 缓存 / PackedSnapshot / PreviewDecodeGate
@@ -133,6 +134,8 @@ SwiftApp/
 - **两阶段粘贴（prepare_paste_by_id + send_paste）**：先按 entry_id 查 history（未命中直接 return 0）→ 再查 accessibility 权限（未授权直接 return 0）→ DB 加载正文/图片 blob（失败显式 return 0，不兜底）→ 写剪贴板（设 pending_self_write）→ DB write-through → move entry to top → 返回目标 pid；Swift 侧先关闭并失焦弹窗（dismiss）避免 panel 保持 key window 截断击键 → 调 send_paste(pid) 发送 Cmd+V。**权限检查必须早于任何剪贴板写入**——写入会替换用户剪贴板，未授权时的写入等于毁掉用户内容却永远粘贴不成。**图片粘贴走唯一的文件路径模式**：先写 `$TMPDIR/CopyAttach/Paste/` 临时 PNG，剪贴板放 `public.file-url`（Finder 复制文件同款）再 Cmd+V
 - **粘贴目标 pid 不变式**：Cmd+V 投递给 `source_app.pid`（由 `NSWorkspace.didActivateApplicationNotification` 事件驱动更新，不轮询）。该 pid 必须是用户打开弹窗前的 app，绝不能是 CopyAttach 自身
 - **粘贴后必须归还前台**：预览会强制 `NSApp.activate`（捏合手势只投给最前台 app），而系统**不会**自动归还 —— 不归还的话 Cmd+V 仍能投进目标 app（内容进去了），但该 app 留在后台，光标回不到输入框。`selectItem` 粘贴后调 `ClipboardBackend.restorePasteTargetFocus()`；它只在 `NSApp.isActive` 为真时才动手，所以从不激活的普通路径是 no-op
+- **粘贴队列（`Queue/`）**：在列表按 `⌘C` 只维护一个有序数组（序号徽标在视图侧由 `orderMap` 派生，不再存第二份顺序），不写剪贴板、不触发 `monitor.rs` 重新捕获置顶；回车启动顺序取用：先按当前快照剔除已失效条目（`pruneStaleEntries`，对空快照不做剔除）→ 再启动 `QueueEventTap`，成功才允许 dismiss 弹窗展开胶囊 HUD；取用阶段通过 `ClipboardBackend.pasteEntryById` 走规范两阶段粘贴，返回 `PasteOutcome`：`.pasted` 前进、`.keystrokeNotDelivered` 前进并提示（内容已在剪贴板，重试会重复粘贴）、`.entryUnavailable` 跳过并提示；`QueueEventTap` 吞掉物理 ⌘V（修饰键精确匹配，`⌥⌘V` 等组合一律放行），合成事件按**事件来源**（`eventSourceUnixProcessID`）识别而**不是时间窗**——实测 `CGEventPostToPid` 事件根本不进 session tap，Esc 单次一律放行给目标应用、**连按两次**才退出队列；闲置看门狗 3 分钟；`clear()` / `cancel()` 强行保证同时拆除 Tap 与 HUD。
+- **弹窗开闭打断状态机**：弹窗通过 `LifecycleState`（`closed`/`opening`/`open`/`closing`）管理生命周期，快速连续敲击快捷键在 `closing` 阶段触发 `reverseToOpen()`，直接将当前半空 alpha 平滑插值拉回 1.0 并恢复焦点，免除冷启动与视图重建闪烁。
 
 **引导（`Onboarding/`）**：
 

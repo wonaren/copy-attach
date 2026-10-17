@@ -17,6 +17,8 @@ let escapeKeyNotification = Notification.Name("PopupEscapeKeyPressed")
 let popupContextMenuNotification = Notification.Name("PopupContextMenuRequested")
 let popupSwipeNotification = Notification.Name("PopupSwipe")
 let popupWillDismissNotification = Notification.Name("PopupWillDismiss")
+let popupCancelDismissNotification = Notification.Name("PopupCancelDismiss")
+let queueToggleNotification = Notification.Name("PopupQueueTogglePressed")
 
 /// Payload for `popupContextMenuNotification`: where the user right-clicked
 /// and where to position the NSMenu. `entryId` is nil on the raw click — the
@@ -360,6 +362,14 @@ class PopupHostingView: NSHostingView<AnyView> {
             NotificationCenter.default.post(name: undoKeyNotification, object: nil)
             return true
         }
+        // Command + C (keyCode 8): toggle item in paste queue
+        if event.keyCode == 8 && event.modifierFlags.contains(.command) &&
+            !event.modifierFlags.contains(.option) &&
+            !event.modifierFlags.contains(.control) &&
+            !event.modifierFlags.contains(.shift) {
+            NotificationCenter.default.post(name: queueToggleNotification, object: nil)
+            return true
+        }
         return super.performKeyEquivalent(with: event)
     }
 
@@ -447,6 +457,19 @@ class PopupHostingView: NSHostingView<AnyView> {
                 return
             }
             NotificationCenter.default.post(name: undoKeyNotification, object: nil)
+            return
+        }
+
+        // Command + C: toggle item in paste queue (fallback)
+        if event.keyCode == 8 && event.modifierFlags.contains(.command) &&
+            !event.modifierFlags.contains(.option) &&
+            !event.modifierFlags.contains(.control) &&
+            !event.modifierFlags.contains(.shift) {
+            if let textView = window?.firstResponder as? NSTextView, textView.isEditable {
+                super.keyDown(with: event)
+                return
+            }
+            NotificationCenter.default.post(name: queueToggleNotification, object: nil)
             return
         }
 

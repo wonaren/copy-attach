@@ -787,6 +787,7 @@ class ClipboardBackend {
         if result {
             favoriteIds.remove(entryId)
             saveFavorites()
+            PasteQueueManager.shared.remove(id: entryId)
             items.remove(at: index)
             count = items.count
             itemsGeneration &+= 1
@@ -800,26 +801,80 @@ class ClipboardBackend {
     /// Two-phase paste used by the popup: write the pasteboard, run
     /// `dismiss`, then post the paste keystroke.
     ///
-    /// The ordering is load-bearing. `dismiss` closes the popup, and only
-    /// `close()` resigns its key status; posting the keystroke before that
-    /// leaves the panel as the key window, which made WeChat intermittently
-    /// drop short-text pastes (measured via PASTEDIAG: `popupKey=true` on
-    /// every paste). Returns true when the pasteboard was written — the
-    /// keystroke is best-effort on top.
+    /// Returns true when the pasteboard was written — the keystroke is
+    /// best-effort on top. Thin wrapper over `pasteEntryById` so both paste
+    /// paths share one implementation of the contract.
     @discardableResult
     func selectAndPasteDismissingPopup(at index: Int, asPath: Bool = false, dismiss: () -> Void) -> Bool {
         guard index < items.count else { return false }
-        let perfPaste = PerfSpan.start("swift", "paste.menu_to_keystroke")
-        let entryId = UInt64(items[index].id)
+        let outcome = pasteEntryById(UInt64(items[index].id),
+                                     asPath: asPath,
+                                     dismiss: dismiss,
+                                     perfName: "paste.menu_to_keystroke")
+        return outcome != .entryUnavailable
+    }
+
+    /// Outcome of a two-phase paste.
+    ///
+    /// The queue needs to tell three cases apart, because they have different
+    /// correct recoveries: an entry that no longer exists must be skipped and
+    /// reported; a pasteboard write whose keystroke never landed must ADVANCE
+    /// (retrying would paste the same payload twice) while telling the user the
+    /// content is on the clipboard; only a full success is silent.
+    enum PasteOutcome: Equatable {
+        case pasted
+        /// Pasteboard written, ⌘V could not be delivered (target exited, or the
+        /// event could not be posted).
+        case keystrokeNotDelivered
+        /// Nothing was written: the entry id no longer resolves, permission is
+        /// missing, or the body could not be loaded.
+        case entryUnavailable
+    }
+
+    /// The one two-phase paste implementation.
+    ///
+    /// Order is load-bearing:
+    /// 1. `prepare` writes the pasteboard and moves the entry to the top of
+    ///    history, returning the pid to deliver to (>0) or 0 on failure.
+    /// 2. `dismiss` (popup path only; the queue passes nothing) must run BEFORE
+    ///    the keystroke: only `close()` resigns the panel's key status, and a
+    ///    keystroke posted while the panel is still key made WeChat
+    ///    intermittently drop short-text pastes (measured via PASTEDIAG:
+    ///    `popupKey=true` on every paste).
+    /// 3. `send_paste` posts Cmd+V to the target pid.
+    /// 4. `reloadItems` refreshes the list AFTER the keystroke: a 478-row packed
+    ///    snapshot costs 6–15 ms of main-thread decode (measured), and it used to
+    ///    sit between `prepare` and the keystroke, adding that latency to every
+    ///    paste. Nothing in the send path reads the refreshed list.
+    @discardableResult
+    func pasteEntryById(_ entryId: UInt64,
+                        asPath: Bool = false,
+                        dismiss: () -> Void = {},
+                        perfName: String = "paste.queue_keystroke") -> PasteOutcome {
+        let perfPaste = PerfSpan.start("swift", perfName)
         let pid = clipboard_prepare_paste_by_id(entryId, asPath)
-        guard pid > 0 else { return false }
-        // History order changed (selected item moved to top) — force UI refresh
-        reloadItems()
-        // The popup must stop being key before the keystroke is posted.
+        guard pid > 0 else {
+            errorLog("pasteEntryById: clipboard_prepare_paste_by_id failed for entry \(entryId)")
+            perfPaste?.end()
+            return .entryUnavailable
+        }
+
         dismiss()
-        _ = clipboard_send_paste(pid)
+
+        let delivered = clipboard_send_paste(pid) != 0
+        if !delivered {
+            errorLog("pasteEntryById: ⌘V delivery failed for entry \(entryId) (pid \(pid))")
+        }
+
+        // End the span AT the keystroke: the name promises "to keystroke", so the
+        // post-send list refresh below must not be counted as paste latency.
         perfPaste?.end()
-        return true
+
+        // History order changed (selected item moved to top) — refresh for the
+        // next open. Done last so it never delays the keystroke.
+        reloadItems()
+
+        return delivered ? .pasted : .keystrokeNotDelivered
     }
 
     // MARK: - Undo Delete
@@ -986,6 +1041,7 @@ class ClipboardBackend {
         count = 0
         items = []
         itemsGeneration &+= 1
+        PasteQueueManager.shared.clear()
     }
 
     /// Trim the oldest N percent of entries from history and DB, preserving favorites.
@@ -998,6 +1054,7 @@ class ClipboardBackend {
         if removed > 0 {
             DispatchQueue.main.async {
                 self.refresh()
+                PasteQueueManager.shared.pruneStaleEntries()
             }
         }
         return removed

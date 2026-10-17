@@ -401,10 +401,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             presentDatabaseUnusableDialog()
             return
         }
-        if popup.isVisible {
-            popup.closeWithAnimation()
-        } else {
-            popup.show()
+        // Summoning the history list is an explicit "I'm done pasting" signal.
+        // End the queue HERE, before the popup exists: the popup's onAppear also
+        // clears it as a safety net, but doing it after the window is already up
+        // looked like the queue had evaporated on its own.
+        if PasteQueueManager.shared.status == .dispensing {
+            debugLog("togglePopup: leaving the paste queue before showing history")
+            PasteQueueManager.shared.cancel()
+        }
+        popup.toggle()
+        if popup.isOpenOrOpening {
             OnboardingGuide.shared.record(.popupOpened)
         }
     }

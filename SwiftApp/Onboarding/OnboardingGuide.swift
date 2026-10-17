@@ -18,6 +18,7 @@ enum OnboardingStep: Int, CaseIterable, Identifiable {
     case preview
     case favorite
     case deleteAndUndo
+    case pasteQueue
     case paste
 
     var id: Int { rawValue }
@@ -30,6 +31,7 @@ enum OnboardingStep: Int, CaseIterable, Identifiable {
         case .preview: return "预览内容"
         case .favorite: return "收藏常用"
         case .deleteAndUndo: return "删除与撤销"
+        case .pasteQueue: return "粘贴队列"
         case .paste: return "拖拽粘贴"
         }
     }
@@ -48,8 +50,10 @@ enum OnboardingStep: Int, CaseIterable, Identifiable {
             return "选中一条常用记录，按 ⌥P 收藏，之后可在收藏标签页快速找到。"
         case .deleteAndUndo:
             return "选中一条记录按 ⌃⌫ 删除；删错了按 ⌘Z 撤销。"
+        case .pasteQueue:
+            return "选中记录按 ⌘C 加入粘贴队列标号；多选后按 ⏎ 即可在外部用 ⌘V 顺序粘贴。"
         case .paste:
-            return "把要用的记录直接拖到需要的地方（编辑器、文档或聊天窗口），松手就能贴进去。"
+            return "唤出历史弹窗，把要用的记录直接拖到需要的地方（编辑器、文档或聊天窗口），松手就能贴进去。"
         }
     }
 
@@ -60,6 +64,7 @@ enum OnboardingStep: Int, CaseIterable, Identifiable {
         case .preview: return "Space"
         case .favorite: return "⌥P"
         case .deleteAndUndo: return "⌃⌫ / ⌘Z"
+        case .pasteQueue: return "⌘C / ⏎"
         // Dragging is a gesture, not a shortcut — the instruction carries it.
         case .copyContent, .openPopup, .search, .paste: return nil
         }
@@ -73,6 +78,7 @@ enum OnboardingStep: Int, CaseIterable, Identifiable {
         case .preview: return "eye"
         case .favorite: return "star"
         case .deleteAndUndo: return "trash"
+        case .pasteQueue: return "list.number"
         case .paste: return "hand.draw"
         }
     }
@@ -104,6 +110,9 @@ enum OnboardingEvent {
     case favorited
     case deleted
     case undone
+    case queueToggled
+    case queueStarted
+    case queuePasted
     /// A native item drag finished — the tour's last step.
     case dragged
 }
@@ -135,6 +144,10 @@ final class OnboardingGuide {
     /// Sub-action flags for the combined delete/undo step.
     private(set) var deleteActionDone = false
     private(set) var undoActionDone = false
+    /// Sub-action flags for the sequential paste queue step.
+    private(set) var queueEnqueueDone = false
+    private(set) var queueStartDone = false
+    private(set) var queuePasteDone = false
 
     private var panel: OnboardingGuidePanel?
     private var spotlight: SpotlightOverlayWindow?
@@ -180,8 +193,12 @@ final class OnboardingGuide {
         // These steps all act on the entry under the cursor, so the cutout
         // rides the selected row and follows ↑/↓ — the strongest possible
         // statement of "this one".
-        case .preview, .favorite, .deleteAndUndo, .paste: return .selectedRow
-        case .copyContent, .openPopup: return nil
+        case .preview, .favorite, .deleteAndUndo, .paste:
+            return .selectedRow
+        case .pasteQueue:
+            return queueStartDone ? nil : .selectedRow
+        case .copyContent, .openPopup:
+            return nil
         }
     }
 
@@ -223,6 +240,9 @@ final class OnboardingGuide {
             completedSteps = []
             deleteActionDone = false
             undoActionDone = false
+            queueEnqueueDone = false
+            queueStartDone = false
+            queuePasteDone = false
             persistProgress()
             // A fresh run must not reuse geometry measured for the last one.
             resetReportedGeometry()
@@ -240,6 +260,9 @@ final class OnboardingGuide {
         isActive = true
         deleteActionDone = false
         undoActionDone = false
+        queueEnqueueDone = false
+        queueStartDone = false
+        queuePasteDone = false
         // A drag left in flight by a previous run would keep the scrim hidden.
         isItemDragInProgress = false
 
@@ -300,6 +323,18 @@ final class OnboardingGuide {
              (.favorite, .favorited),
              (.paste, .dragged):
             complete(step)
+        case (.pasteQueue, .queueToggled):
+            queueEnqueueDone = PasteQueueManager.shared.hasItems
+            refreshPanel()
+        case (.pasteQueue, .queueStarted):
+            queueEnqueueDone = true
+            queueStartDone = true
+            refreshPanel()
+        case (.pasteQueue, .queuePasted):
+            queueEnqueueDone = true
+            queueStartDone = true
+            queuePasteDone = true
+            complete(.pasteQueue)
         case (.deleteAndUndo, .deleted):
             deleteActionDone = true
             completeDeleteAndUndoIfReady()

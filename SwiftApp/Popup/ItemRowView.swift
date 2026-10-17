@@ -8,6 +8,7 @@ struct ItemRowView: View {
     let isSelected: Bool
     let isDeleteModifierPressed: Bool
     let shortcutHint: String?
+    let queueOrder: Int?
     let isFavorite: Bool
     let isEditingRemark: Bool
     @Binding var editingText: String
@@ -146,6 +147,23 @@ struct ItemRowView: View {
                     // from nothing. 0.9 + opacity reads as the badge growing
                     // into place rather than materializing.
                     .transition(.scale(scale: 0.9).combined(with: .opacity))
+            }
+            if let order = queueOrder {
+                let badgeBgColor: Color = isSelected
+                    ? Color.white
+                    : Color(nsColor: .controlAccentColor)
+                let badgeTextColor: Color = isSelected
+                    ? (isDeleteModifierPressed ? Color(nsColor: .systemRed) : Color(nsColor: .controlAccentColor))
+                    : Color.white
+
+                Text("\(order)")
+                    .font(.system(size: 9.5, weight: .bold, design: .rounded))
+                    .foregroundColor(badgeTextColor)
+                    .frame(width: 16, height: 16)
+                    .background(
+                        Circle().fill(badgeBgColor)
+                    )
+                    .transition(.scale(scale: 0.85).combined(with: .opacity))
             }
             if isSelected && isDeleteModifierPressed {
                 Image(systemName: "delete.left.fill")
@@ -435,6 +453,7 @@ extension ItemRowView: @preconcurrency Equatable {
         lhs.isSelected == rhs.isSelected &&
         lhs.isDeleteModifierPressed == rhs.isDeleteModifierPressed &&
         lhs.shortcutHint == rhs.shortcutHint &&
+        lhs.queueOrder == rhs.queueOrder &&
         lhs.isFavorite == rhs.isFavorite &&
         lhs.isEditingRemark == rhs.isEditingRemark &&
         (!lhs.isEditingRemark || lhs.editingText == rhs.editingText) &&

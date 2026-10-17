@@ -369,6 +369,30 @@ struct HistoryPopupContent: View {
         }
         .onKeyPress(keys: [.return], phases: .down) { press in
             guard !isDismissing, editingItemId == nil else { return .ignored }
+            if PasteQueueManager.shared.hasItems {
+                let outcome = PasteQueueManager.shared.startDispensing {
+                    closePreview()
+                    onClose()
+                    backend.restorePasteTargetFocus(force: true)
+                }
+                switch outcome {
+                case .started:
+                    OnboardingGuide.shared.record(.queueStarted)
+                    // The popup is dismissing; the HUD reports pruned entries.
+                    break
+                case .eventTapUnavailable:
+                    // Without the tap, ⌘V cannot be sequenced: say so instead of
+                    // leaving Return looking like it did nothing.
+                    showToast("无法接管 ⌘V，请检查辅助功能权限",
+                              icon: "exclamationmark.triangle.fill")
+                case .emptyQueue:
+                    showToast("粘贴队列已空", icon: "exclamationmark.triangle.fill")
+                case .allEntriesStale:
+                    showToast("所选条目已失效，队列已清空",
+                              icon: "exclamationmark.triangle.fill")
+                }
+                return .handled
+            }
             if selectedIndex > 0 {
                 selectItem(at: selectedIndex - 1, asPath: press.modifiers.contains(.shift))
                 return .handled
@@ -408,6 +432,13 @@ struct HistoryPopupContent: View {
             // are rebuilt per session and nilled on close, so this state has
             // exactly one session's lifetime.
             selectedIndex = backend.items.isEmpty ? 0 : 1
+            // Safety net only: AppDelegate.togglePopup cancels a dispensing queue
+            // before showing the popup, so this normally sees an idle queue. It
+            // still exists for any other path that mounts this view while a queue
+            // is live — the queue must never outlive the list it was built from.
+            if PasteQueueManager.shared.hasItems {
+                PasteQueueManager.shared.clear()
+            }
             searchText = ""
             effectiveSearchText = ""
             searchResults = []
@@ -474,6 +505,16 @@ struct HistoryPopupContent: View {
                 isDismissing = true
             }
         }
+        .onReceive(NotificationCenter.default.publisher(for: popupCancelDismissNotification)) { _ in
+            withAnimation(.easeOut(duration: 0.15)) {
+                isDismissing = false
+            }
+            if selectedIndex == 0 {
+                isSearchFocused = true
+            } else {
+                isContainerFocused = true
+            }
+        }
         .onReceive(NotificationCenter.default.publisher(for: escapeKeyNotification)) { _ in
             handleEscape()
         }
@@ -520,6 +561,17 @@ struct HistoryPopupContent: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: focusSearchNotification)) { _ in
             selectedIndex = 0
+        }
+        .onReceive(NotificationCenter.default.publisher(for: queueToggleNotification)) { _ in
+            guard selectedIndex > 0, !isDismissing, editingItemId == nil else { return }
+            let itemIndex = selectedIndex - 1
+            guard itemIndex < displayItems.count else { return }
+            let item = displayItems[itemIndex]
+            withAnimation(AppleMotion.snappy) {
+                PasteQueueManager.shared.toggle(item)
+            }
+            NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .default)
+            OnboardingGuide.shared.record(.queueToggled)
         }
         .onReceive(NotificationCenter.default.publisher(for: focusSearchAndBackspaceNotification)) { _ in
             // Plain Delete pressed while an item is selected (not the search
@@ -891,6 +943,10 @@ struct HistoryPopupContent: View {
                     .frame(height: 0)
                     .id(listTopAnchorID)
                 LazyVStack(spacing: 3) {
+                // Derived once per body pass instead of being stored in the
+                // manager: one source of truth for the ordering, O(1) lookups
+                // per row, and nothing to forget to rebuild.
+                let queueOrderByID = PasteQueueManager.shared.orderMap
                 ForEach(popupRows, id: \.id) { row in
                     switch row {
                     case .separator(let timestamp, let isFirst):
@@ -909,6 +965,7 @@ struct HistoryPopupContent: View {
                             isSelected: selectedIndex == index + 1,
                             isDeleteModifierPressed: isControlPressed,
                             shortcutHint: shortcut,
+                            queueOrder: queueOrderByID[item.id],
                             isFavorite: backend.favoriteIds.contains(item.id),
                             isEditingRemark: editingItemId == item.id,
                             editingText: $editingText,
@@ -1036,9 +1093,53 @@ struct HistoryPopupContent: View {
 
     // MARK: - Bottom Bar (item count + shortcuts, single row)
 
+    private var queueBottomBar: some View {
+        HStack(spacing: 6) {
+            HStack(spacing: 4) {
+                Image(systemName: "list.number")
+                    .font(.system(size: 10, weight: .bold))
+                Text("已选 \(PasteQueueManager.shared.totalCount) 项")
+                    .font(.system(size: 10, weight: .semibold))
+            }
+            .foregroundColor(Color(nsColor: .controlAccentColor))
+
+            Spacer()
+
+            Text("继续按 ⌘C 标记")
+                .font(.system(size: 9.5))
+                .foregroundColor(theme.popupMutedText)
+            Text("·")
+                .foregroundColor(theme.popupMutedText)
+            Text("⏎ 开始顺序粘贴")
+                .font(.system(size: 9.5, weight: .medium))
+                .foregroundColor(theme.popupPrimaryText)
+            Text("·")
+                .foregroundColor(theme.popupMutedText)
+            Text("⎋ 清空")
+                .font(.system(size: 9.5))
+                .foregroundColor(theme.popupSecondaryText)
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 3)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(Color(nsColor: .controlAccentColor).opacity(0.12))
+        )
+    }
+
+    private var bottomBar: some View {
+        Group {
+            if PasteQueueManager.shared.hasItems {
+                queueBottomBar
+            } else {
+                normalBottomBar
+            }
+        }
+    }
+
     /// Item count is the only animated feedback for tab filtering. The list
     /// and date separators retain their identities and update immediately.
-    private var bottomBar: some View {
+    private var normalBottomBar: some View {
         let memo = currentDisplayMemo
         return HStack(spacing: 0) {
             // --- Left: item count stats ---

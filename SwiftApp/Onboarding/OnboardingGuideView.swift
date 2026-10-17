@@ -95,7 +95,7 @@ struct OnboardingGuideView: View {
                 }
             }
 
-            Text(step.instruction)
+            Text(stepInstruction(for: step))
                 .font(.system(size: 11.5))
                 .foregroundColor(theme.popupSecondaryText)
                 .lineSpacing(2)
@@ -103,6 +103,8 @@ struct OnboardingGuideView: View {
 
             if step == .deleteAndUndo {
                 subActionRow
+            } else if step == .pasteQueue {
+                pasteQueueSubActionRow
             }
         }
         .padding(12)
@@ -117,6 +119,16 @@ struct OnboardingGuideView: View {
         HStack(spacing: 14) {
             subActionFlag(icon: "trash", label: "已删除", done: guide.deleteActionDone)
             subActionFlag(icon: "arrow.uturn.backward", label: "已撤销", done: guide.undoActionDone)
+            Spacer()
+        }
+    }
+
+    /// Paste queue step tracks three actions to form a complete closed loop.
+    private var pasteQueueSubActionRow: some View {
+        HStack(spacing: 12) {
+            subActionFlag(icon: "list.number", label: "已标记", done: guide.queueEnqueueDone)
+            subActionFlag(icon: "return", label: "已启动", done: guide.queueStartDone)
+            subActionFlag(icon: "doc.on.clipboard", label: "已粘贴", done: guide.queuePasteDone)
             Spacer()
         }
     }
@@ -142,10 +154,30 @@ struct OnboardingGuideView: View {
 
     // MARK: - Helpers
 
+    private func stepInstruction(for step: OnboardingStep) -> String {
+        switch step {
+        case .pasteQueue:
+            if guide.queueStartDone {
+                return "粘贴队列已就绪！前往任意应用输入框，按下 ⌘V 体验顺序粘贴。"
+            } else if guide.queueEnqueueDone {
+                return "条目已标号！按下 ⏎（Return）确认，开启顺序粘贴模式。"
+            } else {
+                return "选中一条记录，按 ⌘C 加入粘贴队列并按序标号。"
+            }
+        default:
+            return step.instruction
+        }
+    }
+
     /// The hotkey hint tracks the user's recorded shortcut rather than a
     /// hard-coded default.
     private func keyHint(for step: OnboardingStep) -> String? {
         if step == .openPopup { return HotkeyManager.shared.config.displayString }
+        if step == .pasteQueue {
+            if guide.queueStartDone { return "⌘V" }
+            if guide.queueEnqueueDone { return "⏎" }
+            return "⌘C"
+        }
         return step.keyHint
     }
 

@@ -83,14 +83,52 @@ class HistoryPopupWindow: NSPanel {
         UserDefaults.standard.object(forKey: continuousDragDefaultsKey) as? Bool ?? false
     }
 
+    /// Explicit window lifecycle states for fully interruptible animation.
+    enum LifecycleState: Equatable {
+        case closed
+        case opening
+        case open
+        case closing
+    }
+
+    private(set) var lifecycleState: LifecycleState = .closed
+
+    var isOpenOrOpening: Bool {
+        lifecycleState == .open || lifecycleState == .opening
+    }
+
     /// Duration of the popup open fade-in (window alpha 0 → 1).
     /// Matches Spotlight's ~0.2s open; the content scale spring settles in
     /// the same window (see HistoryPopupContent), so the two stay in sync.
     private static let fadeInDuration: TimeInterval = 0.2
 
+    /// Duration of the popup close fade-out (window alpha 1 → 0).
+    private static let fadeOutDuration: TimeInterval = 0.15
+
     /// Generation token to discard stale async close animation completions
     /// if the window is re-shown before the fade-out finishes.
     private var closeSessionGeneration: UInt64 = 0
+
+    /// Toggle window with interruptible animation support.
+    func toggle() {
+        // Reconcile the state machine with reality first: AppKit can order the
+        // panel out without going through `close()` (display reconfiguration,
+        // space change, a system-initiated hide). Trusting the stale `.open`
+        // state would make the next hotkey press animate a close on an invisible
+        // window, i.e. swallow one press.
+        if lifecycleState != .closed && !isVisible {
+            debugLog("HistoryPopupWindow.toggle: state \(lifecycleState) but panel hidden — resetting to .closed")
+            lifecycleState = .closed
+        }
+        switch lifecycleState {
+        case .closed:
+            show()
+        case .opening, .open:
+            closeWithAnimation()
+        case .closing:
+            reverseToOpen()
+        }
+    }
 
     private init() {
         // Match show() — use visibleFrame so first-open position matches
@@ -158,10 +196,20 @@ class HistoryPopupWindow: NSPanel {
     }
 
     func show() {
+        if lifecycleState == .closing {
+            reverseToOpen()
+            return
+        }
+        if lifecycleState == .open || lifecycleState == .opening {
+            return
+        }
+
         debugLog("HistoryPopupWindow.show() called")
         Perf.instant("swift", "popup.show_begin")
         let perfShow = PerfSpan.start("swift", "popup.show")
         closeSessionGeneration &+= 1
+        let session = closeSessionGeneration
+        lifecycleState = .opening
 
         // Record the app the user was interacting with before the popup surfaces.
         ClipboardBackend.shared.recordFrontmostApp()
@@ -221,11 +269,16 @@ class HistoryPopupWindow: NSPanel {
         // turn. (095b404's concern was onAppear firing before the window was
         // ordered on screen, dropping the fade; animating from `self` after
         // orderFront is always safe, and a close cannot interleave mid-call.)
-        NSAnimationContext.runAnimationGroup { ctx in
+        NSAnimationContext.runAnimationGroup({ ctx in
             ctx.duration = Self.fadeInDuration
             ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
             self.animator().alphaValue = 1
-        }
+        }, completionHandler: { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self = self, self.closeSessionGeneration == session, self.lifecycleState == .opening else { return }
+                self.lifecycleState = .open
+            }
+        })
 
         // Watchdog for the fade-in (same pattern as closeWithAnimation's
         // force-close backstop): the animator animation is a CA transaction
@@ -234,10 +287,13 @@ class HistoryPopupWindow: NSPanel {
         // screen at alpha 0 (invisible). Verify the fade landed after its
         // duration and snap the window visible if it did not.
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.fadeInDuration + 0.1) { [weak self] in
-            guard let self, self.isVisible, self.closeGuaranteeTimer == nil,
+            guard let self, self.closeSessionGeneration == session,
+                  self.lifecycleState == .opening,
+                  self.closeGuaranteeTimer == nil,
                   self.alphaValue < 0.5 else { return }
             debugLog("show(): fade-in dropped; snapping window visible")
             self.alphaValue = 1
+            self.lifecycleState = .open
         }
 
         // Give the hosting view keyboard focus
@@ -266,6 +322,63 @@ class HistoryPopupWindow: NSPanel {
 
         // Synchronous span end: window ordered, key, alpha animation started.
         perfShow?.end()
+    }
+
+    /// Interrupt in-flight closing animation and smoothly reverse back to open.
+    private func reverseToOpen() {
+        debugLog("HistoryPopupWindow.reverseToOpen() called — interrupting close animation")
+        closeSessionGeneration &+= 1
+        let session = closeSessionGeneration
+        closeGuaranteeTimer?.invalidate()
+        closeGuaranteeTimer = nil
+        lifecycleState = .opening
+
+        // Keep backend waiter warm and attribution current
+        ClipboardBackend.shared.recordFrontmostApp()
+        ClipboardBackend.shared.setPopupVisible(true)
+
+        // Cancel the SwiftUI optical dismissal (reverses blur and scale)
+        NotificationCenter.default.post(name: popupCancelDismissNotification, object: nil)
+
+        // Put an open preview back the way it was: closeWithAnimation only faded
+        // it, so the SwiftUI side still thinks it is open and the panel must be
+        // visible again to match.
+        if let pv = previewPanel {
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.1
+                pv.animator().alphaValue = 1
+            }
+        }
+
+        // Re-focus hosting view
+        if let hosting = popupHostingView {
+            self.makeKey()
+            _ = self.makeFirstResponder(hosting)
+            _ = hosting.becomeFirstResponder()
+        }
+
+        // Animate alpha from current position back to 1.0 smoothly
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = Self.fadeInDuration
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            self.animator().alphaValue = 1.0
+        }, completionHandler: { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self = self, self.closeSessionGeneration == session, self.lifecycleState == .opening else { return }
+                self.lifecycleState = .open
+            }
+        })
+
+        // Watchdog for reverseToOpen
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.fadeInDuration + 0.1) { [weak self] in
+            guard let self, self.closeSessionGeneration == session,
+                  self.lifecycleState == .opening,
+                  self.closeGuaranteeTimer == nil,
+                  self.alphaValue < 0.5 else { return }
+            debugLog("reverseToOpen(): fade-in dropped; snapping window visible")
+            self.alphaValue = 1.0
+            self.lifecycleState = .open
+        }
     }
 
     @objc private func didBecomeKey(_ notification: Notification) {
@@ -391,8 +504,14 @@ class HistoryPopupWindow: NSPanel {
     /// leaving the window visible without focus. A timer registered for both
     /// tracking and common run loop modes guarantees the close.
     func closeWithAnimation() {
+        guard lifecycleState != .closing && lifecycleState != .closed else { return }
+        lifecycleState = .closing
+
+        // Keep the preview reference: this close can be reversed (see
+        // reverseToOpen), and nilling it here left the SwiftUI side believing a
+        // preview was open (showPreview stays true) while `previewPanel` was gone.
+        // The panel is only really torn down in close(), which is the commit point.
         let preview = previewPanel
-        previewPanel = nil
 
         closeSessionGeneration &+= 1
         let session = closeSessionGeneration
@@ -406,23 +525,23 @@ class HistoryPopupWindow: NSPanel {
         NotificationCenter.default.post(name: popupWillDismissNotification, object: nil)
 
         NSAnimationContext.runAnimationGroup({ ctx in
-            ctx.duration = 0.15
+            ctx.duration = Self.fadeOutDuration
             ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
             self.animator().alphaValue = 0
         }, completionHandler: { [weak self] in
             MainActor.assumeIsolated {
-                guard let self = self, self.closeSessionGeneration == session else { return }
+                guard let self = self, self.closeSessionGeneration == session, self.lifecycleState == .closing else { return }
                 self.close()
             }
         })
 
+        // Fade the preview out in step with the popup, but do not close it: a
+        // reversal restores its alpha, and close() disposes of it for real.
         if let pv = preview {
-            NSAnimationContext.runAnimationGroup({ ctx in
+            NSAnimationContext.runAnimationGroup { ctx in
                 ctx.duration = 0.1
                 pv.animator().alphaValue = 0
-            }, completionHandler: {
-                MainActor.assumeIsolated { pv.close() }
-            })
+            }
         }
 
         // Guarantee: if the fades above never complete (e.g. their
@@ -432,7 +551,7 @@ class HistoryPopupWindow: NSPanel {
         let guarantee = Timer(timeInterval: 0.4, repeats: false) { [weak self] _ in
             guard let self = self else { return }
             MainActor.assumeIsolated {
-                guard self.closeSessionGeneration == session else { return }
+                guard self.closeSessionGeneration == session, self.lifecycleState == .closing else { return }
                 self.closeGuaranteeTimer = nil
                 if self.isVisible {
                     debugLog("closeWithAnimation: forcing close (animation stalled)")
@@ -450,6 +569,7 @@ class HistoryPopupWindow: NSPanel {
 
     override func close() {
         let perfClose = PerfSpan.start("swift", "popup.close")
+        lifecycleState = .closed
         // Stop the popup-driven history waiter: the list is no longer visible.
         ClipboardBackend.shared.setPopupVisible(false)
 
