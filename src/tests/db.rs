@@ -6,6 +6,64 @@ use crate::types::ClipboardEntry;
 use rusqlite::Connection;
 use super::{insert_text, make_image, make_test_image_rgba, test_db};
 
+/// The startup trim bound must come from the user's saved threshold, not a
+/// compile-time default.
+///
+/// Regression: `clipboard_init` trimmed to `DEFAULT_CLEANUP_THRESHOLD` (3000) and
+/// only *then* pushed the saved preference (e.g. 10000) in. Launching with a
+/// 10,000-row database therefore destroyed 7,000 rows on every start while the
+/// settings panel kept displaying the user's 10,000 — measured on a release build
+/// (`select count(*)` went 10000 -> 3000). The stress-test build hid it behind a
+/// hard-coded 10000 load cap, which is why nothing caught it.
+///
+/// Two things are pinned here, and they are the two halves of the fix:
+///   1. loading with the user's threshold keeps their rows (no truncation), and
+///   2. trimming to that same threshold still enforces the cap.
+#[test]
+fn test_startup_bound_honours_user_threshold_above_default() {
+    use crate::backend::{DEFAULT_CLEANUP_THRESHOLD, MAX_CLEANUP_THRESHOLD};
+
+    // Compile-time invariant: the ceiling the UI offers must exceed the default,
+    // or this test (and the fix it pins) would be meaningless.
+    const { assert!(MAX_CLEANUP_THRESHOLD > DEFAULT_CLEANUP_THRESHOLD) };
+
+    let conn = test_db();
+    let user_threshold = 400; // above the default's spirit, below the ceiling
+    let rows_over_default = DEFAULT_CLEANUP_THRESHOLD + 50;
+    // Keep the corpus small: insert `rows_over_default` cheap text rows.
+    for i in 0..rows_over_default {
+        insert_text(&conn, &format!("startup-bound-{i}"), i as u64);
+    }
+    let total: i64 = conn
+        .query_row("SELECT COUNT(*) FROM clipboard_history", [], |r| r.get(0))
+        .expect("count");
+    assert_eq!(total as usize, rows_over_default);
+
+    // Launch with a threshold ABOVE the compile-time default: every row must
+    // load. Before the fix the load bound was the default, so this returned
+    // exactly `DEFAULT_CLEANUP_THRESHOLD` rows.
+    let loaded = load_history_from_db(&conn, user_threshold.max(rows_over_default));
+    assert_eq!(
+        loaded.len(),
+        rows_over_default,
+        "startup load must be bounded by the caller's threshold, not by the compile-time default"
+    );
+
+    // And trimming to that same threshold still enforces a cap.
+    crate::db::trim_db_history(&conn, user_threshold).expect("trim");
+    let after: i64 = conn
+        .query_row("SELECT COUNT(*) FROM clipboard_history", [], |r| r.get(0))
+        .expect("count");
+    assert_eq!(after as usize, user_threshold, "trim must enforce the user's threshold");
+
+    // The newest rows survive (trim removes oldest first) — the user keeps the
+    // content they most likely want.
+    let loaded = load_history_from_db(&conn, user_threshold);
+    assert_eq!(loaded.len(), user_threshold);
+    let newest = format!("startup-bound-{}", rows_over_default - 1);
+    assert_eq!(loaded[0].label(), newest, "newest row must survive the trim");
+}
+
 #[test]
 fn test_first_launch_tips_seed_into_empty_db() {
     let conn = test_db();

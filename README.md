@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/wonaren/copy-attach/releases"><img src="https://img.shields.io/badge/version-0.108.1-blue?style=flat" alt="Version 0.108.1"></a>
+  <a href="https://github.com/wonaren/copy-attach/releases"><img src="https://img.shields.io/badge/version-0.108.2-blue?style=flat" alt="Version 0.108.2"></a>
   <img src="https://img.shields.io/badge/macOS-15.0%2B-000000?style=flat&logo=apple&logoColor=white" alt="macOS 15.0+">
   <img src="https://img.shields.io/badge/Swift-6%2B-f05138?style=flat&logo=swift&logoColor=white" alt="Swift 6+">
   <img src="https://img.shields.io/badge/Rust-1.75%2B-dea584?style=flat&logo=rust&logoColor=white" alt="Rust 1.75+">
@@ -78,7 +78,7 @@ CopyAttach 是一款专为 macOS 设计的极轻量、高效、自由开源剪�
 
 ## 技术栈与架构
 
-- **Rust 后端**（`src/`，编译为 cdylib `libcopy_attach.dylib`）— 剪贴板底层监控、去重、图片 CatmullRom 缩略图与解码、SQLite FTS5 持久化与内存回收（madvise），通过 65 个 C FFI 接口导出。
+- **Rust 后端**（`src/`，编译为 cdylib `libcopy_attach.dylib`）— 剪贴板底层监控、去重、图片 CatmullRom 缩略图与解码、SQLite FTS5 持久化与内存回收（madvise），通过 66 个 C FFI 接口导出。
 - **Swift 6 前端**（`SwiftApp/`，LSUIElement agent app）— Swift 6 严格并发架构（`@MainActor` 隔离 + `@Observable` 状态管理），AppKit / SwiftUI 无边框原生浮动面板，ProMotion 120fps 滑动无离屏开销。
 
 ## 无负担的设计

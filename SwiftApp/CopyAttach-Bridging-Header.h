@@ -27,7 +27,13 @@ int32_t clipboard_perf_selfcheck(void);
 // 1 = running, 0 = retryable failure, -1 = database corrupt (call
 // clipboard_recover_corrupt_db and re-init, or quit), -2 = environment failure
 // (read-only / permissions / disk full; auto-recovering via backoff).
+//
+// Use clipboard_init_with_threshold: the startup trim bound is the user's saved
+// cleanup threshold (clamped to [100, 10000]), so launching never trims history
+// below their setting. clipboard_init() (no argument) is the older entry point
+// and behaves like a default-preference install.
 int32_t clipboard_init(void);
+int32_t clipboard_init_with_threshold(int32_t threshold);
 // Moves history.db (+ -wal/-shm) aside as history.db.corrupt-<secs>. Only
 // valid after clipboard_init returned -1. Returns 1 on success.
 int32_t clipboard_recover_corrupt_db(void);

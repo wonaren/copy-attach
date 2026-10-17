@@ -254,7 +254,18 @@ pub(crate) fn purge_undo_payload_dir() {
 
 // Constants
 
+/// Default cleanup threshold when the UI has no saved preference.
 pub(crate) const DEFAULT_CLEANUP_THRESHOLD: usize = 3000;
+/// Load cap used when the caller does not pass a threshold (`clipboard_init`).
+///
+/// This is NOT the startup trim bound any more: `clipboard_init_with_threshold`
+/// carries the user's saved setting, so the launch trim uses the same number the
+/// capture path uses. Keeping the load cap at the ceiling means a database larger
+/// than the user's preference is trimmed TO that preference, not silently
+/// truncated to a compile-time default first.
+pub(crate) const MAX_CLEANUP_THRESHOLD: usize = 10000;
+/// Minimum threshold the UI allows (mirrors the Swift slider's lower bound).
+pub(crate) const MIN_CLEANUP_THRESHOLD: usize = 100;
 /// Background clipboard poll cadence.
 pub(crate) const POLL_INTERVAL_MS: u64 = 500;
 

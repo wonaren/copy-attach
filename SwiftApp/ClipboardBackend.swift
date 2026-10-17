@@ -212,7 +212,16 @@ class ClipboardBackend {
         // (DB open, schema ensure, migration) are the ones most needed in a
         // release build; syncing afterwards would silently drop them.
         Self.syncDebugLogging()
-        let result = clipboard_init()
+        // The startup trim bound is the user's saved threshold, read here so the
+        // launch path and the capture path agree. Reading it BEFORE init (and
+        // passing it in) is the whole point: init used to trim to a compile-time
+        // default that a saved preference above it could not raise, so every
+        // launch silently dropped rows the user had asked to keep.
+        let savedThreshold = UserDefaults.standard.integer(forKey: "CleanupThreshold")
+        let initThreshold = savedThreshold >= 100 ? Int32(savedThreshold) : 0
+        let result = initThreshold > 0
+            ? clipboard_init_with_threshold(initThreshold)
+            : clipboard_init()
         // Mirror of the Rust init codes (src/ffi/init.rs):
         //   1 started, 0 retryable, -1 corrupt, -2 permanent environment.
         if result == -1 {
@@ -230,9 +239,10 @@ class ClipboardBackend {
         print("[ClipboardBackend] init result: \(result)")
         permissionGranted = checkPermission()
 
-        // Restore saved cleanup threshold from UserDefaults.
-        // Note: in stress-test builds, clipboard_init() already loads
-        // with a higher limit, so no explicit reload is needed here.
+        // The threshold was already applied by init (it is the startup trim
+        // bound), so this is a no-op trim; it stays as the single place that
+        // pushes the persisted preference into Rust for any init path that was
+        // reached without it (e.g. a retry after a failed start).
         let saved = UserDefaults.standard.integer(forKey: "CleanupThreshold")
         if saved >= 100 {
             clipboard_set_cleanup_threshold(Int32(saved))

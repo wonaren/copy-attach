@@ -325,7 +325,10 @@ pub extern "C" fn clipboard_get_cleanup_threshold() -> i32 {
 #[no_mangle]
 pub extern "C" fn clipboard_set_cleanup_threshold(threshold: i32) {
     if let Some(b) = try_backend() {
-        let t = threshold.clamp(100, 10000) as usize;
+        let t = threshold.clamp(
+            crate::backend::MIN_CLEANUP_THRESHOLD as i32,
+            crate::backend::MAX_CLEANUP_THRESHOLD as i32,
+        ) as usize;
         b.cleanup_threshold.store(t, Ordering::Relaxed);
 
         // Step 1: trim DB first. If DB fails, leave memory intact.

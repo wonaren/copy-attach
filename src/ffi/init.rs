@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use crate::backend::{set_backend, Backend, DEFAULT_CLEANUP_THRESHOLD};
+use crate::backend::{set_backend, Backend, DEFAULT_CLEANUP_THRESHOLD, MAX_CLEANUP_THRESHOLD, MIN_CLEANUP_THRESHOLD};
 use crate::db::{bump_entry_id_watermark, ensure_history_table, entry_id_watermark, get_persist_dir, load_history_from_db, migrate_from_json_to_db, open_db, seed_first_launch_tips, trim_db_history};
 use crate::ignore::IgnoreRules;
 use crate::monitor::clipboard_monitor;
@@ -62,6 +62,29 @@ pub extern "C" fn clipboard_recover_corrupt_db() -> c_int {
 
 #[no_mangle]
 pub extern "C" fn clipboard_init() -> c_int {
+    clipboard_init_inner(None)
+}
+
+/// `clipboard_init` with the user's saved cleanup threshold.
+///
+/// The threshold lives in the UI's preferences (UserDefaults), so Rust cannot
+/// read it at init time; without it the launch trim had to guess with a
+/// compile-time constant, and any saved preference above that constant was
+/// silently truncated on every launch (measured: a 10,000-row database came back
+/// as 3,000 rows after a release-build launch, while the settings panel still
+/// showed 10,000). Passing it here makes the startup trim use the same number the
+/// capture path uses. Clamped like `clipboard_set_cleanup_threshold`, so an
+/// unset/garbage value falls back to `DEFAULT_CLEANUP_THRESHOLD`.
+#[no_mangle]
+pub extern "C" fn clipboard_init_with_threshold(threshold: c_int) -> c_int {
+    clipboard_init_inner(Some(threshold))
+}
+
+fn clipboard_init_inner(threshold: Option<c_int>) -> c_int {
+    let startup_threshold = threshold
+        .map(|t| (t.max(0) as usize).clamp(MIN_CLEANUP_THRESHOLD, MAX_CLEANUP_THRESHOLD))
+        .unwrap_or(DEFAULT_CLEANUP_THRESHOLD);
+
     // OnceLock intentionally retains the backend for process lifetime. Resume
     // the existing backend instead of attempting to replace the singleton.
     if let Some(b) = crate::backend::try_backend() {
@@ -126,17 +149,17 @@ pub extern "C" fn clipboard_init() -> c_int {
     // normal rows; a no-op for any existing user.
     seed_first_launch_tips(&conn);
 
-    // First determine the load limit; then load, THEN trim — otherwise the
-    // trim below the load limit discards entries before we can read them.
-    #[cfg(feature = "stress-test")]
-    const INIT_LOAD: usize = 10000;
-    #[cfg(not(feature = "stress-test"))]
-    const INIT_LOAD: usize = DEFAULT_CLEANUP_THRESHOLD;
-
+    // Load with the startup threshold, THEN trim to it. Order matters: trimming
+    // first would delete rows below the load bound before they can be read.
+    //
+    // The bound is the user's own setting (see `clipboard_init_with_threshold`),
+    // not a compile-time default: any other choice silently drops rows the user
+    // asked to keep on every launch.
+    //
     // `load_history_from_db` already applies `LIMIT ?` with the same bound,
-    // so the returned Vec is at most INIT_LOAD entries.
-    let saved = load_history_from_db(&conn, INIT_LOAD);
-    if trim_db_history(&conn, INIT_LOAD).is_err() {
+    // so the returned Vec is at most `startup_threshold` entries.
+    let saved = load_history_from_db(&conn, startup_threshold);
+    if trim_db_history(&conn, startup_threshold).is_err() {
         crate::error_log!("CopyAttach: startup trim failed; the table stays over the load cap until the next capture's transactional trim");
     }
 
@@ -173,7 +196,7 @@ pub extern "C" fn clipboard_init() -> c_int {
     let pasteboard_event_lock = Arc::new(Mutex::new(()));
     let pending_self_write = Arc::new(Mutex::new(None));
     let db = Arc::new(Mutex::new(conn));
-    let cleanup_threshold = Arc::new(AtomicUsize::new(DEFAULT_CLEANUP_THRESHOLD));
+    let cleanup_threshold = Arc::new(AtomicUsize::new(startup_threshold));
     let ignore_rules = Arc::new(Mutex::new(IgnoreRules::default()));
     let deleted_stack: Arc<Mutex<Vec<crate::backend::DeletedStackEntry>>> = Arc::new(Mutex::new(Vec::new()));
     let last_restored_id = Arc::new(AtomicU64::new(0));

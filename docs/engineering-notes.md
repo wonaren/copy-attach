@@ -13,6 +13,7 @@
 - **图片 hash 同为 FNV-1a（`types::fnv1a`）**，旧 DefaultHasher 值的迁移（user_version 2→3）在 `ffi::init::spawn_image_hash_migration` 后台线程逐行解码重算（`schema::migrate_one_image_row`：一次只锁 DB 一行、解码在锁内逐行进行，捕获只等单行解码而非整库；每行完成后同步镜像进内存条目，同会话重复复制即时去重；完成盖 3，中断幂等重跑，不可解码行显式计数不阻塞盖章；stress-test 构建跳过——其 DB 全部新生成）。
 - **dedup/trim 索引化**：`idx_history_type_hash(entry_type, hash)` 使 `delete_matching_entry` 从全表扫描变索引查找（text 仍带 exact-text 谓词兜底防 2⁻⁶⁴ 碰撞误删），`trim_db_history` 改为 `id <= (SELECT id ... OFFSET ?)` 范围删除——只触达被删行，表内 ≤阈值时子查询为 NULL 完全不扫描（原 `NOT IN` 形态每次捕获全表扫描）。
 - **`migrate_from_json_to_db` 插入的旧 JSON 行同步盖 `entry_id = rowid`**——ensure 的 entry_id 回填先于迁移执行，迁移行若不盖章则每次加载都换新 ID（收藏按 entry_id 存储，重启即失效）；迁移体参数化目录（`migrate_from_json_to_db_at`，test-only 重导出），回归测试用临时目录。
+- **启动裁剪阈值 = 用户设置，不是编译期常量（0.108.2 修复）**：阈值存在 Swift 的 UserDefaults 里，Rust 在 init 时读不到，于是曾用 `INIT_LOAD = DEFAULT_CLEANUP_THRESHOLD`（3000）裁剪，之后才由 Swift 把用户设置推入——用户设 5000/10000 时每次启动都会永久删掉超出 3000 的部分，而设置面板仍显示他的阈值。实测（release 构建）：部署 10000 行库 → 启动后 `select count(*)` 只剩 3000。**stress-test 构建用 `#[cfg]` 把上限写死成 10000，正好掩盖了这个 bug**——这正是「测试构建改行为不改代码路径」的典型陷阱，所以性能数据必须在 product 构建上复核。现改为 `clipboard_init_with_threshold(int32_t)` 由 Swift 先读偏好再传入，init 的 load 与 trim 共用该值（clamp 到 [100,10000]，未设置则回落 3000），`clipboard_init()` 保留为等价的旧入口。绊线：`test_startup_bound_honours_user_threshold_above_default`。
 
 ## 搜索
 
