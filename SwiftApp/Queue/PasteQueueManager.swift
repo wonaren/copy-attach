@@ -96,6 +96,23 @@ final class PasteQueueManager {
         return queueItems.firstIndex { $0.id == item.id }.map { $0 + 1 }
     }
 
+    /// Whether `item` is part of the staged set. Used by the drag path: dragging
+    /// a queued row out of the popup sends the whole set, dragging anything else
+    /// keeps the single-item behaviour.
+    func isQueued(_ item: ClipboardItem) -> Bool {
+        queueItems.contains { $0.id == item.id }
+    }
+
+    /// Drop the first `count` items after a batch dispatch has sent them, so the
+    /// queue holds exactly what has NOT been delivered and a retry cannot paste
+    /// the same entry twice.
+    func removeDelivered(_ count: Int) {
+        guard count > 0, !queueItems.isEmpty else { return }
+        let n = min(count, queueItems.count)
+        queueItems.removeFirst(n)
+        debugLog("PasteQueueManager: batch removed \(n) delivered items, remaining=\(queueItems.count)")
+    }
+
     // MARK: - Staging (Popup List)
 
     /// Toggle an item in or out of the queue (ordered by keypress sequence)

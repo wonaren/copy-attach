@@ -103,6 +103,10 @@ Phase 1 同步 hash + 缩略图（fit 进显示框 920×200px = 460×100pt @2×�
 - **拖拽在途弹窗智能停车**（`tickDragParking`，与松手检测共用 40ms tick）：按屏幕 45%:10%:45% 分区，鼠标在右侧 45% 时弹窗停靠左边缘、左侧 45% 时停靠右边缘，中间 10% 为死区不动；同侧小幅晃动不触发横跳。`park(at:)` 用 `animator().setFrame`（无边框 NSPanel 上 `setFrameOrigin` 静默不动画）；`tickParkingSlide` 侦测 CA 事务停顿（事件跟踪模式下帧动画可能卡死，3 tick 无位移即 `setFrameOrigin` 直接落位）。拖拽结束时开关关闭走 `restoreFromParking()` 滑回居中；`show()`/`close()`/`completeItemDrag` 均 `resetDragParking()`。
 - 开关「连续拖拽」（`ContinuousDrag`，默认关）：关闭时拖拽结束直接 `close()`——与 Esc 相同路径，无动画、无 completion 依赖；开启时保持弹窗、必要时 `restoreFromParking()` 滑回居中，等下一次外部点击再关闭。
 
+- **drop 会“选中”刚插入的内容，批量投递必须绕开这一点**（0.108.4）：把首条作为拖拽载荷送出、其余条目用合成 ⌘V 补发时，接收方会选中 drop 插入的那段内容——紧随其后的第一个 ⌘V **替换**了它。实测：TextEdit 收到 9 字节文本后 AX 选区为 `loc=0 len=9`（内容瞬间被下一条覆盖，最终文本里首条消失）；图片同样中招（一次拖两张 PNG，最终 TextEdit 只有 1 个附件）。因此批量拖拽的载荷是**空占位**，所有条目（文本与图片一视同仁）都由派发器逐条粘贴；单条拖拽路径完全不变。
+- **“落点属于哪个应用”的两个候选都被否掉**（0.108.4）：① `AXUIElementCopyElementAtPosition` 在 AppKit 内容上可用（TextEdit → `AXTextArea`、Hermes → `AXButton`），但在 SwiftUI opaque list 上返回 `-25208`，且落点压在自家弹窗上时会解析到**背后**的应用；② `CGWindowListCopyWindowInfo(.optionOnScreenOnly)` 会返回**其他 Space** 的窗口（实测 macOS 27 / 1470×956：Hermes / Code / Arc / Ghostty 四个全屏窗口同报 `0,33 1470×923`，实际只见其一），按 z 序取第一个会指向用户看不见的应用。最终判定 = **前台应用（`NSWorkspace.frontmostApplication`）+ 用窗口列表仅验证“落点在该应用的某个窗口内”**（几何检查，不做 z 序推理）；落点在自家弹窗内、或无窗口命中 → 不派发，队列原样保留。
+- **派发目标不能用 `source_app.pid`**：那是唤起弹窗前的应用，用户可能拖到另一个应用。`clipboard_send_paste(pid)` 本就接受任意 pid，批量路径把落点应用的 pid 显式传下去，**FFI 零改动**。
+
 ## 弹窗 UI
 
 - **开启（对齐 Spotlight）**：窗口 alpha 淡入 0.2s easeOut，`show()` 在 `orderFrontRegardless()` 后同步执行——刻意不放进 `DispatchQueue.main.async`（async 实测排在 SwiftUI 首帧渲染之后，启动死区 ~40-90ms）；内容侧 `scaleEffect` 1.10→1.0，`spring(response: 0.2, dampingFraction: 0.85)`。**淡入看门狗**：若窗口首帧事务未提交时动画被静默丢弃，弹窗会以 alpha 0 常驻屏幕（可稳定复现）——`show()` 在 `fadeInDuration + 0.1s` 后校验 `isVisible && closeGuaranteeTimer == nil && alphaValue < 0.5`，命中则 snap 到可见；焦点延迟 `openDuration + 0.05`。

@@ -960,7 +960,8 @@ struct HistoryPopupContent: View {
                     case .item(let index, let item):
                         let shortcut: String? = isCommandPressed && index < 9 ? "⌘\(index + 1)" : nil
                         let spotlightRowArmed = OnboardingGuide.shared.isActive && selectedIndex == index + 1
-                        ItemRowView(
+                        let batchPlan = batchDragPlan(for: item)
+                        let rowBody = ItemRowView(
                             item: item,
                             isSelected: selectedIndex == index + 1,
                             isDeleteModifierPressed: isControlPressed,
@@ -982,14 +983,23 @@ struct HistoryPopupContent: View {
                         // Rows exclusively own drag gestures. PopupHostingView
                         // exposes only its outer 3 pt border for moving the
                         // window, so this native drag cannot move the popup.
-                        .onDrag {
-                            selectedIndex = index + 1
-                            popupWindow?.beginItemDrag()
-                            // Rich text is opt-in per source app: it breaks
-                            // VS Code chat drops but is required by 思源笔记 /
-                            // Typora. See `sourceAppNeedsRichTextDrag`.
-                            let richText = backend.sourceAppNeedsRichTextDrag
-                            return ClipboardDragProvider.provider(for: item, richText: richText)
+                        //
+                        // A queued row in a multi-item queue drags the WHOLE set
+                        // (in badge order). The payload is still exactly one
+                        // pasteboard item — the set's first entry — and the rest
+                        // follow as paced keystrokes; see BatchDragController.
+                        Group {
+                            if let plan = batchPlan {
+                                rowBody.onDrag({
+                                    dragProvider(forRow: index, batch: plan)
+                                }, preview: {
+                                    BatchDragChip(item: plan.payload, count: plan.count)
+                                })
+                            } else {
+                                rowBody.onDrag {
+                                    dragProvider(forRow: index, batch: nil)
+                                }
+                            }
                         }
                         .contentShape(Rectangle())
                         .onTapGesture {
@@ -1105,6 +1115,15 @@ struct HistoryPopupContent: View {
 
             Spacer()
 
+            // The queue is also the batch selection, so name the second way to
+            // launch it right here instead of only in the README.
+            if PasteQueueManager.shared.totalCount > 1 {
+                Text("拖拽整组发送")
+                    .font(.system(size: 9.5, weight: .medium))
+                    .foregroundColor(theme.popupPrimaryText)
+                Text("·")
+                    .foregroundColor(theme.popupMutedText)
+            }
             Text("继续按 ⌘C 标记")
                 .font(.system(size: 9.5))
                 .foregroundColor(theme.popupMutedText)
@@ -1169,12 +1188,24 @@ struct HistoryPopupContent: View {
             Spacer()
 
             // --- Right: shortcut hints ---
-            shortcutHint(key: "⌥P", label: "收藏/取消")
-            shortcutHint(key: "Space", label: "预览")
-            shortcutHint(key: "⌃⌫", label: "删除")
-            shortcutHint(key: "⌘Z", label: "撤销")
-            shortcutHint(key: "⌘1~9", label: "快速选择")
-            shortcutHint(key: "右键", label: "菜单")
+            // ⌘-held mode: the rows already reveal their ⌘1…⌘9 shortcuts when
+            // ⌘ goes down, so the bar switches to the ⌘ actions instead of
+            // gaining a seventh permanent hint. Measured at 500 pt (the popup
+            // width): the idle set is 430.5 pt wide, leaving 57.5 pt of slack;
+            // a permanent "⌘C 批量" (41 pt) still fits until the search suffix
+            // ("/ N 项", ~33 pt) appears, which overflows. A mode never does.
+            if isCommandPressed {
+                shortcutHint(key: "⌘C", label: "批量入队/发送")
+                shortcutHint(key: "⌘1~9", label: "快速选择")
+                shortcutHint(key: "⌘Z", label: "撤销")
+            } else {
+                shortcutHint(key: "⌥P", label: "收藏/取消")
+                shortcutHint(key: "Space", label: "预览")
+                shortcutHint(key: "⌃⌫", label: "删除")
+                shortcutHint(key: "⌘Z", label: "撤销")
+                shortcutHint(key: "⌘1~9", label: "快速选择")
+                shortcutHint(key: "右键", label: "菜单")
+            }
         }
         .padding(.horizontal, 6)
         .padding(.vertical, 3)

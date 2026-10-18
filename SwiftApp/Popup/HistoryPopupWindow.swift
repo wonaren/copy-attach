@@ -396,7 +396,15 @@ class HistoryPopupWindow: NSPanel {
             return
         }
         if itemDragInProgress || awaitingPostDragInteraction {
-            if Self.continuousDragEnabled {
+            // Hand the drop point to the batch controller BEFORE closing: a
+            // dispatch must not start while this panel is still the key window
+            // (measured: a keystroke posted to a key panel makes some targets
+            // drop short pastes — see `clipboard_prepare_paste_by_id`).
+            let batchActive = BatchDragController.shared.isActive
+            if batchActive {
+                BatchDragController.shared.dragEnded(at: NSEvent.mouseLocation, popupFrame: self.frame)
+            }
+            if Self.continuousDragEnabled && !batchActive {
                 debugLog("Popup resigned key during item drag; awaiting next interaction")
             } else {
                 // The drag left the popup and focus moved elsewhere (a drop
@@ -452,7 +460,14 @@ class HistoryPopupWindow: NSPanel {
         stopMouseUpWatcher()
         reportItemDragFinished()
 
-        if Self.continuousDragEnabled {
+        // Same contract as the didResignKey path: resolve and dispatch before
+        // the popup goes away, and never leave the panel key while dispatching.
+        let batchActive = BatchDragController.shared.isActive
+        if batchActive {
+            BatchDragController.shared.dragEnded(at: NSEvent.mouseLocation, popupFrame: self.frame)
+        }
+
+        if Self.continuousDragEnabled && !batchActive {
             // 连续拖拽开启：保持弹窗开启，可继续拖拽下一个条目；
             // 下一次外部点击正常关闭。
             if parkedSide != nil {
@@ -580,6 +595,9 @@ class HistoryPopupWindow: NSPanel {
         stopMouseUpWatcher()
         removePostDragClickMonitor()
         resetDragParking()
+        // A drag cut short by the popup closing must not leave a batch armed;
+        // `dragEnded` is the only path that may start a dispatch.
+        BatchDragController.shared.cancel()
         closeGuaranteeTimer?.invalidate()
         closeGuaranteeTimer = nil
         previewPanel?.close()

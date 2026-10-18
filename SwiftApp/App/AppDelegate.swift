@@ -409,6 +409,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             debugLog("togglePopup: leaving the paste queue before showing history")
             PasteQueueManager.shared.cancel()
         }
+        // Same signal for a batch that is still being dispatched: summing the
+        // list means the user is done watching it, and a keystroke sequence that
+        // keeps typing into another app is the last thing they want.
+        if BatchDispenseRunner.shared.isRunning {
+            debugLog("togglePopup: cancelling the in-flight batch dispatch")
+            BatchDispenseRunner.shared.cancel()
+        }
         popup.toggle()
         if popup.isOpenOrOpening {
             OnboardingGuide.shared.record(.popupOpened)

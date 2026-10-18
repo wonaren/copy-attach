@@ -111,6 +111,28 @@ enum ClipboardDragProvider {
         .text,
     ]
 
+    /// A text payload that carries no content, used by the batch drag.
+    ///
+    /// Measured: TextEdit *selects* the text a drop inserts (AX selection
+    /// `loc=0 len=9` right after a 9-byte drop), so the first synthesized ⌘V of
+    /// the batch replaced the dropped item instead of appending after it — the
+    /// first entry vanished from the result. An empty payload leaves no
+    /// selection to replace; every entry of a batch then arrives the same way,
+    /// through ⌘V, and the order is fixed by the queue.
+    static func placeholderProvider() -> NSItemProvider {
+        let provider = NSItemProvider()
+        for type in plainTextRepresentationTypes {
+            provider.registerDataRepresentation(
+                forTypeIdentifier: type.identifier,
+                visibility: .all
+            ) { completion in
+                completion(Data(), nil)
+                return nil
+            }
+        }
+        return provider
+    }
+
     /// The representations used for apps that only accept rich text.
     ///
     /// Adds HTML and RTF to the plain set. Only used when the source app opted

@@ -860,10 +860,12 @@ class ClipboardBackend {
     func pasteEntryById(_ entryId: UInt64,
                         asPath: Bool = false,
                         dismiss: () -> Void = {},
+                        targetPID: Int32? = nil,
+                        refreshAfter: Bool = true,
                         perfName: String = "paste.queue_keystroke") -> PasteOutcome {
         let perfPaste = PerfSpan.start("swift", perfName)
-        let pid = clipboard_prepare_paste_by_id(entryId, asPath)
-        guard pid > 0 else {
+        let preparedPID = clipboard_prepare_paste_by_id(entryId, asPath)
+        guard preparedPID > 0 else {
             errorLog("pasteEntryById: clipboard_prepare_paste_by_id failed for entry \(entryId)")
             perfPaste?.end()
             return .entryUnavailable
@@ -871,6 +873,10 @@ class ClipboardBackend {
 
         dismiss()
 
+        // The batch path delivers to the app the user dropped on, which is not
+        // necessarily `source_app.pid` (that is the app the popup was opened
+        // over). `clipboard_send_paste` takes any pid, so no FFI change.
+        let pid = targetPID ?? preparedPID
         let delivered = clipboard_send_paste(pid) != 0
         if !delivered {
             errorLog("pasteEntryById: ⌘V delivery failed for entry \(entryId) (pid \(pid))")
@@ -881,8 +887,12 @@ class ClipboardBackend {
         perfPaste?.end()
 
         // History order changed (selected item moved to top) — refresh for the
-        // next open. Done last so it never delays the keystroke.
-        reloadItems()
+        // next open. Done last so it never delays the keystroke. A batch skips
+        // it per item and refreshes once at the end (N packed-snapshot decodes
+        // would otherwise sit inside a keystroke sequence).
+        if refreshAfter {
+            reloadItems()
+        }
 
         return delivered ? .pasted : .keystrokeNotDelivered
     }

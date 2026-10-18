@@ -3,6 +3,56 @@ import SwiftUI
 // MARK: - Actions (delete / select / undo)
 
 extension HistoryPopupContent {
+    /// What a drag from a queued row carries.
+    ///
+    /// `payload` is always the queue's FIRST item, not the row the user grabbed:
+    /// the badges promise "delivered in this order", so a drag from row ③ must
+    /// still land ①②③ in that order. The remaining items follow through
+    /// `BatchDispenseRunner` as synthesized keystrokes.
+    struct BatchDragPlan {
+        let payload: ClipboardItem
+        let items: [ClipboardItem]
+        var count: Int { items.count }
+
+        /// The drop delivers NOTHING, for text and images alike.
+        ///
+        /// Measured on TextEdit and on Notes: a receiver SELECTS whatever the
+        /// drop inserted (text: AX selection `loc=0 len=9` after a 9-byte drop;
+        /// images: a dropped PNG stayed selected), so the next ⌘V of the batch
+        /// REPLACED the dropped entry instead of appending after it — the first
+        /// item of the batch disappeared. A batch therefore drags an empty
+        /// placeholder and every entry arrives the same way, by ⌘V, in queue
+        /// order. The `payload` stays here for the drag chip's label.
+    }
+
+    /// A batch drag happens only when the grabbed row is part of a queue with
+    /// more than one item. Everything else — including a one-item queue — keeps
+    /// today's single-item drag path untouched.
+    func batchDragPlan(for item: ClipboardItem) -> BatchDragPlan? {
+        let queue = PasteQueueManager.shared
+        guard queue.totalCount > 1,
+              queue.isQueued(item),
+              let payload = queue.queueItems.first else { return nil }
+        return BatchDragPlan(payload: payload, items: queue.queueItems)
+    }
+
+    /// Arms the drag and returns its payload provider. `batch != nil` means the
+    /// whole queued set travels.
+    func dragProvider(forRow index: Int, batch: BatchDragPlan?) -> NSItemProvider {
+        selectedIndex = index + 1
+        popupWindow?.beginItemDrag()
+        // Rich text is opt-in per source app: it breaks VS Code chat drops but is
+        // required by 思源笔记 / Typora. See `sourceAppNeedsRichTextDrag`.
+        let richText = backend.sourceAppNeedsRichTextDrag
+        if let batch {
+            BatchDragController.shared.begin(items: batch.items)
+            return ClipboardDragProvider.placeholderProvider()
+        }
+        BatchDragController.shared.cancel()
+        guard index < displayItems.count else { return NSItemProvider() }
+        return ClipboardDragProvider.provider(for: displayItems[index], richText: richText)
+    }
+
     func deleteItem(at index: Int) {
         let items = displayItems
         guard index < items.count else { return }
