@@ -966,8 +966,7 @@ struct HistoryPopupContent: View {
                     case .item(let index, let item):
                         let shortcut: String? = isCommandPressed && index < 9 ? "⌘\(index + 1)" : nil
                         let spotlightRowArmed = OnboardingGuide.shared.isActive && selectedIndex == index + 1
-                        let batchPlan = batchDragPlan(for: item)
-                        let rowBody = ItemRowView(
+                        ItemRowView(
                             item: item,
                             isSelected: selectedIndex == index + 1,
                             isDeleteModifierPressed: isControlPressed,
@@ -994,19 +993,23 @@ struct HistoryPopupContent: View {
                         // (in badge order). Every entry is sent by
                         // BatchDispenseRunner; the drag itself carries an empty
                         // placeholder (see BatchDragPlan).
-                        Group {
-                            if let plan = batchPlan {
-                                rowBody.onDrag({
-                                    dragProvider(forRow: index, item: item, batch: plan)
-                                }, preview: {
-                                    BatchDragChip(item: plan.payload, count: plan.count)
-                                })
-                            } else {
-                                rowBody.onDrag {
-                                    dragProvider(forRow: index, item: item, batch: nil)
-                                }
-                            }
-                        }
+                        //
+                        // The batch decision is made when the drag STARTS, never
+                        // in the body. A body-time `if batch` around the drag
+                        // modifier gives the row two possible view types, and
+                        // flipping it rebuilds the row's whole subtree: measured
+                        // in a minimal harness, marking the 2nd item re-inserted
+                        // every already-marked row's badge and the selected row's
+                        // matched-geometry pill, replaying those transitions inside
+                        // the ⌘C spring (a visible scale + flicker). One modifier
+                        // shape for every row means no flip, so only the new badge
+                        // animates.
+                        .onDrag({
+                            dragProvider(forRow: index, item: item, batch: batchDragPlan(for: item))
+                        }, preview: {
+                            let plan = batchDragPlan(for: item)
+                            DragChip(item: plan?.payload ?? item, count: plan?.count ?? 1)
+                        })
                         .contentShape(Rectangle())
                         .onTapGesture {
                             if editingItemId == item.id { return }

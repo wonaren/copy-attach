@@ -266,13 +266,19 @@ final class BatchDragController {
 
 // MARK: - Drag preview
 
-/// The drag image for a batch: the leading item plus the batch size.
+/// The drag image for every row drag: a single entry, or a batch whose payload
+/// is only its first item.
 ///
-/// The payload is a single pasteboard item, so the drag cannot show N stacked
-/// row images (one `NSDraggingItem` per pasteboard item). A single chip stated
-/// as "N 条" is the honest representation of "one payload, N to follow".
-struct BatchDragChip: View {
+/// One view type serves both cases on purpose. Picking between two preview
+/// types in the row's body gave the row two possible view types, and every flip
+/// (the queue crossing 1 -> 2 entries) rebuilt the row subtree and replayed its
+/// transitions. The count capsule appears only when more than one entry will be
+/// delivered: the payload is a single pasteboard item, so the drag cannot show N
+/// stacked row images (one `NSDraggingItem` per pasteboard item), and "N 条" is
+/// the honest representation of "one payload, N to follow".
+struct DragChip: View {
     let item: ClipboardItem
+    /// How many entries the drop delivers; 1 for an ordinary single-entry drag.
     let count: Int
     @Environment(\.appTheme) private var theme
     @Environment(\.colorScheme) private var colorScheme
@@ -295,13 +301,15 @@ struct BatchDragChip: View {
                 .foregroundColor(theme.popupPrimaryText)
                 .lineLimit(1)
                 .truncationMode(.tail)
-            Text("\(count) 条")
-                .font(.system(size: 10, weight: .bold, design: .rounded))
-                .foregroundColor(.white)
-                .padding(.horizontal, 7)
-                .padding(.vertical, 3)
-                .background(Capsule().fill(Color(nsColor: .controlAccentColor)))
-                .fixedSize()
+            if count > 1 {
+                Text("\(count) 条")
+                    .font(.system(size: 10, weight: .bold, design: .rounded))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background(Capsule().fill(Color(nsColor: .controlAccentColor)))
+                    .fixedSize()
+            }
         }
         .padding(.horizontal, 9)
         .padding(.vertical, 6)
