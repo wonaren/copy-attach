@@ -47,6 +47,11 @@ final class PasteQueueManager {
     /// Distinguishes "all pasted" from "all skipped as stale" in the HUD.
     private(set) var failedSkipCount: Int = 0
 
+    /// Set when a batch dispatch stopped with items still queued. The next popup
+    /// open consumes it and keeps the queue visible for one retry instead of
+    /// applying the normal "a queue never outlives its list" clear.
+    private(set) var pendingBatchRetry = false
+
     /// Delayed teardown task token to avoid race conditions
     @ObservationIgnored
     private var finishTask: Task<Void, Never>?
@@ -113,6 +118,23 @@ final class PasteQueueManager {
         debugLog("PasteQueueManager: batch removed \(n) delivered items, remaining=\(queueItems.count)")
     }
 
+    /// Keep the staged remainder for one retry. Called when a dispatch stopped
+    /// before delivering everything (target died, entry vanished, activation
+    /// failed) so the next popup open does not silently clear the queue.
+    func markPendingBatchRetry() {
+        guard !queueItems.isEmpty else { return }
+        pendingBatchRetry = true
+        debugLog("PasteQueueManager: pending batch retry, remaining=\(queueItems.count)")
+    }
+
+    /// Consume the one-shot preserve flag when the popup mounts.
+    func consumePendingBatchRetryOnOpen() -> Bool {
+        guard pendingBatchRetry else { return false }
+        pendingBatchRetry = false
+        debugLog("PasteQueueManager: preserving \(queueItems.count) item(s) for retry")
+        return true
+    }
+
     // MARK: - Staging (Popup List)
 
     /// Toggle an item in or out of the queue (ordered by keypress sequence)
@@ -156,6 +178,7 @@ final class PasteQueueManager {
         resetWatchdog(active: false)
         QueueEventTap.shared.stop()
         PasteQueueHUDWindow.shared.dismiss()
+        pendingBatchRetry = false
 
         guard !queueItems.isEmpty || status != .idle || isFinished else { return }
         queueItems.removeAll(keepingCapacity: true)

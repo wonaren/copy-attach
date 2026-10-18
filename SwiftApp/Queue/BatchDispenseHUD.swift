@@ -155,7 +155,7 @@ struct BatchDispenseHUDView: View {
                 .font(.system(size: 13, weight: .bold))
                 .foregroundColor(finishedNotice == nil
                                  ? Color(nsColor: .systemGreen) : Color(nsColor: .systemOrange))
-            Text(finishedNotice == nil ? "已送达 \(sent)/\(total)" : finishedNotice ?? "")
+            Text(finishedNotice == nil ? "已发送 \(sent)/\(total)" : finishedNotice ?? "")
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundColor(finishedNotice == nil ? theme.popupPrimaryText : Color(nsColor: .systemOrange))
                 .lineLimit(1)

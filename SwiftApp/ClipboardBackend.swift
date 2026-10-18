@@ -832,6 +832,11 @@ class ClipboardBackend {
     /// (retrying would paste the same payload twice) while telling the user the
     /// content is on the clipboard; only a full success is silent.
     enum PasteOutcome: Equatable {
+        /// Pasteboard written and the ⌘V event was posted to the target pid.
+        /// This is NOT proof the target consumed it: `CGEventPostToPid` succeeds
+        /// as soon as the event is delivered to the process, and an app with no
+        /// editable focus can ignore it silently. Batch HUD wording must say
+        /// "sent", never "delivered".
         case pasted
         /// Pasteboard written, ⌘V could not be delivered (target exited, or the
         /// event could not be posted).

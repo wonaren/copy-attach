@@ -1,6 +1,6 @@
 # 设计提案：批量拖拽（一次拖出，多条落位）
 
-> 状态：**设计稿，未实现**。文中每一条「已验证」都必须在真实调用路径上观察到才算数；未标注的一律视为假设。
+> 状态：**已实现（v0.108.4，含落点解析与失败重试修正）**。正文 §1–§11 保留提案原貌，其中与最终实现冲突的部分以 **§13 评审修正** 为准。文中每一条「已验证」都必须在真实调用路径上观察到才算数；未标注的一律视为假设。
 
 ## 1. 目标与非目标
 
@@ -9,7 +9,7 @@
 **非目标（v1 明确不做）**
 - 跨应用「批量搬运文件到 Finder 的某个文件夹」的专门优化（复用同一机制即可，不做额外分支）。
 - 拖拽过程中实时预览批次清单、拖拽中动态改序。
-- 无辅助功能权限下的自动多贴（降级为只送首条并明示）。
+- 无辅助功能权限下的自动多贴（降级为不派发并明示）。
 
 ## 2. 结论先行：三个决策
 
@@ -63,6 +63,8 @@ D2 的替代方案（`payload = N items`，零合成击键）保留为 Phase 0 �
 
 ### 4.3 落位（派发）
 
+> 已被 §12/§13 取代：载荷是空占位，N 条全部由派发器送出；落点由 AX 解析，非前台目标先激活。
+
 ```
 松手 / 弹窗失焦
    ↓  取落点（NSEvent.mouseLocation）
@@ -87,7 +89,7 @@ HUD 复用队列胶囊的视觉（`PasteQueueHUDView` 的排版），但**独立
 
 - **选择 = `PasteQueueManager.queueItems`**（有序数组，顺序即索引）。不新增第二个「选择」状态。
 - 派发任务的输入是**快照**：`[(entryId, index)]` + `targetPID` + `startedAt`。派发开始后不再读队列，避免用户在 HUD 期间改动队列导致语义漂移。
-- 不变量 I1：`payload` 永远只含 1 条 = `queueItems[0]`；派发只处理 `1..<N`。
+- 不变量 I1：`payload` 是空占位；派发处理 `0..<N`（§13）。
 - 不变量 I2：任何一次 `send_paste` 之前的 `prepare` 必须先成功；`prepare == 0` → 停止整批（权限/DB/条目失效都会让它返回 0）。
 - 不变量 I3：派发期间弹窗必须已 close（见 §3 硬约束 1）。
 - 不变量 I4：派发目标 pid 在整批内固定不变；pid 失活（`send_paste == 0`）即中止，不换目标重试。
@@ -98,10 +100,9 @@ HUD 复用队列胶囊的视觉（`PasteQueueHUDView` 的排版），但**独立
 | 文件 | 改动 | 性质 |
 |---|---|---|
 | `Popup/ClipboardDragProvider.swift` | 抽出 `representations(for:richText:) -> [(uti, Data)]`；`provider(for:)` 与其新调用方共用（风味单一真相源） | 重构，行为不变 |
-| `Popup/BatchDragController.swift`（新） | 判断本次拖动是否整组；生成拖影位图；记录拖拽起始状态；落点解析；触发派发 | 新增 ~180 行 |
-| `Popup/BatchDropper.swift`（新） | 落点 → pid 解析（`CGWindowListCopyWindowInfo(.optionOnScreenOnly)` 前到后第一个包含落点、owner≠自身的窗口）+ frontmost 校验 | 新增 ~60 行 |
-| `Queue/BatchDispenseRunner.swift`（新） | 定速派发状态机（MainActor Task）、取消、进度回调 | 新增 ~120 行 |
-| `Queue/BatchHUDWindow.swift` + View（新，复用视觉） | 进度胶囊 | 新增 |
+| `Popup/BatchDrag.swift`（新） | 落点解析 + 批量拖拽控制器 + 拖影；v0.108.4 起落点解析改为 AX 顶层元素 | 新增 |
+| `Queue/BatchDispenseRunner.swift`（新） | 定速派发状态机（MainActor Task）、取消、失败保留剩余项 | 新增 |
+| `Queue/BatchDispenseHUD.swift` + View（新，复用视觉） | 进度胶囊 | 新增 |
 | `Popup/HistoryPopupContent.swift:985` | `.onDrag` 内分流：在队且 N≥2 → 整组；否则原路径 | 小改 |
 | `Popup/HistoryPopupWindow.swift:387-475` | 拖拽结束时通知 `BatchDragController`（`didResignKey` 与 `completeItemDrag` 两条出口都要），批量时强制 close | 小改，注意别改变单条路径的时序 |
 | `ClipboardBackend.swift:860` | `pasteEntryById` 增加 `targetPID: Int32?`（nil = 今天的行为）；有值时 `send_paste(targetPID)` | 参数化，无分支扩散 |
@@ -118,9 +119,9 @@ HUD 复用队列胶囊的视觉（`PasteQueueHUDView` 的排版），但**独立
 
 | 情况 | 表现 | 处理 |
 |---|---|---|
-| 无辅助功能权限 | `prepare` 返回 0 | 只送达首条；HUD「批量粘贴需要辅助功能权限」；队列保留 |
+| 无辅助功能权限 | `prepare` 返回 0 | 不派发；HUD「批量粘贴需要辅助功能权限」；队列保留（§13） |
 | 落点无窗口 / 落回自己 | 无 pid | 不派发，队列不动（用户视为取消） |
-| 落点窗口的 App 不是 frontmost | 可能贴进它的另一个窗口 | 中止剩余项并明示，不猜测 |
+| 落点窗口的 App 不是 frontmost | AX 识别出落点应用 | 先 `activate()` 并确认 frontmost，成功才派发；失败中止并明示（§13） |
 | 落点 App 拒绝该拖拽风味 | 首条没有落进去 | 剩余 N-1 条仍按落点投递（落点是用户的意图），日志记录 |
 | 派发中途某条失效 | `prepare == 0` | 停止整批（不跳过继续，避免「跳过一条后顺序错位 + 用户不知道少了哪条」） |
 | 目标进程退出 | `send_paste == 0` | 中止，HUD「目标应用已退出」 |
@@ -198,6 +199,20 @@ HUD 复用队列胶囊的视觉（`PasteQueueHUDView` 的排版），但**独立
 **未实测（不要在文档/Release 里宣称）**：
 - 辅助功能权限被撤销时的降级（需要用户到系统设置里改授权，未动）；
 - 思源笔记 / Typora 的富文本风味（本机未安装这两个应用）；
-- 拖到桌面空白 / 后台非前台窗口 ⇒ 按设计不派发、队列不动，但只做了代码路径审查，未在真实落点上复现；
+- 桌面空白（Finder）作为落点：AX 会返回 Finder，批次会激活 Finder 并派发；Finder 对文本 ⌘V 的实际行为未验证；
 - 队列 > 3 条的长批次（机制是循环，未做长批次计时）。
+
+## 13. 评审修正（v0.108.4，实测）
+
+§12 的“已验证”里隐藏了两个真实路径，本次在同一台机器上用真实调用路径复现并修正：
+
+1. **落点解析误判**：前台是 Finder、TextEdit 的可见窗口在 (1200,300)。旧实现只查 frontmost（Finder）的窗口（161..1081），得到 `no drop target`；用户拖到可见的 TextEdit 什么都不会发生，且没有任何 HUD 提示。根因不是概率，而是“前台应用 + 任一窗口包含落点”这个判据回答不了“落点在谁上面”。
+   - 修正：弹窗外用 `AXUIElementCopyElementAtPosition` 取落点顶层元素的 owner pid；菜单栏 / 非 regular app / 无 AX 元素 → HUD 明示 + 保留队列。
+   - 目标不是 frontmost 时显式 `activate()` 并轮询确认（50ms × 10），成功后才派发。空载荷的 drop 常被拒绝（日志 4 次 `drop never accepted`），不能指望它自动激活。
+   - 验证：旧实现同一落点 → `no drop target`（实测）；新实现 → `AX pid=38722`、`activated 文本编辑`、`dispatching`、`sent=3/3`。8/8 合成落点激活+派发，3/3 端到端 3 条落位，真实鼠标拖拽 1 次 `sent=3/3`。
+2. **“剩余项可重试”不可达**：`finish` 只 `removeDelivered(sent)`，剩余项留在内存队列；但用户唯一回到队列的路径是重开弹窗，而 `onAppear` 会无条件 `clear()`。所以“可重试”在旧实现里是假的（作者只验证了 `remaining=1` 计数，没有验证重开后的重试）。
+   - 修正：`PasteQueueManager.pendingBatchRetry`（一次性）；失败时保留，下次打开弹窗 `consumePendingBatchRetryOnOpen()` 跳过 clear；主动打开历史取消（`userCancelled`）仍然清空。
+   - 验证：无目标失败 → 重开队列 3（旧实现 0）；失败 `sent=0/3` → 重开队列 3；再次拖拽 → `sent=3/3`。
+3. **“已送达”口径**：`CGEventPostToPid` 成功只证明事件投递到进程，不证明应用消费了 ⌘V。HUD 改为“已发送”；`PasteOutcome.pasted` 注释写明。
+4. 其他：批次派发前 `pruneStaleEntries()`；单条拖拽使用行捕获的 `item` 而不是 `displayItems[index]`；成功路径记录落点/AX/frontmost；无目标/权限/激活失败都有 HUD 明示。
 

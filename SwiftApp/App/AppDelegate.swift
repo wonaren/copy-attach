@@ -411,10 +411,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         // Same signal for a batch that is still being dispatched: summing the
         // list means the user is done watching it, and a keystroke sequence that
-        // keeps typing into another app is the last thing they want.
-        if BatchDispenseRunner.shared.isRunning {
+        // keeps typing into another app is the last thing they want. This also
+        // covers the short window where the batch is waiting for target
+        // activation and BatchDispenseRunner has not started yet.
+        if BatchDragController.shared.isDispatching {
             debugLog("togglePopup: cancelling the in-flight batch dispatch")
-            BatchDispenseRunner.shared.cancel()
+            BatchDragController.shared.abortPendingDispatch()
         }
         popup.toggle()
         if popup.isOpenOrOpening {

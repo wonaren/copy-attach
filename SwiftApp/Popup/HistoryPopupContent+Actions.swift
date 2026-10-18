@@ -38,7 +38,12 @@ extension HistoryPopupContent {
 
     /// Arms the drag and returns its payload provider. `batch != nil` means the
     /// whole queued set travels.
-    func dragProvider(forRow index: Int, batch: BatchDragPlan?) -> NSItemProvider {
+    ///
+    /// `item` is the row's item captured at body-build time. The single-item
+    /// path must use it, not `displayItems[index]`: a capture can prepend a row
+    /// between the body pass and `.onDrag`, and re-indexing would drag a
+    /// different entry than the one under the cursor.
+    func dragProvider(forRow index: Int, item: ClipboardItem, batch: BatchDragPlan?) -> NSItemProvider {
         selectedIndex = index + 1
         popupWindow?.beginItemDrag()
         // Rich text is opt-in per source app: it breaks VS Code chat drops but is
@@ -49,8 +54,7 @@ extension HistoryPopupContent {
             return ClipboardDragProvider.placeholderProvider()
         }
         BatchDragController.shared.cancel()
-        guard index < displayItems.count else { return NSItemProvider() }
-        return ClipboardDragProvider.provider(for: displayItems[index], richText: richText)
+        return ClipboardDragProvider.provider(for: item, richText: richText)
     }
 
     func deleteItem(at index: Int) {

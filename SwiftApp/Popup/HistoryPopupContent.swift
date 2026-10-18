@@ -436,7 +436,10 @@ struct HistoryPopupContent: View {
             // before showing the popup, so this normally sees an idle queue. It
             // still exists for any other path that mounts this view while a queue
             // is live — the queue must never outlive the list it was built from.
-            if PasteQueueManager.shared.hasItems {
+            // Exception: a batch that stopped with items still queued keeps them
+            // for one retry (consumed here, so a later open clears as usual).
+            let preserveForRetry = PasteQueueManager.shared.consumePendingBatchRetryOnOpen()
+            if PasteQueueManager.shared.hasItems && !preserveForRetry {
                 PasteQueueManager.shared.clear()
             }
             searchText = ""
@@ -985,19 +988,19 @@ struct HistoryPopupContent: View {
                         // window, so this native drag cannot move the popup.
                         //
                         // A queued row in a multi-item queue drags the WHOLE set
-                        // (in badge order). The payload is still exactly one
-                        // pasteboard item — the set's first entry — and the rest
-                        // follow as paced keystrokes; see BatchDragController.
+                        // (in badge order). Every entry is sent by
+                        // BatchDispenseRunner; the drag itself carries an empty
+                        // placeholder (see BatchDragPlan).
                         Group {
                             if let plan = batchPlan {
                                 rowBody.onDrag({
-                                    dragProvider(forRow: index, batch: plan)
+                                    dragProvider(forRow: index, item: item, batch: plan)
                                 }, preview: {
                                     BatchDragChip(item: plan.payload, count: plan.count)
                                 })
                             } else {
                                 rowBody.onDrag {
-                                    dragProvider(forRow: index, batch: nil)
+                                    dragProvider(forRow: index, item: item, batch: nil)
                                 }
                             }
                         }

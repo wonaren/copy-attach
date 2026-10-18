@@ -117,8 +117,8 @@ SwiftApp/
   ├── Settings/                        ← InlineSettingsView（5 标签页：通用/快捷键/存储/忽略/关于）
   │                                       + GeneralTab / ShortcutsTab / StorageTab / IgnoreTab / AboutTab / SheetDismissHelper
   ├── Onboarding/                      ← 核心操作引导（5 文件：引导模型/浮窗卡片/聚光灯遮罩）
-  ├── Queue/                           ← 粘贴队列（4 文件：状态管理/HUD窗口/HUD视图/CGEventTap拦截器）
-  ├── Popup/                           ← 主弹窗（12 文件：内容/窗口/事件/行/拖拽/右键菜单/标签过滤/预览/动作）
+  ├── Queue/                           ← 粘贴队列（6 文件：状态管理/HUD窗口/HUD视图/CGEventTap拦截器/批量派发/批量HUD）
+  ├── Popup/                           ← 主弹窗（13 文件：内容/窗口/事件/行/拖拽/批量拖拽/右键菜单/标签过滤/预览/动作）
   ├── Preview/                         ← 预览窗口（4 文件：窗口/内容/布局/缩放）
   ├── Backend/                         ← ClipboardItem / ImageDecode / AppIcon 缓存 / PackedSnapshot / PreviewDecodeGate
   ├── Stress/                          ← 压力测试面板与视图模型（依赖 STRESS=1 构建）
@@ -135,7 +135,7 @@ SwiftApp/
 - **粘贴目标 pid 不变式**：Cmd+V 投递给 `source_app.pid`（由 `NSWorkspace.didActivateApplicationNotification` 事件驱动更新，不轮询）。该 pid 必须是用户打开弹窗前的 app，绝不能是 CopyAttach 自身
 - **粘贴后必须归还前台**：预览会强制 `NSApp.activate`（捏合手势只投给最前台 app），而系统**不会**自动归还 —— 不归还的话 Cmd+V 仍能投进目标 app（内容进去了），但该 app 留在后台，光标回不到输入框。`selectItem` 粘贴后调 `ClipboardBackend.restorePasteTargetFocus()`；它只在 `NSApp.isActive` 为真时才动手，所以从不激活的普通路径是 no-op
 - **粘贴队列（`Queue/`）**：在列表按 `⌘C` 只维护一个有序数组（序号徽标在视图侧由 `orderMap` 派生，不再存第二份顺序），不写剪贴板、不触发 `monitor.rs` 重新捕获置顶；回车启动顺序取用：先按当前快照剔除已失效条目（`pruneStaleEntries`，对空快照不做剔除）→ 再启动 `QueueEventTap`，成功才允许 dismiss 弹窗展开胶囊 HUD；取用阶段通过 `ClipboardBackend.pasteEntryById` 走规范两阶段粘贴，返回 `PasteOutcome`：`.pasted` 前进、`.keystrokeNotDelivered` 前进并提示（内容已在剪贴板，重试会重复粘贴）、`.entryUnavailable` 跳过并提示；`QueueEventTap` 吞掉物理 ⌘V（修饰键精确匹配，`⌥⌘V` 等组合一律放行），合成事件按**事件来源**（`eventSourceUnixProcessID`）识别而**不是时间窗**——实测 `CGEventPostToPid` 事件根本不进 session tap，Esc 单次一律放行给目标应用、**连按两次**才退出队列；闲置看门狗 3 分钟；`clear()` / `cancel()` 强行保证同时拆除 Tap 与 HUD。
-- **批量拖拽（`Popup/BatchDrag.swift` + `Queue/BatchDispenseRunner.swift`）**：队列 ≥2 项时，拖动队列中任一行 = 拖整组（按徽标顺序）。**拖拽载荷是空占位，一条内容都不走 drop**——实测接收方会选中 drop 刚插入的内容（文本：AX selection `loc=0 len=9`；图片：TextEdit 附件数 1 而非 2），紧随其后的 ⌘V 会把首条**替换**掉。所有条目统一由派发器经 `prepare → send_paste(落点 pid)` 送出（settle 250 ms、间隔 150 ms）。落点判定 = **前台应用 + 落点在其窗口内**：AX 位置命中在 SwiftUI opaque list 上返回 `-25208`（且落点在自家弹窗上会解析到背后的应用），`CGWindowListCopyWindowInfo(.optionOnScreenOnly)` 会列出**其他 Space** 的窗口（实测四个全屏应用同 bounds），两者都被实测否掉。派发前必须关闭弹窗（panel 为 key 时微信丢短粘贴）；已送达条目立刻出队，失败/取消保留剩余。
+- **批量拖拽（`Popup/BatchDrag.swift` + `Queue/BatchDispenseRunner.swift`）**：队列 ≥2 项时，拖动队列中任一行 = 拖整组（按徽标顺序）。**拖拽载荷是空占位，一条内容都不走 drop**——实测接收方会选中 drop 刚插入的内容（文本：AX selection `loc=0 len=9`；图片：TextEdit 附件数 1 而非 2），紧随其后的 ⌘V 会把首条**替换**掉。所有条目统一由派发器经 `prepare → send_paste(落点 pid)` 送出（settle 250 ms、间隔 150 ms）。落点判定 = 弹窗外 `AXUIElementCopyElementAtPosition` 命中的顶层元素（返回该元素 owner pid；菜单栏/非 regular app/AX 无元素一律明示拒绝）。**旧的「前台应用 + 窗口几何」已废弃**：实测前台是 Finder、TextEdit 可见窗口在 (1200,300) 时，旧判定只查 Finder 的窗口（161..1081）→ 直接 no drop target，用户拖到可见的 TextEdit 什么都不会发生。落点应用不是前台时显式 `activate()` 并轮询确认 frontmost（最多 ~500ms）后再派发——空载荷常被 drop 拒绝，目标不会自己激活。派发前必须关闭弹窗（panel 为 key 时微信丢短粘贴）；已发送条目在整批结束时出队（不是逐条）；失败保留剩余项（`pendingBatchRetry`，下次打开历史保留一次可重试），主动打开历史取消则清空。**HUD 只说「已发送」**：`CGEventPostToPid` 成功只证明事件已投递，不证明目标消费了 ⌘V。
 - **弹窗开闭打断状态机**：弹窗通过 `LifecycleState`（`closed`/`opening`/`open`/`closing`）管理生命周期，快速连续敲击快捷键在 `closing` 阶段触发 `reverseToOpen()`，直接将当前半空 alpha 平滑插值拉回 1.0 并恢复焦点，免除冷启动与视图重建闪烁。
 
 **引导（`Onboarding/`）**：

@@ -38,27 +38,37 @@ final class BatchDispenseRunner {
     @ObservationIgnored private var task: Task<Void, Never>?
     @ObservationIgnored private var teardownTask: Task<Void, Never>?
 
+    /// Set by `cancel()`. A user cancel discards the remainder (the popup that
+    /// caused it is about to clear the queue anyway); a failure keeps it for a
+    /// one-shot retry.
+    @ObservationIgnored private var userCancelled = false
+
     private init() {}
 
-    /// `items` is everything still to send. `sentSoFar` is 1 when the drop
-    /// itself delivered the first entry (image payload), 0 when the payload was
-    /// the empty placeholder (text batch — see `BatchDragPlan`).
-    func start(items: [ClipboardItem], targetPID: Int32, batchSize: Int, sentSoFar: Int) {
+    /// `items` is everything to send; the drag payload itself carries no content.
+    func start(items: [ClipboardItem], targetPID: Int32, batchSize: Int) {
         guard !items.isEmpty, targetPID > 0, batchSize > 1 else { return }
-        // A second batch always wins; the previous dispatch stops at its next
-        // step (its `finish` still keeps the queue bookkeeping honest).
-        task?.cancel()
+        // A batch owns the queue while it runs. The UI cannot start a second one
+        // (only the popup starts a batch, and opening it cancels this one), so an
+        // overlapping start is a programming error, not a race to win.
+        guard !isRunning else {
+            errorLog("BatchDispense: start ignored; a batch is already running")
+            return
+        }
         teardownTask?.cancel()
-        phase = .running(sent: sentSoFar, total: batchSize)
+        userCancelled = false
+        phase = .running(sent: 0, total: batchSize)
         BatchDispenseHUDWindow.shared.show()
         task = Task { @MainActor [weak self] in
-            await self?.run(items: items, targetPID: targetPID, batchSize: batchSize, sent: sentSoFar)
+            await self?.run(items: items, targetPID: targetPID, batchSize: batchSize)
         }
     }
 
     /// Stop at the next step boundary. Delivered items still leave the queue
-    /// (see `finish`) so a retry cannot duplicate them.
+    /// (see `finish`); the user cancel does not preserve the remainder.
     func cancel() {
+        userCancelled = true
+        debugLog("BatchDispense: cancel requested")
         task?.cancel()
     }
 
@@ -70,8 +80,8 @@ final class BatchDispenseRunner {
         return false
     }
 
-    private func run(items: [ClipboardItem], targetPID: Int32, batchSize: Int, sent sentSoFar: Int) async {
-        var sent = sentSoFar
+    private func run(items: [ClipboardItem], targetPID: Int32, batchSize: Int) async {
+        var sent = 0
         var notice: String?
 
         if await wait(Self.dropSettleNanos) {
@@ -125,14 +135,22 @@ final class BatchDispenseRunner {
         // The queue *is* the selection: whatever has been sent leaves it, so a
         // retry sends exactly the remainder. A full batch empties the queue.
         PasteQueueManager.shared.removeDelivered(sent)
+        let remaining = PasteQueueManager.shared.totalCount
+        var finalNotice = notice
+        if !userCancelled, sent < total, remaining > 0 {
+            // Keep the staged remainder for one retry; the next popup open
+            // consumes the flag instead of clearing the queue.
+            PasteQueueManager.shared.markPendingBatchRetry()
+            finalNotice = "\(notice ?? "已中止") · 剩余 \(remaining) 条"
+        }
         // Each item refreshed the list on its own in the single-paste path;
         // one refresh at the end avoids N packed-snapshot decodes (6–15 ms
         // each on a 478-row list) inside a keystroke sequence.
         ClipboardBackend.shared.reloadItems()
-        phase = .finished(sent: sent, total: total, notice: notice)
-        debugLog("BatchDispense: finished sent=\(sent)/\(total) notice=\(notice ?? "none")")
+        phase = .finished(sent: sent, total: total, notice: finalNotice)
+        debugLog("BatchDispense: finished sent=\(sent)/\(total) remaining=\(remaining) notice=\(finalNotice ?? "none")")
 
-        let hold: UInt64 = notice == nil ? 900_000_000 : 2_500_000_000
+        let hold: UInt64 = finalNotice == nil ? 900_000_000 : 2_500_000_000
         teardownTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: hold)
             guard let self, !Task.isCancelled else { return }
@@ -155,6 +173,7 @@ final class BatchHUDNotice {
     private init() {}
 
     func show(_ text: String) {
+        debugLog("BatchHUDNotice: \(text)")
         self.text = text
         BatchDispenseHUDWindow.shared.show()
         clearTask?.cancel()
