@@ -71,8 +71,8 @@ fn test_backup_export_inspect_and_overwrite() {
         Some((dummy_thumb, 200, 150)),
     ).unwrap();
 
-    // Favorites: favorite e1_id
-    let fav_ids = vec![e1_id];
+    // Favorites: favorite e1_id in the durable table
+    crate::db::set_favorite(&src_conn, e1_id, true).expect("favorite e1");
 
     let mut backup_path = std::env::temp_dir();
     backup_path.push(format!("copyattach-export-{}.cabackup", std::process::id()));
@@ -81,7 +81,7 @@ fn test_backup_export_inspect_and_overwrite() {
     }
 
     // 2. Export backup
-    let count = export_backup(&src_conn, &backup_path, &fav_ids).expect("export_backup must succeed");
+    let count = export_backup(&src_conn, &backup_path).expect("export_backup must succeed");
     assert_eq!(count, 2, "must export 2 items");
 
     // 3. Inspect backup
@@ -164,7 +164,9 @@ fn test_backup_restore_merge_behavior() {
     backup_path.push(format!("copyattach-merge-{}.cabackup", std::process::id()));
     let _ = std::fs::remove_file(&backup_path);
 
-    export_backup(&src_conn, &backup_path, &[item_a_id, item_b_id]).unwrap();
+    crate::db::set_favorite(&src_conn, item_a_id, true).unwrap();
+    crate::db::set_favorite(&src_conn, item_b_id, true).unwrap();
+    export_backup(&src_conn, &backup_path).unwrap();
 
     // Destination DB already has Item A without remark
     let (_dst_path, mut dst_conn) = make_temp_db("merge_dst");
@@ -180,9 +182,7 @@ fn test_backup_restore_merge_behavior() {
     insert_entry_to_db(&dst_conn, &dst_item_a, Some(text_a), None, None).unwrap();
 
     // Active favorites has none initially
-    let current_favs: Vec<u64> = vec![];
-
-    let (added_count, merged_favs) = restore_backup_merge(&mut dst_conn, &backup_path, &current_favs)
+    let (added_count, merged_favs) = restore_backup_merge(&mut dst_conn, &backup_path)
         .expect("restore_backup_merge must succeed");
 
     // Only Item B was newly inserted (Item A was deduplicated and updated)
@@ -245,7 +245,9 @@ fn test_merge_keeps_local_rows_visible_and_newest_first() {
     let mut backup_path = std::env::temp_dir();
     backup_path.push(format!("copyattach-order-{}.cabackup", std::process::id()));
     let _ = std::fs::remove_file(&backup_path);
-    export_backup(&src_conn, &backup_path, &old_ids).unwrap();
+    export_backup(&src_conn, &backup_path).unwrap();
+
+    assert_eq!(old_ids.len(), 3);
 
     // Destination holds NEWER rows.
     let (_dst_path, mut dst_conn) = make_temp_db("order_dst");
@@ -255,7 +257,7 @@ fn test_merge_keeps_local_rows_visible_and_newest_first() {
         insert_entry_to_db(&dst_conn, &e, Some(&format!("local-new-{i}")), None, None).unwrap();
     }
 
-    let (added, _favs) = restore_backup_merge(&mut dst_conn, &backup_path, &[]).unwrap();
+    let (added, _favs) = restore_backup_merge(&mut dst_conn, &backup_path).unwrap();
     assert_eq!(added, 3, "all three backup rows are new to this DB");
 
     // The list the UI shows, newest-first.
@@ -295,7 +297,7 @@ fn test_overwrite_restore_never_lowers_entry_id_watermark() {
     let mut backup_path = std::env::temp_dir();
     backup_path.push(format!("copyattach-wm-{}.cabackup", std::process::id()));
     let _ = std::fs::remove_file(&backup_path);
-    export_backup(&src_conn, &backup_path, &[]).unwrap();
+    export_backup(&src_conn, &backup_path).unwrap();
 
     // Destination: a row carrying a very high entry id, and a watermark above it.
     let (_dst_path, mut dst_conn) = make_temp_db("wm_dst");
@@ -338,14 +340,14 @@ fn test_merge_raises_watermark_to_max_present_id() {
     let mut backup_path = std::env::temp_dir();
     backup_path.push(format!("copyattach-mw-{}.cabackup", std::process::id()));
     let _ = std::fs::remove_file(&backup_path);
-    export_backup(&src_conn, &backup_path, &[]).unwrap();
+    export_backup(&src_conn, &backup_path).unwrap();
 
     // Destination has a low watermark and an empty table.
     let (_dst_path, mut dst_conn) = make_temp_db("mw_dst");
     crate::db::bump_entry_id_watermark(&dst_conn, 10).unwrap();
     assert_eq!(crate::db::entry_id_watermark(&dst_conn), 10);
 
-    let (added, _favs) = restore_backup_merge(&mut dst_conn, &backup_path, &[]).unwrap();
+    let (added, _favs) = restore_backup_merge(&mut dst_conn, &backup_path).unwrap();
     assert_eq!(added, 1, "the backup row is new here");
 
     let max_present: u64 = dst_conn
@@ -370,13 +372,13 @@ fn test_merge_dedup_only_still_covers_backup_ids() {
     let mut backup_path = std::env::temp_dir();
     backup_path.push(format!("copyattach-dd-{}.cabackup", std::process::id()));
     let _ = std::fs::remove_file(&backup_path);
-    export_backup(&src_conn, &backup_path, &[]).unwrap();
+    export_backup(&src_conn, &backup_path).unwrap();
 
     let (_dst_path, mut dst_conn) = make_temp_db("dd_dst");
     let local = ClipboardEntry::text_entry(new_entry_id(), text, 1_780_000_000, "App".into(), "com.a".into(), 0);
     insert_entry_to_db(&dst_conn, &local, Some(text), None, None).unwrap();
 
-    let (added, _favs) = restore_backup_merge(&mut dst_conn, &backup_path, &[]).unwrap();
+    let (added, _favs) = restore_backup_merge(&mut dst_conn, &backup_path).unwrap();
     assert_eq!(added, 0, "same content on both sides must dedup");
 
     let watermark = crate::db::entry_id_watermark(&dst_conn);
@@ -412,7 +414,7 @@ fn test_overwrite_restore_tolerates_archive_without_meta_table() {
     let mut backup_path = std::env::temp_dir();
     backup_path.push(format!("copyattach-nometa-{}.cabackup", std::process::id()));
     let _ = std::fs::remove_file(&backup_path);
-    export_backup(&src_conn, &backup_path, &[]).unwrap();
+    export_backup(&src_conn, &backup_path).unwrap();
 
     {
         let raw = Connection::open(&backup_path).unwrap();
@@ -475,7 +477,7 @@ fn test_export_over_existing_wal_does_not_leak_old_rows() {
         0,
     );
     insert_entry_to_db(&src_conn, &first, Some("OLD-WAL-CONTENT"), None, None).unwrap();
-    export_backup(&src_conn, &backup_path, &[]).unwrap();
+    export_backup(&src_conn, &backup_path).unwrap();
 
     // Forge a stale sidecar beside the target, as a crashed earlier export
     // would leave behind.
@@ -494,7 +496,7 @@ fn test_export_over_existing_wal_does_not_leak_old_rows() {
         0,
     );
     insert_entry_to_db(&src_conn, &second, Some("NEW-CONTENT"), None, None).unwrap();
-    let count = export_backup(&src_conn, &backup_path, &[]).unwrap();
+    let count = export_backup(&src_conn, &backup_path).unwrap();
     assert_eq!(count, 2, "both rows must be exported");
 
     assert!(
@@ -578,13 +580,13 @@ fn test_merge_peak_rss() {
     let mut backup_path = std::env::temp_dir();
     backup_path.push(format!("copyattach-rss-{}.cabackup", std::process::id()));
     let _ = std::fs::remove_file(&backup_path);
-    export_backup(&src_conn, &backup_path, &[]).unwrap();
+    export_backup(&src_conn, &backup_path).unwrap();
     let archive_mb = std::fs::metadata(&backup_path).unwrap().len() as f64 / 1_048_576.0;
 
     let (_dst_path, mut dst_conn) = make_temp_db("rss_dst");
     let base = rss_kb();
     let t0 = Instant::now();
-    let (added, _favs) = restore_backup_merge(&mut dst_conn, &backup_path, &[]).unwrap();
+    let (added, _favs) = restore_backup_merge(&mut dst_conn, &backup_path).unwrap();
     let elapsed = t0.elapsed();
     let after = peak_kb();
 
@@ -639,7 +641,7 @@ fn test_search_works_after_restore_without_explicit_rebuild() {
     let mut backup_path = std::env::temp_dir();
     backup_path.push(format!("copyattach-fts-{}.cabackup", std::process::id()));
     let _ = std::fs::remove_file(&backup_path);
-    export_backup(&src_conn, &backup_path, &[]).unwrap();
+    export_backup(&src_conn, &backup_path).unwrap();
 
     // Overwrite path: DELETE + INSERT..SELECT must leave FTS consistent.
     let (_dst_path, mut dst_conn) = make_temp_db("fts_dst");
@@ -653,7 +655,7 @@ fn test_search_works_after_restore_without_explicit_rebuild() {
 
     // Merge path: plain INSERTs must leave FTS consistent too.
     let (_m_path, mut merge_conn) = make_temp_db("fts_merge");
-    let (added, _f) = restore_backup_merge(&mut merge_conn, &backup_path, &[]).unwrap();
+    let (added, _f) = restore_backup_merge(&mut merge_conn, &backup_path).unwrap();
     assert_eq!(added, 3, "all three rows must merge in");
     let hits = search_history(&merge_conn, needle);
     assert_eq!(

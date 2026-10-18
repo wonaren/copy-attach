@@ -16,6 +16,8 @@ pub extern "C" fn clipboard_clear_history() -> c_int {
 
     // DB delete first: if it fails, the in-memory history stays untouched so
     // memory and DB remain consistent and the caller sees the failure (0).
+    // History and favorites go together: a favorite whose row is gone is a
+    // dangling id, so a clear must remove both.
     let conn = match b.db.lock() {
         Ok(c) => c,
         Err(e) => {
@@ -23,14 +25,23 @@ pub extern "C" fn clipboard_clear_history() -> c_int {
             return 0;
         }
     };
-    if let Err(e) = conn.execute("DELETE FROM clipboard_history", []) {
+    let cleared: Result<(), rusqlite::Error> = (|| {
+        let tx = conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM clipboard_history", [])?;
+        tx.execute("DELETE FROM clipboard_favorites", [])?;
+        tx.commit()
+    })();
+    if let Err(e) = cleared {
         crate::error_log!("CopyAttach: failed to clear DB history: {e}");
         return 0;
     }
     drop(conn);
 
-    // DB clear succeeded: now clear the in-memory history and release the
+    // DB clear succeeded: now clear the in-memory mirror and release the
     // undo stack (materialized payload files removed with their slots).
+    if let Ok(mut favorites) = b.favorites.lock() {
+        favorites.clear();
+    }
     let mut hist = b.history.lock().unwrap();
     hist.clear();
     // Publish under the history lock so the emptied list is observed atomically.
@@ -182,24 +193,30 @@ pub extern "C" fn clipboard_delete_by_id(entry_id: u64) -> c_int {
                 return 0;
             }
         };
-        if let Err(e) = match &entry {
-            ClipboardEntry::Text { db_id, .. } => {
-                // Step 2 rejected unpersisted text (db_id=0) up front, so this
-                // is always the rowid delete.
-                conn.execute(
+        // The row and its favorite are one durable identity: delete both in one
+        // transaction, or neither. A bare row delete would leave the favorite
+        // pointing at an id that no longer exists.
+        let deleted: Result<(), rusqlite::Error> = (|| {
+            let tx = conn.unchecked_transaction()?;
+            {
+                let row_id = match &entry {
+                    ClipboardEntry::Text { db_id, .. } => *db_id,
+                    ClipboardEntry::Image { db_id, .. } => *db_id,
+                };
+                // Step 2 rejected unpersisted entries (db_id=0) up front, so
+                // this is always the rowid delete.
+                tx.execute(
                     "DELETE FROM clipboard_history WHERE id = ?1",
-                    rusqlite::params![*db_id],
-                )
+                    rusqlite::params![row_id],
+                )?;
             }
-            ClipboardEntry::Image { db_id, .. } => {
-                // Step 2 rejected unpersisted images (db_id=0) up front, so this
-                // is always the rowid delete.
-                conn.execute(
-                    "DELETE FROM clipboard_history WHERE id = ?1",
-                    rusqlite::params![*db_id],
-                )
-            }
-        } {
+            tx.execute(
+                "DELETE FROM clipboard_favorites WHERE entry_id = ?1",
+                rusqlite::params![entry_id as i64],
+            )?;
+            tx.commit()
+        })();
+        if let Err(e) = deleted {
             crate::error_log!("CopyAttach: failed to delete entry {entry_id} from DB: {e}");
             remove_undo_payload_file(&crate::backend::DeletedStackEntry {
                 entry: entry.clone(),
@@ -208,6 +225,11 @@ pub extern "C" fn clipboard_delete_by_id(entry_id: u64) -> c_int {
             });
             return 0;
         }
+    }
+
+    // Step 4b: the favorite row is gone; drop the in-memory mirror.
+    if let Ok(mut favorites) = b.favorites.lock() {
+        favorites.remove(&entry_id);
     }
 
     // Step 5: DB delete succeeded. Remove exactly the entry whose row was
@@ -353,8 +375,13 @@ pub extern "C" fn clipboard_undo_delete() -> c_int {
     // by the monitor between deletion and undo, remove the existing copy
     // before inserting the restored one at head.
     *hist = add_to_history(std::mem::take(&mut *hist), entry);
-    while hist.len() > b.cleanup_threshold.load(Ordering::Relaxed) {
-        hist.pop();
+    {
+        let favorites = b.favorites.lock().unwrap();
+        crate::backend::trim_history_memory(
+            &mut hist,
+            b.cleanup_threshold.load(Ordering::Relaxed),
+            &favorites,
+        );
     }
     // add_to_history may have rewritten the restored entry's id on dedup
     // (preserving the re-captured duplicate's id); read the final id from the
@@ -465,20 +492,54 @@ pub extern "C" fn clipboard_set_custom_label(entry_id: u64, label: *const c_char
     1
 }
 
-/// Trim the oldest N percent of entries from both DB and in-memory history.
-/// Returns the number of entries actually removed.
+/// Mark/unmark one entry as a favorite.
 ///
-/// DB first, and a DB failure aborts the whole operation (returns 0) with
-/// memory untouched: the DB row is what makes a removal durable, so trimming
-/// memory after a failed DELETE would let every "removed" entry reappear on
-/// the next launch while the caller still reported success. Mirrors the
-/// contract of `clipboard_delete_by_id` / `clipboard_clear_history`.
-///
-/// The removal is by identity (db_id), not by tail position: an in-memory entry
-/// whose row the DELETE did not touch must survive, and synchronously-inserted
-/// captures during the window are never in the deleted id set.
-/// Trim the oldest N percent of entries from history and DB, preserving any
-/// entries referenced by `favorite_ids_str`.
+/// DB first: a row that no longer exists is an explicit failure (0), never a
+/// dangling favorite id. On success both the durable table and the in-memory
+/// mirror used by the snapshot/trim are updated, and the list is republished so
+/// every open view re-reads the flag from the single source of truth.
+#[no_mangle]
+pub extern "C" fn clipboard_set_favorite(entry_id: u64, favorite: c_int) -> c_int {
+    let b = match try_backend() {
+        Some(b) => b,
+        None => return 0,
+    };
+    let want = favorite != 0;
+
+    {
+        let conn = match b.db.lock() {
+            Ok(c) => c,
+            Err(e) => {
+                crate::error_log!("CopyAttach: DB mutex poisoned toggling favorite for {entry_id}: {e}");
+                return 0;
+            }
+        };
+        if crate::db::set_favorite(&conn, entry_id, want).is_err() {
+            return 0;
+        }
+    }
+
+    {
+        let mut favorites = match b.favorites.lock() {
+            Ok(f) => f,
+            Err(e) => {
+                crate::error_log!("CopyAttach: favorites mutex poisoned toggling {entry_id}: {e}");
+                return 0;
+            }
+        };
+        if want {
+            favorites.insert(entry_id);
+        } else {
+            favorites.remove(&entry_id);
+        }
+    }
+
+    crate::backend::mark_history_changed();
+    1
+}
+
+/// Trim the oldest N percent of **cleanable** entries from both DB and
+/// in-memory history. Favorites are never removed and do not count toward N.
 /// Returns the number of entries actually removed.
 ///
 /// DB first, and a DB failure aborts the whole operation (returns 0) with
@@ -491,10 +552,7 @@ pub extern "C" fn clipboard_set_custom_label(entry_id: u64, label: *const c_char
 /// whose row the DELETE did not touch must survive, and synchronously-inserted
 /// captures during the window are never in the deleted id set.
 #[no_mangle]
-pub extern "C" fn clipboard_trim_oldest_percent(
-    percent: i32,
-    favorite_ids_str: *const c_char,
-) -> c_int {
+pub extern "C" fn clipboard_trim_oldest_percent(percent: i32) -> c_int {
     let b = match try_backend() {
         Some(b) => b,
         None => return 0,
@@ -504,13 +562,19 @@ pub extern "C" fn clipboard_trim_oldest_percent(
         return 0;
     }
 
-    let fav_set: HashSet<u64> = super::parse_ids_set(favorite_ids_str);
+    let favorites = match b.favorites.lock() {
+        Ok(f) => f.clone(),
+        Err(e) => {
+            crate::error_log!("CopyAttach: favorites mutex poisoned in trim_oldest_percent: {e}");
+            return 0;
+        }
+    };
 
     let count = {
         let hist = b.history.lock().unwrap();
         let cleanable_total = hist
             .iter()
-            .filter(|e| !fav_set.contains(&e.entry_id()))
+            .filter(|e| !favorites.contains(&e.entry_id()))
             .count();
         if cleanable_total == 0 {
             return 0;
@@ -523,15 +587,18 @@ pub extern "C" fn clipboard_trim_oldest_percent(
         return 0;
     }
 
-    // Step 1: delete the oldest rows from DB, excluding any rows in fav_set.
-    // Resolving exactly which row ids go away. A failure leaves memory — and the durable
-    // state — untouched. "Oldest" is by `(timestamp, id)`, the same order the list uses:
-    // trimming by rowid instead would evict the user's own newer rows first whenever the
-    // table holds rows inserted out of chronological order (a merge).
+    // Step 1: delete the oldest cleanable rows from the DB. The favorite table
+    // is the authority here, so this matches the automatic trim exactly.
+    // A failure leaves memory — and the durable state — untouched. "Oldest" is
+    // by `(timestamp, id)`, the same order the list uses: trimming by rowid
+    // instead would evict the user's own newer rows first whenever the table
+    // holds rows inserted out of chronological order (a merge).
     let deleted_ids: HashSet<i64> = match b.db.lock() {
         Ok(conn) => {
             let mut stmt = match conn.prepare(
-                "SELECT id, entry_id FROM clipboard_history ORDER BY timestamp ASC, id ASC",
+                "SELECT id, entry_id FROM clipboard_history
+                 WHERE entry_id NOT IN (SELECT entry_id FROM clipboard_favorites)
+                 ORDER BY timestamp ASC, id ASC",
             ) {
                 Ok(s) => s,
                 Err(e) => {
@@ -552,15 +619,9 @@ pub extern "C" fn clipboard_trim_oldest_percent(
                     Ok(id) => id,
                     Err(_) => continue,
                 };
-                let entry_id: i64 = match row.get(1) {
-                    Ok(id) => id,
-                    Err(_) => continue,
-                };
-                if !fav_set.contains(&(entry_id as u64)) {
-                    ids.push(db_id);
-                    if ids.len() >= count {
-                        break;
-                    }
+                ids.push(db_id);
+                if ids.len() >= count {
+                    break;
                 }
             }
             drop(rows);
@@ -606,12 +667,12 @@ pub extern "C" fn clipboard_trim_oldest_percent(
     }
 
     // Step 2: drop exactly those rows from memory, by identity. The entries
-    // the DELETE did not remove keep their rows and must stay listed.
-    // Favorites are preserved both in DB and memory.
+    // the DELETE did not remove keep their rows and must stay listed; favorites
+    // were excluded by the query and remain untouched.
     let actual = {
         let mut hist = b.history.lock().unwrap();
         let before = hist.len();
-        hist.retain(|e| !deleted_ids.contains(&e.db_id()) || fav_set.contains(&e.entry_id()));
+        hist.retain(|e| !deleted_ids.contains(&e.db_id()));
         let removed = before - hist.len();
         // Publish under the history lock (entries were removed).
         crate::backend::mark_history_changed();

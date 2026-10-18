@@ -60,27 +60,26 @@ pub extern "C" fn clipboard_recover_corrupt_db() -> c_int {
     1
 }
 
-#[no_mangle]
-pub extern "C" fn clipboard_init() -> c_int {
-    clipboard_init_inner(None)
-}
-
-/// `clipboard_init` with the user's saved cleanup threshold.
+/// Init with the saved threshold AND the legacy favorites list.
 ///
-/// The threshold lives in the UI's preferences (UserDefaults), so Rust cannot
-/// read it at init time; without it the launch trim had to guess with a
-/// compile-time constant, and any saved preference above that constant was
-/// silently truncated on every launch (measured: a 10,000-row database came back
-/// as 3,000 rows after a release-build launch, while the settings panel still
-/// showed 10,000). Passing it here makes the startup trim use the same number the
-/// capture path uses. Clamped like `clipboard_set_cleanup_threshold`, so an
-/// unset/garbage value falls back to `DEFAULT_CLEANUP_THRESHOLD`.
+/// Legacy favorites used to live only in the UI's UserDefaults. They must be
+/// imported **before** the launch trim runs, or the first launch of this build
+/// would delete a favorite that happens to sit below the trim cutoff and then
+/// import nothing — the exact data loss this migration exists to prevent. A
+/// `threshold` <= 0 means "no saved preference" (same as `clipboard_init`).
+///
+/// Returns the same codes as `clipboard_init`; when the import itself fails the
+/// call is retryable (0) so the caller keeps its legacy list and tries again.
 #[no_mangle]
-pub extern "C" fn clipboard_init_with_threshold(threshold: c_int) -> c_int {
-    clipboard_init_inner(Some(threshold))
+pub extern "C" fn clipboard_init_with_threshold_and_favorites(
+    threshold: c_int,
+    favorite_ids_csv: *const c_char,
+) -> c_int {
+    let legacy = super::parse_ids_str(favorite_ids_csv);
+    clipboard_init_inner(if threshold > 0 { Some(threshold) } else { None }, &legacy)
 }
 
-fn clipboard_init_inner(threshold: Option<c_int>) -> c_int {
+fn clipboard_init_inner(threshold: Option<c_int>, legacy_favorites: &[u64]) -> c_int {
     let startup_threshold = threshold
         .map(|t| (t.max(0) as usize).clamp(MIN_CLEANUP_THRESHOLD, MAX_CLEANUP_THRESHOLD))
         .unwrap_or(DEFAULT_CLEANUP_THRESHOLD);
@@ -88,6 +87,33 @@ fn clipboard_init_inner(threshold: Option<c_int>) -> c_int {
     // OnceLock intentionally retains the backend for process lifetime. Resume
     // the existing backend instead of attempting to replace the singleton.
     if let Some(b) = crate::backend::try_backend() {
+        // A resumed init must also honor the legacy favorites list: the caller
+        // only drops its UserDefaults copy after this returns 1, so a silent
+        // skip here would lose the list for good.
+        if !legacy_favorites.is_empty() {
+            let imported = match b.db.lock() {
+                Ok(conn) => match crate::db::import_favorites(&conn, legacy_favorites) {
+                    Ok(_) => match crate::db::load_favorites(&conn) {
+                        Ok(set) => set,
+                        Err(()) => {
+                            crate::error_log!("CopyAttach: favorites unreadable after legacy import; retryable");
+                            return INIT_RETRYABLE;
+                        }
+                    },
+                    Err(()) => {
+                        crate::error_log!("CopyAttach: legacy favorite import failed on resumed init; retryable");
+                        return INIT_RETRYABLE;
+                    }
+                },
+                Err(e) => {
+                    crate::error_log!("CopyAttach: DB mutex poisoned importing legacy favorites: {e}");
+                    return INIT_RETRYABLE;
+                }
+            };
+            if let Ok(mut favorites) = b.favorites.lock() {
+                *favorites = imported;
+            }
+        }
         if b.running.swap(true, Ordering::SeqCst) {
             return 1;
         }
@@ -100,9 +126,10 @@ fn clipboard_init_inner(threshold: Option<c_int>) -> c_int {
             let pending_self_write = Arc::clone(&b.pending_self_write);
             let cleanup_threshold = Arc::clone(&b.cleanup_threshold);
             let ignore_rules = Arc::clone(&b.ignore_rules);
+            let favorites = Arc::clone(&b.favorites);
             move || clipboard_monitor(history, running, source_app, db,
                 pasteboard_event_lock, pending_self_write,
-                cleanup_threshold, ignore_rules)
+                cleanup_threshold, ignore_rules, favorites)
         });
         *b.monitor_handle.lock().unwrap() = Some(handle);
         return 1;
@@ -149,15 +176,47 @@ fn clipboard_init_inner(threshold: Option<c_int>) -> c_int {
     // normal rows; a no-op for any existing user.
     seed_first_launch_tips(&conn);
 
+    // Import the legacy UserDefaults favorite list BEFORE any trimming: the
+    // rows it references must be protected by the trim below, not deleted and
+    // then looked up. `INSERT ... SELECT` skips ids with no surviving row.
+    if !legacy_favorites.is_empty() {
+        match crate::db::import_favorites(&conn, legacy_favorites) {
+            Ok(imported) => crate::debug_log!(
+                "CopyAttach: imported {imported} legacy favorite(s) before the startup trim"
+            ),
+            Err(()) => {
+                crate::error_log!("CopyAttach: legacy favorite import failed; init retryable so the caller keeps its list");
+                return INIT_RETRYABLE;
+            }
+        }
+    }
+
+    // Favorites are durable rows keyed by entry_id. Drop any whose entry is
+    // gone (a database written by the old UserDefaults-only build can leave
+    // them behind), then load the set into memory so the capture/trim paths and
+    // the snapshot never have to query SQLite.
+    if let Err(()) = crate::db::prune_orphan_favorites(&conn) {
+        crate::error_log!("CopyAttach: orphan-favorite cleanup failed; stale ids may linger");
+    }
+    let favorites_set = match crate::db::load_favorites(&conn) {
+        Ok(set) => set,
+        Err(()) => {
+            crate::error_log!("CopyAttach: favorites unreadable; init retryable instead of trimming unprotected");
+            return INIT_RETRYABLE;
+        }
+    };
+
     // Load with the startup threshold, THEN trim to it. Order matters: trimming
     // first would delete rows below the load bound before they can be read.
     //
-    // The bound is the user's own setting (see `clipboard_init_with_threshold`),
+    // The bound is the user's own setting (see
+    // `clipboard_init_with_threshold_and_favorites`),
     // not a compile-time default: any other choice silently drops rows the user
     // asked to keep on every launch.
     //
-    // `load_history_from_db` already applies `LIMIT ?` with the same bound,
-    // so the returned Vec is at most `startup_threshold` entries.
+    // `load_history_from_db` returns the newest `threshold` rows plus every
+    // favorite, because `trim_db_history` caps only cleanable rows and a
+    // favorite may sit below the cutoff.
     let saved = load_history_from_db(&conn, startup_threshold);
     if trim_db_history(&conn, startup_threshold).is_err() {
         crate::error_log!("CopyAttach: startup trim failed; the table stays over the load cap until the next capture's transactional trim");
@@ -200,6 +259,7 @@ fn clipboard_init_inner(threshold: Option<c_int>) -> c_int {
     let ignore_rules = Arc::new(Mutex::new(IgnoreRules::default()));
     let deleted_stack: Arc<Mutex<Vec<crate::backend::DeletedStackEntry>>> = Arc::new(Mutex::new(Vec::new()));
     let last_restored_id = Arc::new(AtomicU64::new(0));
+    let favorites = Arc::new(Mutex::new(favorites_set));
 
     let backend = Backend {
         history: Arc::clone(&history),
@@ -213,6 +273,7 @@ fn clipboard_init_inner(threshold: Option<c_int>) -> c_int {
         ignore_rules: Arc::clone(&ignore_rules),
         deleted_stack: Arc::clone(&deleted_stack),
         last_restored_id: Arc::clone(&last_restored_id),
+        favorites: Arc::clone(&favorites),
     };
 
     if set_backend(backend).is_err() {
@@ -257,7 +318,7 @@ fn clipboard_init_inner(threshold: Option<c_int>) -> c_int {
     let handle = thread::spawn(|| clipboard_monitor(
         history, running, source_app, db,
         pasteboard_event_lock, pending_self_write,
-        cleanup_threshold, ignore_rules,
+        cleanup_threshold, ignore_rules, favorites,
     ));
 
     if let Some(b) = crate::backend::try_backend() {

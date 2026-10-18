@@ -1,5 +1,6 @@
 //! Global backend state: singleton, constants, and entry-id generator.
 
+use std::collections::HashSet;
 use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -258,9 +259,9 @@ pub(crate) fn purge_undo_payload_dir() {
 pub(crate) const DEFAULT_CLEANUP_THRESHOLD: usize = 3000;
 /// Load cap used when the caller does not pass a threshold (`clipboard_init`).
 ///
-/// This is NOT the startup trim bound any more: `clipboard_init_with_threshold`
-/// carries the user's saved setting, so the launch trim uses the same number the
-/// capture path uses. Keeping the load cap at the ceiling means a database larger
+/// This is NOT the startup trim bound any more:
+/// `clipboard_init_with_threshold_and_favorites` carries the user's saved
+/// setting, so the launch trim uses the same number the capture path uses. Keeping the load cap at the ceiling means a database larger
 /// than the user's preference is trimmed TO that preference, not silently
 /// truncated to a compile-time default first.
 pub(crate) const MAX_CLEANUP_THRESHOLD: usize = 10000;
@@ -815,6 +816,13 @@ pub(crate) struct Backend {
     pub(crate) deleted_stack: Arc<Mutex<Vec<DeletedStackEntry>>>,
     /// Entry ID of the most recently undo-restored entry (0 if none).
     pub(crate) last_restored_id: Arc<AtomicU64>,
+    /// Durable favorites, mirrored from `clipboard_favorites` for the snapshot
+    /// and the in-memory trim. The DB table is the source of truth; this set is
+    /// only the process-local copy so the capture path never has to read SQLite.
+    ///
+    /// Lock order: `history` may be held while taking this lock (snapshot,
+    /// trim); never take `history` or `db` while holding this one.
+    pub(crate) favorites: Arc<Mutex<HashSet<u64>>>,
 }
 
 static BACKEND: OnceLock<Backend> = OnceLock::new();
@@ -837,17 +845,54 @@ pub(crate) fn try_backend() -> Option<&'static Backend> {
     BACKEND.get()
 }
 
+/// Evict the oldest **non-favorite** entries until at most `threshold`
+/// cleanable rows remain. Favorites are never removed and do not count against
+/// the cap — the exact rule `db::trim_db_history` applies to the table, so the
+/// list and the database stay in the same shape.
+///
+/// `hist` is newest-first; the scan walks from the tail (oldest) and stops as
+/// soon as enough cleanable rows are marked, so a history at the cap costs
+/// O(excess), not O(len).
+pub(crate) fn trim_history_memory(
+    hist: &mut Vec<ClipboardEntry>,
+    threshold: usize,
+    favorites: &HashSet<u64>,
+) {
+    let cleanable = hist
+        .iter()
+        .filter(|e| !favorites.contains(&e.entry_id()))
+        .count();
+    if cleanable <= threshold {
+        return;
+    }
+    let mut excess = cleanable - threshold;
+    let mut doomed: HashSet<u64> = HashSet::with_capacity(excess);
+    for entry in hist.iter().rev() {
+        if excess == 0 {
+            break;
+        }
+        if !favorites.contains(&entry.entry_id()) {
+            doomed.insert(entry.entry_id());
+            excess -= 1;
+        }
+    }
+    hist.retain(|e| !doomed.contains(&e.entry_id()));
+}
+
 /// Reload in-memory history from the DB, respecting the cleanup threshold.
 pub(crate) fn reload_history_from_db(b: &Backend) -> usize {
     let conn = b.db.lock().unwrap();
     let threshold = b.cleanup_threshold.load(std::sync::atomic::Ordering::Relaxed);
     let loaded = crate::db::load_history_from_db(&conn, threshold);
-    let trimmed: Vec<ClipboardEntry> = loaded.into_iter().take(threshold).collect();
-    let count = trimmed.len();
     drop(conn);
 
     let mut hist = b.history.lock().unwrap();
-    *hist = trimmed;
+    {
+        let favorites = b.favorites.lock().unwrap();
+        *hist = loaded;
+        trim_history_memory(&mut hist, threshold, &favorites);
+    }
+    let count = hist.len();
     // Publish under the history lock (bulk reload replaced the whole list).
     mark_history_changed();
 

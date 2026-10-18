@@ -158,7 +158,7 @@ extension InlineSettingsView {
                 }
                 .frame(height: 14)
             }
-            Text("当历史项目超过该阈值时，自动清理最早记录，以保护磁盘存储。")
+            Text("当未收藏的记录超过该阈值时，自动清理最早的记录；收藏的条目不会被清理，也不计入该阈值。")
                 .font(.system(size: 11))
                 .foregroundColor(theme.secondaryText)
                 .padding(.top, 4)

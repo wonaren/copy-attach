@@ -35,7 +35,6 @@ fn escape_sql_string(s: &str) -> String {
 pub(crate) fn export_backup(
     conn: &Connection,
     target_path: &Path,
-    favorite_ids: &[u64],
 ) -> Result<usize, String> {
     if let Some(parent) = target_path.parent() {
         if !parent.as_os_str().is_empty() {
@@ -89,14 +88,16 @@ pub(crate) fn export_backup(
             stmt.execute(["total_items", &count.to_string()]).map_err(|e| e.to_string())?;
         }
 
-        {
-            let mut fav_stmt = backup_conn
-                .prepare("INSERT OR IGNORE INTO clipboard_backup_favorites (entry_id) VALUES (?1)")
-                .map_err(|e| format!("准备写入收藏失败: {e}"))?;
-            for &fav_id in favorite_ids {
-                fav_stmt.execute([fav_id as i64]).map_err(|e| e.to_string())?;
-            }
-        }
+        // The favorite set lives in the live DB's `clipboard_favorites` table
+        // (`VACUUM INTO` copies it too); the backup format's own table is what
+        // older builds and the restore path read, so mirror it explicitly.
+        backup_conn
+            .execute(
+                "INSERT OR IGNORE INTO clipboard_backup_favorites (entry_id)
+                 SELECT entry_id FROM clipboard_favorites",
+                [],
+            )
+            .map_err(|e| format!("写入备份收藏失败: {e}"))?;
 
         count.max(0) as usize
     };
@@ -231,9 +232,13 @@ pub(crate) fn restore_backup_overwrite(
             .unchecked_transaction()
             .map_err(|e| format!("开启恢复事务失败: {e}"))?;
 
-        // Overwrite clipboard_history table
+        // Overwrite clipboard_history and its favorite set. They are one
+        // logical dataset: keeping the old favorites would leave ids that the
+        // restored rows may not contain.
         tx.execute("DELETE FROM main.clipboard_history", [])
             .map_err(|e| format!("清空当前历史表失败: {e}"))?;
+        tx.execute("DELETE FROM main.clipboard_favorites", [])
+            .map_err(|e| format!("清空当前收藏表失败: {e}"))?;
 
         tx.execute_batch(
             "INSERT INTO main.clipboard_history (
@@ -311,20 +316,28 @@ pub(crate) fn restore_backup_overwrite(
             )
             .unwrap_or(0);
 
-        let mut restored_favorites = Vec::new();
         if has_fav_table > 0 {
+            // Restore the durable set only for rows that actually came back:
+            // joining the restored history drops ids whose row is absent from
+            // the archive (or was removed by an older trim).
+            tx.execute(
+                "INSERT OR IGNORE INTO main.clipboard_favorites (entry_id)
+                 SELECT f.entry_id
+                 FROM backup_db.clipboard_backup_favorites f
+                 JOIN main.clipboard_history h ON h.entry_id = f.entry_id",
+                [],
+            )
+            .map_err(|e| format!("恢复收藏表失败: {e}"))?;
+        }
+        let restored_favorites: Vec<u64> = {
             let mut stmt = tx
-                .prepare("SELECT entry_id FROM backup_db.clipboard_backup_favorites")
-                .map_err(|e| format!("准备读取收藏表失败: {e}"))?;
+                .prepare("SELECT entry_id FROM main.clipboard_favorites ORDER BY entry_id")
+                .map_err(|e| format!("准备读取恢复后的收藏失败: {e}"))?;
             let rows = stmt
                 .query_map([], |r| r.get::<_, i64>(0))
-                .map_err(|e| format!("遍历收藏表失败: {e}"))?;
-            for row in rows.flatten() {
-                if row > 0 {
-                    restored_favorites.push(row as u64);
-                }
-            }
-        }
+                .map_err(|e| format!("遍历恢复后的收藏失败: {e}"))?;
+            rows.flatten().filter(|id| *id > 0).map(|id| id as u64).collect()
+        };
 
         // No explicit FTS rebuild here. `ensure_history_table` installs
         // AFTER INSERT / AFTER DELETE triggers on `clipboard_history` that keep
@@ -376,7 +389,6 @@ pub(crate) fn restore_backup_overwrite(
 pub(crate) fn restore_backup_merge(
     conn: &mut Connection,
     backup_path: &Path,
-    current_favorites: &[u64],
 ) -> Result<(usize, Vec<u64>), String> {
     let _info = inspect_backup(backup_path)?;
 
@@ -416,7 +428,16 @@ pub(crate) fn restore_backup_merge(
             }
         }
 
-        let mut merged_fav_set: HashSet<u64> = current_favorites.iter().copied().collect();
+        // The live favorite set is the durable table, not a Swift argument.
+        let mut merged_fav_set: HashSet<u64> = {
+            let mut stmt = tx
+                .prepare("SELECT entry_id FROM main.clipboard_favorites")
+                .map_err(|e| format!("查询现有收藏失败: {e}"))?;
+            let rows = stmt
+                .query_map([], |r| r.get::<_, i64>(0))
+                .map_err(|e| format!("遍历现有收藏失败: {e}"))?;
+            rows.flatten().filter(|id| *id > 0).map(|id| id as u64).collect()
+        };
 
         // Query active entry IDs and max watermark to prevent ID conflicts
         let mut used_entry_ids: HashSet<u64> = HashSet::new();
@@ -675,6 +696,20 @@ pub(crate) fn restore_backup_merge(
         // the highest id present locally.
         if max_entry_id > 0 {
             let _ = bump_entry_id_watermark(&tx, max_entry_id);
+        }
+
+        // Persist the consolidated favorite set. The ids were collected against
+        // rows that are present after this transaction, so this is the durable
+        // write the old implementation expressed by returning them to Swift.
+        {
+            let mut fav_stmt = tx
+                .prepare("INSERT OR IGNORE INTO main.clipboard_favorites (entry_id) VALUES (?1)")
+                .map_err(|e| format!("准备写入合并收藏失败: {e}"))?;
+            for id in &merged_fav_set {
+                fav_stmt
+                    .execute([*id as i64])
+                    .map_err(|e| format!("写入合并收藏失败: {e}"))?;
+            }
         }
 
         // No explicit FTS rebuild here either — see the note in

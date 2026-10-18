@@ -75,7 +75,8 @@ pub(super) fn generate_image_rgba(width: u32, height: u32, seed: u64) -> Vec<u8>
 
                 // Fast uniform fill of the entire row slice
                 let rgba = [r, g, b, 255];
-                for chunk in row.chunks_exact_mut(4) {
+                let (chunks, _) = row.as_chunks_mut::<4>();
+                for chunk in chunks {
                     chunk.copy_from_slice(&rgba);
                 }
             }

@@ -10,11 +10,19 @@ import Foundation
 /// lets the caller release the buffer through `clipboard_free_bytes`.
 enum PackedSnapshot {
     fileprivate static let magic: [UInt8] = Array("CSNP".utf8)
-    fileprivate static let version: UInt32 = 2
+    fileprivate static let version: UInt32 = 3
     fileprivate static let headerLength = 16
-    fileprivate static let rowHeaderLength = 56
+    fileprivate static let rowHeaderLength = 60
+    /// Row flag bit 0: the entry is in the DB's `clipboard_favorites` table.
+    fileprivate static let rowFlagFavorite: UInt32 = 1
 
-    static func decodeItems(from ptr: UnsafeRawPointer, length: Int) -> [ClipboardItem]? {
+    /// Decode one packed snapshot into its rows plus the durable favorite set.
+    ///
+    /// Favorites travel per row (a flag) so the list and the set cannot drift:
+    /// both are decoded from the same snapshot. This replaces the old
+    /// UserDefaults id set, which had to be reconciled against the list after
+    /// every publish.
+    static func decodeItems(from ptr: UnsafeRawPointer, length: Int) -> ([ClipboardItem], Set<Int>)? {
         guard length >= headerLength else { return nil }
         for (index, byte) in magic.enumerated() {
             guard ptr.load(fromByteOffset: index, as: UInt8.self) == byte else { return nil }
@@ -25,6 +33,7 @@ enum PackedSnapshot {
 
         var items: [ClipboardItem] = []
         items.reserveCapacity(count)
+        var favoriteIds: Set<Int> = []
         var offset = headerLength
 
         // Sub-phase accumulation. Measuring per row would flood the log; the
@@ -47,6 +56,10 @@ enum PackedSnapshot {
             let sourceNameLength = Int(readUInt32(ptr, at: offset + 44))
             let sourceBundleIdLength = Int(readUInt32(ptr, at: offset + 48))
             let previewLength = Int(readUInt32(ptr, at: offset + 52))
+            let flags = readUInt32(ptr, at: offset + 56)
+            if flags & rowFlagFavorite != 0 {
+                favoriteIds.insert(id)
+            }
 
             let stringBytes = customLabelLength + labelLength + sourceNameLength + sourceBundleIdLength + previewLength
             guard stringBytes >= 0, offset <= length - rowHeaderLength - stringBytes else { return nil }
@@ -101,7 +114,7 @@ enum PackedSnapshot {
             Perf.emitSpan("swift", "snapshot.decode.strings", durNs: stringNs, val: Int64(count))
             Perf.emitSpan("swift", "snapshot.decode.format_preview", durNs: formatNs, val: Int64(count))
         }
-        return items
+        return (items, favoriteIds)
     }
 
     fileprivate static func readUInt32(_ ptr: UnsafeRawPointer, at offset: Int) -> UInt32 {

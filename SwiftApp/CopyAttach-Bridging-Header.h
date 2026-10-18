@@ -28,12 +28,12 @@ int32_t clipboard_perf_selfcheck(void);
 // clipboard_recover_corrupt_db and re-init, or quit), -2 = environment failure
 // (read-only / permissions / disk full; auto-recovering via backoff).
 //
-// Use clipboard_init_with_threshold: the startup trim bound is the user's saved
-// cleanup threshold (clamped to [100, 10000]), so launching never trims history
-// below their setting. clipboard_init() (no argument) is the older entry point
-// and behaves like a default-preference install.
-int32_t clipboard_init(void);
-int32_t clipboard_init_with_threshold(int32_t threshold);
+// Init with the user's saved cleanup threshold and the legacy favorites CSV.
+// `threshold` <= 0 means "no saved preference" (default 3000); a positive value
+// is clamped to [100, 10000]. The favorites list is imported BEFORE the startup
+// trim, so the first launch of a DB-backed build cannot delete a favorite it is
+// about to migrate.
+int32_t clipboard_init_with_threshold_and_favorites(int32_t threshold, const char* favorite_ids_csv);
 // Moves history.db (+ -wal/-shm) aside as history.db.corrupt-<secs>. Only
 // valid after clipboard_init returned -1. Returns 1 on success.
 int32_t clipboard_recover_corrupt_db(void);
@@ -127,13 +127,16 @@ void clipboard_open_preferences(void);
 
 // ─── History Management ───
 int32_t clipboard_clear_history(void);
-int32_t clipboard_trim_oldest_percent(int32_t percent, const char* favorite_ids_str);
+// Favorites are read from the DB; they never count against the percentage.
+int32_t clipboard_trim_oldest_percent(int32_t percent);
 int32_t clipboard_get_cleanup_threshold(void);
 void clipboard_set_cleanup_threshold(int32_t threshold);
 int64_t clipboard_get_storage_size(void);
 int32_t clipboard_shrink_db_memory(void);
 int32_t clipboard_delete_by_id(uint64_t entry_id);
 int32_t clipboard_set_custom_label(uint64_t entry_id, const char* label);
+// Persist a favorite on the entry (DB table + in-memory mirror). 1 = ok, 0 = failure.
+int32_t clipboard_set_favorite(uint64_t entry_id, int32_t favorite);
 int32_t clipboard_undo_delete(void);
 int32_t clipboard_can_undo(void);
 uint64_t clipboard_last_restored_id(void);
@@ -148,7 +151,7 @@ void clipboard_stress_reset(void);
 char* clipboard_stress_run_bench(void);
 
 // ─── Data Backup & Restore ───
-int32_t clipboard_export_backup(const char* target_path, const char* favorite_ids_str);
+int32_t clipboard_export_backup(const char* target_path);
 int32_t clipboard_inspect_backup(const char* backup_path, int32_t* out_item_count, int32_t* out_fav_count, uint64_t* out_timestamp);
 int32_t clipboard_restore_backup_overwrite(const char* backup_path, char** out_fav_str);
-int32_t clipboard_restore_backup_merge(const char* backup_path, const char* current_fav_str, char** out_fav_str);
+int32_t clipboard_restore_backup_merge(const char* backup_path, char** out_fav_str);

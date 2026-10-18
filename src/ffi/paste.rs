@@ -353,8 +353,13 @@ fn prepare_paste_impl(mut item: ClipboardEntry, as_path: bool) -> c_int {
     {
         let mut hist = b.history.lock().unwrap();
         *hist = add_to_history(std::mem::take(&mut *hist), item);
-        while hist.len() > b.cleanup_threshold.load(Ordering::Relaxed) {
-            hist.pop();
+        {
+            let favorites = b.favorites.lock().unwrap();
+            crate::backend::trim_history_memory(
+                &mut hist,
+                b.cleanup_threshold.load(Ordering::Relaxed),
+                &favorites,
+            );
         }
         mark_history_changed();
     }

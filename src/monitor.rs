@@ -6,6 +6,7 @@
 //! full send blocks the capture thread (backpressure) instead of spawning an
 //! unbounded number of threads that each retain a full-resolution RGBA image.
 
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::thread;
@@ -140,6 +141,7 @@ fn ingest_rgba_image(
     now: u64,
     cleanup_threshold: &Arc<AtomicUsize>,
     ignore_rules: &Arc<Mutex<IgnoreRules>>,
+    favorites: &Arc<Mutex<HashSet<u64>>>,
 ) {
     if ignore_rules.lock().unwrap().ignores_image() {
         return;
@@ -177,8 +179,13 @@ fn ingest_rgba_image(
         {
             let mut hist = history.lock().unwrap();
             *hist = add_to_history(std::mem::take(&mut *hist), item);
-            while hist.len() > cleanup_threshold.load(Ordering::Relaxed) {
-                hist.pop();
+            {
+                let favorites = favorites.lock().unwrap();
+                crate::backend::trim_history_memory(
+                    &mut hist,
+                    cleanup_threshold.load(Ordering::Relaxed),
+                    &favorites,
+                );
             }
             crate::backend::mark_history_changed();
             crate::perf::perf_instant("rust", "capture.image_phase1", Some("image"));
@@ -223,6 +230,7 @@ pub(crate) fn clipboard_monitor(
     pending_self_write: Arc<Mutex<Option<PendingSelfWrite>>>,
     cleanup_threshold: Arc<AtomicUsize>,
     ignore_rules: Arc<Mutex<IgnoreRules>>,
+    favorites: Arc<Mutex<HashSet<u64>>>,
 ) {
     let mut cb = loop {
         match Clipboard::new() {
@@ -342,7 +350,7 @@ pub(crate) fn clipboard_monitor(
                         ingest_rgba_image(
                             pixels, w, h, raw_png,
                             &history,
-                            &db, &src, now, &cleanup_threshold, &ignore_rules,
+                            &db, &src, now, &cleanup_threshold, &ignore_rules, &favorites,
                         );
                         captured = true;
                     }
@@ -380,8 +388,13 @@ pub(crate) fn clipboard_monitor(
                         let item_for_db = {
                             let mut hist = history.lock().unwrap();
                             *hist = add_to_history(std::mem::take(&mut *hist), item);
-                            while hist.len() > cleanup_threshold.load(Ordering::Relaxed) {
-                                hist.pop();
+                            {
+                                let favorites = favorites.lock().unwrap();
+                                crate::backend::trim_history_memory(
+                                    &mut hist,
+                                    cleanup_threshold.load(Ordering::Relaxed),
+                                    &favorites,
+                                );
                             }
                             crate::backend::mark_history_changed();
                             crate::perf::perf_instant("rust", "capture.text", Some("text"));

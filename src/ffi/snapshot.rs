@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::ffi::{c_char, c_int, c_longlong};
 
 use super::to_ffi_cstring;
@@ -91,12 +92,13 @@ pub extern "C" fn clipboard_snapshot_acquire() -> *mut Snapshot {
 // serializes the whole snapshot into a single caller-owned byte buffer:
 //
 //   header  : 4 bytes "CSNP", u32 version, u32 row_count, u32 flags
-//   per row : 56-byte fixed header (all integers little-endian)
+//   per row : 60-byte fixed header (all integers little-endian)
 //             i32 entry_type, i64 id, i64 timestamp, i64 db_id,
 //             i32 width, i32 height,
 //             u32 custom_label_len,
 //             u32 label_len, u32 source_name_len, u32 source_bundle_id_len,
-//             u32 preview_len
+//             u32 preview_len,
+//             u32 flags (bit 0 = favorited)
 //             followed by the five UTF-8 byte spans: custom_label, label, source_name, source_bundle_id, preview
 //
 // Text rows carry custom_label + label + source metadata + bounded preview. Image rows carry
@@ -105,8 +107,19 @@ pub extern "C" fn clipboard_snapshot_acquire() -> *mut Snapshot {
 // `clipboard_free_bytes` (which marks its pages reusable before freeing).
 
 pub(crate) const PACKED_SNAPSHOT_MAGIC: &[u8; 4] = b"CSNP";
-pub(crate) const PACKED_SNAPSHOT_VERSION: u32 = 2;
-pub(crate) const PACKED_ROW_HEADER_LEN: usize = 56;
+pub(crate) const PACKED_SNAPSHOT_VERSION: u32 = 3;
+pub(crate) const PACKED_ROW_HEADER_LEN: usize = 60;
+
+/// Row flag bit 0: the entry is in `clipboard_favorites`.
+pub(crate) const PACKED_ROW_FLAG_FAVORITE: u32 = 1;
+
+fn row_flags(entry: &ClipboardEntry, favorites: &HashSet<u64>) -> u32 {
+    if favorites.contains(&entry.entry_id()) {
+        PACKED_ROW_FLAG_FAVORITE
+    } else {
+        0
+    }
+}
 
 fn push_u32(out: &mut Vec<u8>, value: u32) {
     out.extend_from_slice(&value.to_le_bytes());
@@ -159,7 +172,7 @@ fn push_image_label(out: &mut Vec<u8>, width: u32, height: u32) {
 /// Serialize history into the packed format without cloning any per-row
 /// `String`. The image label is written digit-by-digit into the output buffer,
 /// so even that `format!("Image ({w}x{h})")` allocation disappears.
-pub(crate) fn encode_snapshot_packed(hist: &[ClipboardEntry]) -> Vec<u8> {
+pub(crate) fn encode_snapshot_packed(hist: &[ClipboardEntry], favorites: &HashSet<u64>) -> Vec<u8> {
     let mut total = 16usize; // magic + version + row_count + flags
     for entry in hist {
         total += PACKED_ROW_HEADER_LEN;
@@ -217,6 +230,7 @@ pub(crate) fn encode_snapshot_packed(hist: &[ClipboardEntry]) -> Vec<u8> {
                 push_u32(&mut out, source_name.len() as u32);
                 push_u32(&mut out, source_bundle_id.len() as u32);
                 push_u32(&mut out, preview.len() as u32);
+                push_u32(&mut out, row_flags(entry, favorites));
                 out.extend_from_slice(custom_label.as_bytes());
                 out.extend_from_slice(label.as_bytes());
                 out.extend_from_slice(source_name.as_bytes());
@@ -246,6 +260,7 @@ pub(crate) fn encode_snapshot_packed(hist: &[ClipboardEntry]) -> Vec<u8> {
                 push_u32(&mut out, source_name.len() as u32);
                 push_u32(&mut out, source_bundle_id.len() as u32);
                 push_u32(&mut out, 0);
+                push_u32(&mut out, row_flags(entry, favorites));
                 out.extend_from_slice(custom_label.as_bytes());
                 push_image_label(&mut out, *width, *height);
                 out.extend_from_slice(source_name.as_bytes());
@@ -263,12 +278,21 @@ pub(crate) fn encode_snapshot_packed(hist: &[ClipboardEntry]) -> Vec<u8> {
 /// the backend is unavailable; on success `*out_len` receives the byte length.
 #[no_mangle]
 pub extern "C" fn clipboard_snapshot_packed_acquire(out_len: *mut c_int) -> *mut u8 {
-    let hist = match try_backend() {
-        Some(b) => b.history.lock().unwrap(),
+    let b = match try_backend() {
+        Some(b) => b,
         None => return std::ptr::null_mut(),
     };
+    let hist = b.history.lock().unwrap();
     let perf = crate::perf::PerfSpan::start("rust", "snapshot.pack");
-    let packed = encode_snapshot_packed(&hist);
+    // Lock order is history -> favorites (see Backend::favorites).
+    let favorites = match b.favorites.lock() {
+        Ok(f) => f.clone(),
+        Err(e) => {
+            crate::error_log!("CopyAttach: favorites mutex poisoned in snapshot: {e}");
+            return std::ptr::null_mut();
+        }
+    };
+    let packed = encode_snapshot_packed(&hist, &favorites);
     let rows = hist.len();
     if let Some(mut span) = perf {
         span.val = Some(rows as i64);
@@ -512,7 +536,8 @@ mod tests {
                 db_id: 42,
             },
         ];
-        let packed = encode_snapshot_packed(&hist);
+        let favorites: HashSet<u64> = [9u64].into_iter().collect();
+        let packed = encode_snapshot_packed(&hist, &favorites);
 
         assert_eq!(&packed[0..4], b"CSNP");
         assert_eq!(read_u32(&packed, 4), PACKED_SNAPSHOT_VERSION);
@@ -528,6 +553,7 @@ mod tests {
         let source_len = read_u32(&packed, at + 44) as usize;
         let bundle_len = read_u32(&packed, at + 48) as usize;
         let preview_len = read_u32(&packed, at + 52) as usize;
+        assert_eq!(read_u32(&packed, at + 56), 0, "text row is not favorited");
         let mut span = at + PACKED_ROW_HEADER_LEN;
         assert_eq!(&packed[span..span + custom_label_len], "备注 text".as_bytes());
         span += custom_label_len;
@@ -551,6 +577,11 @@ mod tests {
         assert_eq!(read_i32(&packed, at + 32), 2160);
         let custom_label_len = read_u32(&packed, at + 36) as usize;
         assert_eq!(custom_label_len, 0);
+        assert_eq!(
+            read_u32(&packed, at + 56),
+            PACKED_ROW_FLAG_FAVORITE,
+            "image row must carry the favorite flag"
+        );
         let label_len = read_u32(&packed, at + 40) as usize;
         span = at + PACKED_ROW_HEADER_LEN;
         assert_eq!(
@@ -564,7 +595,7 @@ mod tests {
 
     #[test]
     fn packed_snapshot_empty_history_has_only_header() {
-        let packed = encode_snapshot_packed(&[]);
+        let packed = encode_snapshot_packed(&[], &HashSet::new());
         assert_eq!(packed.len(), 16);
         assert_eq!(&packed[0..4], b"CSNP");
         assert_eq!(read_u32(&packed, 8), 0);
@@ -597,13 +628,13 @@ mod tests {
 
         let start = std::time::Instant::now();
         for _ in 0..iterations {
-            std::hint::black_box(encode_snapshot_packed(&hist));
+            std::hint::black_box(encode_snapshot_packed(&hist, &HashSet::new()));
         }
         let packed_avg_us = start.elapsed().as_nanos() as f64 / iterations as f64 / 1000.0;
 
         println!(
             "snapshot build: old per-row {old_avg_us:.1} us vs packed {packed_avg_us:.1} us, packed bytes {}",
-            encode_snapshot_packed(&hist).len()
+            encode_snapshot_packed(&hist, &HashSet::new()).len()
         );
     }
 }

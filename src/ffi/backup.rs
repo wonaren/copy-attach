@@ -5,7 +5,6 @@ use std::sync::atomic::Ordering;
 use crate::backend::try_backend;
 use crate::db::backup::{export_backup, inspect_backup, restore_backup_merge, restore_backup_overwrite};
 use crate::db::{entry_id_watermark, load_history_from_db};
-use super::parse_ids_str;
 
 /// Export full database and favorites to a standalone `.cabackup` file.
 ///
@@ -13,10 +12,7 @@ use super::parse_ids_str;
 /// -1 = backend unavailable or invalid path
 /// -2 = database error or export failure
 #[no_mangle]
-pub extern "C" fn clipboard_export_backup(
-    target_path: *const c_char,
-    favorite_ids_str: *const c_char,
-) -> c_int {
+pub extern "C" fn clipboard_export_backup(target_path: *const c_char) -> c_int {
     if target_path.is_null() {
         return -1;
     }
@@ -25,7 +21,6 @@ pub extern "C" fn clipboard_export_backup(
         Err(_) => return -1,
     };
     let path = Path::new(path_str);
-    let fav_ids = parse_ids_str(favorite_ids_str);
 
     let b = match try_backend() {
         Some(b) => b,
@@ -40,7 +35,7 @@ pub extern "C" fn clipboard_export_backup(
         }
     };
 
-    match export_backup(&conn, path, &fav_ids) {
+    match export_backup(&conn, path) {
         Ok(count) => {
             crate::debug_log!("CopyAttach: exported backup to {} ({} items)", path.display(), count);
             count as c_int
@@ -130,6 +125,10 @@ pub extern "C" fn clipboard_restore_backup_overwrite(
             // Reload memory history from newly populated database
             let threshold = b.cleanup_threshold.load(Ordering::Relaxed);
             *hist = load_history_from_db(&conn, threshold);
+            // The restore transaction already read the final table; mirror it.
+            if let Ok(mut favorites) = b.favorites.lock() {
+                *favorites = fav_ids.iter().copied().collect();
+            }
 
             // Re-align monotonic entry_id counter
             let max_loaded = hist.iter().map(|e| e.entry_id()).max().unwrap_or(0);
@@ -173,7 +172,6 @@ pub extern "C" fn clipboard_restore_backup_overwrite(
 #[no_mangle]
 pub extern "C" fn clipboard_restore_backup_merge(
     backup_path: *const c_char,
-    current_fav_str: *const c_char,
     out_fav_str: *mut *mut c_char,
 ) -> c_int {
     if backup_path.is_null() || out_fav_str.is_null() {
@@ -184,7 +182,6 @@ pub extern "C" fn clipboard_restore_backup_merge(
         Err(_) => return -1,
     };
     let path = Path::new(path_str);
-    let curr_favs = parse_ids_str(current_fav_str);
 
     let b = match try_backend() {
         Some(b) => b,
@@ -201,10 +198,15 @@ pub extern "C" fn clipboard_restore_backup_merge(
 
     let mut hist = b.history.lock().unwrap();
 
-    match restore_backup_merge(&mut conn, path, &curr_favs) {
+    match restore_backup_merge(&mut conn, path) {
         Ok((added_count, merged_fav_ids)) => {
             let threshold = b.cleanup_threshold.load(Ordering::Relaxed);
             *hist = load_history_from_db(&conn, threshold);
+            // The merge wrote the consolidated set into the table (and returned
+            // it); mirror that exact set.
+            if let Ok(mut favorites) = b.favorites.lock() {
+                *favorites = merged_fav_ids.iter().copied().collect();
+            }
 
             let max_loaded = hist.iter().map(|e| e.entry_id()).max().unwrap_or(0);
             let watermark = entry_id_watermark(&conn);

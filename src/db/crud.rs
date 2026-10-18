@@ -22,7 +22,7 @@ pub(crate) fn seed_first_launch_tips(conn: &Connection) {
         "3. 预览：按空格预览大图与文本，按 Esc 退出",
         "4. 搜索：直接输入关键词实时过滤，支持全文",
         "5. 标签页：按 ← → 或双指横滑切换不同分类",
-        "6. 收藏：按 ⌥P 收藏常用条目，重启不丢失",
+        "6. 收藏：按 ⌥P 收藏常用条目，自动清理时会保留",
         "7. 删除与撤销：按 ⌃⌫ 删除，按 ⌘Z 撤销恢复",
         "8. 右键菜单：右键条目弹出菜单，支持另存与复制",
         "9. 拖拽：直接拖拽条目到其他应用，自动避让",
@@ -96,7 +96,18 @@ pub(crate) fn seed_first_launch_tips(conn: &Connection) {
 /// `id`-based one for a DB whose timestamps are in insertion order.
 const ORDER_NEWEST_FIRST: &str = "ORDER BY timestamp DESC, id DESC";
 
-/// Load up to `threshold` entries from the DB, newest first.
+/// Load the newest `threshold` **non-favorite** rows plus every favorite,
+/// newest first.
+///
+/// The plain `LIMIT ?` is not enough now that favorites survive trimming: a
+/// favorite can sit arbitrarily far down the list, and truncating to the newest
+/// N rows would silently hide it. It is also not enough to take the newest N
+/// rows and add favorites: a favorite that happens to *be* in the newest N
+/// consumes one of the N slots, so the oldest cleanable row disappears from the
+/// list while the trim (which caps only cleanable rows) leaves it in the DB.
+/// Measured live: 100 non-favorites + 2 favorites with one favorite re-copied
+/// to the top rendered 101 rows instead of 102. The subquery therefore excludes
+/// favorites before applying `LIMIT`, matching `trim_db_history`'s cap exactly.
 ///
 /// Only metadata is read: the full `text` column is never touched at load.
 /// Preview/label/text-hash were persisted at insert time (and backfilled for
@@ -112,8 +123,11 @@ pub(crate) fn load_history_from_db(conn: &Connection, threshold: usize) -> Vec<C
                     timestamp, source_name, source_bundle_id,
                     custom_label
              FROM clipboard_history
-             {ORDER_NEWEST_FIRST}
-             LIMIT ?"
+             WHERE id IN (SELECT id FROM clipboard_history
+                          WHERE entry_id NOT IN (SELECT entry_id FROM clipboard_favorites)
+                          {ORDER_NEWEST_FIRST} LIMIT ?1)
+                OR entry_id IN (SELECT entry_id FROM clipboard_favorites)
+             {ORDER_NEWEST_FIRST}"
         )
     ) {
         Ok(s) => s,
@@ -337,25 +351,35 @@ pub(crate) fn delete_matching_entry(conn: &Connection, entry: &ClipboardEntry, t
     }
 }
 
-/// Trim the DB to at most `threshold` entries (keeps the newest rows).
+/// Trim the DB to at most `threshold` **non-favorite** entries (keeps the
+/// newest rows, never deletes a favorite).
 ///
-/// Range deletion, not a full scan: the subquery walks `threshold + 1` rows in
-/// newest-first order to find the cutoff `(timestamp, id)`, then the DELETE
-/// touches only the rows at or older than that cutoff. When the table holds ≤
-/// threshold rows the subquery yields NULL and nothing is visited at all — the
-/// previous `id NOT IN (SELECT ...)` form scanned every record on every capture.
+/// Favorites are excluded from both the count and the delete, so the cap applies
+/// to cleanable history only: the table may hold `threshold` non-favorites plus
+/// every favorite. That is the product promise — a starred entry is never
+/// removed by automatic cleanup.
 ///
-/// The cutoff is a row value, not a bare `id`, because the ordering key is
-/// `(timestamp, id)` (see `ORDER_NEWEST_FIRST`). Comparing on `id` alone would
-/// delete a row whose timestamp is newer than the cutoff whenever row order and
-/// time order disagree — exactly the state a merge leaves behind.
+/// The excess is `total - favorites`, which is exact because the favorite table
+/// is kept free of orphans (every delete path removes the favorite in the same
+/// transaction, and init prunes legacy leftovers). The DELETE then walks only
+/// the OLDEST `excess` cleanable rows, so a steady-state capture (excess = 1)
+/// costs a count plus a couple of index rows — measured 15–140 µs at 10 000
+/// rows. The previous newest-first cutoff subquery had to walk the whole window
+/// and, once the favorite exclusion made it non-covering, cost 1.9 ms per
+/// capture at the same size.
+///
+/// "Oldest" is `(timestamp, id)`, the same order the list uses: trimming by
+/// rowid instead would evict the user's own newer rows first whenever the table
+/// holds rows inserted out of chronological order (a merge).
 pub(crate) fn trim_db_history(conn: &Connection, threshold: usize) -> Result<(), ()> {
-    if let Err(e) = conn.execute(
-        "DELETE FROM clipboard_history
-         WHERE (timestamp, id) <= (SELECT timestamp, id FROM clipboard_history
-                      ORDER BY timestamp DESC, id DESC LIMIT 1 OFFSET ?)",
-        rusqlite::params![threshold as i64],
-    ) {
+    let sql = "DELETE FROM clipboard_history
+               WHERE id IN (SELECT id FROM clipboard_history
+                            WHERE entry_id NOT IN (SELECT entry_id FROM clipboard_favorites)
+                            ORDER BY timestamp ASC, id ASC
+                            LIMIT (SELECT MAX(0, (SELECT COUNT(*) FROM clipboard_history)
+                                                  - (SELECT COUNT(*) FROM clipboard_favorites)
+                                                  - ?1)))";
+    if let Err(e) = conn.execute(sql, rusqlite::params![threshold as i64]) {
         crate::error_log!("CopyAttach: failed to trim DB history: {e}");
         return Err(());
     }

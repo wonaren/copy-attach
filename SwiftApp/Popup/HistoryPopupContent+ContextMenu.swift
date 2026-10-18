@@ -84,8 +84,11 @@ extension HistoryPopupContent {
         addContextMenuItem(to: menu,
                            title: isFavorite ? "取消收藏" : "收藏",
                            symbol: isFavorite ? "star.slash" : "star") {
-            self.backend.toggleFavorite(item.id)
-            self.showToast(!isFavorite ? "已加入收藏" : "已取消收藏", icon: !isFavorite ? "star.fill" : "star.slash.fill")
+            if self.backend.toggleFavorite(item.id) {
+                self.showToast(!isFavorite ? "已加入收藏" : "已取消收藏", icon: !isFavorite ? "star.fill" : "star.slash.fill")
+            } else {
+                self.showToast("收藏失败，请重试", icon: "exclamationmark.triangle.fill")
+            }
             // Favorites may shrink displayItems; keep the selection valid.
             if self.selectedIndex > self.maxIndex {
                 self.selectedIndex = max(0, self.maxIndex)

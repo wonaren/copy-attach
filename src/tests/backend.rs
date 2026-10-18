@@ -1,6 +1,7 @@
 // FFI delete-failure semantics and the undo-stack caps.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize};
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use crate::backend::{set_backend, Backend, DELETE_STACK_LIMIT, DeletedStackEntry, MAX_UNDO_BYTES, push_deleted};
@@ -32,6 +33,7 @@ fn ensure_test_backend() {
             ignore_rules: Arc::new(Mutex::new(IgnoreRules::default())),
             deleted_stack: Arc::new(Mutex::new(Vec::new())),
             last_restored_id: Arc::new(AtomicU64::new(0)),
+            favorites: Arc::new(Mutex::new(HashSet::new())),
         };
         set_backend(backend)
             .expect("Backend singleton must not be set before this test");
@@ -532,6 +534,116 @@ fn test_history_mutations_publish_a_revision() {
     }
 }
 
+/// End-to-end favorite toggle through the FFI: the durable table, the
+/// in-memory mirror, and the packed snapshot flag must agree.
+///
+/// This is the bridge the UI actually crosses (⌥P -> toggleFavorite ->
+/// clipboard_set_favorite); the DB helper tests alone cannot prove the FFI
+/// wiring, the publish, or the snapshot flag.
+#[test]
+fn test_set_favorite_updates_db_mirror_and_packed_snapshot() {
+    let _shared = shared_state_guard();
+    ensure_test_backend();
+    let b = crate::backend::try_backend().expect("backend initialized");
+
+    let entry_id: u64 = 930_000_000;
+    let db_id: i64;
+    {
+        let conn = b.db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO clipboard_history
+                (entry_type, text, hash, timestamp, source_name, source_bundle_id, entry_id)
+             VALUES (0, 'fav-ffi', ?1, 1, 'FavTest', 'com.example.favtest', ?2)",
+            rusqlite::params![entry_id as i64, entry_id as i64],
+        ).expect("insert favorite fixture row");
+        db_id = conn.last_insert_rowid();
+    }
+    {
+        let mut hist = b.history.lock().unwrap();
+        hist.push(ClipboardEntry::Text {
+            id: entry_id,
+            preview: "fav-ffi".to_string(),
+            label: "fav-ffi".to_string(),
+            custom_label: String::new(),
+            text_hash: entry_id,
+            timestamp: 1,
+            source_name: "FavTest".to_string(),
+            source_bundle_id: "com.example.favtest".to_string(),
+            db_id,
+        });
+    }
+
+    let before_rev = crate::backend::HISTORY_REVISION.load(std::sync::atomic::Ordering::Relaxed);
+    let toggled = crate::ffi::clipboard_set_favorite(entry_id, 1);
+    let after_rev = crate::backend::HISTORY_REVISION.load(std::sync::atomic::Ordering::Relaxed);
+
+    // Read the packed snapshot's flag for our row.
+    let mut packed_len: i32 = 0;
+    let ptr = crate::ffi::clipboard_snapshot_packed_acquire(&mut packed_len);
+    let mut snapshot_flag = false;
+    let mut snapshot_seen = false;
+    if !ptr.is_null() && packed_len > 16 {
+        let bytes = unsafe { std::slice::from_raw_parts(ptr, packed_len as usize) };
+        let count = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
+        let mut off = 16usize;
+        for _ in 0..count {
+            let id = i64::from_le_bytes(bytes[off + 4..off + 12].try_into().unwrap()) as u64;
+            let clen = u32::from_le_bytes(bytes[off + 36..off + 40].try_into().unwrap()) as usize;
+            let llen = u32::from_le_bytes(bytes[off + 40..off + 44].try_into().unwrap()) as usize;
+            let slen = u32::from_le_bytes(bytes[off + 44..off + 48].try_into().unwrap()) as usize;
+            let blen = u32::from_le_bytes(bytes[off + 48..off + 52].try_into().unwrap()) as usize;
+            let plen = u32::from_le_bytes(bytes[off + 52..off + 56].try_into().unwrap()) as usize;
+            let flags = u32::from_le_bytes(bytes[off + 56..off + 60].try_into().unwrap());
+            if id == entry_id {
+                snapshot_seen = true;
+                snapshot_flag = flags & 1 != 0;
+            }
+            off += 60 + clen + llen + slen + blen + plen;
+        }
+        crate::ffi::clipboard_free_bytes(ptr, packed_len);
+    }
+
+    let in_db: bool = {
+        let conn = b.db.lock().unwrap();
+        conn.query_row(
+            "SELECT COUNT(*) FROM clipboard_favorites WHERE entry_id = ?1",
+            rusqlite::params![entry_id as i64],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap() > 0
+    };
+    let in_mirror = b.favorites.lock().unwrap().contains(&entry_id);
+
+    // Reverse the toggle and unwind the fixture before asserting.
+    let untoggled = crate::ffi::clipboard_set_favorite(entry_id, 0);
+    let removed_db: bool;
+    {
+        let conn = b.db.lock().unwrap();
+        removed_db = conn
+            .query_row(
+                "SELECT COUNT(*) FROM clipboard_favorites WHERE entry_id = ?1",
+                rusqlite::params![entry_id as i64],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap() == 0;
+        let _ = conn.execute("DELETE FROM clipboard_history WHERE id = ?1", rusqlite::params![db_id]);
+    }
+    {
+        let mut hist = b.history.lock().unwrap();
+        hist.retain(|e| e.entry_id() != entry_id);
+    }
+    b.favorites.lock().unwrap().remove(&entry_id);
+
+    assert_eq!(toggled, 1, "favoriting a live entry must succeed");
+    assert!(after_rev > before_rev, "a favorite toggle must publish a history revision");
+    assert!(in_db, "the favorite must be durably recorded");
+    assert!(in_mirror, "the in-memory mirror must reflect the toggle");
+    assert!(snapshot_seen, "the entry must be present in the packed snapshot");
+    assert!(snapshot_flag, "the packed row must carry the favorite flag");
+    assert_eq!(untoggled, 1);
+    assert!(removed_db, "un-favoriting must remove the durable row");
+}
+
 /// Guards the DB-first contract of `clipboard_trim_oldest_percent`: when the
 /// DB DELETE fails, memory must be left untouched AND the call must report 0.
 ///
@@ -587,7 +699,7 @@ fn test_trim_oldest_percent_leaves_memory_intact_when_db_delete_fails() {
         let conn = b.db.lock().unwrap();
         conn.pragma_update(None, "query_only", true).expect("enable query_only");
     }
-    let removed = crate::ffi::clipboard_trim_oldest_percent(40, std::ptr::null());
+    let removed = crate::ffi::clipboard_trim_oldest_percent(40);
     let after = b.history.lock().unwrap().len();
 
     // Restore writability and unwind the fixture before asserting.
@@ -651,12 +763,23 @@ fn test_trim_oldest_percent_preserves_favorites() {
         }
     }
 
-    // Favorite the two oldest entries: base+0 and base+1.
+    // Favorite the two oldest entries: base+0 and base+1. The durable table is
+    // the authority; the in-memory set is the process mirror.
     // Total entries = 10. Cleanable = 8.
     // 40% of 8 = ceil(3.2) = 4.
     // Oldest cleanable entries to be removed: base+2, base+3, base+4, base+5.
-    let fav_str = std::ffi::CString::new(format!("{},{}", base, base + 1)).unwrap();
-    let removed = crate::ffi::clipboard_trim_oldest_percent(40, fav_str.as_ptr());
+    {
+        let conn = b.db.lock().unwrap();
+        for id in [base, base + 1] {
+            crate::db::set_favorite(&conn, id, true).unwrap();
+        }
+    }
+    {
+        let mut favorites = b.favorites.lock().unwrap();
+        favorites.insert(base);
+        favorites.insert(base + 1);
+    }
+    let removed = crate::ffi::clipboard_trim_oldest_percent(40);
 
     // Verify DB: favorites (base+0, base+1) must still exist; unfavorited base+2 must be removed!
     let fav0_db: bool;
@@ -701,6 +824,20 @@ fn test_trim_oldest_percent_preserves_favorites() {
                 rusqlite::params![db_id],
             );
         }
+    }
+    {
+        let conn = b.db.lock().unwrap();
+        for id in [base, base + 1] {
+            let _ = conn.execute(
+                "DELETE FROM clipboard_favorites WHERE entry_id = ?1",
+                rusqlite::params![id as i64],
+            );
+        }
+    }
+    {
+        let mut favorites = b.favorites.lock().unwrap();
+        favorites.remove(&base);
+        favorites.remove(&(base + 1));
     }
     {
         let mut hist = b.history.lock().unwrap();

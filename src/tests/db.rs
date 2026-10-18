@@ -1,7 +1,7 @@
 // Entry-ID persistence tests — stable IDs across restarts and deletion.
 
 use crate::backend::{new_entry_id, prime_entry_id};
-use crate::db::{ensure_history_table, insert_entry_to_db, load_history_from_db, persist_entry_to_db, seed_first_launch_tips};
+use crate::db::{ensure_history_table, import_favorites, insert_entry_to_db, load_favorites, load_history_from_db, persist_entry_to_db, seed_first_launch_tips, set_favorite};
 use crate::types::ClipboardEntry;
 use rusqlite::Connection;
 use super::{insert_text, make_image, make_test_image_rgba, test_db};
@@ -239,6 +239,130 @@ fn test_entry_id_monotonic_after_reload() {
     // The new entry must have its assigned ID.
     assert!(all_ids.contains(&new_id),
         "post-restart entry_id {} must be present", new_id);
+}
+
+/// Automatic trimming must never evict a favorite, and favorites must stay
+/// visible beyond the row cap.
+///
+/// Regression this pins down: favorites used to live only in Swift's
+/// UserDefaults as a set of entry_ids. `trim_db_history` — the trim that runs
+/// inside every capture's write transaction — deleted the oldest rows without
+/// consulting them, and the next list publish then permanently dropped the
+/// dangling ids (`pruneFavorites`). A starred entry therefore aged out exactly
+/// like an unstarred one, and a "version update" (a restart + startup trim) was
+/// when users noticed. The durable table is now consulted by every trim path.
+#[test]
+fn test_trim_db_history_never_evicts_favorites() {
+    let conn = test_db();
+    for i in 0..6u64 {
+        insert_text(&conn, &format!("fav-trim-{i}"), i);
+    }
+    let rows: Vec<(u64, String)> = {
+        let mut stmt = conn
+            .prepare("SELECT entry_id, label FROM clipboard_history ORDER BY timestamp ASC")
+            .unwrap();
+        let it = stmt
+            .query_map([], |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, String>(1)?)))
+            .unwrap();
+        it.map(|r| r.unwrap()).collect()
+    };
+    assert_eq!(rows.len(), 6);
+    // Favorite the two OLDEST rows.
+    for (entry_id, _) in &rows[0..2] {
+        crate::db::set_favorite(&conn, *entry_id, true).unwrap();
+    }
+
+    // Cap = 3 cleanable rows: 6 rows, 2 favorites => 4 cleanable, so exactly the
+    // oldest cleanable row (fav-trim-2) must go.
+    crate::db::trim_db_history(&conn, 3).unwrap();
+
+    let loaded = load_history_from_db(&conn, 3);
+    assert_eq!(
+        loaded.len(),
+        5,
+        "2 favorites + 3 cleanable rows must survive, got {:?}",
+        loaded.iter().map(|e| e.label()).collect::<Vec<_>>()
+    );
+    for favored in ["fav-trim-0", "fav-trim-1"] {
+        assert!(
+            loaded.iter().any(|e| e.label() == favored),
+            "{favored} must survive automatic trimming"
+        );
+    }
+    assert!(
+        !loaded.iter().any(|e| e.label() == "fav-trim-2"),
+        "the oldest NON-favorite must be evicted"
+    );
+    // The durable favorite set is intact.
+    let stored = crate::db::load_favorites(&conn).unwrap();
+    assert_eq!(stored.len(), 2);
+}
+
+/// The legacy-favorite migration must only record ids that still have a row,
+/// and must be idempotent (it can run on every launch until the caller drops
+/// its UserDefaults copy).
+#[test]
+fn test_import_favorites_skips_missing_rows_and_is_idempotent() {
+    let conn = test_db();
+    for i in 0..2u64 {
+        insert_text(&conn, &format!("legacy-{i}"), i);
+    }
+    let ids: Vec<u64> = {
+        let mut stmt = conn
+            .prepare("SELECT entry_id FROM clipboard_history ORDER BY timestamp ASC")
+            .unwrap();
+        let it = stmt.query_map([], |r| r.get::<_, i64>(0)).unwrap();
+        it.flatten().map(|id| id as u64).collect()
+    };
+    assert_eq!(ids.len(), 2);
+
+    let imported = import_favorites(&conn, &[ids[0], ids[1], u64::MAX]).unwrap();
+    assert_eq!(imported, 2, "ids with no row must be skipped");
+    assert_eq!(load_favorites(&conn).unwrap().len(), 2);
+
+    // Re-running the migration adds nothing.
+    assert_eq!(import_favorites(&conn, &[ids[0]]).unwrap(), 0);
+    assert_eq!(load_favorites(&conn).unwrap().len(), 2);
+}
+
+/// Toggling a favorite for an entry that no longer exists must fail loudly, not
+/// leave a dangling id that could later match a re-issued one.
+#[test]
+fn test_set_favorite_rejects_missing_entry() {
+    let conn = test_db();
+    assert!(set_favorite(&conn, 42, true).is_err());
+    assert!(load_favorites(&conn).unwrap().is_empty());
+}
+
+/// A favorite that sits *inside* the newest N rows must not consume one of the
+/// N cleanable slots: the list is "newest N non-favorites + every favorite".
+///
+/// Live counterexample this pins: 100 non-favorites + 2 favorites, one favorite
+/// re-copied to the top -> the DB held 102 rows but the list rendered 101,
+/// because the newest-100 window contained the favorite.
+#[test]
+fn test_load_includes_all_favorites_even_when_one_is_newest() {
+    let conn = test_db();
+    for i in 0..6u64 {
+        insert_text(&conn, &format!("fav-window-{i}"), i);
+    }
+    let ids: Vec<u64> = {
+        let mut stmt = conn
+            .prepare("SELECT entry_id FROM clipboard_history ORDER BY timestamp ASC")
+            .unwrap();
+        let it = stmt.query_map([], |r| r.get::<_, i64>(0)).unwrap();
+        it.flatten().map(|id| id as u64).collect()
+    };
+    // Newest row and oldest row are favorites; 4 cleanable rows, cap 4.
+    set_favorite(&conn, ids[5], true).unwrap();
+    set_favorite(&conn, ids[0], true).unwrap();
+
+    let loaded = load_history_from_db(&conn, 4);
+    assert_eq!(loaded.len(), 6, "4 cleanable + 2 favorites must all be visible");
+    let loaded_ids: std::collections::HashSet<u64> = loaded.iter().map(|e| e.entry_id()).collect();
+    for id in &ids {
+        assert!(loaded_ids.contains(id), "entry {id} missing from the load");
+    }
 }
 
 /// Guards the favorite-identity invariant: entry ids must never be re-issued

@@ -98,6 +98,7 @@ vmmap -summary $(pgrep -f 'CopyAttach.app/Contents/MacOS/CopyAttach') | head -16
 
 - **两阶段图片捕获**：Phase 1 同步 hash + 缩略图 → 内存；Phase 2 异步完整 PNG 编码 → DB（单槽有界队列背压，防内存无界增长）
 - **内存治理（0.99.10 起）**：启动不读剪贴板；图片捕获按固定类型优先级 PNG→TIFF→JPEG→GIF→WebP→BMP 取第一个存在的表示（**只按类型优先级，不比较各表示的体积**）；Phase 2 编码 scratch 复用；空闲池页标记可回收（`madvise MADV_FREE_REUSABLE`）；预览解码走 Rust 而非 ImageIO；自研 u8 resize 替代 `imageops::resize`（避免 f32 中转）。**改任何大缓冲路径前必读 `docs/engineering-notes.md` 的 madvise / claim 契约章节**
+- **收藏落库（0.108.5 起）**：`clipboard_favorites(entry_id)` 表是唯一权威；所有裁剪路径排除收藏且阈值只算非收藏行，`load_history_from_db` 返回「最新 N + 全部收藏」，打包快照每行带 favorite 标志。Swift 的 `favoriteIds` 只是快照的镜像，**不要**再写回 UserDefaults，也不要在列表发布时剪枝
 - **db_id 不变量**：内存条目的 `db_id` 必须指向 DB 中该条目的行，且赋值按内容 hash 匹配、绝不按头部位置
 - **Suppress re-capture**：select_and_paste 通过 `pending_self_write` 标记自身写入，监控线程跳过匹配的 changeCount
 - **undo 删除**：撤销栈 ≤1 条，`MAX_UNDO_BYTES`(48MB) 约束的是**磁盘载荷**——删除时先落盘（`$TMPDIR/CopyAttach/Undo/*.bin`），内存只留 `payload_path`/`payload_bytes` + 元数据，blobs 随即 `mark_pages_reusable`（实测删掉 4.19MB 大图后 footprint 反降 7MB）

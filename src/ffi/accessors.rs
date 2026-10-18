@@ -350,8 +350,9 @@ pub extern "C" fn clipboard_set_cleanup_threshold(threshold: i32) {
         if db_trimmed {
             let mut hist = b.history.lock().unwrap();
             let before = hist.len();
-            while hist.len() > t {
-                hist.pop();
+            {
+                let favorites = b.favorites.lock().unwrap();
+                crate::backend::trim_history_memory(&mut hist, t, &favorites);
             }
             if hist.len() != before {
                 crate::backend::mark_history_changed();

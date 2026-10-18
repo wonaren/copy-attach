@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 use rusqlite::Connection;
 
@@ -184,6 +185,24 @@ pub(crate) fn ensure_history_table(conn: &Connection) -> Result<(), rusqlite::Er
          );"
     )?;
 
+    // Favorites live in their own durable table, keyed by the stable entry_id.
+    //
+    // Deliberately NOT a column on `clipboard_history`: a favorite has to survive
+    // the row being re-created. Re-copying the same content deletes the old row
+    // and inserts a new one that inherits the same entry_id (see
+    // `history::add_to_history`), so a row-scoped flag would have to be copied
+    // forward on every write path. Keyed by entry_id, the favorite simply keeps
+    // matching whichever row currently carries that id.
+    //
+    // The table is also what makes favorites survive automatic trimming: every
+    // trim path excludes these ids, so a favorite is never evicted and never
+    // counts against the history cap.
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS clipboard_favorites (
+             entry_id INTEGER PRIMARY KEY
+         );"
+    )?;
+
     // Dedup lookup index for (entry_type, hash).
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_history_type_hash
@@ -267,6 +286,107 @@ pub(crate) fn bump_entry_id_watermark(conn: &Connection, value: u64) -> Result<(
     .map_err(|e| {
         crate::error_log!("CopyAttach: failed to record entry-id watermark {value}: {e}");
     })
+}
+
+/// Every favorited `entry_id` currently durable in the database.
+///
+/// Fallible on purpose: an empty set on a read error would make every trim
+/// treat the user's favorites as ordinary rows and delete them. The caller
+/// must fail the operation instead.
+pub(crate) fn load_favorites(conn: &Connection) -> Result<HashSet<u64>, ()> {
+    let mut stmt = conn.prepare("SELECT entry_id FROM clipboard_favorites").map_err(|e| {
+        crate::error_log!("CopyAttach: failed to prepare favorites load: {e}");
+    })?;
+    let rows = stmt.query_map([], |row| row.get::<_, i64>(0)).map_err(|e| {
+        crate::error_log!("CopyAttach: failed to query favorites: {e}");
+    })?;
+    Ok(rows
+        .flatten()
+        .filter(|id| *id > 0)
+        .map(|id| id as u64)
+        .collect())
+}
+
+/// Drop favorite rows whose entry no longer exists.
+///
+/// Only needed once at init: every path that deletes history rows also deletes
+/// their favorite rows, so this is cleanup for databases written by builds with
+/// the old UserDefaults-only favorites (and for rows removed by an interrupted
+/// operation). Returns how many stale rows were removed.
+pub(crate) fn prune_orphan_favorites(conn: &Connection) -> Result<usize, ()> {
+    conn.execute(
+        "DELETE FROM clipboard_favorites
+         WHERE entry_id NOT IN (SELECT entry_id FROM clipboard_history)",
+        [],
+    )
+    .map_err(|e| {
+        crate::error_log!("CopyAttach: failed to prune orphan favorites: {e}");
+    })
+}
+
+/// Mark/unmark one entry as a favorite.
+///
+/// Returns `Err(())` when the entry does not exist — the caller must surface
+/// that as a failed toggle rather than silently write a dangling id.
+pub(crate) fn set_favorite(conn: &Connection, entry_id: u64, favorite: bool) -> Result<(), ()> {
+    let exists: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM clipboard_history WHERE entry_id = ?1",
+            rusqlite::params![entry_id as i64],
+            |row| row.get(0),
+        )
+        .map_err(|e| {
+            crate::error_log!("CopyAttach: failed to look up entry {entry_id} for favorite toggle: {e}");
+        })?;
+    if exists == 0 {
+        crate::error_log!("CopyAttach: favorite toggle for unknown entry {entry_id}");
+        return Err(());
+    }
+    // The INSERT selects from the history table, so a row that disappears
+    // between the existence check and this write cannot create an orphan.
+    let sql = if favorite {
+        "INSERT OR IGNORE INTO clipboard_favorites (entry_id)
+         SELECT entry_id FROM clipboard_history WHERE entry_id = ?1"
+    } else {
+        "DELETE FROM clipboard_favorites WHERE entry_id = ?1"
+    };
+    conn.execute(sql, rusqlite::params![entry_id as i64])
+        .map(|_| ())
+        .map_err(|e| {
+            crate::error_log!("CopyAttach: failed to persist favorite state for entry {entry_id}: {e}");
+        })
+}
+
+/// Persist favorites migrated from the legacy UserDefaults id list.
+///
+/// Ids with no matching row are skipped: a favorite whose entry was trimmed
+/// before the migration has nothing to point at. Returns how many ids were
+/// actually recorded.
+pub(crate) fn import_favorites(conn: &Connection, ids: &[u64]) -> Result<usize, ()> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let tx = conn.unchecked_transaction().map_err(|e| {
+        crate::error_log!("CopyAttach: failed to begin favorites import transaction: {e}");
+    })?;
+    let mut imported = 0usize;
+    for &id in ids {
+        match tx.execute(
+            "INSERT OR IGNORE INTO clipboard_favorites (entry_id)
+             SELECT entry_id FROM clipboard_history WHERE entry_id = ?1",
+            rusqlite::params![id as i64],
+        ) {
+            Ok(changed) => imported += changed,
+            Err(e) => {
+                crate::error_log!("CopyAttach: failed to import favorite {id}: {e}");
+                return Err(());
+            }
+        }
+    }
+    tx.commit().map_err(|e| {
+        crate::error_log!("CopyAttach: failed to commit favorites import: {e}");
+    })?;
+    Ok(imported)
 }
 
 /// Metadata migration version stored in SQLite `user_version`.

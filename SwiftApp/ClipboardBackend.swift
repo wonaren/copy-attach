@@ -135,62 +135,46 @@ class ClipboardBackend {
         c.totalCostLimit = 8 * 1024 * 1024  // 8 MB
         return c
     }()
+    /// Favorites, decoded from the same snapshot as `items`.
+    ///
+    /// The durable copy is the DB's `clipboard_favorites` table; this set is
+    /// the in-memory mirror the views read. It is never persisted to
+    /// UserDefaults and never pruned here: a favorite is deleted only by the
+    /// user (toggle) or by the entry itself disappearing — and the engine's
+    /// trim paths now exclude favorited rows, so an ordinary cleanup cannot
+    /// remove the underlying entry.
     var favoriteIds: Set<Int> = []
 
-    private let favoritesKey = "FavoriteIds"
+    /// Legacy UserDefaults key from builds that kept favorites Swift-side.
+    /// Read once at startup, imported into the DB, then removed.
+    private let legacyFavoritesKey = "FavoriteIds"
 
-    private func loadFavorites() {
-        if let data = UserDefaults.standard.data(forKey: favoritesKey),
-           let ids = try? JSONDecoder().decode(Set<Int>.self, from: data) {
-            favoriteIds = ids
+    @discardableResult
+    func toggleFavorite(_ entryId: Int) -> Bool {
+        let wantFavorite = !favoriteIds.contains(entryId)
+        guard clipboard_set_favorite(UInt64(entryId), wantFavorite ? 1 : 0) != 0 else {
+            errorLog("toggleFavorite: backend rejected favorite state for entry \(entryId) — see Rust log")
+            return false
         }
-    }
-
-    private func saveFavorites() {
-        if let data = try? JSONEncoder().encode(favoriteIds) {
-            UserDefaults.standard.set(data, forKey: favoritesKey)
-        }
-    }
-
-    /// Drop favorites whose entry no longer exists.
-    ///
-    /// Every publish of the list is the authoritative answer to "which ids
-    /// exist right now", so this is the single convergence point: it covers
-    /// deletion, undo, threshold trims, percent trims and clear — each of
-    /// which removes entries without knowing about favorites. Without it the
-    /// set only ever grows, and a stale id becomes dangerous rather than
-    /// merely useless: entry ids are persisted, so a re-issued id would
-    /// resurrect an old favorite on unrelated content.
-    ///
-    /// Deliberately idempotent and silent when nothing changed: it runs on
-    /// every reload, and writing UserDefaults on each one would be churn.
-    private func pruneFavorites(against items: [ClipboardItem]) {
-        guard !favoriteIds.isEmpty else { return }
-        let live = Set(items.map(\.id))
-        let stale = favoriteIds.subtracting(live)
-        guard !stale.isEmpty else { return }
-        favoriteIds.subtract(stale)
-        saveFavorites()
-        debugLog("pruneFavorites: dropped \(stale.count) favorite id(s) with no remaining entry")
-    }
-
-    func toggleFavorite(_ entryId: Int) {
-        if favoriteIds.contains(entryId) {
-            favoriteIds.remove(entryId)
-        } else {
+        if wantFavorite {
             favoriteIds.insert(entryId)
+        } else {
+            favoriteIds.remove(entryId)
         }
-        saveFavorites()
+        // Discard any snapshot already in flight: it was taken before this
+        // write and would otherwise publish the pre-toggle favorite set over
+        // the local mutation.
+        reloadGeneration.withLock { $0 &+= 1 }
         // The favorites filter tab derives its list from `favoriteIds` —
         // invalidate any memoized display list.
         itemsGeneration &+= 1
         // Single choke point for every favorite path (shortcut, context menu).
         OnboardingGuide.shared.record(.favorited)
+        return true
     }
 
     private init() {
         permissionGranted = checkPermission()
-        loadFavorites()
     }
 
     enum StartResult {
@@ -219,9 +203,15 @@ class ClipboardBackend {
         // launch silently dropped rows the user had asked to keep.
         let savedThreshold = UserDefaults.standard.integer(forKey: "CleanupThreshold")
         let initThreshold = savedThreshold >= 100 ? Int32(savedThreshold) : 0
-        let result = initThreshold > 0
-            ? clipboard_init_with_threshold(initThreshold)
-            : clipboard_init()
+        // Legacy favorites (pre-DB builds kept them in UserDefaults) must reach
+        // the engine BEFORE its startup trim, otherwise the first launch of
+        // this build could delete a favorite below the cutoff and then have
+        // nothing to import. Passing the list into init is what orders those
+        // two steps; the key is dropped only once init reports success.
+        let legacyFavorites = legacyFavoriteCSV()
+        let result = legacyFavorites.csv.withCString { csv in
+            clipboard_init_with_threshold_and_favorites(initThreshold, csv)
+        }
         // Mirror of the Rust init codes (src/ffi/init.rs):
         //   1 started, 0 retryable, -1 corrupt, -2 permanent environment.
         if result == -1 {
@@ -238,6 +228,10 @@ class ClipboardBackend {
         }
         print("[ClipboardBackend] init result: \(result)")
         permissionGranted = checkPermission()
+        if legacyFavorites.hadKey {
+            UserDefaults.standard.removeObject(forKey: legacyFavoritesKey)
+            debugLog("legacy favorites: handed \(legacyFavorites.count) id(s) to the engine before the startup trim")
+        }
 
         // The threshold was already applied by init (it is the startup trim
         // bound), so this is a no-op trim; it stays as the single place that
@@ -424,6 +418,22 @@ class ClipboardBackend {
         }
     }
 
+    /// Read the pre-DB favorites list for the init call.
+    ///
+    /// Returns the id list as CSV plus whether a key existed. A key that fails
+    /// to decode is reported and left untouched (we must not delete data we
+    /// cannot read); it contributes no ids.
+    private func legacyFavoriteCSV() -> (csv: String, hadKey: Bool, count: Int) {
+        guard let data = UserDefaults.standard.data(forKey: legacyFavoritesKey) else {
+            return ("", false, 0)
+        }
+        guard let ids = try? JSONDecoder().decode(Set<Int>.self, from: data) else {
+            errorLog("legacy favorites: stored data is not a Set<Int>; leaving the key untouched")
+            return ("", false, 0)
+        }
+        return (ids.map(String.init).joined(separator: ","), true, ids.count)
+    }
+
     /// Apply the persisted debug-logging preference as early as possible.
     /// If the user has never touched the setting, keep Rust's build-profile
     /// default (debug builds log, release builds do not).
@@ -563,7 +573,7 @@ class ClipboardBackend {
             defer { clipboard_free_bytes(packed, packedLength) }
 
             let perfDecode = PerfSpan.start("swift", "snapshot.decode")
-            guard let newItems = PackedSnapshot.decodeItems(
+            guard let (newItems, favorites) = PackedSnapshot.decodeItems(
                 from: UnsafeRawPointer(packed),
                 length: Int(packedLength)
             ) else {
@@ -580,7 +590,7 @@ class ClipboardBackend {
                 MainActor.assumeIsolated {
                     guard gen == self.reloadGeneration.withLock({ $0 }) else { return }
                     self.items = newItems
-                    self.pruneFavorites(against: newItems)
+                    self.favoriteIds = favorites
                     // New base data — invalidate memoized display lists.
                     self.itemsGeneration &+= 1
                     // List published: paired with the Rust capture marker this is
@@ -796,7 +806,6 @@ class ClipboardBackend {
         let result = clipboard_delete_by_id(UInt64(entryId)) != 0
         if result {
             favoriteIds.remove(entryId)
-            saveFavorites()
             PasteQueueManager.shared.remove(id: entryId)
             items.remove(at: index)
             count = items.count
@@ -1065,6 +1074,7 @@ class ClipboardBackend {
         // popup-open refresh.
         count = 0
         items = []
+        favoriteIds = []
         itemsGeneration &+= 1
         PasteQueueManager.shared.clear()
     }
@@ -1072,10 +1082,7 @@ class ClipboardBackend {
     /// Trim the oldest N percent of entries from history and DB, preserving favorites.
     /// Returns the number of entries removed.
     func trimOldestPercent(_ percent: Int) -> Int {
-        let favStr = favoriteIds.map(String.init).joined(separator: ",")
-        let removed = favStr.withCString { favCStr in
-            Int(clipboard_trim_oldest_percent(Int32(percent), favCStr))
-        }
+        let removed = Int(clipboard_trim_oldest_percent(Int32(percent)))
         if removed > 0 {
             DispatchQueue.main.async {
                 self.refresh()
@@ -1130,11 +1137,8 @@ class ClipboardBackend {
         // owned by a temporary NSString that ARC may release before the FFI call
         // reads it — a dangling buffer, and one that only misbehaves under memory
         // pressure. `withCString` scopes the buffer to the call instead.
-        let favStr = favoriteIds.map(String.init).joined(separator: ",")
         let count = url.path.withCString { path in
-            favStr.withCString { favCStr in
-                clipboard_export_backup(path, favCStr)
-            }
+            clipboard_export_backup(path)
         }
         if count < 0 {
             throw NSError(domain: "CopyAttachBackup", code: Int(count), userInfo: [
@@ -1178,11 +1182,8 @@ class ClipboardBackend {
                 clipboard_restore_backup_overwrite(path, &outFavCStr)
             }
         case .merge:
-            let favStr = favoriteIds.map(String.init).joined(separator: ",")
             result = url.path.withCString { path in
-                favStr.withCString { favCStr in
-                    clipboard_restore_backup_merge(path, favCStr, &outFavCStr)
-                }
+                clipboard_restore_backup_merge(path, &outFavCStr)
             }
         }
 
@@ -1195,9 +1196,7 @@ class ClipboardBackend {
         if let ptr = outFavCStr {
             let favStr = String(cString: ptr)
             clipboard_free_string(ptr)
-            let newFavs = Set(favStr.split(separator: ",").compactMap { Int($0) })
-            self.favoriteIds = newFavs
-            saveFavorites()
+            self.favoriteIds = Set(favStr.split(separator: ",").compactMap { Int($0) })
         }
 
         // A restore rewrites the rows, and the overwrite mode re-inserts the

@@ -161,7 +161,9 @@ pub fn inject_into_db(
     }
 
     // Trim
-    trim_db_history(&conn, threshold);
+    if trim_db_history(&conn, threshold).is_err() {
+        crate::error_log!("CopyAttach stress: trim failed after injection; the fixture may exceed the cap");
+    }
 
     // Get DB file size
     if let Ok(meta) = std::fs::metadata(db_path) {

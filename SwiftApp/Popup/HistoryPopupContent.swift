@@ -624,8 +624,11 @@ struct HistoryPopupContent: View {
                 if itemIdx < displayItems.count {
                     let item = displayItems[itemIdx]
                     let isFav = backend.favoriteIds.contains(item.id)
-                    backend.toggleFavorite(item.id)
-                    showToast(!isFav ? "已加入收藏" : "已取消收藏", icon: !isFav ? "star.fill" : "star.slash.fill")
+                    if backend.toggleFavorite(item.id) {
+                        showToast(!isFav ? "已加入收藏" : "已取消收藏", icon: !isFav ? "star.fill" : "star.slash.fill")
+                    } else {
+                        showToast("收藏失败，请重试", icon: "exclamationmark.triangle.fill")
+                    }
                 }
             }
             // Reclamp after favorites change: displayItems may have shrunk
