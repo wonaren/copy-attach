@@ -42,6 +42,7 @@ CopyAttach 是一个 macOS 剪贴板历史管理器：Rust cdylib 后端（`src/
 - **自写抑制**：`select_and_paste` 设 `pending_self_write` 标记，监控线程按**精确匹配的 changeCount** 跳过自身写入。
 - `src/ffi/stress.rs` 始终编译，只有内部函数被 feature gate —— release 包里也存在 `clipboard_stress_available`。
 - v0.108.0 起完全免费与开源（旧商业许可证体系封存在 `archive/commercial-v0.107` 分支）。
+- **发布仓库 = 源码仓库**：Release 直接发布在 `wonaren/copy-attach`（`GITHUB_TOKEN` + `contents: write`），不再有 `copyattach-release` 镜像仓库、跨仓库 PAT 或 README 同步 workflow；应用内更新与 README 下载链接必须指向 `copy-attach`。
 
 ## 文档索引
 

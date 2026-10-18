@@ -1,18 +1,20 @@
 # CopyAttach — GitHub Actions 自动构建工作流
 #
 # 功能:
-#   - CI 构建: 每次 push/PR 到 master，验证编译通过
-#   - 发布构建: 打 tag（如 v0.81.0）时自动构建并打包 DMG，上传到 Release
+#   - CI 构建: 每次 PR 到 master 时验证编译通过
+#   - 发布构建: 打 tag（如 v0.81.0）时自动构建并打包 DMG，上传到源码仓库的 Release
+#     （源码仓库 wonaren/copy-attach 已公开，不再有独立的公共发布仓库）
 #   - 手动触发: 通过 GitHub 页面上的 "Run workflow" 按钮手动构建
 #
 # 使用前准备:
 #   1. 代码签名（可选但强烈推荐）
-#      在 repo Settings → Secrets and variables → Actions 中添加:
+#      在仓库 Settings → Environments → src2release-env 中添加（build/release job 都引用该环境）:
 #      - MACOS_CERTIFICATE:       base64 编码的证书 (.p12，含私钥)
 #      - MACOS_CERTIFICATE_PWD:   证书导出密码
 #      - MACOS_NOTARIZATION_ACCOUNT: Apple ID 邮箱（用于公证，需 Developer ID）
 #      - MACOS_NOTARIZATION_PWD:  Apple ID 应用专用密码
 #      - APPLE_TEAM_ID:           团队 ID（如 XXXXXXXXXX）
+#      - LANZOU_COOKIE:           蓝奏云登录 Cookie（可选，用于自动上传）
 #      签名身份必须跨版本稳定（Developer ID 或 Apple Development）：
 #      否则每次更新发布版都会让用户重新弹钥匙串授权框。用稳定身份签名后，
 #      用户首次点一次「始终允许」即可，之后所有版本更新都不再弹。
@@ -217,13 +219,15 @@ jobs:
   # 触发方式：
   #   - 推送 tag v*（如 git push origin v0.81.0）
   #   - 手动触发 workflow 时勾选 "创建 GitHub Release"
+  # 发布仓库就是源码仓库本身；仓库公开后 Release 与资产自动公开，
+  # 不再需要跨仓库 PAT，也不再维护独立的公共发布仓库。
   # ──────────────────────────────────────────────
   release:
-    name: Publish Releases
+    name: Publish Release
     if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && (inputs.create_release || inputs.lanzou_upload))
     needs: build
     runs-on: ubuntu-latest
-    # PUBLIC_RELEASE_TOKEN is stored as an Environment secret in this environment.
+    # 该环境仍承载 LANZOU_COOKIE 等发布用 secrets（环境名沿用历史命名）。
     environment: src2release-env
     permissions:
       contents: write
@@ -278,52 +282,27 @@ jobs:
           # 蓝奏轮换域名时无需改动本文件或重发 Release。
           printf '\n---\n### 国内下载\n- [蓝奏云下载](https://dl.abovepast.shop/lanzou)（提取码：`1234`）\n' >> "$NOTES_FILE"
 
-      # The automatic GITHUB_TOKEN publishes a private release in the source repo.
-      - name: Create or update private source release
+      # 发布到源码仓库本身。仓库已公开，GITHUB_TOKEN 创建的 Release 对所有人可见。
+      - name: Create or update release
         env:
           GH_TOKEN: ${{ github.token }}
-          SOURCE_REPOSITORY: ${{ github.repository }}
+          REPOSITORY: ${{ github.repository }}
           VERSION: ${{ needs.build.outputs.version }}
           NOTES_FILE: ${{ runner.temp }}/release-notes.md
         run: |
           TAG="v${VERSION}"
 
-          if ! gh release view "$TAG" --repo "$SOURCE_REPOSITORY" >/dev/null 2>&1; then
+          if ! gh release view "$TAG" --repo "$REPOSITORY" >/dev/null 2>&1; then
             gh release create "$TAG" \
-              --repo "$SOURCE_REPOSITORY" \
+              --repo "$REPOSITORY" \
               --title "CopyAttach ${TAG}" \
               --notes-file "$NOTES_FILE"
           else
             gh release edit "$TAG" \
-              --repo "$SOURCE_REPOSITORY" \
+              --repo "$REPOSITORY" \
               --notes-file "$NOTES_FILE"
           fi
 
           gh release upload "$TAG" build/CopyAttach-*.dmg \
-            --repo "$SOURCE_REPOSITORY" \
-            --clobber
-
-      # The fine-grained PAT publishes the same release in the public repo.
-      - name: Create or update public release
-        env:
-          GH_TOKEN: ${{ secrets.PUBLIC_RELEASE_TOKEN }}
-          PUBLIC_REPOSITORY: wonaren/copyattach-release
-          VERSION: ${{ needs.build.outputs.version }}
-          NOTES_FILE: ${{ runner.temp }}/release-notes.md
-        run: |
-          TAG="v${VERSION}"
-
-          if ! gh release view "$TAG" --repo "$PUBLIC_REPOSITORY" >/dev/null 2>&1; then
-            gh release create "$TAG" \
-              --repo "$PUBLIC_REPOSITORY" \
-              --title "CopyAttach ${TAG}" \
-              --notes-file "$NOTES_FILE"
-          else
-            gh release edit "$TAG" \
-              --repo "$PUBLIC_REPOSITORY" \
-              --notes-file "$NOTES_FILE"
-          fi
-
-          gh release upload "$TAG" build/CopyAttach-*.dmg \
-            --repo "$PUBLIC_REPOSITORY" \
+            --repo "$REPOSITORY" \
             --clobber

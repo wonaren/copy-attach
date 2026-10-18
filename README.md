@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/wonaren/copy-attach/releases"><img src="https://img.shields.io/badge/version-0.108.2-blue?style=flat" alt="Version 0.108.2"></a>
+  <a href="https://github.com/wonaren/copy-attach/releases"><img src="https://img.shields.io/badge/version-0.108.3-blue?style=flat" alt="Version 0.108.3"></a>
   <img src="https://img.shields.io/badge/macOS-15.0%2B-000000?style=flat&logo=apple&logoColor=white" alt="macOS 15.0+">
   <img src="https://img.shields.io/badge/Swift-6%2B-f05138?style=flat&logo=swift&logoColor=white" alt="Swift 6+">
   <img src="https://img.shields.io/badge/Rust-1.75%2B-dea584?style=flat&logo=rust&logoColor=white" alt="Rust 1.75+">
@@ -21,7 +21,7 @@
 <p align="center">
   <a href="https://copyattach.abovepast.shop/"><img src="assets/icon_inner.svg" alt="CopyAttach" height="14" style="vertical-align: -1px;"> 官方网站 copyattach.abovepast.shop</a>
   &nbsp;&nbsp;·&nbsp;&nbsp;
-  <a href="https://github.com/wonaren/copyattach-release/releases">GitHub Releases 下载</a>
+  <a href="https://github.com/wonaren/copy-attach/releases">GitHub Releases 下载</a>
   &nbsp;&nbsp;·&nbsp;&nbsp;
   <a href="https://dl.abovepast.shop/lanzou">蓝奏云高速镜像</a>
 </p>
@@ -95,7 +95,7 @@ CopyAttach 是一款专为 macOS 设计的极轻量、高效、自由开源剪�
 
 ## 压力测试与性能
 
-以下数据为 **v0.108.1 实机复测**（Apple M5 / macOS 27.0.1 / 10 核 / 16 GB，固定随机种子 `42`），全部由 `perf/analyze.py` 的门禁校验通过后采信（本轮 self-check verdict `swift15_rust7_seen11_clk1`，时钟偏差 35–116 µs）。复现路径：`STRESS=1 ./build.sh` 编译带埋点的构建，`stress_gen` 生成数据，CGEvent 注入真实按键驱动交互，`perf/analyze.py` 按 pid + 墙钟窗口切分相位后统计。v0.108.2 只修复了启动裁剪阈值，未改动任何性能路径。
+以下数据为 **v0.108.1 实机复测**（Apple M5 / macOS 27.0.1 / 10 核 / 16 GB，固定随机种子 `42`），全部由 `perf/analyze.py` 的门禁校验通过后采信（本轮 self-check verdict `swift15_rust7_seen11_clk1`，时钟偏差 35–116 µs）。复现路径：`STRESS=1 ./build.sh` 编译带埋点的构建，`stress_gen` 生成数据，CGEvent 注入真实按键驱动交互，`perf/analyze.py` 按 pid + 墙钟窗口切分相位后统计。v0.108.2 只修复了启动裁剪阈值，v0.108.3 只调整了发布仓库地址，均未改动任何性能路径。
 
 ### 数据负载与生成吞吐
 
@@ -190,7 +190,7 @@ cargo test
 
 ## 免费与开源
 
-CopyAttach 自 **v0.108.0** 起全面免费与开源。所有功能无需激活码、无需联网验证、永久离线可用。
+CopyAttach 自 **v0.108.0** 起全面免费与开源。所有功能无需激活码、无需联网验证、永久离线可用。源代码、发布产物与更新下载均在 [wonaren/copy-attach](https://github.com/wonaren/copy-attach) 仓库。
 
 ## 许可证
 

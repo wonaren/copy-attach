@@ -262,7 +262,7 @@ extension InlineSettingsView {
     }
 
     private var repoURL: URL? {
-        URL(string: "https://github.com/wonaren/copyattach-release")
+        URL(string: "https://github.com/wonaren/copy-attach/releases")
     }
     private var authorGitHubURL: URL? {
         URL(string: "https://github.com/wonaren")
@@ -285,8 +285,8 @@ extension InlineSettingsView {
         }
     }
 
-    /// Seamless update: download + install in the background (GitHub first,
-    /// lanzou fallback), then auto-relaunch. No browser, no manual steps.
+    /// Seamless update: download + install in the background (lanzou first,
+    /// GitHub fallback), then auto-relaunch. No browser, no manual steps.
     private func startDirectDownload() {
         guard case .updateAvailable(let latestVersion, _, _) = updateState else { return }
         updater.startDownload(version: latestVersion)
@@ -301,7 +301,7 @@ extension InlineSettingsView {
     private func stripDevSuffix(_ version: String) -> String { Self.stripDevSuffix(version) }
 
     nonisolated private static let cloudflareUpdateURL = URL(string: "https://dl.abovepast.shop/healthz")
-    nonisolated private static let githubLatestReleaseURL = URL(string: "https://github.com/wonaren/copyattach-release/releases/latest")
+    nonisolated private static let githubLatestReleaseURL = URL(string: "https://github.com/wonaren/copy-attach/releases/latest")
 
     private struct HealthzPayload: Decodable {
         let version: String?
@@ -348,7 +348,7 @@ extension InlineSettingsView {
             }
 
             let latestVersion = Self.cleanVersionTag(rawVersion)
-            let releaseURL = URL(string: "https://github.com/wonaren/copyattach-release/releases/tag/v\(latestVersion)")
+            let releaseURL = URL(string: "https://github.com/wonaren/copy-attach/releases/tag/v\(latestVersion)")
                 ?? Self.githubLatestReleaseURL!
 
             DispatchQueue.main.async {

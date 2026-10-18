@@ -15,8 +15,8 @@ import Foundation
 ///     link on its own CDN. Verified end-to-end (0.5s / 2.7MB). The lanzou
 ///     native download hop (`developer2.lanrar.com/file/?token`) rejects
 ///     non-browser clients (400 Time Out), so it is not used directly.
-///   - GitHub (fallback): `https://github.com/wonaren/copyattach-release/releases/
-///     download/v<version>/CopyAttach-<version>.dmg`
+///   - GitHub (fallback): `https://github.com/wonaren/copy-attach/releases/
+///     download/v<version>/CopyAttach-<version>-macos-<arch>.dmg`
 @MainActor
 final class UpdateDownloader: NSObject, ObservableObject, URLSessionDownloadDelegate {
     static let shared = UpdateDownloader()
@@ -164,7 +164,7 @@ final class UpdateDownloader: NSObject, ObservableObject, URLSessionDownloadDele
         #else
         let arch = "x86_64"
         #endif
-        guard let url = URL(string: "https://github.com/wonaren/copyattach-release/releases/download/v\(cleanVersion)/CopyAttach-\(cleanVersion)-macos-\(arch).dmg") else {
+        guard let url = URL(string: "https://github.com/wonaren/copy-attach/releases/download/v\(cleanVersion)/CopyAttach-\(cleanVersion)-macos-\(arch).dmg") else {
             preconditionFailure("Invalid generated GitHub asset URL")
         }
         return url

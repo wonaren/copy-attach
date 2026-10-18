@@ -183,6 +183,8 @@ SwiftApp/
 
 CI（`.github/workflows/build.yml`）签名步骤关键：`build` job 必须声明 `environment: src2release-env` 才能读到环境级 secrets；证书配了却找不到身份时显式失败（`exit 1`）；公证流程先 `build/package_dmg.sh` 打包，再 `notarytool submit` + `stapler staple` 作用于最终 DMG。
 
+**发布仓库即源码仓库**：`release` job 直接向 `wonaren/copy-attach` 发布 Release（`GITHUB_TOKEN` + `contents: write` 即可），不再有独立公共发布仓库、跨仓库 PAT 或 README 同步 workflow。应用内更新检查/下载与 README 中的所有 Release 链接必须指向该仓库；GitHub 回退资产路径是 `releases/download/v<version>/CopyAttach-<version>-macos-<arch>.dmg`。
+
 验证方式：`codesign -dv --verbose=4 CopyAttach.app | grep Authority` 必须是身份证书而非 `Signature=adhoc`。
 
 ## 构建依赖

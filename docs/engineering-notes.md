@@ -164,6 +164,7 @@ CI（`.github/workflows/build.yml`）已修复的关键坑：
 2. **步骤级 `if: env.MACOS_CERTIFICATE != ''` 永远为 false**：`if` 条件看不到步骤自己的 `env:` 映射。改为步骤始终运行 + 脚本内 `[ -z ]` 守卫。
 3. **证书配了却找不到身份时显式失败**（`exit 1`）：避免静默发布 ad-hoc 产物。
 4. **公证流程**：先 `build/package_dmg.sh` 打包，再 `notarytool submit` + `stapler staple` 作用于最终 DMG（需 Developer ID + `MACOS_NOTARIZATION_ACCOUNT/PWD/APPLE_TEAM_ID` secrets）。
+5. **发布仓库即源码仓库**（2026-10 起 `wonaren/copy-attach` 已公开）：`release` job 用 `github.token` + `contents: write` 直接发布，不再向 `copyattach-release` 镜像、不再需要 `PUBLIC_RELEASE_TOKEN`，`sync-readme.yml` 已删除。应用内 GitHub 回退下载路径必须与新仓库一致：`releases/download/v<version>/CopyAttach-<version>-macos-<arch>.dmg`。删除旧镜像仓库后，旧版本 App 的 GitHub 兜底会失效（蓝奏云主通道仍可用），升级到本版本即恢复。
 
 验证：`codesign -dv --verbose=4 CopyAttach.app | grep Authority` 必须是身份证书而非 `Signature=adhoc`；`codesign --verify --deep --strict` 通过。
 
