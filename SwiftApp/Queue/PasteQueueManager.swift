@@ -277,6 +277,13 @@ final class PasteQueueManager {
         case .pasted:
             advance()
             OnboardingGuide.shared.record(.queuePasted)
+        case .copied:
+            // ClipboardOnly mode: the payload reached the pasteboard but no
+            // keystroke will ever be synthesized, so stepping through the rest
+            // would just overwrite it item after item. Stop and say why.
+            errorLog("PasteQueueManager: ClipboardOnly mode reached dispensing — stopping")
+            showSkippedNotice("当前为仅复制模式，队列已停止")
+            finish()
         case .keystrokeNotDelivered:
             // The payload IS on the pasteboard — retrying would paste the same
             // item twice, so advance and tell the user the keystroke did not

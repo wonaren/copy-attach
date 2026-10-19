@@ -820,9 +820,10 @@ class ClipboardBackend {
     /// Two-phase paste used by the popup: write the pasteboard, run
     /// `dismiss`, then post the paste keystroke.
     ///
-    /// Returns true when the pasteboard was written — the keystroke is
-    /// best-effort on top. Thin wrapper over `pasteEntryById` so both paste
-    /// paths share one implementation of the contract.
+    /// Returns true when the entry was placed on the pasteboard — the keystroke
+    /// is best-effort on top (and absent entirely in ClipboardOnly mode). Thin
+    /// wrapper over `pasteEntryById` so both paste paths share one
+    /// implementation of the contract.
     @discardableResult
     func selectAndPasteDismissingPopup(at index: Int, asPath: Bool = false, dismiss: () -> Void) -> Bool {
         guard index < items.count else { return false }
@@ -847,11 +848,15 @@ class ClipboardBackend {
         /// editable focus can ignore it silently. Batch HUD wording must say
         /// "sent", never "delivered".
         case pasted
-        /// Pasteboard written, ⌘V could not be delivered (target exited, or the
-        /// event could not be posted).
+        /// Pasteboard written, but no keystroke was posted because the user
+        /// chose ClipboardOnly mode. Nothing else is pending: the content is
+        /// ready for a manual ⌘V.
+        case copied
+        /// Pasteboard written, ⌘V could not be delivered (target exited, no
+        /// target pid was known, or the event could not be posted).
         case keystrokeNotDelivered
         /// Nothing was written: the entry id no longer resolves, permission is
-        /// missing, or the body could not be loaded.
+        /// missing in Keystroke mode, or the body could not be loaded.
         case entryUnavailable
     }
 
@@ -859,13 +864,15 @@ class ClipboardBackend {
     ///
     /// Order is load-bearing:
     /// 1. `prepare` writes the pasteboard and moves the entry to the top of
-    ///    history, returning the pid to deliver to (>0) or 0 on failure.
+    ///    history, returning >0 (pid to deliver to), -1 (written, no pid),
+    ///    or 0 (nothing written).
     /// 2. `dismiss` (popup path only; the queue passes nothing) must run BEFORE
     ///    the keystroke: only `close()` resigns the panel's key status, and a
     ///    keystroke posted while the panel is still key made WeChat
     ///    intermittently drop short-text pastes (measured via PASTEDIAG:
     ///    `popupKey=true` on every paste).
-    /// 3. `send_paste` posts Cmd+V to the target pid.
+    /// 3. `send_paste` posts Cmd+V to the target pid — skipped entirely in
+    ///    ClipboardOnly mode, where the user pastes by hand.
     /// 4. `reloadItems` refreshes the list AFTER the keystroke: a 478-row packed
     ///    snapshot costs 6–15 ms of main-thread decode (measured), and it used to
     ///    sit between `prepare` and the keystroke, adding that latency to every
@@ -878,19 +885,47 @@ class ClipboardBackend {
                         refreshAfter: Bool = true,
                         perfName: String = "paste.queue_keystroke") -> PasteOutcome {
         let perfPaste = PerfSpan.start("swift", perfName)
-        let preparedPID = clipboard_prepare_paste_by_id(entryId, asPath)
-        guard preparedPID > 0 else {
+        let mode = PasteDeliveryMode.current
+        let prepared = clipboard_prepare_paste_by_id(entryId, asPath, Int32(mode.rawValue))
+        guard prepared != 0 else {
             errorLog("pasteEntryById: clipboard_prepare_paste_by_id failed for entry \(entryId)")
             perfPaste?.end()
             return .entryUnavailable
         }
+        debugLog("[paste] entry \(entryId) prepared=\(prepared) mode=\(mode == .clipboardOnly ? "clipboard" : "keystroke")")
 
         dismiss()
+
+        // ClipboardOnly is a complete outcome: the pasteboard write already
+        // happened, and synthesizing ⌘V is exactly what the user opted out of.
+        if mode == .clipboardOnly {
+            perfPaste?.end()
+            if refreshAfter {
+                reloadItems()
+            }
+            return .copied
+        }
 
         // The batch path delivers to the app the user dropped on, which is not
         // necessarily `source_app.pid` (that is the app the popup was opened
         // over). `clipboard_send_paste` takes any pid, so no FFI change.
-        let pid = targetPID ?? preparedPID
+        let pid: Int32
+        if let targetPID {
+            pid = targetPID
+        } else if prepared > 0 {
+            pid = prepared
+        } else {
+            // -1: content is on the clipboard but the history record carries no
+            // target app. Report it as an undelivered keystroke instead of
+            // pretending nothing was copied — a manual ⌘V still works.
+            errorLog("pasteEntryById: entry \(entryId) written but no target pid — keystroke skipped")
+            perfPaste?.end()
+            if refreshAfter {
+                reloadItems()
+            }
+            return .keystrokeNotDelivered
+        }
+
         let delivered = clipboard_send_paste(pid) != 0
         if !delivered {
             errorLog("pasteEntryById: ⌘V delivery failed for entry \(entryId) (pid \(pid))")

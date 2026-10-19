@@ -44,7 +44,37 @@ struct ItemRowView: View {
     }
     private var mutedText: Color { theme.popupMutedText }
     private func sourceNameColor(_ isSelected: Bool) -> Color {
-        isSelected ? theme.popupPrimaryText : theme.popupSecondaryText
+        // White at 95% on the selection fill is 4.8:1 (light) / 5.6:1 (dark).
+        // `theme.popupPrimaryText` is near-black in the light theme, which read
+        // as a stray dark label on the blue pill.
+        isSelected ? Color.white.opacity(0.95) : theme.popupSecondaryText
+    }
+
+    /// Platform selection fill (a darker shade of the user's accent), not the
+    /// raw accent. Measured: white on `controlAccentColor` (#007AFF) is 4.07:1
+    /// — below AA — and the large saturated pill is what read as glaring.
+    /// `selectedContentBackgroundColor` gives 5.4:1 (light) / 6.3:1 (dark) with
+    /// white, inside the AA–AAA band, and follows the user's accent + contrast
+    /// settings automatically.
+    private var selectionFill: Color {
+        Color(nsColor: .selectedContentBackgroundColor)
+    }
+
+    /// Delete-mode fill. `systemRed` with white text is only 3.5:1; blending
+    /// 22% black raises it to 5.1:1 (light) / 4.9:1 (dark).
+    private var deleteSelectionFill: Color {
+        Color(nsColor: NSColor.systemRed.blended(withFraction: 0.22, of: .black) ?? .systemRed)
+    }
+
+    /// Teal accent for a user-authored remark, or nil on the selected row.
+    ///
+    /// The selected row is already marked by a solid accent-colored pill (or
+    /// red in delete mode); keeping the warm accent there would put it on an
+    /// unknown accent hue and break the contrast the theme values guarantee.
+    /// Text falls back to the selection foreground, exactly like every other
+    /// selected row.
+    private var remarkAccent: Color? {
+        isSelected ? nil : theme.popupRemarkAccent
     }
 
     var body: some View {
@@ -79,7 +109,11 @@ struct ItemRowView: View {
                                 )
                         )
                     } else {
-                        textContent(!customLabel.isEmpty ? customLabel : displayPreview)
+                        // A remark replaces the preview as the row's content and
+                        // carries the remark accent; ordinary entries keep the
+                        // default readable foreground.
+                        textContent(!customLabel.isEmpty ? customLabel : displayPreview,
+                                    color: customLabel.isEmpty ? nil : remarkAccent)
                     }
                 case .image(_, let dbId, let width, let height, _, let customLabel, _, _, _):
                     if isEditingRemark {
@@ -111,7 +145,9 @@ struct ItemRowView: View {
                                 )
                         )
                     } else if !customLabel.isEmpty {
-                        let markColor = (isSelected && isDeleteModifierPressed) ? Color.white : Color(nsColor: .systemOrange)
+                        // Same accent as text remarks: one semantic color for
+                        // "this entry has a note", white when selected.
+                        let markColor = remarkAccent ?? textColor(true)
                         HStack(spacing: 5) {
                             Image(systemName: "photo.fill")
                                 .font(.system(size: 11.5))
@@ -128,7 +164,7 @@ struct ItemRowView: View {
             if item.hasCustomLabel {
                 Image(systemName: "tag.fill")
                     .font(.system(size: 9.5))
-                    .foregroundColor(Color(nsColor: .systemTeal))
+                    .foregroundColor(remarkAccent ?? textColor(true))
                     .frame(width: 14, alignment: .center)
                     .help("备注: \(item.customLabel)")
                     .symbolEffect(.bounce, value: item.hasCustomLabel)
@@ -152,8 +188,10 @@ struct ItemRowView: View {
                 let badgeBgColor: Color = isSelected
                     ? Color.white
                     : Color(nsColor: .controlAccentColor)
+                // The selected badge is a white disc: its label must clear 4.5:1
+                // against white, so use the same (darker) fills as the row.
                 let badgeTextColor: Color = isSelected
-                    ? (isDeleteModifierPressed ? Color(nsColor: .systemRed) : Color(nsColor: .controlAccentColor))
+                    ? (isDeleteModifierPressed ? deleteSelectionFill : selectionFill)
                     : Color.white
 
                 Text("\(order)")
@@ -195,7 +233,10 @@ struct ItemRowView: View {
                     .lineLimit(1)
                     .padding(.horizontal, 2)
                     .padding(.vertical, 1.5)
-                    .background(Capsule().fill(theme.popupTagBackground))
+                    // No capsule on the selected row: the light-theme capsule
+                    // is an opaque near-white block that clashed with the blue
+                    // pill. The label alone carries it there.
+                    .background(Capsule().fill(isSelected ? Color.clear : theme.popupTagBackground))
                     // Never from scale(0): nothing in the real world appears
                     // from nothing. 0.9 + opacity reads as the badge growing
                     // into place rather than materializing.
@@ -225,14 +266,14 @@ struct ItemRowView: View {
     private var selectionBackground: some View {
         if isSelected {
             let strokeColor: Color = isDeleteModifierPressed
-                ? Color(nsColor: .systemRed)
+                ? Color.white.opacity(0.85)
                 : (colorSchemeContrast == .increased
                     ? Color.white
                     : Color(nsColor: .keyboardFocusIndicatorColor).opacity(0.85))
             let strokeWidth: CGFloat = colorSchemeContrast == .increased ? 1.8 : 1.0
 
             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(isDeleteModifierPressed ? Color(nsColor: .systemRed) : Color(nsColor: .controlAccentColor))
+                .fill(isDeleteModifierPressed ? deleteSelectionFill : selectionFill)
                 .overlay(
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
                         .strokeBorder(strokeColor, lineWidth: strokeWidth)

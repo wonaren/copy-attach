@@ -99,6 +99,10 @@ final class BatchDispenseRunner {
                 case .pasted:
                     sent += 1
                     phase = .running(sent: sent, total: batchSize)
+                case .copied:
+                    // unreachable while the popup blocks queueing in
+                    // ClipboardOnly mode, but explicit beats a silent overwrite
+                    notice = "当前为仅复制模式，无法批量发送"
                 case .keystrokeNotDelivered:
                     // The payload is on the pasteboard but never arrived. The
                     // remaining items would hit the same wall; stop and report

@@ -29,6 +29,9 @@ extension HistoryPopupContent {
     /// more than one item. Everything else — including a one-item queue — keeps
     /// today's single-item drag path untouched.
     func batchDragPlan(for item: ClipboardItem) -> BatchDragPlan? {
+        // Batch dispatch is sequential ⌘V delivery; ClipboardOnly has no
+        // keystroke to dispatch, so a drag falls back to the single-item path.
+        guard PasteDeliveryMode.current == .keystroke else { return nil }
         let queue = PasteQueueManager.shared
         guard queue.totalCount > 1,
               queue.isQueued(item),

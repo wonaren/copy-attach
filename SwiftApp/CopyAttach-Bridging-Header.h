@@ -56,12 +56,26 @@ void clipboard_free_bytes(uint8_t* data, int32_t len);
 // Single-phase select-and-paste was removed: it blocked the caller thread and
 // could post Cmd+V while the panel was still key. Use the two-phase
 // clipboard_prepare_paste_by_id + clipboard_send_paste below.
-// Two-phase paste. Phase 1 writes the pasteboard and returns the target pid
-// (>0), or 0 on failure; phase 2 posts the paste keystroke to that pid. The
-// caller must dismiss its own key window between the phases: posting the
-// keystroke while the popup is still key makes a target that resolves the
-// paste against its key window (WeChat) intermittently drop it.
-int32_t clipboard_prepare_paste_by_id(uint64_t entry_id, bool as_path);
+// Two-phase paste. Phase 1 writes the pasteboard and returns:
+//   >0  target pid for phase 2 (the content is on the clipboard, ⌘V may be sent)
+//   1   ClipboardOnly mode: the content is on the clipboard; do NOT call phase 2
+//   -1  the payload was written but no target pid is known (content is on the
+//       clipboard; only the keystroke is impossible)
+//    0  nothing was written (entry missing, load/write failed, or Accessibility
+//       is missing in Keystroke mode)
+// Phase 2 posts the paste keystroke to that pid. The caller must dismiss its
+// own key window between the phases: posting the keystroke while the popup is
+// still key makes a target that resolves the paste against its key window
+// (WeChat) intermittently drop it.
+//
+// `delivery_mode` states what the caller wants:
+//   0 COPYATTACH_DELIVERY_KEYSTROKE      — phase 1 + phase 2 (needs Accessibility)
+//   1 COPYATTACH_DELIVERY_CLIPBOARD_ONLY — clipboard write only; no permission
+//                                          needed, and phase 2 must NOT be called
+// Any other value returns 0 (explicit failure, nothing written).
+#define COPYATTACH_DELIVERY_KEYSTROKE 0
+#define COPYATTACH_DELIVERY_CLIPBOARD_ONLY 1
+int32_t clipboard_prepare_paste_by_id(uint64_t entry_id, bool as_path, int32_t delivery_mode);
 int32_t clipboard_send_paste(int32_t pid);
 
 // ─── Lazy Text Loading (on-demand full text by entry ID) ───

@@ -24,6 +24,12 @@ struct AppTheme {
     let popupSecondaryText: Color
     let popupMutedText: Color
     let popupDimText: Color
+    /// Accent for user-authored remarks (备注). One semantic color in every
+    /// theme so "has a remark" reads the same everywhere; each value is picked
+    /// for WCAG AA text contrast against that theme's popup background.
+    /// Teal, deliberately: the favorite star already owns yellow, and the old
+    /// warm amber read as "another star" at row scale.
+    let popupRemarkAccent: Color
     let popupRowHover: Color
     let popupRowDefault: Color
     let popupRowBorder: Color
@@ -64,6 +70,11 @@ struct AppTheme {
         popupSecondaryText: Color.white.opacity(0.76),
         popupMutedText: Color.white.opacity(0.68),
         popupDimText: Color.white.opacity(0.60),
+        // #0FA79A sRGB: measured 6.7:1 on the popup's actual dark backdrop and
+        // 4.5:1 even in the worst case (82% black over a white desktop) — the
+        // AA–AAA band for 13 pt text, not the glare of a near-white mint.
+        // sRGB (not calibrated) so the rendered color is the hex used here.
+        popupRemarkAccent: Color(nsColor: NSColor(srgbRed: 0.059, green: 0.655, blue: 0.604, alpha: 1.0)),
         popupRowHover: Color.white.opacity(0.09),
         popupRowDefault: .clear,
         popupRowBorder: Color.white.opacity(0.14),
@@ -105,6 +116,10 @@ struct AppTheme {
         popupSecondaryText: Color(white: 0.33),
         popupMutedText: Color(white: 0.36),
         popupDimText: Color(white: 0.38),
+        // #005B52 sRGB on the worst-case translucent backdrop (#CFCFD3 = 88%
+        // white over a black desktop) is 5.2:1, so remarks stay AA-readable
+        // even over a dark window; on the usual light backdrop it is ~6.9:1.
+        popupRemarkAccent: Color(nsColor: NSColor(srgbRed: 0.0, green: 0.357, blue: 0.322, alpha: 1.0)),
         popupRowHover: Color.black.opacity(0.07),
         popupRowDefault: .clear,
         popupRowBorder: Color.black.opacity(0.14),
@@ -146,6 +161,8 @@ struct AppTheme {
         popupSecondaryText: Color.white.opacity(0.92),
         popupMutedText: Color.white.opacity(0.85),
         popupDimText: Color.white.opacity(0.78),
+        // #7FE7DC on the near-opaque #141416 popup is 12.6:1 (AAA).
+        popupRemarkAccent: Color(nsColor: NSColor(srgbRed: 0.498, green: 0.906, blue: 0.863, alpha: 1.0)),
         popupRowHover: Color.white.opacity(0.16),
         popupRowDefault: .clear,
         popupRowBorder: Color.white.opacity(0.40),
@@ -187,6 +204,9 @@ struct AppTheme {
         popupSecondaryText: Color(white: 0.16),
         popupMutedText: Color(white: 0.20),
         popupDimText: Color(white: 0.24),
+        // #00534B on the near-opaque #F5F5F7 popup is 7.8:1 (AAA), so the
+        // increased-contrast theme stays legible with the same hue family.
+        popupRemarkAccent: Color(nsColor: NSColor(srgbRed: 0.0, green: 0.325, blue: 0.294, alpha: 1.0)),
         popupRowHover: Color.black.opacity(0.12),
         popupRowDefault: .clear,
         popupRowBorder: Color.black.opacity(0.40),
@@ -234,6 +254,7 @@ struct AppTheme {
             popupSecondaryText: self.popupSecondaryText,
             popupMutedText: self.popupMutedText,
             popupDimText: self.popupDimText,
+            popupRemarkAccent: self.popupRemarkAccent,
             popupRowHover: self.popupRowHover,
             popupRowDefault: self.popupRowDefault,
             popupRowBorder: self.popupRowBorder,

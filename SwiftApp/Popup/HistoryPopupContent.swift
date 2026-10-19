@@ -370,6 +370,14 @@ struct HistoryPopupContent: View {
         .onKeyPress(keys: [.return], phases: .down) { press in
             guard !isDismissing, editingItemId == nil else { return .ignored }
             if PasteQueueManager.shared.hasItems {
+                // The queue is a sequence of synthesized ⌘V events. In
+                // ClipboardOnly mode there is no keystroke, so enqueuing would
+                // overwrite the clipboard item by item and paste nothing.
+                guard PasteDeliveryMode.current == .keystroke else {
+                    showToast("当前为「仅复制到剪贴板」模式，无法顺序粘贴",
+                              icon: "doc.on.clipboard")
+                    return .handled
+                }
                 let outcome = PasteQueueManager.shared.startDispensing {
                     closePreview()
                     onClose()
@@ -567,6 +575,12 @@ struct HistoryPopupContent: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: queueToggleNotification)) { _ in
             guard selectedIndex > 0, !isDismissing, editingItemId == nil else { return }
+            // See the Return handler: the queue cannot exist without keystrokes.
+            guard PasteDeliveryMode.current == .keystroke else {
+                showToast("当前为「仅复制到剪贴板」模式，无需粘贴队列",
+                          icon: "doc.on.clipboard")
+                return
+            }
             let itemIndex = selectedIndex - 1
             guard itemIndex < displayItems.count else { return }
             let item = displayItems[itemIndex]
@@ -1204,7 +1218,11 @@ struct HistoryPopupContent: View {
             // a permanent "⌘C 批量" (41 pt) still fits until the search suffix
             // ("/ N 项", ~33 pt) appears, which overflows. A mode never does.
             if isCommandPressed {
-                shortcutHint(key: "⌘C", label: "批量入队/发送")
+                // The queue cannot exist without synthesized ⌘V, so ClipboardOnly
+                // mode has no ⌘C action to advertise (the key explains why).
+                if PasteDeliveryMode.current == .keystroke {
+                    shortcutHint(key: "⌘C", label: "批量入队/发送")
+                }
                 shortcutHint(key: "⌘1~9", label: "快速选择")
                 shortcutHint(key: "⌘Z", label: "撤销")
             } else {

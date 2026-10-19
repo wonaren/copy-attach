@@ -99,6 +99,7 @@ vmmap -summary $(pgrep -f 'CopyAttach.app/Contents/MacOS/CopyAttach') | head -16
 - **两阶段图片捕获**：Phase 1 同步 hash + 缩略图 → 内存；Phase 2 异步完整 PNG 编码 → DB（单槽有界队列背压，防内存无界增长）
 - **内存治理（0.99.10 起）**：启动不读剪贴板；图片捕获按固定类型优先级 PNG→TIFF→JPEG→GIF→WebP→BMP 取第一个存在的表示（**只按类型优先级，不比较各表示的体积**）；Phase 2 编码 scratch 复用；空闲池页标记可回收（`madvise MADV_FREE_REUSABLE`）；预览解码走 Rust 而非 ImageIO；自研 u8 resize 替代 `imageops::resize`（避免 f32 中转）。**改任何大缓冲路径前必读 `docs/engineering-notes.md` 的 madvise / claim 契约章节**
 - **收藏落库（0.108.5 起）**：`clipboard_favorites(entry_id)` 表是唯一权威；所有裁剪路径排除收藏且阈值只算非收藏行，`load_history_from_db` 返回「最新 N + 全部收藏」，打包快照每行带 favorite 标志。Swift 的 `favoriteIds` 只是快照的镜像，**不要**再写回 UserDefaults，也不要在列表发布时剪枝
+- **检查更新（`Update/UpdateChecker.swift`）**：GitHub `releases/latest` HEAD（实测 0.2–0.5s，权威且零字节）与 healthz（实测 3.9–10s，仅为 GitHub DNS 不可达时兜底）**并行竞速**，取最快成功者；结果持久化缓存 15 分钟，About 首屏直接渲染缓存、过期才后台复检。旧实现串行「healthz 6s 超时 → GitHub」，把每次检查都拖到 5s 以上
 - **db_id 不变量**：内存条目的 `db_id` 必须指向 DB 中该条目的行，且赋值按内容 hash 匹配、绝不按头部位置
 - **Suppress re-capture**：select_and_paste 通过 `pending_self_write` 标记自身写入，监控线程跳过匹配的 changeCount
 - **undo 删除**：撤销栈 ≤1 条，`MAX_UNDO_BYTES`(48MB) 约束的是**磁盘载荷**——删除时先落盘（`$TMPDIR/CopyAttach/Undo/*.bin`），内存只留 `payload_path`/`payload_bytes` + 元数据，blobs 随即 `mark_pages_reusable`（实测删掉 4.19MB 大图后 footprint 反降 7MB）
@@ -123,7 +124,7 @@ SwiftApp/
   ├── Preview/                         ← 预览窗口（4 文件：窗口/内容/布局/缩放）
   ├── Backend/                         ← ClipboardItem / ImageDecode / AppIcon 缓存 / PackedSnapshot / PreviewDecodeGate
   ├── Stress/                          ← 压力测试面板与视图模型（依赖 STRESS=1 构建）
-  ├── Update/                          ← 应用内更新下载（蓝奏云优先，GitHub 兜底）
+  ├── Update/                          ← 更新检查（并行竞速 + 缓存）与下载（蓝奏云优先，GitHub 兜底）
   └── Utility/                         ← DebugLog / VisualWidth / PerfTrace / PerfSelfCheck
 ```
 
@@ -132,7 +133,7 @@ SwiftApp/
 - **Snapshot API**（`clipboard_snapshot_acquire/release`）：Swift 批量读取时一次性加锁构建紧凑快照（`SnapshotRow`：类型/id/时间戳/label/source/图片尺寸 + preview，**不含全文**），后续无锁访问。新功能优先用此 API
 - **稳定 ID**：`entry_id`（u64，AtomicU64 单调递增），用于 `select_and_paste_by_id`，避免数组索引竞争
 - **图片加载**：缩略图走 `clipboard_get_image_thumb_by_db_id`（仅 SQLite 读），后台用 ImageIO 降采样到**行显示框**（460×100pt，按屏幕 backupScale 换算像素；Rust 端存储 blob 按 2× 上限 920×200 生成，双向镜像同一组常量）后存入 `NSCache`（countLimit 120、8MB，cost 按实际解码尺寸计），**弹窗关闭不清空**（跨会话保温：清空会让每次打开都冷启动，首屏行先渲染占位符；实测命中率 0%→92%、占位闪烁 2 行→0，内存无变化——缓存本身仍有界且随内存压力驱逐）。只有真正使行失效的路径才清空：清空历史、撤销删除、恢复备份。**预览大图**走 `clipboard_decode_preview_by_db_id`，由 Rust 降采样解码（Rust 预览路径不用 ImageIO）；预算是 `min(源最长边, max(显示尺寸×scale, 2048px))` —— **2048px 是缩放下限（floor），不是上限**，实测交付缓冲的 `max_dim` 常见 2066–2348。`clipboard_get_image_full_by_db_id` 是另一条路（**仅 SQLite 读，没有任何内存层**），只用于 GIF 预览兜底与右键「复制图片」，不是预览主路径。**显示框是矩形而非「最长边」**：扁图由宽边限制、竖图由高边限制，按长/短边匹配会让竖图纵向溢出（曾实测 1362×1774 → 200×260 超出 200 高）。
-- **两阶段粘贴（prepare_paste_by_id + send_paste）**：先按 entry_id 查 history（未命中直接 return 0）→ 再查 accessibility 权限（未授权直接 return 0）→ DB 加载正文/图片 blob（失败显式 return 0，不兜底）→ 写剪贴板（设 pending_self_write）→ DB write-through → move entry to top → 返回目标 pid；Swift 侧先关闭并失焦弹窗（dismiss）避免 panel 保持 key window 截断击键 → 调 send_paste(pid) 发送 Cmd+V。**权限检查必须早于任何剪贴板写入**——写入会替换用户剪贴板，未授权时的写入等于毁掉用户内容却永远粘贴不成。**图片粘贴走唯一的文件路径模式**：先写 `$TMPDIR/CopyAttach/Paste/` 临时 PNG，剪贴板放 `public.file-url`（Finder 复制文件同款）再 Cmd+V
+- **两阶段粘贴（prepare_paste_by_id + send_paste）**：`delivery_mode` 0 = 光标处插入、1 = 仅写剪贴板（`PasteDeliveryMode`，设置里可切）。先按 entry_id 查 history（未命中直接 return 0）→ 仅 mode 0 查 accessibility 权限（未授权直接 return 0；mode 1 无需授权）→ DB 加载正文/图片 blob（失败显式 return 0，不兜底）→ 写剪贴板（设 pending_self_write）→ DB write-through → move entry to top → mode 1 返回 1（Swift 不调 send_paste，`.copied`），mode 0 返回目标 pid（无目标 pid 返回 -1：内容已在剪贴板，只跳过击键）；Swift 侧先关闭并失焦弹窗（dismiss）避免 panel 保持 key window 截断击键 → 调 send_paste(pid) 发送 Cmd+V。**权限检查必须早于任何剪贴板写入**——写入会替换用户剪贴板，未授权时的写入等于毁掉用户内容却永远粘贴不成。**图片粘贴走唯一的文件路径模式**：先写 `$TMPDIR/CopyAttach/Paste/` 临时 PNG，剪贴板放 `public.file-url`（Finder 复制文件同款）再 Cmd+V
 - **粘贴目标 pid 不变式**：Cmd+V 投递给 `source_app.pid`（由 `NSWorkspace.didActivateApplicationNotification` 事件驱动更新，不轮询）。该 pid 必须是用户打开弹窗前的 app，绝不能是 CopyAttach 自身
 - **粘贴后必须归还前台**：预览会强制 `NSApp.activate`（捏合手势只投给最前台 app），而系统**不会**自动归还 —— 不归还的话 Cmd+V 仍能投进目标 app（内容进去了），但该 app 留在后台，光标回不到输入框。`selectItem` 粘贴后调 `ClipboardBackend.restorePasteTargetFocus()`；它只在 `NSApp.isActive` 为真时才动手，所以从不激活的普通路径是 no-op
 - **粘贴队列（`Queue/`）**：在列表按 `⌘C` 只维护一个有序数组（序号徽标在视图侧由 `orderMap` 派生，不再存第二份顺序），不写剪贴板、不触发 `monitor.rs` 重新捕获置顶；回车启动顺序取用：先按当前快照剔除已失效条目（`pruneStaleEntries`，对空快照不做剔除）→ 再启动 `QueueEventTap`，成功才允许 dismiss 弹窗展开胶囊 HUD；取用阶段通过 `ClipboardBackend.pasteEntryById` 走规范两阶段粘贴，返回 `PasteOutcome`：`.pasted` 前进、`.keystrokeNotDelivered` 前进并提示（内容已在剪贴板，重试会重复粘贴）、`.entryUnavailable` 跳过并提示；`QueueEventTap` 吞掉物理 ⌘V（修饰键精确匹配，`⌥⌘V` 等组合一律放行），合成事件按**事件来源**（`eventSourceUnixProcessID`）识别而**不是时间窗**——实测 `CGEventPostToPid` 事件根本不进 session tap，Esc 单次一律放行给目标应用、**连按两次**才退出队列；闲置看门狗 3 分钟；`clear()` / `cancel()` 强行保证同时拆除 Tap 与 HUD。
@@ -156,7 +157,7 @@ SwiftApp/
 - **右键上下文菜单**：行 frame 按需一次性快照（`RowFramePreferenceKey`：仅武装期间行才挂 GeometryReader）——滚动全程无每行几何上报开销，菜单延迟仅一帧
 - **搜索**：统一在 Rust/SQLite 侧完成检索。正文搜索走 SQLite FTS5 trigram 索引（≥3 字符 `MATCH` + 超限行 LIKE 兜底；<3 字符 LIKE 全表扫描；LIKE 回退是有意保留的语义承诺：1-2 字符查询必须命中长文中段）。元数据字段（label、custom_label、source_name）走 LIKE 子串匹配，Swift 侧仅需按 matchIds 筛选并辅以动态日期分组（DayGroup），彻底杜绝前端多字段遍历过滤开销。**图片条目的 `label` 列恒为空**（不落库）：界面上的「Image (W×H)」是读取时由 `width`/`height` 合成的（`types.rs`），因此历史记录**不支持按尺寸搜索图片**，图片只能按 `custom_label`（备注）与 `source_name`（来源应用）命中——这是有意的产品边界，不要对外宣称按尺寸检索。
 - FocusState 双管理：isSearchFocused（selectedIndex=0）和 isContainerFocused（selectedIndex>0）。Escape 三层拦截：SwiftUI `.onKeyPress` → PopupHostingView local monitor → Notification。优先关预览，否则关弹窗
-- 选中高亮：`matchedGeometryEffect` 在行间滑动；hover 静态填充；删除模式（⌃⌫）高亮变红
+- 选中高亮：`matchedGeometryEffect` 在行间滑动；hover 静态填充；删除模式（⌃⌫）高亮变红。**选中填充必须用 `NSColor.selectedContentBackgroundColor`（白字 5.4/6.3:1），不能用 `controlAccentColor`（白字仅 4.07:1，低于 AA）；删除红需向黑混合 22% 才够 5:1。选中行不画来源胶囊**——浅色主题的 `popupTagBackground` 是近白块，压在蓝底上很跳
 
 **许可证体系归档**（<= v0.107.10 商业版，已封存至 `archive/commercial-v0.107` 分支）：
 

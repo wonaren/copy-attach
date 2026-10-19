@@ -9,7 +9,7 @@ extension InlineSettingsView {
     var generalTab: some View {
         ScrollView {
             VStack(spacing: 16) {
-                if !backend.permissionGranted {
+                if !backend.permissionGranted && autoPasteAtCursor {
                     permissionBanner
                 }
                 generalSettingsCard
@@ -182,6 +182,19 @@ extension InlineSettingsView {
             )
             .onChange(of: runInBackground) { _, newValue in
                 UserDefaults.standard.set(newValue, forKey: "RunInBackground")
+            }
+            sectionDivider().padding(.vertical, 7)
+            settingToggleRow(
+                icon: autoPasteAtCursor ? "text.insert" : "doc.on.clipboard",
+                iconColor: autoPasteAtCursor ? Color.accentColor : theme.secondaryText,
+                title: "自动粘贴到光标处",
+                desc: autoPasteAtCursor
+                    ? "内容插入到光标处（需要辅助功能权限）。"
+                    : "内容仅复制到剪贴板，由你按 ⌘V 自行粘贴。",
+                isOn: $autoPasteAtCursor
+            )
+            .onChange(of: autoPasteAtCursor) { _, newValue in
+                PasteDeliveryMode.persist(newValue ? .keystroke : .clipboardOnly)
             }
             sectionDivider().padding(.vertical, 7)
             settingToggleRow(

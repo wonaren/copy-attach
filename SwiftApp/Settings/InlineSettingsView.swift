@@ -11,6 +11,9 @@ struct InlineSettingsView: View {
     @State private var selectedTab: Int
     @State var launchAtLogin = UserDefaults.standard.bool(forKey: "LaunchAtLogin")
     @State var runInBackground = UserDefaults.standard.object(forKey: "RunInBackground") as? Bool ?? true
+    /// Paste delivery preference. Default is keystroke: choosing an entry inserts
+    /// it at the caret. Off = clipboard-only, which needs no Accessibility grant.
+    @State var autoPasteAtCursor = PasteDeliveryMode.current == .keystroke
     @State var showMenuBarIcon = UserDefaults.standard.object(forKey: "ShowMenuBarIcon") as? Bool ?? true
     @State var cleanupThreshold: Double = {
         let saved = UserDefaults.standard.integer(forKey: "CleanupThreshold")
@@ -35,6 +38,11 @@ struct InlineSettingsView: View {
     @State var isHoveringDragIcon = false
     @State var backupStatusMessage: String? = nil
     @State var updateState: UpdateCheckState = .idle
+    /// Drives the spinner/disabled state independently of `updateState`, so a
+    /// background revalidation never erases the currently displayed result (a
+    /// new release would otherwise disappear from the badge for the duration
+    /// of every check).
+    @State var isCheckingUpdate = false
     /// Alert item, decoupled from `updateState` so dismissing an alert does not
     /// clear the badge / download button (which persist until a re-check).
     @State var updateAlert: UpdateCheckState? = nil
@@ -51,7 +59,6 @@ struct InlineSettingsView: View {
 
     enum UpdateCheckState: Equatable, Identifiable {
         case idle
-        case checking
         case upToDate(currentVersion: String)
         case updateAvailable(latestVersion: String, releaseURL: URL, isDowngrade: Bool)
         case error(String)
@@ -59,7 +66,6 @@ struct InlineSettingsView: View {
         var id: String {
             switch self {
             case .idle: return "idle"
-            case .checking: return "checking"
             case .upToDate: return "upToDate"
             case .updateAvailable: return "updateAvailable"
             case .error: return "error"

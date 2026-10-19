@@ -117,19 +117,51 @@ pub extern "C" fn clipboard_purge_stale_drag_images() {
 // clipboard_prepare_paste_by_id + clipboard_send_paste instead, and nothing
 // else called this, so it was removed rather than left as a trap.
 
+/// What the caller wants `prepare_paste_impl` to do after the pasteboard
+/// write. The distinction is user-visible: `Keystroke` is "insert at the
+/// cursor", `ClipboardOnly` is "copy and let me paste by hand".
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PasteDelivery {
+    /// Write the pasteboard and let the caller post ⌘V. Requires Accessibility.
+    Keystroke,
+    /// Write the pasteboard only. No Accessibility, no keystroke.
+    ClipboardOnly,
+}
+
+impl PasteDelivery {
+    fn from_ffi(mode: c_int) -> Option<Self> {
+        match mode {
+            0 => Some(Self::Keystroke),
+            1 => Some(Self::ClipboardOnly),
+            _ => None,
+        }
+    }
+}
+
 /// Loads full image data from DB if needed, writes to the system clipboard,
 /// write-through DB, and moves the item to the top of history — everything a
 /// paste needs except the keystroke itself.
 ///
-/// Returns the pid the paste keystroke must be delivered to, or 0 on failure
-/// (in which case the pasteboard may or may not have been written, but no
-/// keystroke may be sent).
+/// Return contract (the caller has to tell three cases apart):
+///   `> 0` — pasteboard written; deliver ⌘V to this pid (Keystroke mode).
+///   `1`   — pasteboard written; ClipboardOnly mode, do NOT call
+///           `clipboard_send_paste`.
+///   `-1`  — pasteboard written (Keystroke mode) but no target pid is known,
+///           so only the keystroke is impossible. The content is usable by a
+///           manual ⌘V; callers must not report the copy as failed.
+///   `0`   — nothing was pasted (entry missing, load failed, write failed, or
+///           Accessibility missing in Keystroke mode).
+///
 /// When `as_path` is true and the entry is an Image, its temp PNG path is
 /// placed on the clipboard as plain text instead of `public.file-url`.
-fn prepare_paste_impl(mut item: ClipboardEntry, as_path: bool) -> c_int {
+fn prepare_paste_impl(mut item: ClipboardEntry, as_path: bool, delivery: PasteDelivery) -> c_int {
     let perf_total = crate::perf::PerfSpan::start("rust", "paste.prepare");
     if let Some(mut span) = perf_total {
-        span.data = Some(if as_path { "path".to_string() } else { "normal".to_string() });
+        span.data = Some(match (delivery, as_path) {
+            (PasteDelivery::ClipboardOnly, _) => "clipboard".to_string(),
+            (PasteDelivery::Keystroke, true) => "path".to_string(),
+            (PasteDelivery::Keystroke, false) => "normal".to_string(),
+        });
     }
     #[cfg(target_os = "macos")]
     {
@@ -138,7 +170,9 @@ fn prepare_paste_impl(mut item: ClipboardEntry, as_path: bool) -> c_int {
         // proceeding without permission would destroy their content on a paste
         // that can never happen — and the old fall-through still reported
         // success (1). No permission → explicit failure, clipboard untouched.
-        if !macos::check_permission() {
+        // ClipboardOnly has no keystroke, so it needs no permission at all:
+        // replacing the clipboard is exactly what the user asked for.
+        if delivery == PasteDelivery::Keystroke && !macos::check_permission() {
             crate::error_log!("CopyAttach: accessibility permission not granted — paste aborted, clipboard untouched");
             return 0;
         }
@@ -367,16 +401,36 @@ fn prepare_paste_impl(mut item: ClipboardEntry, as_path: bool) -> c_int {
     // blocked while the caller dismisses the window and sends keystrokes.
     drop(db_guard);
 
+    // ClipboardOnly is complete here: there is no keystroke to target.
+    if delivery == PasteDelivery::ClipboardOnly {
+        return 1;
+    }
+
     // The caller owns the keystroke: it must not be posted until the popup has
-    // resigned key status (see `clipboard_prepare_paste_by_id`).
-    try_backend()
+    // resigned key status (see `clipboard_prepare_paste_by_id`). A missing
+    // target is not a failed copy — return -1 so the caller can tell the user
+    // the content is on the clipboard and only the keystroke was skipped.
+    match try_backend()
         .and_then(|b| b.source_app.lock().ok())
-        .map_or(0, |src| src.pid)
+        .map(|src| src.pid)
+    {
+        Some(pid) if pid > 0 => pid,
+        _ => {
+            crate::error_log!("CopyAttach: paste written but no target pid — keystroke skipped");
+            -1
+        }
+    }
 }
 
 /// Phase 1 of a two-phase paste: write the entry to the pasteboard and update
-/// history, but do NOT post the paste keystroke yet. Returns the pid that
-/// phase 2 must deliver to (>0), or 0 on failure.
+/// history, but do NOT post the paste keystroke yet.
+///
+/// `delivery_mode`: 0 = write + deliver ⌘V (requires Accessibility);
+/// 1 = write only, no keystroke, no Accessibility. Any other value is an
+/// explicit failure (0) — never a silent fallback to one of the real modes.
+///
+/// Returns `> 0` (pid for phase 2), `1` (ClipboardOnly, no phase 2), `-1`
+/// (written, target pid unknown), or `0` (nothing written).
 ///
 /// The split exists because the paste keystroke must arrive when the popup is
 /// no longer the key window. Only `close()` resigns key status, and it runs
@@ -386,7 +440,11 @@ fn prepare_paste_impl(mut item: ClipboardEntry, as_path: bool) -> c_int {
 /// its own key window (WeChat) intermittently dropped short-text pastes.
 /// Callers MUST dismiss the popup between phase 1 and phase 2.
 #[no_mangle]
-pub extern "C" fn clipboard_prepare_paste_by_id(entry_id: u64, as_path: bool) -> c_int {
+pub extern "C" fn clipboard_prepare_paste_by_id(entry_id: u64, as_path: bool, delivery_mode: c_int) -> c_int {
+    let Some(delivery) = PasteDelivery::from_ffi(delivery_mode) else {
+        crate::error_log!("CopyAttach: clipboard_prepare_paste_by_id: unknown delivery_mode {delivery_mode} — aborted");
+        return 0;
+    };
     let item = {
         let Some(b) = try_backend() else { return 0 };
         let hist = b.history.lock().unwrap();
@@ -398,7 +456,7 @@ pub extern "C" fn clipboard_prepare_paste_by_id(entry_id: u64, as_path: bool) ->
             None => return 0,
         }
     };
-    prepare_paste_impl(item, as_path)
+    prepare_paste_impl(item, as_path, delivery)
 }
 
 /// Phase 2 of a two-phase paste: post the paste keystroke to `pid` (the value
@@ -415,6 +473,7 @@ pub extern "C" fn clipboard_send_paste(pid: c_int) -> c_int {
             crate::error_log!("CopyAttach: clipboard_send_paste: simulate_cmd_v failed");
             return 0;
         }
+        crate::debug_log!("CopyAttach: send_paste delivered ⌘V to pid {pid}");
         1
     }
     #[cfg(not(target_os = "macos"))]

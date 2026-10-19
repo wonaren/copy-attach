@@ -316,10 +316,19 @@ fn test_image_decode_buffer_pool_lifecycle() {
 #[test]
 fn test_prepare_paste_by_id_missing_returns_zero() {
     ensure_test_backend();
-    // Nonexistent entry must be rejected before any pasteboard write, and must
-    // return the documented 0 sentinel (no keystroke pid > 0).
-    let pid = crate::ffi::clipboard_prepare_paste_by_id(999_999_999, false);
-    assert_eq!(pid, 0, "nonexistent entry must return 0");
+    // Nonexistent entry must be rejected before any pasteboard write, in both
+    // delivery modes, and must return the documented 0 sentinel.
+    assert_eq!(crate::ffi::clipboard_prepare_paste_by_id(999_999_999, false, 0), 0);
+    assert_eq!(crate::ffi::clipboard_prepare_paste_by_id(999_999_999, false, 1), 0);
+}
+
+#[test]
+fn test_prepare_paste_rejects_unknown_delivery_mode() {
+    ensure_test_backend();
+    // `delivery_mode` is a closed set. An unknown value must be an explicit
+    // failure, never a silent fallback to "paste" or "copy".
+    assert_eq!(crate::ffi::clipboard_prepare_paste_by_id(999_999_999, false, 2), 0);
+    assert_eq!(crate::ffi::clipboard_prepare_paste_by_id(999_999_999, false, -1), 0);
 }
 
 #[test]

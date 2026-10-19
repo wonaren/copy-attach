@@ -137,7 +137,7 @@ extension InlineSettingsView {
                     message: Text(message),
                     dismissButton: .default(Text("好的"))
                 )
-            case .idle, .checking:
+            case .idle:
                 // Should never be shown — updateAlert is only set for terminal states.
                 return Alert(title: Text(""))
             }
@@ -155,7 +155,7 @@ extension InlineSettingsView {
                 checkForUpdates()
             } label: {
                 HStack(spacing: 6) {
-                    if case .checking = updateState {
+                    if isCheckingUpdate {
                         ProgressView()
                             .controlSize(.small)
                             .scaleEffect(0.8)
@@ -169,7 +169,7 @@ extension InlineSettingsView {
                 .padding(.horizontal, 16)
                 .padding(.vertical, 8)
             }
-            .disabled(updateState == .checking)
+            .disabled(isCheckingUpdate)
             .background(Color.accentColor)
             .foregroundColor(theme.buttonText)
             .cornerRadius(6)
@@ -273,16 +273,21 @@ extension InlineSettingsView {
         NSWorkspace.shared.open(repoURL)
     }
 
-    /// Silent check when the About tab appears. Never shows the alert —
-    /// the result surfaces only through the badge / download button.
-    /// Retried on re-entry after an error, but not after a successful check.
+    /// Silent check when the About tab appears. Never shows the alert — the
+    /// result surfaces only through the badge / download button.
+    ///
+    /// The last known answer is painted immediately; the network is only hit
+    /// when that cache has aged out. Opening a settings tab must never wait on
+    /// a socket, and a check must cost the fastest source's latency rather
+    /// than the slowest one's timeout (see `UpdateChecker`).
     private func autoCheckForUpdates() {
-        switch updateState {
-        case .idle, .error:
-            checkForUpdates(showAlert: false)
-        default:
-            break
+        if let cached = UpdateChecker.cachedRelease() {
+            evaluateVersion(latestVersion: cached.version,
+                            releaseURL: cached.releaseURL,
+                            showAlert: false)
         }
+        guard UpdateChecker.cachedRelease(maxAge: UpdateChecker.cacheLifetime) == nil else { return }
+        checkForUpdates(showAlert: false)
     }
 
     /// Seamless update: download + install in the background (lanzou first,
@@ -300,114 +305,31 @@ extension InlineSettingsView {
     }
     private func stripDevSuffix(_ version: String) -> String { Self.stripDevSuffix(version) }
 
-    nonisolated private static let cloudflareUpdateURL = URL(string: "https://dl.abovepast.shop/healthz")
-    nonisolated private static let githubLatestReleaseURL = URL(string: "https://github.com/wonaren/copy-attach/releases/latest")
-
-    private struct HealthzPayload: Decodable {
-        let version: String?
-    }
-
-    /// Two-phase update check:
-    /// 1. Primary: queries the Cloudflare-accelerated endpoint (dl.abovepast.shop/healthz)
-    ///    which provides cached version info in ~50ms, unaffected by GitHub DNS pollution or timeouts.
-    /// 2. Fallback: HEAD request to GitHub's web endpoint (releases/latest), which redirects
-    ///    to the latest tag page for zero bytes without REST API rate limits.
+    /// Check for updates without blocking the UI. Manual checks always bypass
+    /// the cache. The spinner lives in `isCheckingUpdate`, so a revalidation
+    /// never erases the result currently on screen.
     private func checkForUpdates(showAlert: Bool = true) {
-        guard updateState != .checking else { return }
-        updateState = .checking
-        checkViaCloudflare(showAlert: showAlert)
-    }
-
-    private func checkViaCloudflare(showAlert: Bool) {
-        guard let url = Self.cloudflareUpdateURL else {
-            checkViaGitHub(showAlert: showAlert)
-            return
+        guard !isCheckingUpdate else { return }
+        isCheckingUpdate = true
+        Task { @MainActor in
+            defer { isCheckingUpdate = false }
+            do {
+                let release = try await UpdateChecker.latestRelease()
+                evaluateVersion(latestVersion: release.version,
+                                releaseURL: release.releaseURL,
+                                showAlert: showAlert)
+            } catch {
+                let message = (error as? LocalizedError)?.errorDescription
+                    ?? "无法连接到更新服务器：\(error.localizedDescription)"
+                debugLog("[update] check failed: \(error.localizedDescription)")
+                // A silent revalidation failure must not wipe a cached result
+                // (that would hide a known update and its download button) —
+                // only a manual check or a blank tab surfaces the error.
+                if showAlert || updateState == .idle {
+                    finishUpdateCheck(.error(message), showAlert: showAlert)
+                }
+            }
         }
-        var request = URLRequest(url: url)
-        request.httpMethod = "GET"
-        request.timeoutInterval = 6
-
-        URLSession.shared.dataTask(with: request) { [self] data, response, error in
-            if let error {
-                debugLog("[update] Cloudflare check failed: \(error.localizedDescription); falling back to GitHub")
-                DispatchQueue.main.async {
-                    checkViaGitHub(showAlert: showAlert)
-                }
-                return
-            }
-
-            guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200,
-                  let data,
-                  let payload = try? JSONDecoder().decode(HealthzPayload.self, from: data),
-                  let rawVersion = payload.version, !rawVersion.isEmpty else {
-                debugLog("[update] Cloudflare check returned invalid payload; falling back to GitHub")
-                DispatchQueue.main.async {
-                    checkViaGitHub(showAlert: showAlert)
-                }
-                return
-            }
-
-            let latestVersion = Self.cleanVersionTag(rawVersion)
-            let releaseURL = URL(string: "https://github.com/wonaren/copy-attach/releases/tag/v\(latestVersion)")
-                ?? Self.githubLatestReleaseURL!
-
-            DispatchQueue.main.async {
-                evaluateVersion(latestVersion: latestVersion, releaseURL: releaseURL, showAlert: showAlert)
-            }
-        }.resume()
-    }
-
-    private func checkViaGitHub(showAlert: Bool) {
-        guard let url = Self.githubLatestReleaseURL else {
-            finishUpdateCheck(.error("更新地址无效"), showAlert: showAlert)
-            return
-        }
-        var request = URLRequest(url: url)
-        request.httpMethod = "HEAD"
-        request.timeoutInterval = 15
-
-        URLSession.shared.dataTask(with: request) { [self] data, response, error in
-            DispatchQueue.main.async {
-                if let error {
-                    debugLog("[update] GitHub check failed: \(error.localizedDescription)")
-                    finishUpdateCheck(.error("无法连接到更新服务器：\(error.localizedDescription)"), showAlert: showAlert)
-                    return
-                }
-
-                guard let httpResponse = response as? HTTPURLResponse else {
-                    debugLog("[update] check failed: non-HTTP response")
-                    finishUpdateCheck(.error("无效的服务器响应"), showAlert: showAlert)
-                    return
-                }
-
-                switch httpResponse.statusCode {
-                case 200:
-                    break // redirect resolved; the final URL carries the tag
-                case 404:
-                    debugLog("[update] check failed: HTTP 404 (no published release)")
-                    finishUpdateCheck(.error("未找到版本信息（仓库中尚无正式 Release）"), showAlert: showAlert)
-                    return
-                case 403, 429:
-                    debugLog("[update] check failed: HTTP \(httpResponse.statusCode) (throttled)")
-                    finishUpdateCheck(.error("请求过于频繁，请稍后再试"), showAlert: showAlert)
-                    return
-                default:
-                    debugLog("[update] check failed: HTTP \(httpResponse.statusCode)")
-                    finishUpdateCheck(.error("服务器返回错误 (HTTP \(httpResponse.statusCode))"), showAlert: showAlert)
-                    return
-                }
-
-                // Redirect target is the release page itself: …/releases/tag/v0.106.0
-                guard let releaseURL = httpResponse.url,
-                      let latestVersion = Self.releaseTag(from: releaseURL) else {
-                    debugLog("[update] check failed: no tag in \(httpResponse.url?.absoluteString ?? "nil")")
-                    finishUpdateCheck(.error("无法解析更新信息"), showAlert: showAlert)
-                    return
-                }
-
-                evaluateVersion(latestVersion: latestVersion, releaseURL: releaseURL, showAlert: showAlert)
-            }
-        }.resume()
     }
 
     private func evaluateVersion(latestVersion: String, releaseURL: URL, showAlert: Bool) {
@@ -427,25 +349,6 @@ extension InlineSettingsView {
         } else {
             finishUpdateCheck(.upToDate(currentVersion: currentVersion), showAlert: showAlert)
         }
-    }
-
-    /// Clean a raw tag string (e.g. "v0.107.0" or "0.107.0") to purely numeric version string.
-    nonisolated private static func cleanVersionTag(_ raw: String) -> String {
-        var v = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        while v.hasPrefix("v") || v.hasPrefix("V") {
-            v.removeFirst()
-        }
-        return v
-    }
-
-    /// Pull the tag out of a `…/releases/tag/<tag>` URL, stripping any
-    /// leading "v" or "V" so the version string is purely numeric ("0.107.0").
-    nonisolated private static func releaseTag(from url: URL) -> String? {
-        let parts = url.pathComponents
-        guard let i = parts.firstIndex(of: "tag"), i + 1 < parts.count else { return nil }
-        let tag = parts[(i + 1)...].joined(separator: "/")
-        guard !tag.isEmpty else { return nil }
-        return cleanVersionTag(tag)
     }
 
     /// Terminal-state sink: drives the badge / download button, and optionally
