@@ -6,8 +6,8 @@ struct HotkeyConfig: Codable, Equatable {
     var flags: UInt
 
     static var `default`: HotkeyConfig {
-        // Default: ⌥X (Option+X)
-        HotkeyConfig(keyCode: UInt16(kVK_ANSI_X),
+        // ⌥Space (Option+Space)
+        HotkeyConfig(keyCode: UInt16(kVK_Space),
                      flags: NSEvent.ModifierFlags.option.rawValue)
     }
 
@@ -19,7 +19,9 @@ struct HotkeyConfig: Codable, Equatable {
         if flags & NSEvent.ModifierFlags.command.rawValue != 0 { parts.append("⌘") }
 
         if let char = keyCodeToCharacter(keyCode) {
-            parts.append(char.uppercased())
+            // Named keys stay readable ("Space", "Return"); only single chars
+            // get uppercased.
+            parts.append(char.count == 1 ? char.uppercased() : char)
         } else {
             parts.append("?")
         }

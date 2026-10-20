@@ -330,7 +330,7 @@ class HotkeyManager {
         stopRecording()
     }
 
-    /// Reset to default hotkey (⌥X)
+    /// Reset to default hotkey (⌥Space)
     func resetToDefault() {
         config = .default
     }

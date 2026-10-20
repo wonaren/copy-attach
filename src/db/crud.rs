@@ -17,7 +17,7 @@ use crate::types::ClipboardEntry;
 pub(crate) fn seed_first_launch_tips(conn: &Connection) {
     const TIPS: &[&str] = &[
         "欢迎使用 CopyAttach !",
-        "1. 打开：按 ⌥X 打开或关闭剪贴板，打字即搜索",
+        "1. 打开：按 ⌥Space 打开或关闭剪贴板，打字即搜索",
         "2. 粘贴：按回车或点击条目，直接粘贴到应用",
         "3. 预览：按空格预览大图与文本，按 Esc 退出",
         "4. 搜索：直接输入关键词实时过滤，支持全文",
