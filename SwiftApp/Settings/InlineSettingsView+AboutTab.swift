@@ -51,12 +51,12 @@ extension InlineSettingsView {
                     .help("github.com/wonaren")
                 }
 
-                Text("CopyAttach 是一款极轻量的剪贴板历史管理应用,它在性能体验、内存占用、存储效率、功耗表现、操作逻辑、UI界面都经过精心设计,旨在为用户提供一个简洁、高效、无负担的剪贴板历史管理工具。")
-                    .font(.system(size: 12.5))
-                    .foregroundColor(theme.secondaryText)
-                    .multilineTextAlignment(.center)
-                    .lineSpacing(3)
-                    .frame(maxWidth: 300)
+                JustifiedParagraph(
+                    text: "CopyAttach 是一款极轻量的剪贴板历史管理应用,它在性能体验、内存占用、存储效率、功耗表现、操作逻辑、UI界面都经过精心设计,旨在为用户提供一个简洁、高效、无负担的剪贴板历史管理工具。",
+                    font: .systemFont(ofSize: 12.5),
+                    textColor: NSColor(theme.secondaryText),
+                    width: 320
+                )
 
                 Group {
                     if updater.phase.isBusy {
