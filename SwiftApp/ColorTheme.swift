@@ -18,6 +18,18 @@ struct AppTheme {
     let buttonText: Color
     let cardRowBackground: Color
 
+    // MARK: Update CTA (About tab)
+    /// Fill and label for the "下载更新" call to action.
+    ///
+    /// Deliberately not `Color.green` (#31D158): white on the system green is
+    /// 2.0:1, below even the 3:1 large-text floor, and the saturated block was
+    /// the loudest thing on an otherwise quiet window. Each pair below keeps
+    /// the label in the AA→AAA band while the fill itself stays ≥3:1 against
+    /// that theme's window backdrop, so the button edge clears the non-text
+    /// floor without needing an extra border.
+    let updateActionBackground: Color
+    let updateActionText: Color
+
     // MARK: Popup
     let popupBackground: Color
     let popupPrimaryText: Color
@@ -63,6 +75,11 @@ struct AppTheme {
         buttonBorder: Color(nsColor: NSColor(calibratedRed: 0.48, green: 0.48, blue: 0.52, alpha: 1.0)),
         buttonText: Color(white: 0.92),
         cardRowBackground: Color.black.opacity(0.24),
+        // #1F7D48 sRGB: white label 5.14:1, and 3.20:1 against the measured
+        // #1F1F21 window backdrop. The two ratios trade off exactly — a
+        // lighter green raises the label ratio but pushes the edge under 3:1.
+        updateActionBackground: Color(nsColor: NSColor(srgbRed: 0.122, green: 0.490, blue: 0.282, alpha: 1.0)),
+        updateActionText: Color.white,
 
         // Popup
         popupBackground: Color.black.opacity(0.82),
@@ -109,6 +126,10 @@ struct AppTheme {
         buttonBorder: Color(nsColor: NSColor(calibratedRed: 0.65, green: 0.65, blue: 0.68, alpha: 1.0)),
         buttonText: Color(white: 0.10),
         cardRowBackground: Color.white.opacity(0.65),
+        // #0F5C33 sRGB: white label 8.08:1 (AAA) and 7.10:1 against the light
+        // window, so the light theme gets the full AAA band.
+        updateActionBackground: Color(nsColor: NSColor(srgbRed: 0.059, green: 0.361, blue: 0.200, alpha: 1.0)),
+        updateActionText: Color.white,
 
         // Popup — Spotlight-like light translucent
         popupBackground: Color(nsColor: NSColor(calibratedRed: 0.92, green: 0.92, blue: 0.94, alpha: 0.88)),
@@ -154,6 +175,11 @@ struct AppTheme {
         buttonBorder: Color.white.opacity(0.60),
         buttonText: Color.white,
         cardRowBackground: Color(nsColor: NSColor(calibratedRed: 0.08, green: 0.08, blue: 0.09, alpha: 1.0)),
+        // #5FD98A with black label: 11.78:1. A filled dark green cannot reach
+        // AAA text on this backdrop, so the increased-contrast theme inverts
+        // to a light fill instead of settling for AA.
+        updateActionBackground: Color(nsColor: NSColor(srgbRed: 0.373, green: 0.851, blue: 0.541, alpha: 1.0)),
+        updateActionText: Color.black,
 
         // Popup
         popupBackground: Color(nsColor: NSColor(calibratedRed: 0.08, green: 0.08, blue: 0.09, alpha: 0.98)),
@@ -197,6 +223,9 @@ struct AppTheme {
         buttonBorder: Color.black.opacity(0.50),
         buttonText: Color.black,
         cardRowBackground: Color(nsColor: NSColor(calibratedRed: 0.96, green: 0.96, blue: 0.97, alpha: 1.0)),
+        // #0B4A2A with a white label: 10.36:1 (AAA) on the light backdrop.
+        updateActionBackground: Color(nsColor: NSColor(srgbRed: 0.043, green: 0.290, blue: 0.165, alpha: 1.0)),
+        updateActionText: Color.white,
 
         // Popup
         popupBackground: Color(nsColor: NSColor(calibratedRed: 0.96, green: 0.96, blue: 0.97, alpha: 1.0)),
@@ -247,6 +276,8 @@ struct AppTheme {
             cardRowBackground: isDark
                 ? Color(nsColor: NSColor(calibratedRed: 0.10, green: 0.10, blue: 0.11, alpha: 1.0))
                 : Color(nsColor: NSColor(calibratedRed: 0.95, green: 0.95, blue: 0.96, alpha: 1.0)),
+            updateActionBackground: self.updateActionBackground,
+            updateActionText: self.updateActionText,
             popupBackground: isDark
                 ? Color(nsColor: NSColor(calibratedRed: 0.10, green: 0.10, blue: 0.11, alpha: 1.0))
                 : Color(nsColor: NSColor(calibratedRed: 0.94, green: 0.94, blue: 0.96, alpha: 1.0)),

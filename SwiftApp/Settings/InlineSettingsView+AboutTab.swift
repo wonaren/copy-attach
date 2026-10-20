@@ -151,6 +151,10 @@ extension InlineSettingsView {
 
     private var updateButtonsRow: some View {
         HStack(spacing: 12) {
+            // Secondary action, in the same neutral idiom as the rest of
+            // Settings (buttonBackground + cardBorder). A filled accent put
+            // white on #007AFF at 4.0:1 — under AA — and while an update was
+            // pending it competed with the one action that actually matters.
             Button {
                 checkForUpdates()
             } label: {
@@ -166,45 +170,43 @@ extension InlineSettingsView {
                             .font(.system(size: 12, weight: .medium))
                     }
                 }
+                .foregroundColor(theme.primaryText)
                 .padding(.horizontal, 16)
                 .padding(.vertical, 8)
+                .background(theme.buttonBackground)
+                .cornerRadius(6)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(theme.buttonBorder, lineWidth: 1)
+                )
             }
             .disabled(isCheckingUpdate)
-            .background(Color.accentColor)
-            .foregroundColor(theme.buttonText)
-            .cornerRadius(6)
             .buttonStyle(.plain)
-            .overlay(alignment: .topTrailing) {
-                // Red badge showing the latest version when an update exists.
-                if case .updateAvailable(let latestVersion, _, _) = updateState {
-                    Text("v\(latestVersion)")
-                        .font(.system(size: 9, weight: .bold, design: .rounded))
-                        .foregroundColor(.white)
-                        .padding(.horizontal, 5).padding(.vertical, 2)
-                        .background(Color.red)
-                        .clipShape(Capsule())
-                        .offset(x: 6, y: -6)
-                        .transition(.scale(scale: 0.85).combined(with: .opacity))
-                }
-            }
 
-            // Green download button, only shown when an update exists.
-            if case .updateAvailable = updateState {
+            // Primary action, only while an update is pending. The version
+            // rides in the label: it used to be a separate red badge pinned
+            // over the check button, shown under the exact same condition, so
+            // it carried no information the download button didn't already
+            // carry — at 3.4:1 for 9 pt text.
+            if case .updateAvailable(let latestVersion, _, _) = updateState {
                 Button {
                     startDirectDownload()
                 } label: {
-                    HStack(spacing: 5) {
+                    HStack(spacing: 6) {
                         Image(systemName: "arrow.down.circle.fill")
                             .font(.system(size: 12))
+                            .accessibilityHidden(true)
                         Text("下载更新")
                             .font(.system(size: 12, weight: .medium))
+                        Text("v\(latestVersion)")
+                            .font(.system(size: 11, weight: .medium, design: .monospaced))
                     }
+                    .foregroundColor(theme.updateActionText)
                     .padding(.horizontal, 16)
                     .padding(.vertical, 8)
+                    .background(theme.updateActionBackground)
+                    .cornerRadius(6)
                 }
-                .background(Color.green)
-                .foregroundColor(theme.buttonText)
-                .cornerRadius(6)
                 .buttonStyle(.plain)
                 .transition(.scale(scale: 0.85).combined(with: .opacity))
             }
