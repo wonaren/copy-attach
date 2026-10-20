@@ -288,7 +288,12 @@ extension InlineSettingsView {
                             releaseURL: cached.releaseURL,
                             showAlert: false)
         }
-        guard UpdateChecker.cachedRelease(maxAge: UpdateChecker.cacheLifetime) == nil else { return }
+        // Always revalidate, even when the cache is still warm. Painting the
+        // cached answer must not suppress the check: with a 15 min lifetime and
+        // a source that caches for 10 min, a release published moments ago
+        // stayed invisible for up to 25 min (measured 2026-10-20). The check is
+        // async and a failure never clears the painted result, so this costs no
+        // latency — it only lets the answer catch up.
         checkForUpdates(showAlert: false)
     }
 
