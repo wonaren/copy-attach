@@ -47,5 +47,23 @@ thinking-effort-loaded.json
 scripts/lanzou-redirect/state.json
 scripts/lanzou-redirect/redirect.log
 
+# Node 依赖（videos/ 下的视频制作工作区）
+node_modules/
+
+# 本地视频制作工作区：hyperframes 项目含 node_modules 与渲染成片，不入库
+videos/
+
+# macOS AppleDouble 旁路文件（外接盘 / 压缩包解出的）
+._*
+
+# 本地演示 / 压测数据
+demo-data/
+
+# Rust profiler 与补丁残留
+*.profraw
+*.profdata
+*.orig
+*.rej
+
 
 
