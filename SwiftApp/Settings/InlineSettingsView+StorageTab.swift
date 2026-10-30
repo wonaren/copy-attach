@@ -152,57 +152,37 @@ extension InlineSettingsView {
 
     private var undoCard: some View {
         settingsCard {
-            cardTitle(icon: "arrow.uturn.backward.circle", text: "撤销记录")
-            VStack(alignment: .leading, spacing: 6) {
-                HStack {
-                    Text("可撤销容量")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundColor(theme.primaryText)
-                    Spacer()
-                    Text(undoBudgetLabel)
-                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                        .foregroundColor(.accentColor)
-                }
-                Picker("", selection: Binding(
-                    get: { undoBudgetChoice },
-                    set: { newValue in
-                        undoBudgetChoice = newValue
+            VStack(alignment: .leading, spacing: 10) {
+                cardTitle(icon: "arrow.uturn.backward.circle", text: "撤销栈大小")
+                HStack(spacing: 10) {
+                    Picker("保留空间", selection: Binding(
+                        get: { undoBudgetChoice },
+                        set: { undoBudgetChoice = $0 }
+                    )) {
+                        ForEach(UndoBudgetChoice.allCases) { choice in
+                            Text(choice.title).tag(choice)
+                        }
                     }
-                )) {
-                    ForEach(UndoBudgetChoice.allCases) { choice in
-                        Text(choice.title).tag(choice)
-                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .fixedSize()
+                    Text("删除后保留 7 天，空间满时淘汰最早记录")
+                        .font(.system(size: 11))
+                        .foregroundColor(theme.secondaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
+                    Text("淘汰弹窗提醒")
+                        .font(.system(size: 11))
+                        .foregroundColor(theme.secondaryText)
+                    Toggle("淘汰弹窗提醒", isOn: Binding(
+                        get: { !undoEvictionWarningDisabled },
+                        set: { undoEvictionWarningDisabled = !$0 }
+                    ))
+                    .labelsHidden()
+                    .toggleStyle(.switch)
                 }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-
-                Text("撤销删除的记录保留 7 天。容量填满后，最早的删除会被丢弃且无法恢复——删除时会先提示。")
-                    .font(.system(size: 11))
-                    .foregroundColor(theme.secondaryText)
-
-                sectionDivider().padding(.vertical, 4)
-
-                Toggle(isOn: Binding(
-                    get: { !HistoryPopupContent.undoEvictionWarningDisabled },
-                    set: { HistoryPopupContent.undoEvictionWarningDisabled = !$0 }
-                )) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("容量不足时提醒")
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundColor(theme.primaryText)
-                        Text("删除会挤掉更早的撤销记录时弹出确认。")
-                            .font(.system(size: 11))
-                            .foregroundColor(theme.secondaryText)
-                    }
-                }
-                .toggleStyle(.switch)
             }
         }
-    }
-
-    /// The budget as a friendly string; 0 means unlimited.
-    private var undoBudgetLabel: String {
-        undoBudgetChoice.title
     }
 
     private var cleanupCard: some View {

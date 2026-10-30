@@ -32,6 +32,7 @@ struct InlineSettingsView: View {
     @State var undoBudgetChoiceCache: UndoBudgetChoice = UndoBudgetChoice.nearest(
         to: ClipboardBackend.shared.undoBudgetBytes()
     )
+    @AppStorage("UndoEvictionWarningDisabled") var undoEvictionWarningDisabled = false
     @State var continuousDrag = HistoryPopupWindow.continuousDragEnabled
     @State var richTextDragApps = ClipboardBackend.richTextDragAppBundleIDs
     @State var isDraggingOverRichTextCard = false

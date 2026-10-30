@@ -131,21 +131,23 @@ extension HistoryPopupContent {
             return true
         }
         let alert = NSAlert()
-        alert.messageText = "继续删除将无法撤销 \(evicted) 条更早的删除"
-        alert.informativeText = """
-            撤销容量已满。继续删除这条记录，会让最早删除的 \(evicted) 条彻底无法撤销。
-
-            可在「设置 → 存储 → 撤销记录」中调整容量。
-            """
-        alert.alertStyle = .warning
+        alert.messageText = "撤销空间已满"
+        alert.informativeText = "继续删除将无法恢复 \(evicted) 条更早的记录。"
+        alert.alertStyle = .informational
         alert.addButton(withTitle: "继续删除")
         alert.addButton(withTitle: "取消")
-        let suppress = NSButton(checkboxWithTitle: "不再提醒", target: nil, action: nil)
-        suppress.state = .off
-        alert.accessoryView = suppress
+        alert.buttons[0].keyEquivalent = ""
+        alert.buttons[1].keyEquivalent = "\r"
+        alert.showsSuppressionButton = true
+        alert.suppressionButton?.title = "不再提醒"
 
+        let popup = popupWindow
+        popup?.isPresentingModalPanel = true
+        defer { popup?.isPresentingModalPanel = false }
+        NSApp.activate(ignoringOtherApps: true)
         let response = alert.runModal()
-        if suppress.state == .on {
+        if let popup, popup.isVisible { popup.makeKey() }
+        if alert.suppressionButton?.state == .on {
             Self.undoEvictionWarningDisabled = true
         }
         return response == .alertFirstButtonReturn
