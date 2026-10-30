@@ -31,6 +31,9 @@ fn ensure_test_backend() {
             db: Arc::new(Mutex::new(conn)),
             cleanup_threshold: Arc::new(AtomicUsize::new(3000)),
             ignore_rules: Arc::new(Mutex::new(IgnoreRules::default())),
+            undo_budget_bytes: Arc::new(std::sync::atomic::AtomicI64::new(
+                crate::backend::DEFAULT_UNDO_BUDGET_MB * 1024 * 1024,
+            )),
             last_restored_id: Arc::new(AtomicU64::new(0)),
             favorites: Arc::new(Mutex::new(HashSet::new())),
         };
@@ -109,7 +112,7 @@ fn test_clipboard_delete_by_id_returns_zero_on_failure() {
 ///
 /// The previous design kept a one-slot in-memory stack of on-disk payloads; a
 /// delete is now a stamp on the row, so depth is bounded by retention
-/// (`UNDO_RETENTION_SECS`) and the byte budget (`MAX_UNDO_RETAINED_BYTES`)
+/// (`UNDO_RETENTION_SECS`) and the configurable byte budget
 /// instead of a step count. These assertions pin that contract.
 #[test]
 fn test_soft_delete_undo_depth_is_not_capped() {
@@ -440,7 +443,8 @@ fn test_deleted_rows_are_swept_by_age_and_byte_budget() {
     }
     let purged = {
         let conn = b.db.lock().unwrap();
-        crate::db::purge_expired_deleted_rows(&conn).expect("age sweep must succeed")
+        crate::db::purge_expired_deleted_rows(&conn, crate::backend::undo_budget_bytes())
+            .expect("age sweep must succeed")
     };
     let survivors: i64 = {
         let conn = b.db.lock().unwrap();
@@ -484,7 +488,8 @@ fn test_deleted_rows_are_swept_by_age_and_byte_budget() {
     }
     let budget_purged = {
         let conn = b.db.lock().unwrap();
-        crate::db::purge_expired_deleted_rows(&conn).expect("byte sweep must succeed")
+        crate::db::purge_expired_deleted_rows(&conn, crate::backend::undo_budget_bytes())
+            .expect("byte sweep must succeed")
     };
     let remaining_bytes: i64 = {
         let conn = b.db.lock().unwrap();
@@ -515,7 +520,7 @@ fn test_deleted_rows_are_swept_by_age_and_byte_budget() {
     assert_eq!(survivors, 1, "the row inside the retention window must survive");
     assert!(budget_purged >= 1, "the byte budget must shed the oldest deletion");
     assert!(
-        remaining_bytes <= crate::backend::MAX_UNDO_RETAINED_BYTES,
+        remaining_bytes <= crate::backend::undo_budget_bytes(),
         "retained deleted payload must fit the budget (left {remaining_bytes} bytes)"
     );
 }

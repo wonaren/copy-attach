@@ -25,6 +25,31 @@ fn file_db(name: &str) -> (std::path::PathBuf, Connection) {
     (path, conn)
 }
 
+/// Insert an image row and return its rowid.
+///
+/// Uses the history table's MAX(id) boundary rather than `last_insert_rowid()`:
+/// `insert_entry_to_db` raises the entry-id watermark with an upsert into
+/// `clipboard_meta`, and an upsert moves `last_insert_rowid()` to the meta row
+/// (measured — it reported a meta rowid, which made the fixture delete the
+/// wrong thing).
+fn insert_image_row(
+    conn: &Connection,
+    entry: &ClipboardEntry,
+    png: &[u8],
+    thumb: &[u8],
+) -> i64 {
+    let before: i64 = conn
+        .query_row("SELECT COALESCE(MAX(id), 0) FROM clipboard_history", [], |r| r.get(0))
+        .expect("read id bound");
+    crate::db::insert_entry_to_db(conn, entry, None, Some(png), Some((thumb, 10, 10)))
+        .expect("insert image");
+    let after: i64 = conn
+        .query_row("SELECT COALESCE(MAX(id), 0) FROM clipboard_history", [], |r| r.get(0))
+        .expect("read id bound");
+    assert!(after > before, "insert must produce a new history row");
+    after
+}
+
 fn insert_body(conn: &Connection, text: &str, ts: u64) -> (u64, i64) {
     let id = crate::backend::new_entry_id();
     let entry = ClipboardEntry::text_entry(id, text, ts, String::new(), String::new(), 0);
@@ -365,6 +390,155 @@ fn test_soft_delete_primitives_report_read_failures() {
     conn.execute("DELETE FROM clipboard_deleted WHERE row_id = 999999", [])
         .expect("cleanup orphan");
 
+    drop(conn);
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+    }
+}
+
+/// The eviction preview must predict exactly what the sweep then does.
+///
+/// The preview is what the user is warned with ("继续删除将无法撤销 N 条"),
+/// so a preview that under- or over-counts is a wrong promise. This pins the
+/// two halves together: predict N, delete the row, and the sweep must have
+/// evicted exactly N and left the budget satisfied.
+#[test]
+fn test_eviction_preview_matches_the_real_sweep() {
+    let (path, conn) = file_db("eviction");
+    let blob = vec![0xEEu8; 2 * 1024 * 1024]; // 2 MB per deleted image
+    let thumb = vec![0x11u8; 1024];
+
+    // Budget: 6 MB — fits three 2 MB deletions, the fourth evicts the oldest.
+    //
+    // The sweep reads the budget from the backend singleton (one number shared
+    // with the delete path), so the test sets it through the same accessor the
+    // app uses and asserts it took effect — otherwise this test would silently
+    // measure the default budget instead of the one it declared.
+    // The budget is passed explicitly to the preview/sweep, so this test owns
+    // its own policy and needs no backend singleton.
+
+    // Three deletions that fit.
+    let mut deleted_rows = Vec::new();
+    for i in 0..3 {
+        let id = crate::backend::new_entry_id();
+        let entry = ClipboardEntry::Image {
+            id,
+            width: 100,
+            height: 100,
+            thumb_width: 10,
+            thumb_height: 10,
+            hash: id,
+            custom_label: String::new(),
+            timestamp: i as u64,
+            source_name: "EvictTest".to_string(),
+            source_bundle_id: "com.example.evict".to_string(),
+            db_id: 0,
+        };
+        let row = insert_image_row(&conn, &entry, &blob, &thumb);
+        crate::db::soft_delete_row(&conn, row).expect("soft delete");
+        deleted_rows.push(row);
+    }
+    assert_eq!(
+        crate::db::undo_depth(&conn).expect("depth"),
+        3,
+        "three deletions fit the 6 MB budget"
+    );
+
+    // A fourth deletion of the same size: the preview must name the evictions.
+    let id = crate::backend::new_entry_id();
+    let entry = ClipboardEntry::Image {
+        id,
+        width: 100,
+        height: 100,
+        thumb_width: 10,
+        thumb_height: 10,
+        hash: id,
+        custom_label: String::new(),
+        timestamp: 99,
+        source_name: "EvictTest".to_string(),
+        source_bundle_id: "com.example.evict".to_string(),
+        db_id: 0,
+    };
+    let incoming_row = insert_image_row(&conn, &entry, &blob, &thumb);
+    let incoming_bytes =
+        crate::db::history_row_payload_bytes(&conn, incoming_row).expect("payload size");
+
+    let predicted =
+        crate::db::pending_undo_evictions(&conn, incoming_bytes, 6 * 1024 * 1024)
+            .expect("preview");
+    assert!(
+        predicted >= 1,
+        "adding a fourth 2 MB deletion over a 6 MB budget must predict at least one eviction"
+    );
+
+    // Now do it for real and compare.
+    crate::db::soft_delete_row(&conn, incoming_row).expect("soft delete");
+    crate::db::purge_expired_deleted_rows(&conn, 6 * 1024 * 1024).expect("sweep");
+
+    let evicted = 4 - crate::db::undo_depth(&conn).expect("depth");
+    let retained: i64 = conn
+        .query_row(
+            "SELECT COALESCE(SUM(COALESCE(LENGTH(h.png_data), 0)
+                               + COALESCE(LENGTH(h.thumb_data), 0)), 0)
+             FROM clipboard_deleted d JOIN clipboard_history h ON h.id = d.row_id",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+
+    assert_eq!(
+        evicted, predicted,
+        "the preview promised {predicted} eviction(s) but the sweep evicted {evicted}"
+    );
+    assert!(
+        retained <= 6 * 1024 * 1024,
+        "the sweep must leave the retained payload inside the budget (left {retained})"
+    );
+
+    // The oldest deletion is the one that went: the newest must still undo.
+    let newest_survives: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM clipboard_deleted WHERE row_id = ?1",
+            rusqlite::params![incoming_row],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap()
+        > 0;
+    let oldest_gone: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM clipboard_deleted WHERE row_id = ?1",
+            rusqlite::params![deleted_rows[0]],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap()
+        == 0;
+    assert!(newest_survives, "the newest deletion must stay undoable");
+    assert!(oldest_gone, "the oldest deletion must be the one evicted");
+
+    drop(conn);
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+    }
+}
+
+/// An unlimited budget (0) must never evict, and the preview must say so.
+#[test]
+fn test_unlimited_budget_never_evicts() {
+    let (path, conn) = file_db("unlimited");
+    // 0 = unlimited, passed explicitly to the preview/sweep.
+    let (_, row) = insert_body(&conn, "unlimited-probe", 1);
+    assert_eq!(
+        crate::db::pending_undo_evictions(&conn, 10 * 1024 * 1024 * 1024, 0)
+            .expect("preview with unlimited budget"),
+        0,
+        "an unlimited budget must never predict evictions"
+    );
+    crate::db::soft_delete_row(&conn, row).expect("soft delete");
+    assert_eq!(
+        crate::db::purge_expired_deleted_rows(&conn, 0).expect("sweep"),
+        0,
+        "an unlimited budget must purge nothing"
+    );
     drop(conn);
     for suffix in ["", "-wal", "-shm"] {
         let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));

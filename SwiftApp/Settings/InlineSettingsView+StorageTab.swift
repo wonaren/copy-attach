@@ -5,6 +5,55 @@ import UniformTypeIdentifiers
 // MARK: - 🟡 STORAGE TAB
 
 extension InlineSettingsView {
+    /// The undo-capacity choices the settings UI offers.
+    ///
+    /// Deliberately coarse: the exact byte figure is a policy knob, not
+    /// something a user tunes precisely. 16 MB is the default (about four 4 MB
+    /// screenshots — enough for the "wrong row" mistake this feature exists
+    /// for), and 0 means "keep everything until the 7-day window closes it".
+    enum UndoBudgetChoice: CaseIterable, Identifiable {
+        case small, medium, large, unlimited
+
+        var id: Self { self }
+
+        /// Payload bytes this choice allows; 0 means unlimited.
+        var bytes: Int64 {
+            switch self {
+            case .small: return 16 * 1024 * 1024
+            case .medium: return 64 * 1024 * 1024
+            case .large: return 256 * 1024 * 1024
+            case .unlimited: return 0
+            }
+        }
+
+        var title: String {
+            switch self {
+            case .small: return "16 MB"
+            case .medium: return "64 MB"
+            case .large: return "256 MB"
+            case .unlimited: return "不限制"
+            }
+        }
+
+        /// Nearest choice for a stored byte value, so a value written by another
+        /// build (or a partial write) still selects something sensible.
+        static func nearest(to bytes: Int64) -> UndoBudgetChoice {
+            if bytes <= 0 { return .unlimited }
+            return allCases.min(by: { abs($0.bytes - bytes) < abs($1.bytes - bytes) }) ?? .small
+        }
+    }
+
+    /// Current budget choice. Cached in `@State` because it comes from an FFI
+    /// call SwiftUI cannot observe: rendering must read cached state, and the
+    /// setter writes through to the backend then refreshes the cache.
+    var undoBudgetChoice: UndoBudgetChoice {
+        get { undoBudgetChoiceCache }
+        nonmutating set {
+            undoBudgetChoiceCache = newValue
+            backend.setUndoBudgetBytes(newValue.bytes)
+        }
+    }
+
     private var textPct: CGFloat {
         let threshold = CGFloat(max(Int(cleanupThreshold), 1))
         return CGFloat(textCount) / threshold
@@ -20,6 +69,7 @@ extension InlineSettingsView {
                 storageStatsCard
                 backupRestoreCard
                 cleanupCard
+                undoCard
             }
             .padding(20)
         }
@@ -98,6 +148,61 @@ extension InlineSettingsView {
                 )
             }
         }
+    }
+
+    private var undoCard: some View {
+        settingsCard {
+            cardTitle(icon: "arrow.uturn.backward.circle", text: "撤销记录")
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text("可撤销容量")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(theme.primaryText)
+                    Spacer()
+                    Text(undoBudgetLabel)
+                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                        .foregroundColor(.accentColor)
+                }
+                Picker("", selection: Binding(
+                    get: { undoBudgetChoice },
+                    set: { newValue in
+                        undoBudgetChoice = newValue
+                    }
+                )) {
+                    ForEach(UndoBudgetChoice.allCases) { choice in
+                        Text(choice.title).tag(choice)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+
+                Text("撤销删除的记录保留 7 天。容量填满后，最早的删除会被丢弃且无法恢复——删除时会先提示。")
+                    .font(.system(size: 11))
+                    .foregroundColor(theme.secondaryText)
+
+                sectionDivider().padding(.vertical, 4)
+
+                Toggle(isOn: Binding(
+                    get: { !HistoryPopupContent.undoEvictionWarningDisabled },
+                    set: { HistoryPopupContent.undoEvictionWarningDisabled = !$0 }
+                )) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("容量不足时提醒")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundColor(theme.primaryText)
+                        Text("删除会挤掉更早的撤销记录时弹出确认。")
+                            .font(.system(size: 11))
+                            .foregroundColor(theme.secondaryText)
+                    }
+                }
+                .toggleStyle(.switch)
+            }
+        }
+    }
+
+    /// The budget as a friendly string; 0 means unlimited.
+    private var undoBudgetLabel: String {
+        undoBudgetChoice.title
     }
 
     private var cleanupCard: some View {

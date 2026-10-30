@@ -60,7 +60,54 @@ pub extern "C" fn clipboard_clear_history() -> c_int {
 /// no resident memory. (The previous design materialized the payload to disk
 /// precisely because a deleted row had to leave the table.) Undo depth is
 /// therefore bounded by retention (`UNDO_RETENTION_SECS`) and a byte budget
-/// (`MAX_UNDO_RETAINED_BYTES`), not by a step count.
+/// (the configurable undo budget), not by a step count.
+/// Would deleting this entry evict already-undoable deletions, and how many?
+///
+/// The caller asks BEFORE deleting so the user can be warned while it is still
+/// reversible. Once the delete runs, the sweep has already dropped the evicted
+/// rows — there is nothing left to report afterwards.
+///
+/// Returns the number of deletions that would be evicted, or -1 when the
+/// question could not be answered (unknown entry, DB error). -1 is distinct
+/// from 0 so the caller never shows "no eviction" on a failed probe.
+#[no_mangle]
+pub extern "C" fn clipboard_undo_eviction_preview(entry_id: u64) -> c_int {
+    let b = match try_backend() {
+        Some(b) => b,
+        None => return -1,
+    };
+    let db_id = {
+        let hist = b.history.lock().unwrap();
+        match hist.iter().find(|e| e.entry_id() == entry_id) {
+            Some(e) => e.db_id(),
+            None => {
+                crate::error_log!("CopyAttach: eviction preview for unknown entry {entry_id}");
+                return -1;
+            }
+        }
+    };
+    if db_id == 0 {
+        // Never persisted, so it can never be deleted either — nothing to warn
+        // about. (The delete itself refuses this entry.)
+        return 0;
+    }
+    let conn = match b.db.lock() {
+        Ok(c) => c,
+        Err(e) => {
+            crate::error_log!("CopyAttach: DB mutex poisoned in eviction preview: {e}");
+            return -1;
+        }
+    };
+    let bytes = match crate::db::history_row_payload_bytes(&conn, db_id) {
+        Ok(v) => v,
+        Err(()) => return -1,
+    };
+    match crate::db::pending_undo_evictions(&conn, bytes, crate::backend::undo_budget_bytes()) {
+        Ok(n) => n as c_int,
+        Err(()) => -1,
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn clipboard_delete_by_id(entry_id: u64) -> c_int {
     let b = match try_backend() {
@@ -128,7 +175,7 @@ pub extern "C" fn clipboard_delete_by_id(entry_id: u64) -> c_int {
         }
         // Self-limit the retained deleted set now instead of at the next launch:
         // a burst of large deletions sheds its oldest immediately.
-        if crate::db::purge_expired_deleted_rows(&conn).is_err() {
+        if crate::db::purge_expired_deleted_rows(&conn, crate::backend::undo_budget_bytes()).is_err() {
             crate::error_log!("CopyAttach: deleted-row sweep failed after delete; retried at next launch");
         }
     }
@@ -644,6 +691,53 @@ pub extern "C" fn clipboard_undo_depth() -> c_int {
         // `undo_depth` already logged the concrete SQLite error.
         Err(()) => 0,
     }
+}
+
+/// Current undo byte budget in bytes (0 = unlimited).
+#[no_mangle]
+pub extern "C" fn clipboard_get_undo_budget_bytes() -> i64 {
+    crate::backend::undo_budget_bytes()
+}
+
+/// Persist a new undo byte budget (0 = unlimited) and apply it immediately.
+///
+/// Lowering the budget sweeps the retained deletions right away, so the
+/// setting's effect is visible at once rather than at the next delete.
+/// Returns 1 on success, 0 when the value was rejected or the write failed.
+#[no_mangle]
+pub extern "C" fn clipboard_set_undo_budget_bytes(bytes: i64) -> c_int {
+    let b = match try_backend() {
+        Some(b) => b,
+        None => return 0,
+    };
+    let max_bytes = crate::backend::MAX_UNDO_BUDGET_MB * 1024 * 1024;
+    let clamped = if bytes <= crate::backend::UNDO_BUDGET_UNLIMITED {
+        crate::backend::UNDO_BUDGET_UNLIMITED
+    } else {
+        bytes.min(max_bytes)
+    };
+    {
+        let conn = match b.db.lock() {
+            Ok(c) => c,
+            Err(e) => {
+                crate::error_log!("CopyAttach: DB mutex poisoned setting the undo budget: {e}");
+                return 0;
+            }
+        };
+        // DB first: on failure the in-memory budget must not diverge from what
+        // the next launch would read back.
+        if crate::db::store_undo_budget_bytes(&conn, clamped).is_err() {
+            return 0;
+        }
+    }
+    b.undo_budget_bytes.store(clamped, Ordering::Relaxed);
+    // Apply the new cap now, so shrinking it frees the excess immediately.
+    if let Ok(conn) = b.db.lock() {
+        if crate::db::purge_expired_deleted_rows(&conn, clamped).is_err() {
+            crate::error_log!("CopyAttach: sweep after undo-budget change failed; retried after the next delete");
+        }
+    }
+    1
 }
 
 /// Returns the `entry_id` of the most recently undo-restored entry, or 0 if none.

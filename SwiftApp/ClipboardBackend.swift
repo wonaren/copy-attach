@@ -1078,6 +1078,27 @@ class ClipboardBackend {
         Int(clipboard_undo_depth())
     }
 
+    /// How many already-undoable deletions would be evicted by deleting
+    /// `entryId` right now. Returns nil when the backend could not answer.
+    ///
+    /// Asked BEFORE the delete so the user can be warned while the action is
+    /// still reversible; after the delete there is nothing left to report.
+    func undoEvictionPreview(entryId: Int) -> Int? {
+        let n = Int(clipboard_undo_eviction_preview(UInt64(entryId)))
+        return n < 0 ? nil : n
+    }
+
+    /// Current undo byte budget. 0 = unlimited.
+    func undoBudgetBytes() -> Int64 {
+        clipboard_get_undo_budget_bytes()
+    }
+
+    /// Persist a new undo byte budget (0 = unlimited) and apply it immediately.
+    @discardableResult
+    func setUndoBudgetBytes(_ bytes: Int64) -> Bool {
+        clipboard_set_undo_budget_bytes(bytes) != 0
+    }
+
     func checkPermission() -> Bool {
         return clipboard_check_permission() != 0
     }

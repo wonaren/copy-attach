@@ -168,7 +168,7 @@ fn test_soft_delete_real_path() {
     assert_eq!(live_after_delete, 0, "no live rows may remain");
     assert_eq!(deleted_rows, ids.len() as i64, "deleted rows must stay in the table");
     assert!(
-        retained_bytes <= crate::backend::MAX_UNDO_RETAINED_BYTES,
+        retained_bytes <= crate::backend::undo_budget_bytes(),
         "retained deleted payload must fit the byte budget ({retained_bytes} bytes)"
     );
 

@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 // MARK: - Actions (delete / select / undo)
@@ -64,6 +65,11 @@ extension HistoryPopupContent {
         let items = displayItems
         guard index < items.count else { return }
         let item = items[index]
+        // A delete that pushes the oldest undoable deletion out of the byte
+        // budget is irreversible for THAT entry, so ask first. The preview must
+        // run before the write: once the sweep has run there is nothing left to
+        // report.
+        guard confirmUndoEvictionIfNeeded(for: item) else { return }
         guard let backendIdx = backend.items.firstIndex(where: { $0.id == item.id }) else { return }
         // The row is about to disappear: drop the inline editor first, otherwise
         // `editingItemId` would stay set with no row rendering a field, and every
@@ -110,6 +116,49 @@ extension HistoryPopupContent {
         // to whatever the user was typing in.
         backend.restorePasteTargetFocus(force: true)
     }
+
+    // MARK: - Undo eviction warning
+
+    /// Warn when deleting `item` would push the oldest undoable deletion out of
+    /// the retention budget. Returns true when the delete may proceed.
+    ///
+    /// Only fires when the backend can name a specific count (`-1` = "could not
+    /// tell" is treated as "nothing to warn about" — a probe failure must never
+    /// block deleting) and the user has not opted out of the warning.
+    func confirmUndoEvictionIfNeeded(for item: ClipboardItem) -> Bool {
+        guard !Self.undoEvictionWarningDisabled else { return true }
+        guard let evicted = backend.undoEvictionPreview(entryId: item.id), evicted > 0 else {
+            return true
+        }
+        let alert = NSAlert()
+        alert.messageText = "继续删除将无法撤销 \(evicted) 条更早的删除"
+        alert.informativeText = """
+            撤销容量已满。继续删除这条记录，会让最早删除的 \(evicted) 条彻底无法撤销。
+
+            可在「设置 → 存储 → 撤销记录」中调整容量。
+            """
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "继续删除")
+        alert.addButton(withTitle: "取消")
+        let suppress = NSButton(checkboxWithTitle: "不再提醒", target: nil, action: nil)
+        suppress.state = .off
+        alert.accessoryView = suppress
+
+        let response = alert.runModal()
+        if suppress.state == .on {
+            Self.undoEvictionWarningDisabled = true
+        }
+        return response == .alertFirstButtonReturn
+    }
+
+    /// UserDefaults-backed "不再提醒" flag for the undo eviction warning.
+    /// The checkbox writes here; Settings → 存储 exposes the same flag so it can
+    /// be switched back on without deleting a record to re-trigger the dialog.
+    static var undoEvictionWarningDisabled: Bool {
+        get { UserDefaults.standard.bool(forKey: Self.undoEvictionWarningKey) }
+        set { UserDefaults.standard.set(newValue, forKey: Self.undoEvictionWarningKey) }
+    }
+    static let undoEvictionWarningKey = "UndoEvictionWarningDisabled"
 
     // MARK: - Undo
 

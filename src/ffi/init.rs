@@ -1,5 +1,5 @@
 use std::ffi::{c_char, c_int, CStr};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -249,11 +249,24 @@ fn clipboard_init_inner(threshold: Option<c_int>, legacy_favorites: &[u64]) -> c
         }
     }
 
+    // The undo byte budget is a persisted policy, not a per-call argument: the
+    // sweep runs from both startup and the delete path, and reading it here
+    // (before the first sweep) means the two can never disagree. A read failure
+    // is retryable — falling back to the default would silently evict the
+    // deletions a user who chose "unlimited" expects to keep.
+    let undo_budget = match crate::db::load_undo_budget_bytes(&conn) {
+        Ok(v) => v,
+        Err(()) => {
+            crate::error_log!("CopyAttach: undo budget unreadable; init retryable instead of guessing");
+            return INIT_RETRYABLE;
+        }
+    };
+
     // Sweep soft-deleted rows past their retention window (and over the byte
     // budget) before the history is published. Deleted rows keep their
     // payloads, so without this the deleted set would grow forever; the same
     // sweep also runs after every delete, and both are idempotent.
-    if crate::db::purge_expired_deleted_rows(&conn).is_err() {
+    if crate::db::purge_expired_deleted_rows(&conn, undo_budget).is_err() {
         crate::error_log!("CopyAttach: startup deleted-row sweep failed; retried after the next delete");
     }
 
@@ -263,6 +276,7 @@ fn clipboard_init_inner(threshold: Option<c_int>, legacy_favorites: &[u64]) -> c
     let pasteboard_event_lock = Arc::new(Mutex::new(()));
     let pending_self_write = Arc::new(Mutex::new(None));
     let db = Arc::new(Mutex::new(conn));
+    let undo_budget_bytes = Arc::new(AtomicI64::new(undo_budget));
     let cleanup_threshold = Arc::new(AtomicUsize::new(startup_threshold));
     let ignore_rules = Arc::new(Mutex::new(IgnoreRules::default()));
     let last_restored_id = Arc::new(AtomicU64::new(0));
@@ -278,6 +292,7 @@ fn clipboard_init_inner(threshold: Option<c_int>, legacy_favorites: &[u64]) -> c
         db: Arc::clone(&db),
         cleanup_threshold: Arc::clone(&cleanup_threshold),
         ignore_rules: Arc::clone(&ignore_rules),
+        undo_budget_bytes: Arc::clone(&undo_budget_bytes),
         last_restored_id: Arc::clone(&last_restored_id),
         favorites: Arc::clone(&favorites),
     };
@@ -299,6 +314,21 @@ fn clipboard_init_inner(threshold: Option<c_int>, legacy_favorites: &[u64]) -> c
     // delete. The undo stack itself now lives in the database (deleted rows), so
     // this directory is dead storage from an older version.
     crate::backend::purge_legacy_undo_payload_dir();
+
+    // Reclaim disk the freelist is holding.
+    //
+    // Deleting a row (a trim eviction, a soft delete, a purge) leaves its pages
+    // on SQLite's freelist — the FILE never shrinks on its own, and
+    // `auto_vacuum=INCREMENTAL` was measured to reclaim a single page per call
+    // on this SQLite/WAL combination, so it is not an option. Only a full
+    // `VACUUM` compacts (measured: a 200 MB file with every row deleted drops to
+    // 0 MB). It rewrites the whole database, so it runs on a background thread,
+    // only at startup, and only once the file is large enough that the win is
+    // worth the IO.
+    #[cfg(not(feature = "stress-test"))]
+    if let Some(b) = crate::backend::try_backend() {
+        spawn_compaction_if_fragmented(b);
+    }
 
     // One-time image metadata migration (DefaultHasher → stable FNV-1a hashes
     // and 300px → display-box thumbnails, user_version 3 → 4) on a background
@@ -491,8 +521,7 @@ fn spawn_metadata_migration(b: &'static crate::backend::Backend) {
 }
 
 #[no_mangle]
-pub extern "C" fn clipboard_cleanup() {
-    if let Some(b) = crate::backend::try_backend() {
+pub extern "C" fn clipboard_cleanup() {    if let Some(b) = crate::backend::try_backend() {
         b.running.store(false, Ordering::SeqCst);
         if let Ok(mut handle) = b.monitor_handle.lock() {
             if let Some(h) = handle.take() {
@@ -571,4 +600,88 @@ pub extern "C" fn clipboard_set_ignore_rules(
         }
         None => 0,
     }
+}
+
+/// Compact the database at startup when the freelist has grown large enough to
+/// be worth rewriting the file for.
+///
+/// Why this exists: SQLite never shrinks a database file on its own. Every
+/// deleted row (trim eviction, soft delete, retention purge) leaves its pages on
+/// the freelist, so the file keeps its high-water size forever — measured live
+/// on a real library: 507 MB file, 71 MB of live payload, 433 MB of freelist.
+/// `auto_vacuum=INCREMENTAL` is not a substitute: measured on this SQLite
+/// (3.54, WAL) it reclaimed ONE page per call, leaving the file unchanged.
+///
+/// Safety of running it at all: `VACUUM` needs free space roughly equal to the
+/// database size and rewrites every page, so it runs once per launch, on a
+/// background thread, and only when the freelist exceeds both a floor and a
+/// share of the file. A failure is logged and retried next launch — compaction
+/// is an optimisation, and nothing depends on it succeeding.
+#[cfg(not(feature = "stress-test"))]
+fn spawn_compaction_if_fragmented(b: &'static crate::backend::Backend) {
+    /// Below this freelist size the rewrite costs more than it reclaims.
+    const MIN_FREELIST_PAGES: i64 = 10_000; // ~40 MB at 4 KB pages
+    /// And the freelist must be at least this share of the whole file.
+    const MIN_FREELIST_SHARE_PCT: i64 = 20;
+
+    let (freelist, total) = {
+        let conn = match b.db.lock() {
+            Ok(c) => c,
+            Err(e) => {
+                crate::error_log!("CopyAttach: compaction check could not lock the DB: {e}");
+                return;
+            }
+        };
+        let read = |pragma: &str| -> i64 {
+            conn.query_row(&format!("PRAGMA {pragma}"), [], |r| r.get::<_, i64>(0))
+                .unwrap_or(0)
+        };
+        (read("freelist_count"), read("page_count"))
+    };
+    if total <= 0 || freelist < MIN_FREELIST_PAGES {
+        return;
+    }
+    if freelist * 100 < total * MIN_FREELIST_SHARE_PCT {
+        crate::debug_log!(
+            "CopyAttach: skipping compaction, freelist={freelist}/{total} pages is under {MIN_FREELIST_SHARE_PCT}%"
+        );
+        return;
+    }
+
+    crate::debug_log!(
+        "CopyAttach: compacting database in the background (freelist {freelist}/{total} pages)"
+    );
+    std::thread::spawn(move || {
+        // Hold the DB lock for the whole VACUUM: nothing may write while the
+        // file is being rewritten, and the capture path already tolerates
+        // waiting on it.
+        let guard = match b.db.lock() {
+            Ok(g) => g,
+            Err(e) => {
+                crate::error_log!("CopyAttach: compaction could not lock the DB: {e}");
+                return;
+            }
+        };
+        if !b.running.load(Ordering::SeqCst) {
+            return; // shutting down
+        }
+        let started = std::time::Instant::now();
+        match guard.execute_batch("VACUUM") {
+            Ok(()) => {
+                // `VACUUM` rewrites the main file; the WAL from before it is
+                // dead weight, so truncate it and let the file size settle.
+                let _ = guard.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)");
+                crate::debug_log!(
+                    "CopyAttach: compaction complete in {} ms",
+                    started.elapsed().as_millis()
+                );
+            }
+            Err(e) => {
+                // Not fatal: the freed pages stay on the freelist and the next
+                // launch retries. Loud because a persistent failure means the
+                // disk is never reclaimed.
+                crate::error_log!("CopyAttach: compaction (VACUUM) failed: {e}");
+            }
+        }
+    });
 }

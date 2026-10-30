@@ -27,6 +27,11 @@ struct InlineSettingsView: View {
     @State var shortTextThreshold = UserDefaults.standard.integer(forKey: "ShortTextThreshold") > 0 ? UserDefaults.standard.integer(forKey: "ShortTextThreshold") : 3
     @State var pendingThreshold: Int? = nil
     @State var thresholdBeforeEdit: Double = 3000
+    /// Cached undo-capacity choice (see `InlineSettingsView+StorageTab`). Seeded
+    /// from the persisted backend value so the card opens on the real setting.
+    @State var undoBudgetChoiceCache: UndoBudgetChoice = UndoBudgetChoice.nearest(
+        to: ClipboardBackend.shared.undoBudgetBytes()
+    )
     @State var continuousDrag = HistoryPopupWindow.continuousDragEnabled
     @State var richTextDragApps = ClipboardBackend.richTextDragAppBundleIDs
     @State var isDraggingOverRichTextCard = false

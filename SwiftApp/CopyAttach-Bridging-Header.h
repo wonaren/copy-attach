@@ -155,6 +155,12 @@ int32_t clipboard_undo_delete(void);
 int32_t clipboard_can_undo(void);
 // Number of deletions currently undoable (deleted rows still inside retention).
 int32_t clipboard_undo_depth(void);
+// Deletions the byte budget would evict if this entry were deleted now.
+// -1 = could not be determined (unknown entry / DB error); 0 = none evicted.
+int32_t clipboard_undo_eviction_preview(uint64_t entry_id);
+// Undo payload-byte budget. 0 = unlimited.
+int64_t clipboard_get_undo_budget_bytes(void);
+int32_t clipboard_set_undo_budget_bytes(int64_t bytes);
 uint64_t clipboard_last_restored_id(void);
 
 // ─── History Reload (for stress testing) ───

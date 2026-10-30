@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
@@ -45,24 +45,31 @@ pub(crate) const POLL_INTERVAL_MS: u64 = 500;
 
 // Undo retention (soft delete)
 //
-// Undo depth is not capped by a step count any more: a delete is a stamp on a
-// row, so N deletions cost N rows' worth of metadata and zero extra memory.
-// What IS bounded is retention: deleted rows (and their payloads) are swept
-// once they are older than `UNDO_RETENTION_SECS`, and a byte budget caps how
-// much deleted payload may accumulate before the oldest are purged early.
-// Without a byte budget a user who deletes a few 4 MB screenshots would carry
-// them on disk indefinitely.
+// Undo depth is not capped by a step count: a delete is a stamp on a row, so N
+// deletions cost N rows' worth of metadata and zero extra memory. What IS
+// bounded is retention: deleted rows (and their payloads) are swept once they
+// are older than `UNDO_RETENTION_SECS`, and a byte budget caps how much deleted
+// payload may accumulate before the oldest are purged early.
 //
 /// How long a deleted row stays undoable, in seconds (7 days).
 pub(crate) const UNDO_RETENTION_SECS: u64 = 7 * 24 * 60 * 60;
 
-/// Max payload bytes (text + png + thumb) that deleted rows may retain.
+/// Default cap on payload bytes (text + png + thumb) that deleted rows retain.
 ///
 /// Soft delete keeps the row's payload in place, so this is the one axis that
-/// can grow without bound. 64 MB holds roughly 16–60 screenshots — far more
-/// than a user reaches by undoing, while staying inside the disk the previous
-/// undo stack already budgeted (48 MB) plus headroom.
-pub(crate) const MAX_UNDO_RETAINED_BYTES: i64 = 64 * 1024 * 1024;
+/// can grow without bound. Undo is a low-frequency action (a user deletes far
+/// more than they undo), so the default is deliberately small: 16 MB holds
+/// about four 4 MB screenshots, which covers the "oops, wrong row" case this
+/// feature exists for. Users who want a deeper history can raise it from
+/// Settings → 存储, up to `MAX_UNDO_BUDGET_MB`.
+pub(crate) const DEFAULT_UNDO_BUDGET_MB: i64 = 16;
+
+/// Highest budget the settings UI offers.
+pub(crate) const MAX_UNDO_BUDGET_MB: i64 = 512;
+
+/// Budget value meaning "keep every deletion until the retention window ends".
+/// Stored in the DB so the capture/delete path never re-reads a preference.
+pub(crate) const UNDO_BUDGET_UNLIMITED: i64 = 0;
 
 /// Microsecond deletion stamp for a delete happening now.
 ///
@@ -73,6 +80,19 @@ pub(crate) fn undo_stamp_now() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_micros() as i64)
         .unwrap_or(0)
+}
+
+/// The live undo byte budget in BYTES (0 = unlimited), read from the backend.
+///
+/// Kept in the backend rather than passed through every call: the sweep runs
+/// from both the delete path and startup, and threading a parameter through
+/// would invite the two callers to disagree. `None` backend means "not
+/// initialized yet", which only startup can hit — the default applies there.
+pub(crate) fn undo_budget_bytes() -> i64 {
+    match BACKEND.get() {
+        Some(b) => b.undo_budget_bytes.load(Ordering::Relaxed),
+        None => DEFAULT_UNDO_BUDGET_MB * 1024 * 1024,
+    }
 }
 
 // Debug logging toggle
@@ -616,6 +636,10 @@ pub(crate) struct Backend {
     pub(crate) cleanup_threshold: Arc<AtomicUsize>,
     /// Live-replaceable capture policy (metadata only, no payloads).
     pub(crate) ignore_rules: Arc<Mutex<IgnoreRules>>,
+    /// Payload-byte cap for soft-deleted rows (0 = unlimited). Mirrors the
+    /// persisted `clipboard_meta` value so the delete path never reads SQLite
+    /// just to learn its own policy.
+    pub(crate) undo_budget_bytes: Arc<AtomicI64>,
     /// Entry ID of the most recently undo-restored entry (0 if none).
     pub(crate) last_restored_id: Arc<AtomicU64>,
     /// Durable favorites, mirrored from `clipboard_favorites` for the snapshot

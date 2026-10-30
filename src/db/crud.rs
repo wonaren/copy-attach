@@ -563,7 +563,15 @@ pub(crate) fn undo_depth(conn: &Connection) -> Result<usize, ()> {
 /// Returns how many payload rows were purged. A DB error is reported and
 /// returned as `Err`; the caller logs it, and nothing else depends on the sweep
 /// succeeding.
-pub(crate) fn purge_expired_deleted_rows(conn: &Connection) -> Result<usize, ()> {
+///
+/// `budget_bytes` is passed in rather than read from the backend: the two
+/// callers (the delete path and startup) must agree on one policy, and a
+/// parameter makes that explicit instead of depending on process-global state
+/// (which also makes the behaviour testable without a backend singleton).
+pub(crate) fn purge_expired_deleted_rows(
+    conn: &Connection,
+    budget_bytes: i64,
+) -> Result<usize, ()> {
     let now_micros = crate::backend::undo_stamp_now();
     let cutoff_micros = now_micros - (crate::backend::UNDO_RETENTION_SECS as i64) * 1_000_000;
 
@@ -601,10 +609,12 @@ pub(crate) fn purge_expired_deleted_rows(conn: &Connection) -> Result<usize, ()>
         })?;
 
     let mut purged = by_age;
-    if retained > crate::backend::MAX_UNDO_RETAINED_BYTES {
+    // Budget 0 means "unlimited": every deletion survives until the age window
+    // closes it.
+    if budget_bytes > crate::backend::UNDO_BUDGET_UNLIMITED && retained > budget_bytes {
         // Walk oldest-deletion-first, collecting rows until enough bytes are
         // shed, then delete exactly that set.
-        let mut excess = retained - crate::backend::MAX_UNDO_RETAINED_BYTES;
+        let mut excess = retained - budget_bytes;
         let mut doomed: Vec<i64> = Vec::new();
         {
             let mut stmt = match conn.prepare(
@@ -653,6 +663,98 @@ pub(crate) fn purge_expired_deleted_rows(conn: &Connection) -> Result<usize, ()>
         crate::debug_log!("CopyAttach: purged {purged} deleted row(s) (age or byte budget)");
     }
     Ok(purged)
+}
+
+/// How many already-deleted rows the byte budget would shed if a row of
+/// `incoming_payload_bytes` were deleted now.
+///
+/// Used to warn the user BEFORE the delete happens: once the sweep runs, the
+/// evicted deletions are gone and cannot be reported after the fact. Mirrors
+/// the eviction in `purge_expired_deleted_rows` exactly — oldest deletion
+/// first, accumulate until the excess is covered — so the warning cannot drift
+/// from the real behaviour.
+///
+/// Returns 0 when the budget is unlimited or the incoming row still fits.
+pub(crate) fn pending_undo_evictions(
+    conn: &Connection,
+    incoming_payload_bytes: i64,
+    budget_bytes: i64,
+) -> Result<usize, ()> {
+    if budget_bytes <= crate::backend::UNDO_BUDGET_UNLIMITED {
+        return Ok(0);
+    }
+    let retained: i64 = conn
+        .query_row(
+            "SELECT COALESCE(SUM(
+                 COALESCE(LENGTH(h.text), 0)
+               + COALESCE(LENGTH(h.png_data), 0)
+               + COALESCE(LENGTH(h.thumb_data), 0)), 0)
+             FROM clipboard_deleted d
+             JOIN clipboard_history h ON h.id = d.row_id",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|e| {
+            crate::error_log!("CopyAttach: failed to size the retained deleted payload: {e}");
+        })?;
+
+    let after_insert = retained.saturating_add(incoming_payload_bytes);
+    if after_insert <= budget_bytes {
+        return Ok(0);
+    }
+    let mut excess = after_insert - budget_bytes;
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT COALESCE(LENGTH(h.text), 0)
+                  + COALESCE(LENGTH(h.png_data), 0)
+                  + COALESCE(LENGTH(h.thumb_data), 0)
+             FROM clipboard_deleted d
+             JOIN clipboard_history h ON h.id = d.row_id
+             ORDER BY d.deleted_at ASC, d.row_id ASC",
+        )
+        .map_err(|e| {
+            crate::error_log!("CopyAttach: failed to prepare the eviction preview: {e}");
+        })?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, i64>(0))
+        .map_err(|e| {
+            crate::error_log!("CopyAttach: failed to read the eviction preview: {e}");
+        })?;
+
+    let mut count = 0usize;
+    for bytes in rows {
+        let bytes = match bytes {
+            Ok(v) => v,
+            Err(e) => {
+                crate::error_log!("CopyAttach: eviction-preview row read error: {e}");
+                continue;
+            }
+        };
+        if excess <= 0 {
+            break;
+        }
+        // A row is evicted whole, so a single oversized row can clear the excess.
+        excess -= bytes.max(1);
+        count += 1;
+    }
+    Ok(count)
+}
+
+/// Payload bytes (text + png + thumb) of one history row, or `None` if the row
+/// is gone. Used to price a deletion before warning about evictions.
+pub(crate) fn history_row_payload_bytes(conn: &Connection, row_id: i64) -> Result<i64, ()> {
+    conn.query_row(
+        "SELECT COALESCE(LENGTH(text), 0)
+              + COALESCE(LENGTH(png_data), 0)
+              + COALESCE(LENGTH(thumb_data), 0)
+         FROM clipboard_history WHERE id = ?1",
+        rusqlite::params![row_id],
+        |row| row.get::<_, i64>(0),
+    )
+    .map_err(|e| {
+        crate::error_log!("CopyAttach: failed to size history row {row_id}: {e}");
+    })
 }
 
 /// Purge deletions matching a `clipboard_deleted` predicate. Returns how many

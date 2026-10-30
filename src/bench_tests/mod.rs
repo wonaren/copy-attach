@@ -16,6 +16,7 @@ use rusqlite::Connection;
 mod thresholds;
 mod images;
 mod memory_probe;
+mod side_table;
 
 /// Estimate total heap allocation for a history Vec (vec backing + string buffers).
 fn estimate_vec_heap(hist: &[ClipboardEntry]) -> usize {
