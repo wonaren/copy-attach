@@ -950,22 +950,17 @@ class ClipboardBackend {
 
     /// Undo the most recent deletion. Performs a synchronous reload from snapshot
     /// so the caller can wrap this in `withAnimation` for a smooth transition.
+    ///
+    /// The packed snapshot is used rather than the per-row API because undo also
+    /// restores the entry's favorite flag (Rust puts the star back), and the
+    /// packed wire carries the flag per row — one decode keeps the list and
+    /// `favoriteIds` in step instead of leaving a stale star until the next full
+    /// reload.
     func undoDelete() -> Bool {
         guard clipboard_undo_delete() != 0 else { return false }
 
         // Clear thumbnail cache: restored images get new db_ids, old keys are orphans.
         clearThumbnailCache()
-
-        // Lightweight synchronous prepend: find the restored entry in the snapshot
-        // by its entry_id (set by Rust after undo). Avoids TOCTOU races where the
-        // monitor thread inserts new content at index 0 between undo and snapshot.
-        guard let snap = clipboard_snapshot_acquire() else {
-            return false
-        }
-        defer { clipboard_snapshot_release(snap) }
-
-        // Sync count to suppress redundant timer refresh.
-        count = Int(clipboard_snapshot_count(snap))
 
         let restoredId = Int(clipboard_last_restored_id())
         guard restoredId > 0 else {
@@ -973,26 +968,37 @@ class ClipboardBackend {
             return false
         }
 
-        // Scan the snapshot for the entry matching the restored ID.
-        let c = Int(clipboard_snapshot_count(snap))
-        var restoredItem: ClipboardItem? = nil
-        for i in 0..<c {
-            let sid = Int(clipboard_snapshot_item_id(snap, Int32(i)))
-            if sid == restoredId {
-                restoredItem = readSnapshotItem(snap, at: Int32(i))
-                break
-            }
+        var packedLength: Int32 = 0
+        guard let packed = clipboard_snapshot_packed_acquire(&packedLength) else {
+            errorLog("undoDelete: packed snapshot unavailable after a successful undo")
+            return false
+        }
+        guard packedLength > 0 else {
+            clipboard_free_bytes(packed, packedLength)
+            return false
+        }
+        defer { clipboard_free_bytes(packed, packedLength) }
+
+        guard let (newItems, favorites) = PackedSnapshot.decodeItems(
+            from: UnsafeRawPointer(packed),
+            length: Int(packedLength)
+        ) else {
+            errorLog("undoDelete: packed snapshot decode failed after a successful undo")
+            return false
         }
 
-        guard let item = restoredItem else {
+        // The restored entry must be present: Rust prepended it under this id.
+        guard newItems.contains(where: { $0.id == restoredId }) else {
             errorLog("undoDelete: restored entry \(restoredId) not found in snapshot")
             return false
         }
 
-        // Remove any existing copy in the local items list (mirroring Rust-side
-        // add_to_history dedup) to prevent duplicate IDs in SwiftUI rendering.
-        items.removeAll { $0.id == restoredId }
-        items.insert(item, at: 0)
+        // Publish exactly what the snapshot says: identity-based diffing keeps
+        // the row-enter animation to the restored entry while every other row is
+        // unchanged.
+        items = newItems
+        favoriteIds = favorites
+        count = newItems.count
         itemsGeneration &+= 1
         reloadGeneration.withLock { $0 &+= 1 }
         return true
@@ -1063,6 +1069,13 @@ class ClipboardBackend {
     /// Returns true if there is at least one deleted entry that can be undone.
     func canUndo() -> Bool {
         clipboard_can_undo() != 0
+    }
+
+    /// How many deletions are still undoable. Undo depth is bounded by the
+    /// database's retention window and byte budget, not by a step count, so the
+    /// UI reports the live number instead of promising a fixed one.
+    func undoDepth() -> Int {
+        Int(clipboard_undo_depth())
     }
 
     func checkPermission() -> Bool {

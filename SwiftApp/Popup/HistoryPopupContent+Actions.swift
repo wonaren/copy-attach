@@ -136,7 +136,14 @@ extension HistoryPopupContent {
         }
 
         OnboardingGuide.shared.record(.undone)
-        showToast("已恢复删除记录", icon: "arrow.uturn.backward.circle.fill")
+        // Undo depth is retention-bounded, not step-bounded, so report the live
+        // remaining count instead of implying "one step".
+        let remaining = backend.undoDepth()
+        if remaining > 0 {
+            showToast("已恢复删除记录（还可撤销 \(remaining) 步）", icon: "arrow.uturn.backward.circle.fill")
+        } else {
+            showToast("已恢复删除记录", icon: "arrow.uturn.backward.circle.fill")
+        }
 
         // Clear search only on success so the user sees the restored item
         if !searchText.isEmpty {

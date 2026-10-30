@@ -74,6 +74,32 @@ pub(crate) fn export_backup(
             );"
         ).map_err(|e| format!("创建备份元数据表失败: {e}"))?;
 
+        // `VACUUM INTO` copies the whole table, soft-deleted rows included.
+        // Those are undo candidates, not history: a backup that carried them
+        // would restore deletions the user already made, and it would bloat the
+        // archive with payloads the restore path then has to re-import. Drop
+        // them from the snapshot (this is the backup file, never the live DB).
+        // The side table may be absent from an older build's database.
+        if backup_conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='clipboard_deleted'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap_or(0) > 0
+        {
+            backup_conn
+                .execute(
+                    "DELETE FROM clipboard_history
+                     WHERE id IN (SELECT row_id FROM clipboard_deleted)",
+                    [],
+                )
+                .map_err(|e| format!("清理备份中的已删除记录失败: {e}"))?;
+            backup_conn
+                .execute("DELETE FROM clipboard_deleted", [])
+                .map_err(|e| format!("清理备份中的删除标记失败: {e}"))?;
+        }
+
         let count: i64 = backup_conn
             .query_row("SELECT COUNT(*) FROM clipboard_history", [], |r| r.get(0))
             .unwrap_or(0);
@@ -158,11 +184,24 @@ pub(crate) fn inspect_backup(backup_path: &Path) -> Result<BackupInspectInfo, St
         return Err("不是有效的 CopyAttach 备份文件（缺少剪贴板历史表）".to_string());
     }
 
-    let item_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM clipboard_history",
-        [],
-        |r| r.get(0),
-    ).map_err(|e| format!("统计历史记录数失败: {e}"))?;
+    // Older backups predate the soft-delete side table, so the filter cannot be
+    // a hard-coded `id NOT IN (clipboard_deleted)`: a pre-soft-delete archive
+    // has no such table and the query would fail to prepare. Check first and
+    // fall back to the plain count. (Such an archive has no deleted rows anyway.)
+    let has_deleted_table: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'clipboard_deleted'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    let count_sql = if has_deleted_table > 0 {
+        "SELECT COUNT(*) FROM clipboard_history WHERE id NOT IN (SELECT row_id FROM clipboard_deleted)"
+    } else {
+        "SELECT COUNT(*) FROM clipboard_history"
+    };
+    let item_count: i64 = conn.query_row(count_sql, [], |r| r.get(0))
+        .map_err(|e| format!("统计历史记录数失败: {e}"))?;
 
     let has_fav: i64 = conn.query_row(
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='clipboard_backup_favorites'",
@@ -235,6 +274,11 @@ pub(crate) fn restore_backup_overwrite(
         // Overwrite clipboard_history and its favorite set. They are one
         // logical dataset: keeping the old favorites would leave ids that the
         // restored rows may not contain.
+        //
+        // The backup's own `deleted_at`/`deleted_favorite` are NOT copied: an
+        // exported archive has its deleted rows stripped (see `export_backup`),
+        // and a restore must bring back history, not a prior session's undo
+        // stack. The columns therefore keep their `DEFAULT 0` (live, unstarred).
         tx.execute("DELETE FROM main.clipboard_history", [])
             .map_err(|e| format!("清空当前历史表失败: {e}"))?;
         tx.execute("DELETE FROM main.clipboard_favorites", [])
@@ -565,7 +609,8 @@ pub(crate) fn restore_backup_merge(
                 let existing: Option<(i64, i64, String)> = tx
                     .query_row(
                         "SELECT id, entry_id, custom_label FROM main.clipboard_history
-                         WHERE entry_type = 0 AND hash = ?1 AND text = ?2",
+                         WHERE id NOT IN (SELECT row_id FROM clipboard_deleted)
+                           AND entry_type = 0 AND hash = ?1 AND text = ?2",
                         rusqlite::params![item.hash, full_text],
                         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
                     )
@@ -627,7 +672,8 @@ pub(crate) fn restore_backup_merge(
                 let existing: Option<(i64, i64, String)> = tx
                     .query_row(
                         "SELECT id, entry_id, custom_label FROM main.clipboard_history
-                         WHERE entry_type = 1 AND hash = ?1",
+                         WHERE id NOT IN (SELECT row_id FROM clipboard_deleted)
+                           AND entry_type = 1 AND hash = ?1",
                         rusqlite::params![item.hash],
                         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
                     )

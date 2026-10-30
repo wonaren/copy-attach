@@ -153,6 +153,8 @@ int32_t clipboard_set_custom_label(uint64_t entry_id, const char* label);
 int32_t clipboard_set_favorite(uint64_t entry_id, int32_t favorite);
 int32_t clipboard_undo_delete(void);
 int32_t clipboard_can_undo(void);
+// Number of deletions currently undoable (deleted rows still inside retention).
+int32_t clipboard_undo_depth(void);
 uint64_t clipboard_last_restored_id(void);
 
 // ─── History Reload (for stress testing) ───

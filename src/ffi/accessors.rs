@@ -406,7 +406,9 @@ pub extern "C" fn clipboard_get_storage_size() -> i64 {
         }
     };
     match conn.query_row(
-        "SELECT COALESCE(SUM(LENGTH(text)), 0) + COALESCE(SUM(LENGTH(png_data)), 0) + COALESCE(SUM(LENGTH(thumb_data)), 0) FROM clipboard_history",
+        "SELECT COALESCE(SUM(LENGTH(text)), 0) + COALESCE(SUM(LENGTH(png_data)), 0) + COALESCE(SUM(LENGTH(thumb_data)), 0)
+         FROM clipboard_history
+         WHERE id NOT IN (SELECT row_id FROM clipboard_deleted)",
         [],
         |row| row.get::<_, i64>(0),
     ) {

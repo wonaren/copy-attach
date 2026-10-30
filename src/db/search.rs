@@ -27,7 +27,8 @@ pub(crate) fn search_history(conn: &Connection, query: &str) -> Vec<u64> {
             "SELECT clipboard_history.entry_id
              FROM clipboard_fts
              JOIN clipboard_history ON clipboard_history.id = clipboard_fts.rowid
-             WHERE clipboard_fts MATCH ?1",
+             WHERE clipboard_fts MATCH ?1
+               AND clipboard_history.id NOT IN (SELECT row_id FROM clipboard_deleted)",
         ) {
             Ok(s) => s,
             Err(e) => {
@@ -55,7 +56,8 @@ pub(crate) fn search_history(conn: &Connection, query: &str) -> Vec<u64> {
         // drop a huge document from search results.
         let mut stmt = match conn.prepare(
             "SELECT entry_id FROM clipboard_history
-             WHERE entry_type = 0 AND length(text) > ?1 AND text LIKE ?2 ESCAPE '\\'",
+             WHERE id NOT IN (SELECT row_id FROM clipboard_deleted)
+               AND entry_type = 0 AND length(text) > ?1 AND text LIKE ?2 ESCAPE '\\'",
         ) {
             Ok(s) => s,
             Err(e) => {
@@ -82,7 +84,8 @@ pub(crate) fn search_history(conn: &Connection, query: &str) -> Vec<u64> {
     } else {
         let mut stmt = match conn.prepare(
             "SELECT entry_id FROM clipboard_history
-             WHERE entry_type = 0 AND text LIKE ?1 ESCAPE '\\'",
+             WHERE id NOT IN (SELECT row_id FROM clipboard_deleted)
+               AND entry_type = 0 AND text LIKE ?1 ESCAPE '\\'",
         ) {
             Ok(s) => s,
             Err(e) => {
@@ -109,9 +112,10 @@ pub(crate) fn search_history(conn: &Connection, query: &str) -> Vec<u64> {
     // (both text and image entries).
     let mut meta_stmt = match conn.prepare(
         "SELECT entry_id FROM clipboard_history
-         WHERE label LIKE ?1 ESCAPE '\\'
-            OR custom_label LIKE ?1 ESCAPE '\\'
-            OR source_name LIKE ?1 ESCAPE '\\'",
+         WHERE id NOT IN (SELECT row_id FROM clipboard_deleted)
+           AND (label LIKE ?1 ESCAPE '\\'
+                OR custom_label LIKE ?1 ESCAPE '\\'
+                OR source_name LIKE ?1 ESCAPE '\\')",
     ) {
         Ok(s) => s,
         Err(e) => {
@@ -158,6 +162,11 @@ fn escape_like(query: &str) -> String {
 }
 
 /// Load the full text body for a row by its SQLite rowid (== `db_id`).
+///
+/// Deliberately NOT filtered on `deleted_at`: the undo path reads the body of a
+/// soft-deleted row to restore it. Callers on the live path only ever reach
+/// rows they got from the (already filtered) history, so this cannot leak a
+/// deleted entry into the UI.
 pub(crate) fn load_text_by_db_id(conn: &Connection, db_id: i64) -> Option<String> {
     let text: String = conn
         .query_row(

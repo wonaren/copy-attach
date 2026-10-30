@@ -165,6 +165,7 @@ pub(crate) fn ensure_history_table(conn: &Connection) -> Result<(), rusqlite::Er
             return Err(e);
         }
     }
+
     backfill_text_metadata(conn)?;
 
     // Monotonic entry-id high-water mark.
@@ -220,6 +221,38 @@ pub(crate) fn ensure_history_table(conn: &Connection) -> Result<(), rusqlite::Er
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_history_timestamp
          ON clipboard_history(timestamp DESC, id DESC);"
+    )?;
+
+    // Soft-delete side table (undo support).
+    //
+    // Deliberately a separate table, NOT columns on `clipboard_history`.
+    // A `UPDATE clipboard_history SET deleted_at = ?` rewrites the ENTIRE row,
+    // and image rows carry multi-MB PNG + thumbnail blobs: SQLite has to read
+    // them out and write them back, which measured +24 MB of retained RSS for
+    // 34 deletions (3 of them 4 MB screenshots) — exactly the resident cost the
+    // soft-delete design was meant to avoid. A row in this side table is a
+    // couple of integers, so a delete never touches the payload row at all.
+    //
+    // `row_id` is `clipboard_history.id`. `deleted_at` is Unix MICROSECONDS
+    // (never 0) because the undo stack replays by this value and two deletions
+    // inside the same second must still undo in reverse order.
+    // `was_favorite` records whether the entry was starred at delete time: the
+    // favorite row itself is removed with the delete (so `clipboard_favorites`
+    // only ever references live rows), and undo re-creates it only if the user
+    // actually had it starred.
+    //
+    // `ON DELETE CASCADE` cannot be used (the main table has no foreign key to
+    // it), so every hard-delete path removes the side row explicitly; the
+    // startup sweep also prunes orphans left by a crash.
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS clipboard_deleted (
+             row_id      INTEGER PRIMARY KEY,
+             entry_id    INTEGER NOT NULL,
+             deleted_at  INTEGER NOT NULL,
+             was_favorite INTEGER NOT NULL DEFAULT 0
+         );
+         CREATE INDEX IF NOT EXISTS idx_deleted_stamp
+             ON clipboard_deleted(deleted_at DESC);"
     )?;
 
     // FTS5 trigram index with a size cap. Oversized rows are skipped and remain
@@ -316,7 +349,8 @@ pub(crate) fn load_favorites(conn: &Connection) -> Result<HashSet<u64>, ()> {
 pub(crate) fn prune_orphan_favorites(conn: &Connection) -> Result<usize, ()> {
     conn.execute(
         "DELETE FROM clipboard_favorites
-         WHERE entry_id NOT IN (SELECT entry_id FROM clipboard_history)",
+         WHERE entry_id NOT IN (SELECT entry_id FROM clipboard_history
+                                WHERE id NOT IN (SELECT row_id FROM clipboard_deleted))",
         [],
     )
     .map_err(|e| {
@@ -331,7 +365,9 @@ pub(crate) fn prune_orphan_favorites(conn: &Connection) -> Result<usize, ()> {
 pub(crate) fn set_favorite(conn: &Connection, entry_id: u64, favorite: bool) -> Result<(), ()> {
     let exists: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM clipboard_history WHERE entry_id = ?1",
+            "SELECT COUNT(*) FROM clipboard_history
+             WHERE entry_id = ?1
+               AND id NOT IN (SELECT row_id FROM clipboard_deleted)",
             rusqlite::params![entry_id as i64],
             |row| row.get(0),
         )
@@ -344,9 +380,12 @@ pub(crate) fn set_favorite(conn: &Connection, entry_id: u64, favorite: bool) -> 
     }
     // The INSERT selects from the history table, so a row that disappears
     // between the existence check and this write cannot create an orphan.
+    // `deleted_at = 0` keeps the select from matching a soft-deleted row that
+    // still carries the same entry_id (a delete drops the favorite anyway).
     let sql = if favorite {
         "INSERT OR IGNORE INTO clipboard_favorites (entry_id)
-         SELECT entry_id FROM clipboard_history WHERE entry_id = ?1"
+         SELECT entry_id FROM clipboard_history
+         WHERE entry_id = ?1 AND id NOT IN (SELECT row_id FROM clipboard_deleted)"
     } else {
         "DELETE FROM clipboard_favorites WHERE entry_id = ?1"
     };
@@ -373,7 +412,8 @@ pub(crate) fn import_favorites(conn: &Connection, ids: &[u64]) -> Result<usize, 
     for &id in ids {
         match tx.execute(
             "INSERT OR IGNORE INTO clipboard_favorites (entry_id)
-             SELECT entry_id FROM clipboard_history WHERE entry_id = ?1",
+             SELECT entry_id FROM clipboard_history
+             WHERE entry_id = ?1 AND id NOT IN (SELECT row_id FROM clipboard_deleted)",
             rusqlite::params![id as i64],
         ) {
             Ok(changed) => imported += changed,

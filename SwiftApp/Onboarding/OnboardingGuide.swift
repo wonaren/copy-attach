@@ -49,7 +49,7 @@ enum OnboardingStep: Int, CaseIterable, Identifiable {
         case .favorite:
             return "选中一条常用记录，按 ⌥P 收藏，之后可在收藏标签页快速找到。"
         case .deleteAndUndo:
-            return "选中一条记录按 ⌃⌫ 删除；删错了按 ⌘Z 撤销。"
+            return "选中一条记录按 ⌃⌫ 删除；删错了按 ⌘Z 撤销，可连续撤销多次。"
         case .pasteQueue:
             return "选中记录按 ⌘C 加入粘贴队列标号；多选后按 ⏎ 即可在外部用 ⌘V 顺序粘贴。"
         case .paste:

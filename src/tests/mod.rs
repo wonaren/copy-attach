@@ -20,6 +20,8 @@ mod db;
 mod migration;
 mod backend;
 mod backup;
+mod soft_delete;
+mod soft_delete_real;
 
 fn make_text(text: &str, ts: u64) -> ClipboardEntry {
     ClipboardEntry::text_entry(

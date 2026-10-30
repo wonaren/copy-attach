@@ -249,6 +249,14 @@ fn clipboard_init_inner(threshold: Option<c_int>, legacy_favorites: &[u64]) -> c
         }
     }
 
+    // Sweep soft-deleted rows past their retention window (and over the byte
+    // budget) before the history is published. Deleted rows keep their
+    // payloads, so without this the deleted set would grow forever; the same
+    // sweep also runs after every delete, and both are idempotent.
+    if crate::db::purge_expired_deleted_rows(&conn).is_err() {
+        crate::error_log!("CopyAttach: startup deleted-row sweep failed; retried after the next delete");
+    }
+
     let history: Arc<Mutex<Vec<ClipboardEntry>>> = Arc::new(Mutex::new(saved));
     let running = Arc::new(AtomicBool::new(true));
     let source_app = Arc::new(Mutex::new(crate::types::SourceApp::default()));
@@ -257,7 +265,6 @@ fn clipboard_init_inner(threshold: Option<c_int>, legacy_favorites: &[u64]) -> c
     let db = Arc::new(Mutex::new(conn));
     let cleanup_threshold = Arc::new(AtomicUsize::new(startup_threshold));
     let ignore_rules = Arc::new(Mutex::new(IgnoreRules::default()));
-    let deleted_stack: Arc<Mutex<Vec<crate::backend::DeletedStackEntry>>> = Arc::new(Mutex::new(Vec::new()));
     let last_restored_id = Arc::new(AtomicU64::new(0));
     let favorites = Arc::new(Mutex::new(favorites_set));
 
@@ -271,7 +278,6 @@ fn clipboard_init_inner(threshold: Option<c_int>, legacy_favorites: &[u64]) -> c
         db: Arc::clone(&db),
         cleanup_threshold: Arc::clone(&cleanup_threshold),
         ignore_rules: Arc::clone(&ignore_rules),
-        deleted_stack: Arc::clone(&deleted_stack),
         last_restored_id: Arc::clone(&last_restored_id),
         favorites: Arc::clone(&favorites),
     };
@@ -289,10 +295,10 @@ fn clipboard_init_inner(threshold: Option<c_int>, legacy_favorites: &[u64]) -> c
     // image drag materializes — i.e. never, for a user who dragged once.
     super::paste::purge_stale_drag_images();
 
-    // Purge stale materialized undo payloads once at launch: the in-memory
-    // undo stack does not survive a restart, so every file in the directory
-    // is an orphan from a previous process.
-    crate::backend::purge_undo_payload_dir();
+    // Purge stale materialized undo payloads left by builds that predate soft
+    // delete. The undo stack itself now lives in the database (deleted rows), so
+    // this directory is dead storage from an older version.
+    crate::backend::purge_legacy_undo_payload_dir();
 
     // One-time image metadata migration (DefaultHasher → stable FNV-1a hashes
     // and 300px → display-box thumbnails, user_version 3 → 4) on a background

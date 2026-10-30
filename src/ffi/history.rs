@@ -2,11 +2,9 @@ use std::collections::HashSet;
 use std::ffi::{c_char, c_int, CStr};
 use std::sync::atomic::Ordering;
 
-use crate::backend::{push_deleted, remove_undo_payload_file, try_backend, UndoPayload};
-use crate::db::{insert_entry_to_db, load_text_by_db_id};
+use crate::backend::try_backend;
 use crate::history::add_to_history;
 use crate::types::ClipboardEntry;
-
 #[no_mangle]
 pub extern "C" fn clipboard_clear_history() -> c_int {
     let b = match try_backend() {
@@ -18,6 +16,11 @@ pub extern "C" fn clipboard_clear_history() -> c_int {
     // memory and DB remain consistent and the caller sees the failure (0).
     // History and favorites go together: a favorite whose row is gone is a
     // dangling id, so a clear must remove both.
+    //
+    // This is a HARD delete of every row, soft-deleted ones included: "清空历史"
+    // is an explicit, confirmed, destructive action, and leaving a retention
+    // window of deleted payloads behind it would contradict the confirmation
+    // alert it comes from ("无法撤销").
     let conn = match b.db.lock() {
         Ok(c) => c,
         Err(e) => {
@@ -37,8 +40,8 @@ pub extern "C" fn clipboard_clear_history() -> c_int {
     }
     drop(conn);
 
-    // DB clear succeeded: now clear the in-memory mirror and release the
-    // undo stack (materialized payload files removed with their slots).
+    // DB clear succeeded: clear the in-memory mirror. The undo stack lives in
+    // the database, and every deleted row went with the DELETE above.
     if let Ok(mut favorites) = b.favorites.lock() {
         favorites.clear();
     }
@@ -46,14 +49,18 @@ pub extern "C" fn clipboard_clear_history() -> c_int {
     hist.clear();
     // Publish under the history lock so the emptied list is observed atomically.
     crate::backend::mark_history_changed();
-    let mut stack = b.deleted_stack.lock().unwrap();
-    for slot in stack.iter() {
-        remove_undo_payload_file(slot);
-    }
-    stack.clear();
     1
 }
 
+/// Soft-delete one entry: stamp its row, drop its favorite, and remove it from
+/// the in-memory list. Returns 1 on success, 0 on failure.
+///
+/// The payload is NOT copied anywhere. The row keeps its text/png/thumb blobs,
+/// which makes a delete a couple of index writes — no blob read, no temp file,
+/// no resident memory. (The previous design materialized the payload to disk
+/// precisely because a deleted row had to leave the table.) Undo depth is
+/// therefore bounded by retention (`UNDO_RETENTION_SECS`) and a byte budget
+/// (`MAX_UNDO_RETAINED_BYTES`), not by a step count.
 #[no_mangle]
 pub extern "C" fn clipboard_delete_by_id(entry_id: u64) -> c_int {
     let b = match try_backend() {
@@ -61,205 +68,328 @@ pub extern "C" fn clipboard_delete_by_id(entry_id: u64) -> c_int {
         None => return 0,
     };
 
-    // Step 1: Find the entry in history and clone it WITHOUT removing yet.
-    // If undo data capture fails later, entry stays intact in history.
-    let entry = {
+    // Resolve the entry in memory first: the history owns the entry set, so an
+    // id it does not know is rejected before any write. The `db_id` it reports
+    // is the row's full identity — a re-capture keeps the entry_id but points at
+    // a different row — and it is what the stamp targets.
+    let (entry, db_id) = {
         let hist = b.history.lock().unwrap();
-        hist.iter().find(|e| match e {
-            ClipboardEntry::Text { id, .. } => *id == entry_id,
-            ClipboardEntry::Image { id, .. } => *id == entry_id,
-        }).cloned()
-    };
-    let mut entry = match entry {
-        Some(e) => e,
-        None => return 0,
-    };
-    // The entry's full identity: a concurrent re-capture preserves entry_id but
-    // gets a different row, so the removal below must match both (Step 5).
-    let target_db_id = entry.db_id();
-
-    // Step 2: Load full content for undo BEFORE the DB delete removes it.
-    // Text bodies live only in SQLite (the in-memory entry carries just a
-    // preview), so they are loaded here and stashed for the undo stack. A text
-    // entry with db_id=0 was never persisted and has no restorable body —
-    // reject deletion explicitly, matching the image Phase 2 guard below.
-    let mut undo_text: Option<String> = None;
-    if let ClipboardEntry::Text { db_id, .. } = &entry {
-        if *db_id == 0 {
-            crate::error_log!("CopyAttach: cannot delete text entry {entry_id}: db_id=0 (entry not persisted)");
-            return 0;
-        }
-        let conn = match b.db.lock() {
-            Ok(c) => c,
-            Err(e) => {
-                crate::error_log!("CopyAttach: DB lock poisoned loading text for undo of entry {entry_id}: {e}");
-                return 0;
-            }
-        };
-        match load_text_by_db_id(&conn, *db_id) {
-            Some(t) => undo_text = Some(t),
+        match hist.iter().find(|e| e.entry_id() == entry_id) {
+            Some(e) => (e.clone(), e.db_id()),
             None => {
-                crate::error_log!("CopyAttach: failed to load text for undo of entry {entry_id} — delete aborted");
+                crate::error_log!("CopyAttach: cannot delete entry {entry_id}: not in history");
                 return 0;
             }
         }
+    };
+
+    // An entry with db_id=0 was never persisted (Phase 2 pending, or its DB
+    // write failed). There is no row to stamp, so deletion is refused explicitly
+    // — the entry stays listed and the user can retry once it lands.
+    if db_id == 0 {
+        crate::error_log!(
+            "CopyAttach: cannot delete entry {entry_id}: db_id=0 (entry not persisted)"
+        );
+        return 0;
     }
 
-    // For image entries, load full data from DB before removal.
-    // If loading fails (Phase 2 not done, DB error), reject deletion entirely.
-    let mut undo_image: Option<crate::backend::MarkImageBlobsReusableOnDrop> = None;
-    if let ClipboardEntry::Image { db_id, thumb_width, thumb_height, .. } = &mut entry {
-        if *db_id != 0 {
-            let conn = match b.db.lock() {
-                Ok(c) => c,
-                Err(e) => {
-                    crate::error_log!("CopyAttach: DB lock poisoned loading image for undo: {e}");
-                    return 0;
-                }
-            };
-            let loaded = conn.query_row(
-                "SELECT png_data, thumb_data, thumb_width, thumb_height FROM clipboard_history WHERE id = ?",
-                rusqlite::params![*db_id],
-                |row| Ok((
-                    row.get::<_, Vec<u8>>(0)?,
-                    row.get::<_, Vec<u8>>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, i64>(3)?,
-                )),
-            );
-            match loaded {
-                Ok((png, thumb, tw, th)) => {
-                    // Claim any reusable-marked pages the allocator handed
-                    // back: these blobs are written into the undo payload file.
-                    // An unclaimable blob could be zeroed mid-write, so the
-                    // delete is refused (the entry stays listed and retryable).
-                    if !crate::backend::claim_pages(png.as_ptr(), png.capacity())
-                        || !crate::backend::claim_pages(thumb.as_ptr(), thumb.capacity())
-                    {
-                        crate::error_log!("CopyAttach: image blobs for entry {entry_id} could not be claimed — delete aborted");
-                        return 0;
-                    }
-                    *thumb_width = tw as u32;
-                    *thumb_height = th as u32;
-                    undo_image = Some(crate::backend::MarkImageBlobsReusableOnDrop { png, thumb });
-                }
-                Err(e) => {
-                    crate::error_log!("CopyAttach: failed to load image data from DB for undo (entry {entry_id}, db_id={db_id}): {e}");
-                    return 0;
-                }
-            }
-        } else {
-            // Phase 2 async persist has not completed — no image data exists in DB.
-            // Reject deletion: the entry stays in history, user can retry later.
-            crate::error_log!("CopyAttach: cannot delete image entry {entry_id}: Phase 2 not yet complete (db_id=0)");
-            return 0;
-        }
-    }
-
-    // Step 3: Materialize the payload to disk before the DB delete removes it.
-    // On success the in-memory blobs/body are released immediately; the undo
-    // stack keeps only metadata + the file path.
-    let image_slices = undo_image.as_ref().map(|b| (b.png.as_slice(), b.thumb.as_slice()));
-    let (payload_path, payload_bytes) =
-        match crate::backend::write_undo_payload(&entry, undo_text.as_deref(), image_slices) {
-            Ok(v) => v,
-            Err(()) => {
-                crate::error_log!("CopyAttach: failed to materialize undo payload for entry {entry_id} — delete aborted");
-                return 0;
-            }
-        };
-    crate::debug_log!("CopyAttach: delete payload_path={} payload_bytes={payload_bytes}", payload_path.display());
-
-    // Release the in-memory payload now that it is safely on disk. Both the
-    // text body and the image blobs were claimed when loaded, so mark their
-    // pages reusable before they drop.
-    if let Some(t) = undo_text.take() {
-        crate::backend::mark_pages_reusable(t.as_ptr(), t.capacity());
-    }
-    drop(undo_image);
-
-    // Step 4: Delete from DB. If this fails, remove the materialized payload
-    // and leave the history entry intact.
+    // Stamp the row and drop its favorite in one transaction. A deleted row must
+    // not stay starred (the favorites table only references live rows), and the
+    // flag it carries is what undo uses to restore the star.
     {
         let conn = match b.db.lock() {
             Ok(c) => c,
             Err(e) => {
-                crate::error_log!("CopyAttach: DB lock poisoned deleting entry {entry_id}: {e}");
-                remove_undo_payload_file(&crate::backend::DeletedStackEntry {
-                    entry: entry.clone(),
-                    payload_path,
-                    payload_bytes,
-                });
+                crate::error_log!("CopyAttach: DB mutex poisoned deleting entry {entry_id}: {e}");
                 return 0;
             }
         };
-        // The row and its favorite are one durable identity: delete both in one
-        // transaction, or neither. A bare row delete would leave the favorite
-        // pointing at an id that no longer exists.
-        let deleted: Result<(), rusqlite::Error> = (|| {
-            let tx = conn.unchecked_transaction()?;
-            {
-                let row_id = match &entry {
-                    ClipboardEntry::Text { db_id, .. } => *db_id,
-                    ClipboardEntry::Image { db_id, .. } => *db_id,
-                };
-                // Step 2 rejected unpersisted entries (db_id=0) up front, so
-                // this is always the rowid delete.
-                tx.execute(
-                    "DELETE FROM clipboard_history WHERE id = ?1",
-                    rusqlite::params![row_id],
-                )?;
-            }
+        let result: Result<(), ()> = (|| {
+            let tx = conn.unchecked_transaction().map_err(|e| {
+                crate::error_log!("CopyAttach: failed to begin delete transaction: {e}");
+            })?;
+            crate::db::soft_delete_row(&tx, db_id)?;
             tx.execute(
                 "DELETE FROM clipboard_favorites WHERE entry_id = ?1",
                 rusqlite::params![entry_id as i64],
-            )?;
-            tx.commit()
+            )
+            .map_err(|e| {
+                crate::error_log!("CopyAttach: failed to drop favorite for deleted entry {entry_id}: {e}");
+            })?;
+            tx.commit().map_err(|e| {
+                crate::error_log!("CopyAttach: failed to commit delete of entry {entry_id}: {e}");
+            })?;
+            Ok(())
         })();
-        if let Err(e) = deleted {
-            crate::error_log!("CopyAttach: failed to delete entry {entry_id} from DB: {e}");
-            remove_undo_payload_file(&crate::backend::DeletedStackEntry {
-                entry: entry.clone(),
-                payload_path,
-                payload_bytes,
-            });
+        if result.is_err() {
+            // The stamp (or the favorite drop) rolled back: the row is still
+            // live, so memory must stay untouched.
             return 0;
+        }
+        // Self-limit the retained deleted set now instead of at the next launch:
+        // a burst of large deletions sheds its oldest immediately.
+        if crate::db::purge_expired_deleted_rows(&conn).is_err() {
+            crate::error_log!("CopyAttach: deleted-row sweep failed after delete; retried at next launch");
         }
     }
 
-    // Step 4b: the favorite row is gone; drop the in-memory mirror.
+    // DB write succeeded: drop the favorite mirror and remove exactly the entry
+    // whose row was stamped — by (entry_id, db_id), never by entry_id alone
+    // (see `history::remove_deleted_entry`: a concurrent re-capture keeps the
+    // entry_id but points at a different row).
     if let Ok(mut favorites) = b.favorites.lock() {
         favorites.remove(&entry_id);
     }
-
-    // Step 5: DB delete succeeded. Remove exactly the entry whose row was
-    // deleted — by identity, never by entry_id alone (see
-    // history::remove_deleted_entry).
     {
         let mut hist = b.history.lock().unwrap();
-        crate::history::remove_deleted_entry(&mut hist, entry_id, target_db_id);
+        crate::history::remove_deleted_entry(&mut hist, entry_id, db_id);
         // Publish under the history lock: delete mutates and notifies atomically.
         crate::backend::mark_history_changed();
     }
 
-    // Step 6: Push the metadata-only slot (with its on-disk payload) onto the
-    // undo stack, under the entry count and total-bytes caps. The entry is
-    // moved, not cloned.
-    {
-        let mut stack = b.deleted_stack.lock().unwrap();
-        push_deleted(&mut stack, crate::backend::DeletedStackEntry {
-            entry,
-            payload_path,
-            payload_bytes,
-        });
-    }
-
+    // The cloned metadata is unused from here on: the undo path re-reads the row.
+    drop(entry);
+    crate::debug_log!("CopyAttach: soft-deleted entry {entry_id} (db_id={db_id})");
     1
 }
 
-/// Undo the most recent deletion: restore the entry back into history
-/// at the front of the list and re-insert into DB.
-/// Returns 1 on success, 0 if there's nothing to undo.
+/// Payload read back from a soft-deleted row. Its `Drop` marks the pages
+/// reusable, so every exit path (success, failure, early return) releases them
+/// symmetrically with the `claim_pages` in `load_deleted_payload`.
+enum DeletedBody {
+    Text(String),
+    Image { png: Vec<u8>, thumb: Vec<u8> },
+}
+
+impl DeletedBody {
+    /// The body as text, for the dedup predicate. Images have no text body.
+    fn as_text(&self) -> Option<&str> {
+        match self {
+            DeletedBody::Text(t) => Some(t),
+            DeletedBody::Image { .. } => None,
+        }
+    }
+}
+
+impl Drop for DeletedBody {
+    fn drop(&mut self) {
+        match self {
+            DeletedBody::Text(t) => {
+                crate::backend::mark_pages_reusable(t.as_ptr(), t.capacity());
+            }
+            DeletedBody::Image { png, thumb } => {
+                crate::backend::mark_pages_reusable(png.as_ptr(), png.capacity());
+                crate::backend::mark_pages_reusable(thumb.as_ptr(), thumb.capacity());
+            }
+        }
+    }
+}
+
+/// What the undo needs from a deleted row: the payload, the metadata entry it
+/// will re-insert, and the star it carried.
+struct UndoSource {
+    entry: ClipboardEntry,
+    body: DeletedBody,
+    was_favorite: bool,
+}
+
+/// Read a soft-deleted row's payload and rebuild its metadata entry.
+///
+/// The entry's `timestamp` is restamped to now so the restored row sorts to the
+/// top like any other "just used" entry, and `db_id` is cleared (the caller
+/// assigns the new row id after the insert). `entry_id` is PRESERVED: Swift's
+/// favorites and the undo's own bookkeeping key on it.
+fn load_deleted_payload(conn: &rusqlite::Connection, row_id: i64) -> Option<UndoSource> {
+    type Row = (
+        i32,            // entry_type
+        Option<String>, // text
+        Option<Vec<u8>>,// png_data
+        Option<Vec<u8>>,// thumb_data
+        Option<i64>,    // thumb_width
+        Option<i64>,    // thumb_height
+        Option<i64>,    // width
+        Option<i64>,    // height
+        i64,            // entry_id
+        i64,            // hash
+        Option<String>, // preview
+        String,         // label
+        String,         // custom_label
+        String,         // source_name
+        String,         // source_bundle_id
+        i64,            // deleted_favorite
+    );
+    let row: Row = conn
+        .query_row(
+            "SELECT entry_type, text, png_data, thumb_data, thumb_width, thumb_height,
+                    width, height, h.entry_id, hash, preview, label, custom_label,
+                    source_name, source_bundle_id, d.was_favorite
+             FROM clipboard_history h
+             JOIN clipboard_deleted d ON d.row_id = h.id
+             WHERE h.id = ?1",
+            rusqlite::params![row_id],
+            |row| {
+                Ok((
+                    row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?,
+                    row.get(6)?, row.get(7)?, row.get(8)?, row.get(9)?, row.get(10)?, row.get(11)?,
+                    row.get(12)?, row.get(13)?, row.get(14)?, row.get(15)?,
+                ))
+            },
+        )
+        .map_err(|e| {
+            crate::error_log!("CopyAttach: undo could not read deleted row {row_id}: {e}");
+        })
+        .ok()?;
+    let (
+        entry_type, text, png, thumb, tw, th, width, height, entry_id, hash, preview, label,
+        custom_label, source_name, source_bundle_id, deleted_favorite,
+    ) = row;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let (entry, body) = match entry_type {
+        0 => {
+            let body = text?;
+            // The body arrives through rusqlite, which may have grown it over
+            // reusable-marked pages; claim before anything reads it. A rejected
+            // claim means the kernel may zero it mid-use, so refuse.
+            if !crate::backend::claim_pages(body.as_ptr(), body.capacity()) {
+                crate::error_log!("CopyAttach: undo text body for row {row_id} could not be claimed — unreadable");
+                return None;
+            }
+            let entry = ClipboardEntry::Text {
+                id: entry_id as u64,
+                preview: preview.unwrap_or_default(),
+                label,
+                custom_label,
+                text_hash: hash as u64,
+                timestamp: now,
+                source_name,
+                source_bundle_id,
+                db_id: 0,
+            };
+            (entry, DeletedBody::Text(body))
+        }
+        1 => {
+            let png = png?;
+            let thumb = thumb?;
+            // Same rule as the text body: an unclaimable blob is one the kernel
+            // may zero while it is live, so refuse rather than restore an image
+            // that would render as garbage.
+            let png_ok = crate::backend::claim_pages(png.as_ptr(), png.capacity());
+            let thumb_ok = crate::backend::claim_pages(thumb.as_ptr(), thumb.capacity());
+            if !png_ok || !thumb_ok {
+                // Release-side symmetry for whichever one DID claim before
+                // handing the pair off to `DeletedBody` (whose Drop would do it
+                // otherwise).
+                crate::backend::mark_pages_reusable(png.as_ptr(), png.capacity());
+                crate::backend::mark_pages_reusable(thumb.as_ptr(), thumb.capacity());
+                crate::error_log!("CopyAttach: undo image payload for row {row_id} could not be claimed — unreadable");
+                return None;
+            }
+            let entry = ClipboardEntry::Image {
+                id: entry_id as u64,
+                width: width.unwrap_or(0) as u32,
+                height: height.unwrap_or(0) as u32,
+                thumb_width: tw.unwrap_or(0) as u32,
+                thumb_height: th.unwrap_or(0) as u32,
+                hash: hash as u64,
+                custom_label,
+                timestamp: now,
+                source_name,
+                source_bundle_id,
+                db_id: 0,
+            };
+            (entry, DeletedBody::Image { png, thumb })
+        }
+        other => {
+            crate::error_log!("CopyAttach: deleted row {row_id} has unknown entry_type {other}");
+            return None;
+        }
+    };
+
+    Some(UndoSource {
+        entry,
+        body,
+        was_favorite: deleted_favorite != 0,
+    })
+}
+
+/// Read a live row back into a metadata-only entry.
+///
+/// The undo's in-memory publish step uses this instead of the pre-delete clone:
+/// the row it just wrote is the authority, and re-reading keeps the list in
+/// lockstep with the table (new rowid, restamped timestamp, any dedup rewrite).
+fn load_live_entry_by_row(conn: &rusqlite::Connection, row_id: i64) -> Option<ClipboardEntry> {
+    type LiveRow = (i32, i64, Option<String>, String, String, i64, Option<i64>, Option<i64>,
+                    Option<i64>, Option<i64>, i64, String, String);
+    let row: LiveRow = conn
+        .query_row(
+            "SELECT entry_type, entry_id, preview, label, custom_label, hash,
+                    width, height, thumb_width, thumb_height, timestamp,
+                    source_name, source_bundle_id
+             FROM clipboard_history WHERE id = ?1",
+            rusqlite::params![row_id],
+            |row| {
+                Ok((
+                    row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?,
+                    row.get(6)?, row.get(7)?, row.get(8)?, row.get(9)?, row.get(10)?,
+                    row.get(11)?, row.get(12)?,
+                ))
+            },
+        )
+        .map_err(|e| {
+            crate::error_log!("CopyAttach: undo could not read back row {row_id}: {e}");
+        })
+        .ok()?;
+    let (entry_type, entry_id, preview, label, custom_label, hash, width, height, tw, th,
+         timestamp, source_name, source_bundle_id) = row;
+
+    Some(match entry_type {
+        0 => ClipboardEntry::Text {
+            id: entry_id as u64,
+            preview: preview.unwrap_or_default(),
+            label,
+            custom_label,
+            text_hash: hash as u64,
+            timestamp: timestamp as u64,
+            source_name,
+            source_bundle_id,
+            db_id: row_id,
+        },
+        1 => ClipboardEntry::Image {
+            id: entry_id as u64,
+            width: width.unwrap_or(0) as u32,
+            height: height.unwrap_or(0) as u32,
+            thumb_width: tw.unwrap_or(0) as u32,
+            thumb_height: th.unwrap_or(0) as u32,
+            hash: hash as u64,
+            custom_label,
+            timestamp: timestamp as u64,
+            source_name,
+            source_bundle_id,
+            db_id: row_id,
+        },
+        other => {
+            crate::error_log!("CopyAttach: row {row_id} has unknown entry_type {other}");
+            return None;
+        }
+    })
+}
+
+/// Undo the most recent deletion: restore the entry to the head of history.
+/// Returns 1 on success, 0 when nothing is undoable or the restore failed.
+///
+/// The restored row is re-inserted as a NEW row (fresh rowid, current timestamp)
+/// and the old deleted row is then removed, rather than un-stamping the old row.
+/// Two reasons: the list is ordered by timestamp, so a restored entry must sort
+/// to the top like any other "just used" entry; and the insert path already owns
+/// dedup + trim, so content re-captured while it was deleted collapses to one
+/// row instead of resurrecting a duplicate (the previous code inserted without
+/// dedup, so undo followed by a restart left two identical rows — reachable even
+/// with a one-slot stack).
 #[no_mangle]
 pub extern "C" fn clipboard_undo_delete() -> c_int {
     let b = match try_backend() {
@@ -267,144 +397,227 @@ pub extern "C" fn clipboard_undo_delete() -> c_int {
         None => return 0,
     };
 
-    let slot = {
-        let mut stack = b.deleted_stack.lock().unwrap();
-        match stack.pop() {
+    // Load the most recently deleted row's payload and restore it inside one
+    // transaction. Everything below runs under the DB lock, so the row cannot be
+    // swept (or otherwise change) between the read and the re-insert.
+    let restored: Option<(u64, i64, bool)> = {
+        let conn = match b.db.lock() {
+            Ok(c) => c,
+            Err(e) => {
+                crate::error_log!("CopyAttach: DB mutex poisoned during undo: {e}");
+                return 0;
+            }
+        };
+        let (old_row_id, entry_id, _stamp, was_favorite_raw) = match crate::db::newest_deleted_row(&conn) {
+            Some(t) => t,
+            None => {
+                crate::debug_log!("CopyAttach: undo requested with nothing deleted");
+                return 0;
+            }
+        };
+        let was_favorite = was_favorite_raw != 0;
+
+        // Read the payload back out of the deleted row. This is the only place a
+        // delete's payload is ever touched again; `DeletedBody`'s Drop releases
+        // its pages on every exit path.
+        let source = match load_deleted_payload(&conn, old_row_id) {
+            Some(s) => s,
+            None => {
+                // The row is unreadable, so it can never be restored. Drop it
+                // rather than let a broken row block the undo stack forever, and
+                // report the failure so the caller can surface it.
+                crate::error_log!("CopyAttach: undo could not load payload for deleted row {old_row_id} — dropping it");
+                let _ = conn.execute(
+                    "DELETE FROM clipboard_deleted WHERE row_id = ?1",
+                    rusqlite::params![old_row_id],
+                );
+                return 0;
+            }
+        };
+
+        let tx = match conn.unchecked_transaction() {
+            Ok(t) => t,
+            Err(e) => {
+                crate::error_log!("CopyAttach: failed to begin undo transaction: {e}");
+                return 0;
+            }
+        };
+        // Locate the restored row by rowid range, NOT by `last_insert_rowid()`:
+        // `insert_entry_to_db` raises the entry-id watermark with an upsert into
+        // `clipboard_meta`, and an upsert moves `last_insert_rowid()` away from
+        // the history row (measured: it reported row 1, a meta row). The history
+        // table's max id before the insert is the reliable boundary.
+        let before_max: i64 = match tx.query_row(
+            "SELECT COALESCE(MAX(id), 0) FROM clipboard_history",
+            [],
+            |r| r.get(0),
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                crate::error_log!("CopyAttach: undo could not read the history id bound: {e}");
+                return 0;
+            }
+        };
+        let insert = match &source.body {
+            DeletedBody::Text(body) => {
+                crate::db::insert_entry_to_db(&tx, &source.entry, Some(body), None, None)
+            }
+            DeletedBody::Image { png, thumb } => {
+                let (tw, th) = match &source.entry {
+                    ClipboardEntry::Image { thumb_width, thumb_height, .. } => {
+                        (*thumb_width, *thumb_height)
+                    }
+                    _ => (0, 0),
+                };
+                crate::db::insert_entry_to_db(&tx, &source.entry, None, Some(png), Some((thumb, tw, th)))
+            }
+        };
+        if insert.is_err() {
+            crate::error_log!("CopyAttach: undo failed to re-insert entry {entry_id}; the deleted row is kept for retry");
+            return 0;
+        }
+        let new_row_id = match tx.query_row(
+            "SELECT COALESCE(MAX(id), 0) FROM clipboard_history",
+            [],
+            |r| r.get::<_, i64>(0),
+        ) {
+            Ok(v) if v > before_max => v,
+            Ok(v) => {
+                crate::error_log!("CopyAttach: undo insert produced no new history row (max id {v}, was {before_max})");
+                return 0;
+            }
+            Err(e) => {
+                crate::error_log!("CopyAttach: undo could not locate the restored row: {e}");
+                return 0;
+            }
+        };
+        // Collapse with any live copy of the same content: the re-capture made
+        // while the entry was deleted is the older duplicate and goes away, so
+        // exactly one row survives. The row just inserted has the highest id,
+        // which is the row the dedup keeps.
+        crate::db::delete_matching_entry(&tx, &source.entry, source.body.as_text());
+        // The old (soft-deleted) row has served its purpose: remove both the
+        // side-table entry and the payload row it describes.
+        if let Err(e) = tx.execute(
+            "DELETE FROM clipboard_deleted WHERE row_id = ?1",
+            rusqlite::params![old_row_id],
+        ) {
+            crate::error_log!("CopyAttach: undo could not remove the undo entry {old_row_id}: {e}");
+            return 0;
+        }
+        if let Err(e) = tx.execute(
+            "DELETE FROM clipboard_history WHERE id = ?1",
+            rusqlite::params![old_row_id],
+        ) {
+            crate::error_log!("CopyAttach: undo could not remove the deleted row {old_row_id}: {e}");
+            return 0;
+        }
+        // Restore the star the entry carried when it was deleted.
+        if was_favorite {
+            if let Err(e) = tx.execute(
+                "INSERT OR IGNORE INTO clipboard_favorites (entry_id) VALUES (?1)",
+                rusqlite::params![entry_id as i64],
+            ) {
+                crate::error_log!("CopyAttach: undo could not restore favorite for entry {entry_id}: {e}");
+                return 0;
+            }
+        }
+        if let Err(e) = tx.commit() {
+            crate::error_log!("CopyAttach: failed to commit undo of entry {entry_id}: {e}");
+            return 0;
+        }
+        // The payload now belongs to the new row; release the read-back copy.
+        drop(source);
+        Some((entry_id, new_row_id, was_favorite))
+    };
+
+    let (entry_id, new_row_id, was_favorite) = match restored {
+        Some(v) => v,
+        None => return 0,
+    };
+
+    // Publish the in-memory side. A full reload would rebuild the whole snapshot
+    // for one row, so re-read the new row's metadata and prepend it — exactly
+    // what the capture path does. `add_to_history` dedups, so a live copy of the
+    // same content collapses with the restored entry.
+    let entry = {
+        let conn = match b.db.lock() {
+            Ok(c) => c,
+            Err(e) => {
+                crate::error_log!("CopyAttach: DB mutex poisoned publishing undo of entry {entry_id}: {e}");
+                return 0;
+            }
+        };
+        match load_live_entry_by_row(&conn, new_row_id) {
             Some(e) => e,
-            None => return 0,
-        }
-    };
-
-    // Read the materialized payload back from disk. On failure the slot (with
-    // its file still in place) is re-pushed so the user can retry.
-    let payload = match crate::backend::read_undo_payload(&slot.payload_path) {
-        Ok(p) => p,
-        Err(()) => {
-            crate::error_log!("CopyAttach: failed to read undo payload for entry {} — keeping undo slot", slot.entry.entry_id());
-            let mut stack = b.deleted_stack.lock().unwrap();
-            stack.push(slot);
-            return 0;
-        }
-    };
-
-    // Clone the metadata (small) so `slot` stays intact for the retry path.
-    let mut entry = slot.entry.clone();
-
-    // The restored entry goes to the top of history. Stamp it with the current
-    // time before the DB write so the stored row and the in-memory entry agree —
-    // the day separator groups rely on list order matching the timestamp.
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    match &mut entry {
-        ClipboardEntry::Text { ref mut timestamp, .. }
-        | ClipboardEntry::Image { ref mut timestamp, .. } => {
-            *timestamp = now;
-        }
-    }
-
-    let conn = match b.db.lock() {
-        Ok(c) => c,
-        Err(e) => {
-            crate::error_log!("CopyAttach: DB lock poisoned during undo: {e}");
-            let mut stack = b.deleted_stack.lock().unwrap();
-            stack.push(slot);
-            return 0;
-        }
-    };
-
-    let insert_result = match &payload {
-        UndoPayload::Text(body) => {
-            insert_entry_to_db(&conn, &entry, Some(body), None, None)
-        }
-        UndoPayload::Image { png, thumb } => {
-            let (tw, th) = match &entry {
-                ClipboardEntry::Image { thumb_width, thumb_height, .. } => (*thumb_width, *thumb_height),
-                _ => (0, 0),
-            };
-            insert_entry_to_db(&conn, &entry, None, Some(png), Some((thumb, tw, th)))
-        }
-    };
-
-    // Must succeed: without DB write, image entries can't store their data
-    // and text entries would lack db_id. Re-push the slot (the payload file is
-    // still on disk) so the user can retry.
-    if insert_result.is_err() {
-        let mut stack = b.deleted_stack.lock().unwrap();
-        stack.push(slot);
-        // The read-back payload is transient and claimed; release its pages.
-        match &payload {
-            UndoPayload::Text(body) => {
-                crate::backend::mark_pages_reusable(body.as_ptr(), body.capacity());
-            }
-            UndoPayload::Image { png, thumb } => {
-                crate::backend::mark_pages_reusable(png.as_ptr(), png.capacity());
-                crate::backend::mark_pages_reusable(thumb.as_ptr(), thumb.capacity());
+            None => {
+                crate::error_log!("CopyAttach: undo restored row {new_row_id} but could not read it back");
+                return 0;
             }
         }
-        return 0;
-    }
-    let new_row_id = conn.last_insert_rowid();
+    };
 
-    // The payload now lives in the new DB row. Remove the materialized file
-    // (a failure here only leaks a temp file; startup purges stale files) and
-    // update the in-memory entry to metadata-only before it lands in history.
-    remove_undo_payload_file(&slot);
-    match &mut entry {
-        ClipboardEntry::Text { ref mut db_id, .. } => *db_id = new_row_id,
-        ClipboardEntry::Image { ref mut db_id, .. } => {
-            *db_id = new_row_id;
+    let restored_id = {
+        let mut hist = b.history.lock().unwrap();
+        *hist = add_to_history(std::mem::take(&mut *hist), entry);
+        {
+            let favorites = b.favorites.lock().unwrap();
+            crate::backend::trim_history_memory(
+                &mut hist,
+                b.cleanup_threshold.load(Ordering::Relaxed),
+                &favorites,
+            );
+        }
+        // `add_to_history` may have rewritten the restored entry's id when it
+        // deduplicated against a live copy; read the final id off the head so
+        // Swift's last_restored_id points at the entry actually restored.
+        let id = hist.first().map_or(0, ClipboardEntry::entry_id);
+        crate::backend::mark_history_changed();
+        id
+    };
+
+    if was_favorite {
+        if let Ok(mut favorites) = b.favorites.lock() {
+            favorites.insert(entry_id);
         }
     }
 
-    // Release the read-back payload: it was claimed by `read_undo_payload` and
-    // is no longer needed after the DB insert above.
-    match &payload {
-        UndoPayload::Text(body) => {
-            crate::backend::mark_pages_reusable(body.as_ptr(), body.capacity());
-        }
-        UndoPayload::Image { png, thumb } => {
-            crate::backend::mark_pages_reusable(png.as_ptr(), png.capacity());
-            crate::backend::mark_pages_reusable(thumb.as_ptr(), thumb.capacity());
-        }
-    }
-
-    let mut hist = b.history.lock().unwrap();
-    // Use add_to_history for dedup: if the same content was re-captured
-    // by the monitor between deletion and undo, remove the existing copy
-    // before inserting the restored one at head.
-    *hist = add_to_history(std::mem::take(&mut *hist), entry);
-    {
-        let favorites = b.favorites.lock().unwrap();
-        crate::backend::trim_history_memory(
-            &mut hist,
-            b.cleanup_threshold.load(Ordering::Relaxed),
-            &favorites,
-        );
-    }
-    // add_to_history may have rewritten the restored entry's id on dedup
-    // (preserving the re-captured duplicate's id); read the final id from the
-    // head so Swift's last_restored_id points at the entry actually restored.
-    let restored_id = hist.first().map_or(0, ClipboardEntry::entry_id);
-    // Publish under the history lock (undo replaced the head / deduped).
-    crate::backend::mark_history_changed();
-    drop(hist);
-
-    // Record the restored entry ID so Swift can find it in the snapshot
-    // even if the monitor thread inserted new content at position 0.
+    // Record the restored entry ID so Swift can find it in the snapshot even if
+    // the monitor thread inserted new content at position 0 meanwhile.
     b.last_restored_id.store(restored_id, Ordering::SeqCst);
-
+    crate::debug_log!(
+        "CopyAttach: undo restored entry {entry_id} as row {new_row_id} (favorite={was_favorite})"
+    );
     1
 }
 
-/// Returns 1 if there's at least one entry in the undo stack, 0 otherwise.
+/// Returns 1 if at least one deleted row is still undoable, 0 otherwise.
 #[no_mangle]
 pub extern "C" fn clipboard_can_undo() -> c_int {
-    match try_backend() {
-        Some(b) => c_int::from(!b.deleted_stack.lock().unwrap().is_empty()),
-        None => 0,
-    }
+    let b = match try_backend() {
+        Some(b) => b,
+        None => return 0,
+    };
+    let conn = match b.db.lock() {
+        Ok(c) => c,
+        Err(_) => return 0,
+    };
+    c_int::from(crate::db::undo_depth(&conn) > 0)
+}
+
+/// How many deletions are currently undoable. Lets the UI say "还可撤销 N 步"
+/// instead of implying a fixed step count.
+#[no_mangle]
+pub extern "C" fn clipboard_undo_depth() -> c_int {
+    let b = match try_backend() {
+        Some(b) => b,
+        None => return 0,
+    };
+    let conn = match b.db.lock() {
+        Ok(c) => c,
+        Err(_) => return 0,
+    };
+    crate::db::undo_depth(&conn) as c_int
 }
 
 /// Returns the `entry_id` of the most recently undo-restored entry, or 0 if none.
@@ -597,7 +810,8 @@ pub extern "C" fn clipboard_trim_oldest_percent(percent: i32) -> c_int {
         Ok(conn) => {
             let mut stmt = match conn.prepare(
                 "SELECT id, entry_id FROM clipboard_history
-                 WHERE entry_id NOT IN (SELECT entry_id FROM clipboard_favorites)
+                 WHERE id NOT IN (SELECT row_id FROM clipboard_deleted)
+                   AND entry_id NOT IN (SELECT entry_id FROM clipboard_favorites)
                  ORDER BY timestamp ASC, id ASC",
             ) {
                 Ok(s) => s,
@@ -641,7 +855,11 @@ pub extern "C" fn clipboard_trim_oldest_percent(percent: i32) -> c_int {
             let mut deleted_count = 0;
             for chunk in ids.chunks(500) {
                 let placeholders = vec!["?"; chunk.len()].join(",");
-                let sql = format!("DELETE FROM clipboard_history WHERE id IN ({placeholders})");
+                let sql = format!(
+                    "DELETE FROM clipboard_history
+                      WHERE id NOT IN (SELECT row_id FROM clipboard_deleted)
+                        AND id IN ({placeholders})"
+                );
                 match tx.execute(&sql, rusqlite::params_from_iter(chunk.iter())) {
                     Ok(c) => deleted_count += c,
                     Err(e) => {

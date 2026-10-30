@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
-use crate::backend::{set_backend, Backend, DELETE_STACK_LIMIT, DeletedStackEntry, MAX_UNDO_BYTES, push_deleted};
+use crate::backend::{set_backend, Backend};
 use crate::ffi::{clipboard_delete_by_id, clipboard_undo_delete};
 use crate::ignore::IgnoreRules;
 use crate::types::{ClipboardEntry, SourceApp};
@@ -31,7 +31,6 @@ fn ensure_test_backend() {
             db: Arc::new(Mutex::new(conn)),
             cleanup_threshold: Arc::new(AtomicUsize::new(3000)),
             ignore_rules: Arc::new(Mutex::new(IgnoreRules::default())),
-            deleted_stack: Arc::new(Mutex::new(Vec::new())),
             last_restored_id: Arc::new(AtomicU64::new(0)),
             favorites: Arc::new(Mutex::new(HashSet::new())),
         };
@@ -105,111 +104,424 @@ fn test_clipboard_delete_by_id_returns_zero_on_failure() {
     );
 }
 
-fn mem_slot(entry: ClipboardEntry, payload_bytes: usize) -> DeletedStackEntry {
-    DeletedStackEntry { entry, payload_path: std::path::PathBuf::new(), payload_bytes }
-}
-
+/// Soft-delete undo: unlimited depth, LIFO order, favorite restoration,
+/// dedup on restore, and the retention/byte sweeps.
+///
+/// The previous design kept a one-slot in-memory stack of on-disk payloads; a
+/// delete is now a stamp on the row, so depth is bounded by retention
+/// (`UNDO_RETENTION_SECS`) and the byte budget (`MAX_UNDO_RETAINED_BYTES`)
+/// instead of a step count. These assertions pin that contract.
 #[test]
-fn test_undo_stack_caps() {
-    let text_entry = |id: u64, body: &str| {
-        ClipboardEntry::text_entry(id, body, 0, String::new(), String::new(), id as i64)
-    };
+fn test_soft_delete_undo_depth_is_not_capped() {
+    let _shared = shared_state_guard();
+    ensure_test_backend();
+    let b = crate::backend::try_backend().expect("backend initialized");
 
-    // Count cap: 12 small entries trim to the newest DELETE_STACK_LIMIT.
-    // Only the most recent deletion is undoable; older ones are shed
-    // immediately (deleting something else permanently discards the previous
-    // undo).
-    let mut stack = Vec::new();
-    for i in 0..12 {
-        push_deleted(&mut stack, mem_slot(text_entry(i, &"x".repeat(100)), 100));
+    // 40 deletions — far past the old one-slot stack, and past any step count a
+    // future UI might hardcode.
+    let base: u64 = 940_000_000;
+    let n: u64 = 40;
+    let mut db_ids: Vec<i64> = Vec::new();
+    {
+        let conn = b.db.lock().unwrap();
+        for i in 0..n {
+            conn.execute(
+                "INSERT INTO clipboard_history
+                    (entry_type, text, hash, timestamp, source_name, source_bundle_id, entry_id,
+                     preview, label)
+                 VALUES (0, ?1, ?2, ?3, 'UndoDepth', 'com.example.undodepth', ?4, ?1, ?1)",
+                rusqlite::params![
+                    format!("undo-depth-{i}"),
+                    (base + i) as i64,
+                    (i + 1) as i64,
+                    (base + i) as i64
+                ],
+            )
+            .expect("insert undo-depth fixture row");
+            db_ids.push(conn.last_insert_rowid());
+        }
     }
-    assert_eq!(stack.len(), DELETE_STACK_LIMIT, "count cap keeps the newest deletion only");
-    let oldest_id = match &stack[0].entry {
-        ClipboardEntry::Text { id, .. } => *id,
-        _ => unreachable!(),
-    };
-    assert_eq!(oldest_id, 11, "all but the newest deletion (11) were shed");
-
-    // Byte cap still guards the single slot: an oversized paste must not pin
-    // memory even when it is the only undoable deletion.
-    let mut stack = Vec::new();
-    for i in 0..10 {
-        let body = "y".repeat(6 * 1024 * 1024);
-        let body_len = body.len();
-        push_deleted(&mut stack, mem_slot(text_entry(i, &body), body_len));
-    }
-    assert_eq!(stack.len(), 1, "byte cap sheds oversized pastes");
-    let retained: usize = stack.iter().map(|s| s.payload_bytes).sum();
-    assert!(retained <= MAX_UNDO_BYTES, "retained bodies bounded");
-    let oldest_id = match &stack[0].entry {
-        ClipboardEntry::Text { id, .. } => *id,
-        _ => unreachable!(),
-    };
-    assert_eq!(oldest_id, 9, "entries 0..=8 were shed, 9 (newest) retained");
-
-    // Image blobs count toward the same byte budget: a deleted image cannot
-    // pin unbounded memory. 3 × 20 MB = 60 MB > 48 MB → the single slot must
-    // still shed it (nothing undoable rather than pinning 60 MB).
-    let image_entry = |i: u64| ClipboardEntry::Image {
-        id: i,
-        width: 1,
-        height: 1,
-        thumb_width: 0,
-        thumb_height: 0,
-        hash: i,
-        custom_label: String::new(),
-        timestamp: 0,
-        source_name: String::new(),
-        source_bundle_id: String::new(),
-        db_id: i as i64,
-    };
-    let mut stack = Vec::new();
-    for i in 0..3 {
-        push_deleted(&mut stack, mem_slot(image_entry(i), 20 * 1024 * 1024));
-    }
-    assert_eq!(stack.len(), 1, "single slot keeps only the newest image");
-    let oldest_id = match &stack[0].entry {
-        ClipboardEntry::Image { id, .. } => *id,
-        _ => unreachable!(),
-    };
-    assert_eq!(oldest_id, 2, "only the newest deletion (2) is retained");
-    let image_bytes: usize = stack.iter().map(|s| s.payload_bytes).sum();
-    assert!(image_bytes <= MAX_UNDO_BYTES, "retained image bytes bounded");
-
-    // Mixed: image entries with empty blobs carry no bytes and respect only
-    // the count cap.
-    let mut stack = Vec::new();
-    push_deleted(&mut stack, mem_slot(text_entry(0, "small"), "small".len()));
-    for i in 1..=11 {
-        push_deleted(
-            &mut stack,
-            mem_slot(ClipboardEntry::Image {
-                id: i,
-                width: 1,
-                height: 1,
-                thumb_width: 0,
-                thumb_height: 0,
-                hash: i,
+    {
+        let mut hist = b.history.lock().unwrap();
+        for (i, db_id) in db_ids.iter().enumerate() {
+            hist.push(ClipboardEntry::Text {
+                id: base + i as u64,
+                preview: format!("undo-depth-{i}"),
+                label: format!("undo-depth-{i}"),
                 custom_label: String::new(),
-                timestamp: 0,
-                source_name: String::new(),
-                source_bundle_id: String::new(),
-                db_id: i as i64,
-            }, 0),
+                text_hash: base + i as u64,
+                timestamp: (i + 1) as u64,
+                source_name: "UndoDepth".to_string(),
+                source_bundle_id: "com.example.undodepth".to_string(),
+                db_id: *db_id,
+            });
+        }
+    }
+
+    // Delete every one of them. Each delete must succeed, and the depth must
+    // grow monotonically — no shedding.
+    for i in 0..n {
+        assert_eq!(
+            clipboard_delete_by_id(base + i),
+            1,
+            "deleting fixture entry {i} must succeed"
+        );
+        let depth = {
+            let conn = b.db.lock().unwrap();
+            crate::db::undo_depth(&conn)
+        };
+        assert!(
+            depth >= (i + 1) as usize,
+            "undo depth must retain every deletion: after {} deletes depth={depth}",
+            i + 1
         );
     }
-    assert_eq!(stack.len(), DELETE_STACK_LIMIT, "images respect count cap too");
-    let image_count = stack.iter().filter(|s| matches!(&s.entry, &ClipboardEntry::Image { .. })).count();
-    assert_eq!(image_count, DELETE_STACK_LIMIT, "only the newest deletion is retained");
+    {
+        let conn = b.db.lock().unwrap();
+        assert_eq!(
+            crate::db::undo_depth(&conn),
+            n as usize,
+            "all {n} deletions must stay undoable (no step cap)"
+        );
+    }
+
+    // Undo in strict LIFO order: the most recent deletion comes back first.
+    for i in (0..n).rev() {
+        assert_eq!(clipboard_undo_delete(), 1, "undo of deletion {i} must succeed");
+        let restored = crate::backend::try_backend()
+            .unwrap()
+            .last_restored_id
+            .load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(restored, base + i, "undo must restore the newest deletion first (LIFO)");
+    }
+    {
+        let conn = b.db.lock().unwrap();
+        assert_eq!(crate::db::undo_depth(&conn), 0, "everything was undone");
+    }
+
+    // Unwind the fixture (the rows came back live, with new row ids).
+    {
+        let conn = b.db.lock().unwrap();
+        conn.execute(
+            "DELETE FROM clipboard_history WHERE entry_id >= ?1 AND entry_id < ?2",
+            rusqlite::params![base as i64, (base + n) as i64],
+        )
+        .expect("cleanup fixture rows");
+    }
+    {
+        let mut hist = b.history.lock().unwrap();
+        hist.retain(|e| !(e.entry_id() >= base && e.entry_id() < base + n));
+    }
+}
+
+/// A delete must be undoable *and* must not resurrect a duplicate when the same
+/// content was re-captured while it was deleted.
+///
+/// The old undo path inserted without dedup, so `delete A → copy A → delete A →
+/// undo ×2` left two identical rows that survived a restart.
+#[test]
+fn test_undo_collapses_with_recaptured_duplicate() {
+    let _shared = shared_state_guard();
+    ensure_test_backend();
+    let b = crate::backend::try_backend().expect("backend initialized");
+
+    let body = "duplicate-content-for-undo";
+    let entry_a: u64 = 941_000_001;
+    let entry_b: u64 = 941_000_002;
+    let (row_a, row_b) = {
+        let conn = b.db.lock().unwrap();
+        let row_a = {
+            conn.execute(
+                "INSERT INTO clipboard_history
+                    (entry_type, text, hash, timestamp, source_name, source_bundle_id, entry_id,
+                     preview, label)
+                 VALUES (0, ?1, ?2, 1, 'DupTest', 'com.example.duptest', ?3, ?1, ?1)",
+                rusqlite::params![body, crate::types::text_hash(body) as i64, entry_a as i64],
+            )
+            .unwrap();
+            conn.last_insert_rowid()
+        };
+        // The re-capture: same content, new row, and (as `add_to_history` does)
+        // the same stable entry_id.
+        let row_b = {
+            conn.execute(
+                "INSERT INTO clipboard_history
+                    (entry_type, text, hash, timestamp, source_name, source_bundle_id, entry_id,
+                     preview, label)
+                 VALUES (0, ?1, ?2, 2, 'DupTest', 'com.example.duptest', ?3, ?1, ?1)",
+                rusqlite::params![body, crate::types::text_hash(body) as i64, entry_a as i64],
+            )
+            .unwrap();
+            conn.last_insert_rowid()
+        };
+        (row_a, row_b)
+    };
+    // In memory the dedup already collapsed them to one entry pointing at row_b.
+    {
+        let mut hist = b.history.lock().unwrap();
+        hist.push(ClipboardEntry::Text {
+            id: entry_a,
+            preview: body.to_string(),
+            label: body.to_string(),
+            custom_label: String::new(),
+            text_hash: crate::types::text_hash(body),
+            timestamp: 2,
+            source_name: "DupTest".to_string(),
+            source_bundle_id: "com.example.duptest".to_string(),
+            db_id: row_b,
+        });
+    }
+    let _ = entry_b;
+    let _ = row_a;
+
+    assert_eq!(clipboard_delete_by_id(entry_a), 1, "delete of the live duplicate must succeed");
+    assert_eq!(clipboard_undo_delete(), 1, "undo must succeed");
+
+    // Exactly one live row of this content may remain — not two.
+    let live_rows: i64 = {
+        let conn = b.db.lock().unwrap();
+        conn.query_row(
+            "SELECT COUNT(*) FROM clipboard_history
+           WHERE id NOT IN (SELECT row_id FROM clipboard_deleted)
+             AND entry_type = 0 AND text = ?1",
+            rusqlite::params![body],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+
+    {
+        let conn = b.db.lock().unwrap();
+        conn.execute(
+            "DELETE FROM clipboard_history WHERE entry_id >= 941_000_000 AND entry_id < 942_000_000",
+            [],
+        )
+        .unwrap();
+    }
+    {
+        let mut hist = b.history.lock().unwrap();
+        hist.retain(|e| !(e.entry_id() >= 941_000_000 && e.entry_id() < 942_000_000));
+    }
+
+    assert_eq!(live_rows, 1, "undo must not leave a duplicate row behind (found {live_rows})");
+}
+
+/// Deleting a favorited entry must drop the star, and undo must bring it back.
+#[test]
+fn test_undo_restores_favorite_state() {
+    let _shared = shared_state_guard();
+    ensure_test_backend();
+    let b = crate::backend::try_backend().expect("backend initialized");
+
+    let entry_id: u64 = 943_000_001;
+    let row_id = {
+        let conn = b.db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO clipboard_history
+                (entry_type, text, hash, timestamp, source_name, source_bundle_id, entry_id,
+                 preview, label)
+             VALUES (0, 'favorite-restore', 1, 1, 'FavUndo', 'com.example.favundo', ?1,
+                     'favorite-restore', 'favorite-restore')",
+            rusqlite::params![entry_id as i64],
+        )
+        .unwrap();
+        let row_id = conn.last_insert_rowid();
+        crate::db::set_favorite(&conn, entry_id, true).unwrap();
+        row_id
+    };
+    {
+        let mut hist = b.history.lock().unwrap();
+        hist.push(ClipboardEntry::Text {
+            id: entry_id,
+            preview: "favorite-restore".to_string(),
+            label: "favorite-restore".to_string(),
+            custom_label: String::new(),
+            text_hash: 1,
+            timestamp: 1,
+            source_name: "FavUndo".to_string(),
+            source_bundle_id: "com.example.favundo".to_string(),
+            db_id: row_id,
+        });
+    }
+    b.favorites.lock().unwrap().insert(entry_id);
+
+    assert_eq!(clipboard_delete_by_id(entry_id), 1, "delete must succeed");
+
+    // The star must be gone from both the table and the mirror while deleted.
+    let fav_rows_after_delete: i64 = {
+        let conn = b.db.lock().unwrap();
+        conn.query_row(
+            "SELECT COUNT(*) FROM clipboard_favorites WHERE entry_id = ?1",
+            rusqlite::params![entry_id as i64],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    let in_mirror_after_delete = b.favorites.lock().unwrap().contains(&entry_id);
+
+    assert_eq!(clipboard_undo_delete(), 1, "undo must succeed");
+
+    let fav_rows_after_undo: i64 = {
+        let conn = b.db.lock().unwrap();
+        conn.query_row(
+            "SELECT COUNT(*) FROM clipboard_favorites WHERE entry_id = ?1",
+            rusqlite::params![entry_id as i64],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    let in_mirror_after_undo = b.favorites.lock().unwrap().contains(&entry_id);
+
+    // Unwind.
+    {
+        let conn = b.db.lock().unwrap();
+        let _ = conn.execute(
+            "DELETE FROM clipboard_history WHERE entry_id >= 943_000_000 AND entry_id < 944_000_000",
+            [],
+        );
+        let _ = conn.execute(
+            "DELETE FROM clipboard_favorites WHERE entry_id = ?1",
+            rusqlite::params![entry_id as i64],
+        );
+    }
+    {
+        let mut hist = b.history.lock().unwrap();
+        hist.retain(|e| !(e.entry_id() >= 943_000_000 && e.entry_id() < 944_000_000));
+    }
+    b.favorites.lock().unwrap().remove(&entry_id);
+
+    assert_eq!(fav_rows_after_delete, 0, "delete must drop the durable favorite");
+    assert!(!in_mirror_after_delete, "delete must drop the favorite mirror entry");
+    assert_eq!(fav_rows_after_undo, 1, "undo must restore the durable favorite");
+    assert!(in_mirror_after_undo, "undo must restore the favorite mirror entry");
+}
+
+/// The retention window and byte budget are the only things that discard a
+/// deletion — and they must actually discard it.
+#[test]
+fn test_deleted_rows_are_swept_by_age_and_byte_budget() {
+    let _shared = shared_state_guard();
+    ensure_test_backend();
+    let b = crate::backend::try_backend().expect("backend initialized");
+
+    // --- Age sweep ---
+    // One row stamped just inside the window (must survive) and one far outside
+    // (must be purged).
+    let base: u64 = 944_000_000;
+    {
+        let conn = b.db.lock().unwrap();
+        for (i, age_secs) in [crate::backend::UNDO_RETENTION_SECS - 60,
+                             crate::backend::UNDO_RETENTION_SECS + 60].iter().enumerate() {
+            let stamp = crate::backend::undo_stamp_now() - (*age_secs as i64) * 1_000_000;
+            conn.execute(
+                "INSERT INTO clipboard_history
+                    (entry_type, text, hash, timestamp, source_name, source_bundle_id, entry_id,
+                     preview, label)
+                 VALUES (0, ?1, ?2, 0, 'SweepTest', 'com.example.sweep', ?3, ?1, ?1)",
+                rusqlite::params![
+                    format!("sweep-{i}"),
+                    (base + i as u64) as i64,
+                    (base + i as u64) as i64,
+                ],
+            )
+            .unwrap();
+            let row_id = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO clipboard_deleted (row_id, entry_id, deleted_at, was_favorite)
+                 VALUES (?1, ?2, ?3, 0)",
+                rusqlite::params![row_id, (base + i as u64) as i64, stamp],
+            )
+            .unwrap();
+        }
+    }
+    let purged = {
+        let conn = b.db.lock().unwrap();
+        crate::db::purge_expired_deleted_rows(&conn).expect("age sweep must succeed")
+    };
+    let survivors: i64 = {
+        let conn = b.db.lock().unwrap();
+        conn.query_row(
+            "SELECT COUNT(*) FROM clipboard_history WHERE entry_id >= ?1 AND entry_id < ?2",
+            rusqlite::params![base as i64, (base + 2) as i64],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+
+    // --- Byte budget ---
+    // Two deleted rows of ~40 MB each exceed the 64 MB budget; the older
+    // deletion must be shed, the newer kept (that is the undo order).
+    let big_base: u64 = 945_000_000;
+    {
+        let conn = b.db.lock().unwrap();
+        let blob = vec![0u8; 40 * 1024 * 1024];
+        for (i, secs) in [120i64, 60].iter().enumerate() {
+            let stamp = crate::backend::undo_stamp_now() - secs * 1_000_000;
+            conn.execute(
+                "INSERT INTO clipboard_history
+                    (entry_type, png_data, width, height, hash, timestamp,
+                     source_name, source_bundle_id, entry_id)
+                 VALUES (1, ?1, 1, 1, ?2, 0, 'SweepBig', 'com.example.sweepbig', ?3)",
+                rusqlite::params![
+                    blob,
+                    (big_base + i as u64) as i64,
+                    (big_base + i as u64) as i64,
+                ],
+            )
+            .unwrap();
+            let row_id = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO clipboard_deleted (row_id, entry_id, deleted_at, was_favorite)
+                 VALUES (?1, ?2, ?3, 0)",
+                rusqlite::params![row_id, (big_base + i as u64) as i64, stamp],
+            )
+            .unwrap();
+        }
+    }
+    let budget_purged = {
+        let conn = b.db.lock().unwrap();
+        crate::db::purge_expired_deleted_rows(&conn).expect("byte sweep must succeed")
+    };
+    let remaining_bytes: i64 = {
+        let conn = b.db.lock().unwrap();
+        conn.query_row(
+            "SELECT COALESCE(SUM(LENGTH(png_data)), 0) FROM clipboard_history h
+             JOIN clipboard_deleted d ON d.row_id = h.id
+             WHERE h.entry_id >= ?1 AND h.entry_id < ?2",
+            rusqlite::params![big_base as i64, (big_base + 2) as i64],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+
+    // Unwind.
+    {
+        let conn = b.db.lock().unwrap();
+        let _ = conn.execute(
+            "DELETE FROM clipboard_history WHERE entry_id >= ?1 AND entry_id < ?2",
+            rusqlite::params![base as i64, (base + 2) as i64],
+        );
+        let _ = conn.execute(
+            "DELETE FROM clipboard_history WHERE entry_id >= ?1 AND entry_id < ?2",
+            rusqlite::params![big_base as i64, (big_base + 2) as i64],
+        );
+    }
+
+    assert_eq!(purged, 1, "only the row past the retention window is purged");
+    assert_eq!(survivors, 1, "the row inside the retention window must survive");
+    assert!(budget_purged >= 1, "the byte budget must shed the oldest deletion");
+    assert!(
+        remaining_bytes <= crate::backend::MAX_UNDO_RETAINED_BYTES,
+        "retained deleted payload must fit the budget (left {remaining_bytes} bytes)"
+    );
 }
 
 /// Regression: undoing an image deletion must not pin the deleted image's
 /// PNG/thumb allocations inside the in-memory history Vec.
 ///
-/// The undo payload is materialized on disk by `clipboard_delete_by_id`; the
-/// in-memory slot stays metadata-only, and the restored history entry must be
-/// metadata-only as well after `clipboard_undo_delete` re-inserts the blobs
-/// into a fresh DB row.
+/// The deleted row keeps its blobs; only the undo's read-back copy passes
+/// through memory, and the restored history entry must be metadata-only after
+/// `clipboard_undo_delete` re-inserts the blobs into a fresh DB row.
 #[test]
 fn test_undo_image_restore_releases_blob_capacity() {
     let _shared = shared_state_guard();
@@ -251,17 +563,24 @@ fn test_undo_image_restore_releases_blob_capacity() {
 
     assert_eq!(clipboard_delete_by_id(777_000), 1, "delete must succeed");
 
-    // The slot must hold only metadata + a materialized payload file.
+    // The row must still be present with its blobs, and the side table must
+    // carry the deletion stamp: soft delete keeps the payload in the table
+    // instead of materializing it to a temp file.
     {
-        let stack = b.deleted_stack.lock().unwrap();
-        assert_eq!(stack.len(), 1, "one undo slot after delete");
-        let slot = &stack[0];
-        match &slot.entry {
-            ClipboardEntry::Image { .. } => {}
-            other => panic!("expected image slot, got {other:?}"),
-        }
-        assert!(!slot.payload_path.as_os_str().is_empty(), "payload path must be materialized");
-        assert!(slot.payload_path.exists(), "payload file must exist");
+        let conn = b.db.lock().unwrap();
+        let (stamp, png_len, thumb_len): (i64, i64, i64) = conn
+            .query_row(
+                "SELECT d.deleted_at, LENGTH(h.png_data), LENGTH(h.thumb_data)
+                 FROM clipboard_history h
+                 JOIN clipboard_deleted d ON d.row_id = h.id
+                 WHERE h.id = ?1",
+                rusqlite::params![db_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .expect("deleted row must still exist with its undo entry");
+        assert!(stamp > 0, "the side table must carry a deletion stamp");
+        assert_eq!(png_len, 64 * 1024, "the PNG blob must stay in the row");
+        assert_eq!(thumb_len, 512, "the thumbnail blob must stay in the row");
     }
 
     assert_eq!(clipboard_undo_delete(), 1, "undo must succeed");
@@ -275,7 +594,11 @@ fn test_undo_image_restore_releases_blob_capacity() {
         other => panic!("expected restored image at head of history, got {other:?}"),
     };
     assert_ne!(restored_id, 0);
-    assert!(b.deleted_stack.lock().unwrap().is_empty(), "undo slot consumed");
+    assert_eq!(
+        crate::db::undo_depth(&b.db.lock().unwrap()),
+        0,
+        "undo slot consumed"
+    );
 }
 
 /// The capture pipeline's decode buffer is pooled: one allocation is reused

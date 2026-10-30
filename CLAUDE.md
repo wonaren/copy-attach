@@ -63,7 +63,7 @@ vmmap -summary $(pgrep -f 'CopyAttach.app/Contents/MacOS/CopyAttach') | head -16
 
 - `phys_footprint` 把**已压缩换出的页照样算作脏页**：实测长期会话 `resident` 仅 ~20MB，`phys_footprint` 却是 95–104MB（~70MB 在压缩器里）。两者差很大 = 账本问题，不是回收问题。
 - 稳定底线 ~36–44MB：干净空闲 19–22MB，首次开弹窗一次性 +~13–25MB（视图图，之后多轮开关零累积）。再往上的两个已实测来源：瞬时大图解码（~20MB 池，页已标记可回收、不计入 footprint）与 `NSWorkspace` 查询把 ~12MB LaunchServices 数据库拉进进程。构成与数据见 `docs/engineering-notes.md` 的「内存基线的真相」。
-- **撤销栈不是内存来源**(0.99.17 时代的笔记已过期)：载荷在删除时即落盘（`$TMPDIR/CopyAttach/Undo/*.bin`），内存只留 `payload_path`/`payload_bytes`，blobs 随即 `mark_pages_reusable`。实测删除一张 4.19MB 大图（撤销栈落盘 4.30MB）后 footprint **55 → 48MB**。
+- **删除/撤销不产生常驻内存**(0.110.0 起)：删除只是在 `clipboard_deleted` 侧表写一行（行号 + 时间戳 + 收藏标记），**载荷行一个字节都不动**——因此既没有落盘临时文件，也不读 blob。实测（34 条 demo 库、含 3 张 ~4MB 截图，`vmmap -summary` 的 `Writable regions`）：删 34 条 `written` **320K → 320K（+0KB）**；撤销 34 条 `written` **+32KB**、`resident` 增长 28MB 但全部落在 `Malloc Large (Reusable)`（已 `mark_pages_reusable`、不计入 footprint）；再连续 3 轮删除/撤销 `written` **零增长**（352K 恒定）。早期「载荷落盘到 `$TMPDIR/CopyAttach/Undo/*.bin`」的 1 步栈已整体删除。
 - `malloc_zone_pressure_relief` 不要加：实测它收不回任何东西——进程内 4 次调用、以及「512MB 已释放的 1MB 块仍计入 footprint」的合成场景，全部返回 `0 bytes`。
 - **缩略图迁移是一次性内存事件**（0.105.1 起，仅 user_version 3 的库首次启动触发一次）：真库 137 行 release 实测峰值 79MB、稳态回落至与 no-op 相当（~9–18MB vs ~8.7MB），完成后不再发生。它不是常驻泄漏；若在「刚升级后」看到后台内存偏高，先确认 `metadata migration complete` 日志是否已出现。实现细节与三条踩坑（绕过 madvise 契约、每行新建 blob、借用捕获池）见 `docs/engineering-notes.md`。
 
@@ -103,7 +103,7 @@ vmmap -summary $(pgrep -f 'CopyAttach.app/Contents/MacOS/CopyAttach') | head -16
 - **检查更新（`Update/UpdateChecker.swift`）**：GitHub `releases/latest` HEAD（实测 0.2–0.5s，权威且零字节）与 healthz（实测 3.9–10s，仅为 GitHub DNS 不可达时兜底）**并行竞速**，取最快成功者；结果持久化缓存 15 分钟，About 首屏直接渲染缓存、过期才后台复检。旧实现串行「healthz 6s 超时 → GitHub」，把每次检查都拖到 5s 以上
 - **db_id 不变量**：内存条目的 `db_id` 必须指向 DB 中该条目的行，且赋值按内容 hash 匹配、绝不按头部位置
 - **Suppress re-capture**：select_and_paste 通过 `pending_self_write` 标记自身写入，监控线程跳过匹配的 changeCount
-- **undo 删除**：撤销栈 ≤1 条，`MAX_UNDO_BYTES`(48MB) 约束的是**磁盘载荷**——删除时先落盘（`$TMPDIR/CopyAttach/Undo/*.bin`），内存只留 `payload_path`/`payload_bytes` + 元数据，blobs 随即 `mark_pages_reusable`（实测删掉 4.19MB 大图后 footprint 反降 7MB）
+- **undo 删除（软删除，0.110.0 起）**：删除 = 在 `clipboard_deleted` 侧表插一行 `(row_id, entry_id, deleted_at 微秒, was_favorite)` + 删掉该条的 `clipboard_favorites` 行；载荷行留在 `clipboard_history` 原地不动。撤销栈因此**由数据库派生**，没有内存栈、没有临时文件、**没有步数上限**——深度只受保留期（`UNDO_RETENTION_SECS` 7 天）与字节预算（`MAX_UNDO_RETAINED_BYTES` 64MB，超限丢最老的删除）约束。撤销 = 读回该行载荷 → 走 `insert_entry_to_db` + `delete_matching_entry`（dedup）→ 删掉旧行 → 按 `was_favorite` 恢复收藏，因此「删 A → 再复制 A → 删 A → ⌘Z×2」只留一行，重启也不重复（旧实现不去重，会留两行）。**侧表而非列**是实测决定的：`UPDATE clipboard_history SET deleted_at=?` 会整行重写，图片行的多 MB blob 被读出来再写回，34 次删除实测 +24MB 滞留 RSS（`shrink_memory` 不回落）；换成侧表后同样的 34 次删除是 **+0KB `written`**。所有活行查询用 `id NOT IN (SELECT row_id FROM clipboard_deleted)`（`load_history_from_db` / `trim_db_history` / `search_history` 的 FTS+LIKE+metadata 三路 / `set_favorite` / `update_entry_custom_label` / `clipboard_get_storage_size` / 备份导出与合并）。`clipboard_clear_history` 仍是硬删（清空历史的确认框承诺「无法撤销」）。
 
 ### Swift 前端（`SwiftApp/`，LSUIElement agent app）
 

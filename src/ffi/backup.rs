@@ -119,8 +119,9 @@ pub extern "C" fn clipboard_restore_backup_overwrite(
 
     match restore_backup_overwrite(&mut conn, path) {
         Ok((count, fav_ids)) => {
-            // Clear undo stack since historical references are invalidated
-            b.deleted_stack.lock().unwrap().clear();
+            // Historical references are invalidated: the overwrite deleted
+            // every row, soft-deleted ones included, so nothing is undoable.
+            // (The rows are gone, which is what makes the undo stack empty.)
 
             // Reload memory history from newly populated database
             let threshold = b.cleanup_threshold.load(Ordering::Relaxed);
