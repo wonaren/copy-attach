@@ -22,6 +22,7 @@ base64 = { version = "0.23", optional = true }
 default = ["migration"]
 migration = ["serde", "serde_json", "base64"]
 stress-test = []
+demo-data = []
 
 [[bin]]
 name = "stress-gen"
@@ -32,6 +33,11 @@ required-features = ["stress-test"]
 name = "bench"
 path = "src/bin/bench.rs"
 required-features = ["stress-test"]
+
+[[bin]]
+name = "demo-gen"
+path = "src/bin/demo_gen.rs"
+required-features = ["demo-data"]
 
 [profile.release]
 strip = true

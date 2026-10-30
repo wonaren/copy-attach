@@ -19,7 +19,7 @@ pub(crate) use schema::{classify_db_error, ensure_history_table, open_db, DbFail
 // The image-hash migration driver lives in ffi/init.rs and is compiled out of
 // stress-test builds (their DBs are freshly generated with the stable
 // algorithm), so these re-exports follow the same gate; tests keep access.
-#[cfg(any(not(feature = "stress-test"), test))]
+#[cfg(any(not(feature = "stress-test"), feature = "demo-data", test))]
 pub(crate) use schema::{METADATA_VERSION, migrate_one_image_row, migrate_one_thumbnail_row};
 pub(crate) use schema::FTS_MAX_INDEXED_TEXT_LEN;
 pub(crate) use schema::{bump_entry_id_watermark, entry_id_watermark, import_favorites, load_favorites, prune_orphan_favorites, set_favorite};

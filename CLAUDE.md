@@ -93,6 +93,7 @@ vmmap -summary $(pgrep -f 'CopyAttach.app/Contents/MacOS/CopyAttach') | head -16
 | `history.rs` | `add_to_history()` — 去重 + 头部插入，纯函数式 |
 | `tests/` | 单元测试（cfg-gated），按主题拆分：history / image / search / cleanup / db / backend |
 | `stress/` | 应力测试（feature-gated behind `stress-test`）：数据生成 + 基准测试 |
+| `demo/` | 演示数据（feature-gated behind `demo-data`）：一套人工挑选的文本 + Unsplash 实拍图（首次生成时下载并缓存到 gitignored 的 `demo-data/images/`），按生产 schema/hash/缩略图辅助函数写入独立 DB。`src/bin/demo_gen.rs` 是它的 CLI，`./videos/demo.sh` 负责与个人库换位 |
 
 **关键机制**（详细原理见 `docs/engineering-notes.md`）：
 

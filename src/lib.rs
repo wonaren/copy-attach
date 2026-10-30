@@ -70,6 +70,10 @@ mod ffi;
 #[cfg(feature = "stress-test")]
 pub mod stress;
 
+/// Curated demo dataset generator (`demo-gen` binary / `demo.sh`).
+#[cfg(feature = "demo-data")]
+pub mod demo;
+
 #[cfg(test)]
 mod tests;
 
