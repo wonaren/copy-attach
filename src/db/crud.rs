@@ -424,21 +424,28 @@ pub(crate) fn soft_delete_row(conn: &Connection, db_id: i64) -> Result<(u64, i64
     let stamp = crate::backend::undo_stamp_now();
     // Read the row's identity and star state in one probe; a row that is
     // already in the side table is not deletable again.
-    let row: Option<(i64, i64)> = conn
-        .query_row(
-            "SELECT h.entry_id,
-                    (SELECT COUNT(*) FROM clipboard_favorites f WHERE f.entry_id = h.entry_id)
-             FROM clipboard_history h
-             WHERE h.id = ?1
-               AND NOT EXISTS (SELECT 1 FROM clipboard_deleted d WHERE d.row_id = h.id)",
-            rusqlite::params![db_id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .ok();
-    let (entry_id, was_favorite) = match row {
-        Some(v) => v,
-        None => {
+    //
+    // "No such row" and "the read failed" are DIFFERENT outcomes and must not be
+    // collapsed: a failed read (IO error, lock timeout, damaged schema) is a
+    // defect in the main path, and reporting it as "the row isn't there" would
+    // hide it behind a plausible business answer. Only `QueryReturnedNoRows`
+    // means the row is genuinely absent.
+    let (entry_id, was_favorite) = match conn.query_row(
+        "SELECT h.entry_id,
+                (SELECT COUNT(*) FROM clipboard_favorites f WHERE f.entry_id = h.entry_id)
+         FROM clipboard_history h
+         WHERE h.id = ?1
+           AND NOT EXISTS (SELECT 1 FROM clipboard_deleted d WHERE d.row_id = h.id)",
+        rusqlite::params![db_id],
+        |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+    ) {
+        Ok(v) => v,
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
             crate::error_log!("CopyAttach: soft-delete matched no live row for db_id={db_id}");
+            return Err(());
+        }
+        Err(e) => {
+            crate::error_log!("CopyAttach: soft-delete could not read row {db_id}: {e}");
             return Err(());
         }
     };
@@ -459,26 +466,41 @@ pub(crate) fn soft_delete_row(conn: &Connection, db_id: i64) -> Result<(u64, i64
 /// `(row_id, entry_id, deleted_at, was_favorite)`. A side row whose payload row
 /// is already gone is skipped and cleaned up: it cannot be restored, and
 /// letting it sit at the head would block every older deletion behind it.
-pub(crate) fn newest_deleted_row(conn: &Connection) -> Option<(i64, u64, i64, i64)> {
+///
+/// `Err` is a real read failure and must be surfaced, not flattened into
+/// `None`: "nothing is undoable" is a normal state the UI acts on (it disables
+/// ⌘Z), so reporting an IO error that way would make a broken database look
+/// like an empty undo stack.
+pub(crate) fn newest_deleted_row(
+    conn: &Connection,
+) -> Result<Option<(i64, u64, i64, i64)>, ()> {
     loop {
-        let candidate: Option<(i64, i64, i64, i64)> = conn
-            .query_row(
-                "SELECT row_id, entry_id, deleted_at, was_favorite
-                 FROM clipboard_deleted
-                 ORDER BY deleted_at DESC, row_id DESC
-                 LIMIT 1",
-                [],
-                |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, i64>(1)?,
-                        row.get::<_, i64>(2)?,
-                        row.get::<_, i64>(3)?,
-                    ))
-                },
-            )
-            .ok();
-        let (row_id, entry_id, stamp, was_favorite) = candidate?;
+        let candidate = match conn.query_row(
+            "SELECT row_id, entry_id, deleted_at, was_favorite
+             FROM clipboard_deleted
+             ORDER BY deleted_at DESC, row_id DESC
+             LIMIT 1",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        ) {
+            Ok(v) => Some(v),
+            Err(rusqlite::Error::QueryReturnedNoRows) => None,
+            Err(e) => {
+                crate::error_log!("CopyAttach: undo could not read the deleted-row head: {e}");
+                return Err(());
+            }
+        };
+        let (row_id, entry_id, stamp, was_favorite) = match candidate {
+            Some(v) => v,
+            None => return Ok(None),
+        };
         // An orphan side row (payload row already purged) is dropped and the
         // next-newest deletion is considered.
         let payload_exists: i64 = conn
@@ -487,20 +509,34 @@ pub(crate) fn newest_deleted_row(conn: &Connection) -> Option<(i64, u64, i64, i6
                 rusqlite::params![row_id],
                 |r| r.get(0),
             )
-            .unwrap_or(0);
+            .map_err(|e| {
+                crate::error_log!("CopyAttach: undo could not check payload for row {row_id}: {e}");
+            })?;
         if payload_exists > 0 {
-            return Some((row_id, entry_id as u64, stamp, was_favorite));
+            return Ok(Some((row_id, entry_id as u64, stamp, was_favorite)));
         }
         crate::debug_log!("CopyAttach: dropping orphan undo entry for missing row {row_id}");
-        let _ = conn.execute(
+        // The drop MUST succeed before looping: on failure the same row would be
+        // selected again forever, so this returns an explicit error instead of
+        // retrying silently.
+        conn.execute(
             "DELETE FROM clipboard_deleted WHERE row_id = ?1",
             rusqlite::params![row_id],
-        );
+        )
+        .map_err(|e| {
+            crate::error_log!(
+                "CopyAttach: could not drop orphan undo entry for row {row_id}: {e} — aborting instead of looping"
+            );
+        })?;
     }
 }
 
 /// Number of deletions currently undoable.
-pub(crate) fn undo_depth(conn: &Connection) -> usize {
+///
+/// `Err` (not 0) on a read failure: the caller uses this to enable/disable ⌘Z,
+/// and a failed count reported as "0" would silently disable undo while the
+/// deleted rows are still there.
+pub(crate) fn undo_depth(conn: &Connection) -> Result<usize, ()> {
     conn.query_row(
         "SELECT COUNT(*) FROM clipboard_deleted d
          WHERE EXISTS (SELECT 1 FROM clipboard_history h WHERE h.id = d.row_id)",
@@ -508,7 +544,9 @@ pub(crate) fn undo_depth(conn: &Connection) -> usize {
         |row| row.get::<_, i64>(0),
     )
     .map(|n| n.max(0) as usize)
-    .unwrap_or(0)
+    .map_err(|e| {
+        crate::error_log!("CopyAttach: failed to count undoable deletions: {e}");
+    })
 }
 
 /// Purge deletions past their retention window, then shed the oldest until the

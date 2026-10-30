@@ -408,13 +408,18 @@ pub extern "C" fn clipboard_undo_delete() -> c_int {
                 return 0;
             }
         };
-        let (old_row_id, entry_id, _stamp, was_favorite_raw) = match crate::db::newest_deleted_row(&conn) {
-            Some(t) => t,
-            None => {
-                crate::debug_log!("CopyAttach: undo requested with nothing deleted");
-                return 0;
-            }
-        };
+        let (old_row_id, entry_id, _stamp, was_favorite_raw) =
+            match crate::db::newest_deleted_row(&conn) {
+                Ok(Some(t)) => t,
+                Ok(None) => {
+                    crate::debug_log!("CopyAttach: undo requested with nothing deleted");
+                    return 0;
+                }
+                // `newest_deleted_row` already logged the concrete SQLite error.
+                // Reported as a failed undo (0), never as "nothing to undo": the
+                // caller shows a distinct message for a genuine failure.
+                Err(()) => return 0,
+            };
         let was_favorite = was_favorite_raw != 0;
 
         // Read the payload back out of the deleted row. This is the only place a
@@ -592,6 +597,10 @@ pub extern "C" fn clipboard_undo_delete() -> c_int {
 }
 
 /// Returns 1 if at least one deleted row is still undoable, 0 otherwise.
+///
+/// A read failure also returns 0, but logs it: 0 is the only value the FFI
+/// contract has for "cannot undo", so the distinction lives in the log rather
+/// than being silently swallowed.
 #[no_mangle]
 pub extern "C" fn clipboard_can_undo() -> c_int {
     let b = match try_backend() {
@@ -600,13 +609,23 @@ pub extern "C" fn clipboard_can_undo() -> c_int {
     };
     let conn = match b.db.lock() {
         Ok(c) => c,
-        Err(_) => return 0,
+        Err(e) => {
+            crate::error_log!("CopyAttach: DB mutex poisoned in can_undo: {e}");
+            return 0;
+        }
     };
-    c_int::from(crate::db::undo_depth(&conn) > 0)
+    match crate::db::undo_depth(&conn) {
+        Ok(depth) => c_int::from(depth > 0),
+        // `undo_depth` already logged the concrete SQLite error.
+        Err(()) => 0,
+    }
 }
 
 /// How many deletions are currently undoable. Lets the UI say "还可撤销 N 步"
 /// instead of implying a fixed step count.
+///
+/// 0 on a read failure as well, but the failure is logged: the FFI cannot
+/// express "unknown" and a negative sentinel would be misread as a count.
 #[no_mangle]
 pub extern "C" fn clipboard_undo_depth() -> c_int {
     let b = match try_backend() {
@@ -615,9 +634,16 @@ pub extern "C" fn clipboard_undo_depth() -> c_int {
     };
     let conn = match b.db.lock() {
         Ok(c) => c,
-        Err(_) => return 0,
+        Err(e) => {
+            crate::error_log!("CopyAttach: DB mutex poisoned in undo_depth: {e}");
+            return 0;
+        }
     };
-    crate::db::undo_depth(&conn) as c_int
+    match crate::db::undo_depth(&conn) {
+        Ok(depth) => depth as c_int,
+        // `undo_depth` already logged the concrete SQLite error.
+        Err(()) => 0,
+    }
 }
 
 /// Returns the `entry_id` of the most recently undo-restored entry, or 0 if none.

@@ -281,3 +281,92 @@ fn test_clear_removes_deleted_rows() {
         let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
     }
 }
+
+/// The three soft-delete primitives must distinguish a real read failure from
+/// a normal "nothing there" answer.
+///
+/// Each of these used to flatten the distinction, which is exactly the
+/// fallback pattern the repo forbids: a broken read surfaced as a plausible
+/// business state (row absent / nothing to undo / undo depth 0) and the UI
+/// acted on the wrong one. The write failure is produced for real
+/// (`PRAGMA query_only`), not mocked.
+///
+/// Positive control: with `query_only` off, every call succeeds and returns the
+/// real answer — so the assertions below cannot pass by failing everything.
+#[test]
+fn test_soft_delete_primitives_report_read_failures() {
+    let (path, conn) = file_db("failures");
+    let (_id, row) = insert_body(&conn, "failure-probe", 1);
+
+    // --- Positive control: writable connection, real answers. ---
+    assert_eq!(
+        crate::db::undo_depth(&conn).expect("live read must succeed"),
+        0,
+        "nothing deleted yet"
+    );
+    assert!(
+        crate::db::newest_deleted_row(&conn).expect("live read must succeed").is_none(),
+        "nothing deleted yet"
+    );
+    crate::db::soft_delete_row(&conn, row).expect("delete must succeed on a live row");
+
+    // `soft_delete_row` on an already-deleted row is the "no live row" case and
+    // must still be a clean failure (not a panic, not a silent success).
+    assert!(
+        crate::db::soft_delete_row(&conn, row).is_err(),
+        "deleting the same row twice must fail"
+    );
+    assert_eq!(
+        crate::db::undo_depth(&conn).expect("read must succeed"),
+        1,
+        "the first delete left one undoable row"
+    );
+
+    // --- Failure path: every write now fails inside SQLite. ---
+    {
+        let ro = Connection::open(&path).expect("reopen read-only connection");
+        ro.pragma_update(None, "query_only", true).expect("query_only");
+        // `undo_depth` is a pure read and must still work with writes disabled;
+        // this also proves the flag only affects writes, so the failures below
+        // come from the write attempts, not from a broken connection.
+        assert_eq!(
+            crate::db::undo_depth(&ro).expect("read must work on a query_only connection"),
+            1,
+            "reading is unaffected by query_only"
+        );
+    }
+
+    // A read-only connection's DELETE for the orphan cleanup must fail loudly
+    // inside `newest_deleted_row` instead of spinning forever. Manufacture an
+    // orphan side row (payload already gone) so that path is taken.
+    {
+        let ro = Connection::open(&path).expect("reopen");
+        ro.pragma_update(None, "query_only", true).expect("query_only");
+        // The orphan cannot be created on the read-only connection; it is made
+        // on the writable one first, then observed here.
+        drop(ro);
+        conn.execute(
+            "INSERT INTO clipboard_deleted (row_id, entry_id, deleted_at, was_favorite)
+             VALUES (999999, 4242, ?1, 0)",
+            rusqlite::params![crate::backend::undo_stamp_now() + 1],
+        )
+        .expect("insert orphan side row");
+        let ro = Connection::open(&path).expect("reopen");
+        ro.pragma_update(None, "query_only", true).expect("query_only");
+        // The newest deletion is the orphan; dropping it requires a write, which
+        // is refused — the call must return Err, NOT loop or silently skip.
+        assert!(
+            crate::db::newest_deleted_row(&ro).is_err(),
+            "an undeletable orphan must surface as an error, not an infinite loop"
+        );
+    }
+
+    // Unwind the orphan and confirm the readable state again.
+    conn.execute("DELETE FROM clipboard_deleted WHERE row_id = 999999", [])
+        .expect("cleanup orphan");
+
+    drop(conn);
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+    }
+}

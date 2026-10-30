@@ -168,7 +168,7 @@ fn test_soft_delete_undo_depth_is_not_capped() {
         );
         let depth = {
             let conn = b.db.lock().unwrap();
-            crate::db::undo_depth(&conn)
+            crate::db::undo_depth(&conn).expect("undo depth must be readable")
         };
         assert!(
             depth >= (i + 1) as usize,
@@ -179,7 +179,7 @@ fn test_soft_delete_undo_depth_is_not_capped() {
     {
         let conn = b.db.lock().unwrap();
         assert_eq!(
-            crate::db::undo_depth(&conn),
+            crate::db::undo_depth(&conn).expect("undo depth must be readable"),
             n as usize,
             "all {n} deletions must stay undoable (no step cap)"
         );
@@ -196,7 +196,11 @@ fn test_soft_delete_undo_depth_is_not_capped() {
     }
     {
         let conn = b.db.lock().unwrap();
-        assert_eq!(crate::db::undo_depth(&conn), 0, "everything was undone");
+        assert_eq!(
+            crate::db::undo_depth(&conn).expect("undo depth must be readable"),
+            0,
+            "everything was undone"
+        );
     }
 
     // Unwind the fixture (the rows came back live, with new row ids).
@@ -595,7 +599,7 @@ fn test_undo_image_restore_releases_blob_capacity() {
     };
     assert_ne!(restored_id, 0);
     assert_eq!(
-        crate::db::undo_depth(&b.db.lock().unwrap()),
+        crate::db::undo_depth(&b.db.lock().unwrap()).expect("undo depth must be readable"),
         0,
         "undo slot consumed"
     );
