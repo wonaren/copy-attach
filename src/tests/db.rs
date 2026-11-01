@@ -51,7 +51,7 @@ fn test_first_launch_tips_seed_into_empty_db() {
 
     for e in &loaded {
         assert_eq!(e.source_name(), "CopyAttach", "tip source name");
-        assert_eq!(e.source_bundle_id(), "com.example.copyattach", "tip source bundle id");
+        assert_eq!(e.source_bundle_id(), "cc.wonaren.copyattach", "tip source bundle id");
     }
 
     assert_eq!(loaded[0].label(), "欢迎使用 CopyAttach !");

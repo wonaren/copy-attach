@@ -64,7 +64,7 @@ cmd_launch() {
     # Also persist the preference: the self-healing single-instance path (and
     # any later `open`) re-reads it, whereas a direct-launch env var lives only
     # in that one process. HOME is left untouched (keychain!).
-    defaults write com.example.copyattach PerfTracing -bool true
+    defaults write cc.wonaren.copyattach PerfTracing -bool true
     # Launch the binary directly so it inherits COPYATTACH_PERF; `open` does not
     # forward the shell environment.
     COPYATTACH_PERF=1 nohup "$BIN" >/dev/null 2>&1 &

@@ -80,6 +80,8 @@ vmmap -summary $(pgrep -f 'CopyAttach.app/Contents/MacOS/CopyAttach') | head -16
 
 （历史商业版本的服务端与客户端授权体系已完整归档封存在 `archive/commercial-v0.107` 分支与 `v0.107.10-commercial-final` 标签）。
 
+Homebrew cask 维护在独立仓库 `wonaren/homebrew-copyattach`（安装命令 `brew install --cask wonaren/copyattach/copyattach`）。该仓库的定时 workflow 每 6 小时读取最新 Release，自动更新 `version` 与 `sha256`；本仓库发版后无需手动改 cask。
+
 ## 代码库架构
 
 ### Rust 后端（`src/`，cdylib → `libcopy_attach.dylib`）
@@ -224,7 +226,7 @@ CI（`.github/workflows/build.yml`）签名步骤关键：`build` job 必须声�
 
 改动任何热路径前后，用仪表实测而非推测。详见 `docs/perf-instrumentation.md`（格式、门禁、基线）与 `perf/BASELINE.md`（已实测基线）。
 
-- 开启：`defaults write com.example.copyattach PerfTracing -bool true` 后 `open "CopyAttach.app"`（`open` 不继承 shell 环境变量，故用偏好而非 env）。
+- 开启：`defaults write cc.wonaren.copyattach PerfTracing -bool true` 后 `open "CopyAttach.app"`（`open` 不继承 shell 环境变量，故用偏好而非 env）。
 - 采集：`bash perf/collect.sh launch` / `smoke N` / `analyze <start_ms>`；或 `python3 perf/analyze.py /tmp/copyattach_debug.log --session-start <ms>`。
 - 记录写在既有 `/tmp/copyattach_debug.log`，以 `__CA_PERF__` 开头；Rust 用 `mach_absolute_time`、Swift 用 `DispatchTime.uptimeNanoseconds`，同一单调时钟（有 G6 门禁证明）。
 - 分析器先跑 9 条门禁（自检/通道/时钟对齐/开销/关闭态惰性），任一失败即判 INVALID 且返回码 2；数字不可信之前不会给出结论。

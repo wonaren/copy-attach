@@ -17,7 +17,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var localKeyDownMonitor: Any?
 
     static func terminateIfDuplicateInstance() {
-        let bundleID = Bundle.main.bundleIdentifier ?? "com.example.copyattach"
+        let bundleID = Bundle.main.bundleIdentifier ?? "cc.wonaren.copyattach"
         let currentPID = ProcessInfo.processInfo.processIdentifier
         let others = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
             .filter { $0.processIdentifier != currentPID }

@@ -53,7 +53,7 @@ pub(crate) fn seed_first_launch_tips(conn: &Connection) {
             &full,
             now - i as u64,
             "CopyAttach".to_string(),
-            "com.example.copyattach".to_string(),
+            "cc.wonaren.copyattach".to_string(),
             0,
         );
         if insert_entry_to_db(&tx, &entry, Some(&full), None, None).is_err() {

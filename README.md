@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/wonaren/copy-attach/releases"><img src="https://img.shields.io/badge/version-0.109.0-blue?style=flat" alt="Version 0.109.0"></a>
+  <a href="https://github.com/wonaren/copy-attach/releases"><img src="https://img.shields.io/badge/version-0.110.0-blue?style=flat" alt="Version 0.110.0"></a>
   <img src="https://img.shields.io/badge/macOS-15.0%2B-000000?style=flat&logo=apple&logoColor=white" alt="macOS 15.0+">
   <img src="https://img.shields.io/badge/Swift-6%2B-f05138?style=flat&logo=swift&logoColor=white" alt="Swift 6+">
   <img src="https://img.shields.io/badge/Rust-1.75%2B-dea584?style=flat&logo=rust&logoColor=white" alt="Rust 1.75+">
@@ -29,6 +29,14 @@
 CopyAttach 是一款专为 macOS 设计的极轻量、高效、自由开源剪贴板管理器。它在后台默默记录你复制的一切——文本、代码、链接、图片，通过全局快捷键让你在任何应用中极速检索、预览与盲打粘贴。
 
 自 **v0.108.0** 起，CopyAttach 全面转为**完全免费与开源**，代码遵循 **GNU General Public License v3.0 (GPLv3)**。从渲染帧率到磁盘写入，从原子内存回收（madvise）到功耗治理，每个环节都经过严苛打磨，坚守**纯本地离线、零数据上传、零后台遥测**的极客精神。
+
+## 安装
+
+```bash
+brew install --cask wonaren/copyattach/copyattach
+```
+
+也可从 [GitHub Releases](https://github.com/wonaren/copy-attach/releases) 下载 DMG 拖入「应用程序」。仅支持 Apple Silicon（arm64）与 macOS 15.0+。
 
 ## 特性
 

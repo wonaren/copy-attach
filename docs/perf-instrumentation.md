@@ -46,11 +46,11 @@ __CA_PERF__ v=1 pid=<u32> tid=<hex> t=<mono_ns> wall=<unix_ms> kind=<b|e|i|c> ca
 
 | 方式 | 适用 | 说明 |
 |---|---|---|
-| `defaults write com.example.copyattach PerfTracing -bool true` | **推荐** | 持久化偏好；`open` 启动的 app 也能读到（`open` 不继承 shell 环境变量） |
+| `defaults write cc.wonaren.copyattach PerfTracing -bool true` | **推荐** | 持久化偏好；`open` 启动的 app 也能读到（`open` 不继承 shell 环境变量） |
 | `COPYATTACH_PERF=1 <binary>` | 直接运行二进制 | 注意：从受限启动器启动会被沙箱限制，且 app 需要写 `~/Library/Application Support/CopyAttach` |
 | `clipboard_set_perf_enabled(1)` | 运行中 | FFI，可选 |
 
-关闭：`defaults write com.example.copyattach PerfTracing -bool false`（或删除该 key）。
+关闭：`defaults write cc.wonaren.copyattach PerfTracing -bool false`（或删除该 key）。
 
 ---
 
@@ -94,7 +94,7 @@ __CA_PERF__ v=1 pid=<u32> tid=<hex> t=<mono_ns> wall=<unix_ms> kind=<b|e|i|c> ca
 
 ```bash
 # 1. 打开 tracing 并启动
-defaults write com.example.copyattach PerfTracing -bool true
+defaults write cc.wonaren.copyattach PerfTracing -bool true
 open ./CopyAttach.app
 
 # 2. 记录会话窗口起点

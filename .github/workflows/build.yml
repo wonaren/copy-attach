@@ -20,8 +20,7 @@
 #      用户首次点一次「始终允许」即可，之后所有版本更新都不再弹。
 #   2. 不配置证书也可以构建，但打出的 DMG 是 ad-hoc 签名：会被 Gatekeeper
 #      拦截，且每次更新都会重新弹钥匙串授权框。
-#   3. 修改 CFBundleIdentifier（SwiftApp/Info.plist）为你的真实 bundle ID
-#      （当前是 com.example.copyattach，不签名不影响使用）
+#   3. CFBundleIdentifier 为 cc.wonaren.copyattach（SwiftApp/Info.plist）
 #
 # 触发方式:
 #   - git tag v0.81.0 && git push origin v0.81.0
@@ -106,6 +105,11 @@ jobs:
             arm64|aarch64) ARCH="arm64" ;;
             x86_64|amd64) ARCH="x86_64" ;;
           esac
+          # Cask 只发布 Apple Silicon 产物；不对的 runner 直接失败，避免静默产出无法安装的 DMG
+          if [ "$ARCH" != "arm64" ]; then
+            echo "::error::Only arm64 releases are supported (runner: $ARCH)"
+            exit 1
+          fi
           DMG_NAME="CopyAttach-${VERSION}-macos-${ARCH}.dmg"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "dmg_name=${DMG_NAME}" >> "$GITHUB_OUTPUT"
@@ -306,3 +310,18 @@ jobs:
           gh release upload "$TAG" build/CopyAttach-*.dmg \
             --repo "$REPOSITORY" \
             --clobber
+
+      # 立即触发 Homebrew tap 的 bump workflow。TAP_TOKEN 需为可写
+      # wonaren/homebrew-copyattach 的 fine-grained PAT（Contents: Read and write）。
+      # 未配置时 tap 仍会在自己的定时任务里自动追平，此处只告警不阻断发布。
+      - name: Update Homebrew tap
+        env:
+          GH_TOKEN: ${{ secrets.TAP_TOKEN }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::warning::TAP_TOKEN 未配置，Homebrew tap 将在定时任务中自动更新"
+            exit 0
+          fi
+          gh api repos/wonaren/homebrew-copyattach/dispatches -f event_type=release
+          echo "Homebrew tap update dispatched for v${VERSION}"

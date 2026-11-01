@@ -484,7 +484,7 @@ Rust 侧的「单槽」`IMAGE_DECODE_SCRATCH` 是**复用机会**而非并发上
 **a. 验证手法破坏了被测前提。** 起初用 `perf/collect.sh launch` 带 `COPYATTACH_PERF=1` 直接启动二进制，
 结果 app **继承了调用者的沙箱**，连真实 DB 都写不了（日志刷 `attempt to write a readonly database`、后端起不来、
 弹窗永远打不开，我因此误以为「`open` 不触发 toggle」）。正确做法是 `open -a`（由 launchd 拉起、不继承沙箱）
-＋ `defaults write com.example.copyattach PerfTracing -bool true`（`open` 不继承 shell 环境变量）。
+＋ `defaults write cc.wonaren.copyattach PerfTracing -bool true`（`open` 不继承 shell 环境变量）。
 这与 CLAUDE.md 里「覆盖 HOME 启动 GUI」是同一类错误：**测试手法必须先确认不改变被测对象**。
 
 **b. 合成按键无法进入 key window（已实测，非推断）。** 三种方式全部失败：`CGEvent.post(tap:.cghidEventTap)`（0 条记录）、
