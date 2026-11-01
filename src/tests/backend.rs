@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use crate::backend::{set_backend, Backend};
-use crate::ffi::{clipboard_delete_by_id, clipboard_undo_delete};
+use crate::ffi::{clipboard_clear_history, clipboard_delete_by_id, clipboard_undo_delete};
 use crate::ignore::IgnoreRules;
 use crate::types::{ClipboardEntry, SourceApp};
 use rusqlite::Connection;
@@ -226,6 +226,80 @@ fn test_soft_delete_undo_depth_is_not_capped() {
 ///
 /// The old undo path inserted without dedup, so `delete A → copy A → delete A →
 /// undo ×2` left two identical rows that survived a restart.
+/// "清空历史" is a hard delete that must take the undo stack with it: the
+/// confirmation the user accepts says the action cannot be undone, and the side
+/// table IS the stack. Leaving it behind also means `clipboard_can_undo` keeps
+/// advertising an undo whose payload rows were just deleted.
+#[test]
+fn test_clear_history_also_clears_the_undo_stack() {
+    let _shared = shared_state_guard();
+    ensure_test_backend();
+    let b = crate::backend::try_backend().expect("backend initialized");
+
+    let base: u64 = 950_000_000;
+    let mut db_ids: Vec<i64> = Vec::new();
+    {
+        let conn = b.db.lock().unwrap();
+        for i in 0..2u64 {
+            conn.execute(
+                "INSERT INTO clipboard_history
+                    (entry_type, text, hash, timestamp, source_name, source_bundle_id, entry_id,
+                     preview, label)
+                 VALUES (0, ?1, ?2, ?3, 'ClearUndo', 'com.example.clearundo', ?4, ?1, ?1)",
+                rusqlite::params![
+                    format!("clear-undo-{i}"),
+                    (base + i) as i64,
+                    (i + 1) as i64,
+                    (base + i) as i64
+                ],
+            )
+            .expect("insert clear-undo fixture row");
+            db_ids.push(conn.last_insert_rowid());
+        }
+    }
+    {
+        let mut hist = b.history.lock().unwrap();
+        for (i, db_id) in db_ids.iter().enumerate() {
+            hist.push(ClipboardEntry::Text {
+                id: base + i as u64,
+                preview: format!("clear-undo-{i}"),
+                label: format!("clear-undo-{i}"),
+                custom_label: String::new(),
+                text_hash: base + i as u64,
+                timestamp: (i + 1) as u64,
+                source_name: "ClearUndo".to_string(),
+                source_bundle_id: "com.example.clearundo".to_string(),
+                db_id: *db_id,
+            });
+        }
+    }
+
+    assert_eq!(clipboard_delete_by_id(base), 1, "fixture delete must succeed");
+    {
+        let conn = b.db.lock().unwrap();
+        assert_eq!(
+            crate::db::undo_depth(&conn).expect("undo depth"),
+            1,
+            "precondition: the delete is undoable"
+        );
+    }
+
+    assert_eq!(clipboard_clear_history(), 1, "clear must succeed");
+
+    let conn = b.db.lock().unwrap();
+    for table in ["clipboard_history", "clipboard_deleted", "clipboard_favorites"] {
+        let n: i64 = conn
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+            .expect("count table");
+        assert_eq!(n, 0, "{table} must be empty after 清空历史");
+    }
+    assert_eq!(
+        crate::db::undo_depth(&conn).expect("undo depth"),
+        0,
+        "清空历史 promises it cannot be undone"
+    );
+}
+
 #[test]
 fn test_undo_collapses_with_recaptured_duplicate() {
     let _shared = shared_state_guard();

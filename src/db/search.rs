@@ -163,10 +163,10 @@ fn escape_like(query: &str) -> String {
 
 /// Load the full text body for a row by its SQLite rowid (== `db_id`).
 ///
-/// Deliberately NOT filtered on `deleted_at`: the undo path reads the body of a
-/// soft-deleted row to restore it. Callers on the live path only ever reach
-/// rows they got from the (already filtered) history, so this cannot leak a
-/// deleted entry into the UI.
+/// Deliberately NOT filtered on the `clipboard_deleted` side table: the undo
+/// path reads the body of a soft-deleted row to restore it. Callers on the live
+/// path only ever reach rows they got from the (already filtered) history, so
+/// this cannot leak a deleted entry into the UI.
 pub(crate) fn load_text_by_db_id(conn: &Connection, db_id: i64) -> Option<String> {
     let text: String = conn
         .query_row(

@@ -84,10 +84,11 @@ pub(crate) fn undo_stamp_now() -> i64 {
 
 /// The live undo byte budget in BYTES (0 = unlimited), read from the backend.
 ///
-/// Kept in the backend rather than passed through every call: the sweep runs
-/// from both the delete path and startup, and threading a parameter through
-/// would invite the two callers to disagree. `None` backend means "not
-/// initialized yet", which only startup can hit — the default applies there.
+/// The FFI layer reads it here (delete path, eviction preview, settings); the
+/// `db::` functions take the value as a parameter instead, so DB-level tests
+/// need no process singleton and the two callers of the sweep are forced to
+/// name the policy they run with. `None` backend means "not initialized yet",
+/// which only startup can hit — the default applies there.
 pub(crate) fn undo_budget_bytes() -> i64 {
     match BACKEND.get() {
         Some(b) => b.undo_budget_bytes.load(Ordering::Relaxed),

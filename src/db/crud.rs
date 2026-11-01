@@ -114,8 +114,8 @@ const ORDER_NEWEST_FIRST: &str = "ORDER BY timestamp DESC, id DESC";
 /// to the top rendered 101 rows instead of 102. The subquery therefore excludes
 /// favorites before applying `LIMIT`, matching `trim_db_history`'s cap exactly.
 ///
-/// Soft-deleted rows (`deleted_at != 0`) are excluded from both halves: they are
-/// undo candidates, not list entries.
+/// Soft-deleted rows (those with a `clipboard_deleted` side row) are excluded:
+/// they are undo candidates, not list entries.
 ///
 /// Only metadata is read: the full `text` column is never touched at load.
 /// Preview/label/text-hash were persisted at insert time (and backfilled for
@@ -131,14 +131,17 @@ pub(crate) fn load_history_from_db(conn: &Connection, threshold: usize) -> Vec<C
                     timestamp, source_name, source_bundle_id,
                     custom_label
              FROM clipboard_history
+             -- One live-row filter for the whole statement. `clipboard_favorites`
+             -- only ever references live rows (a delete drops the favorite, and
+             -- `prune_orphan_favorites` sweeps leftovers), so the favorites half
+             -- needs no filter of its own: this outer one already excludes a
+             -- soft-deleted row that a stale favorite id might name.
              WHERE id NOT IN (SELECT row_id FROM clipboard_deleted)
                AND (id IN (SELECT id FROM clipboard_history
                            WHERE id NOT IN (SELECT row_id FROM clipboard_deleted)
                              AND entry_id NOT IN (SELECT entry_id FROM clipboard_favorites)
                            {ORDER_NEWEST_FIRST} LIMIT ?1)
-                   OR entry_id IN (SELECT entry_id FROM clipboard_favorites
-                                   WHERE entry_id IN (SELECT entry_id FROM clipboard_history
-                                                      WHERE id NOT IN (SELECT row_id FROM clipboard_deleted))))
+                   OR entry_id IN (SELECT entry_id FROM clipboard_favorites))
              {ORDER_NEWEST_FIRST}"
         )
     ) {
@@ -328,6 +331,10 @@ pub(crate) fn insert_entry_to_db(
 /// selects candidate rows, and for text the exact-text predicate still
 /// enforces full equality (a 2^-64 hash collision can at worst miss a dedup,
 /// never delete a different text's row).
+///
+/// Only LIVE rows are matched: a soft-deleted row of the same content is an undo
+/// candidate, and removing it here would make the delete silently un-undoable
+/// just because the content was copied again.
 pub(crate) fn delete_matching_entry(conn: &Connection, entry: &ClipboardEntry, text: Option<&str>) {
     let result = match entry {
         ClipboardEntry::Text { text_hash, .. } => {
@@ -338,37 +345,87 @@ pub(crate) fn delete_matching_entry(conn: &Connection, entry: &ClipboardEntry, t
                     return;
                 }
             };
-            // Dedup only against LIVE rows: a soft-deleted row of the same
-            // content is an undo candidate, and removing it here would make the
-            // delete silently un-undoable just because the content was copied
-            // again.
-            conn.execute(
-                "DELETE FROM clipboard_history
-                 WHERE id NOT IN (SELECT row_id FROM clipboard_deleted)
-                   AND entry_type = 0 AND hash = ?1 AND text = ?2
-                   AND id != (SELECT id FROM clipboard_history
-                              WHERE id NOT IN (SELECT row_id FROM clipboard_deleted)
-                                AND entry_type = 0 AND hash = ?1 AND text = ?2
-                              ORDER BY id DESC LIMIT 1)",
-                rusqlite::params![*text_hash as i64, full],
-            ).map(|_| ())
+            collect_live_rows_with_content(conn, TEXT_DEDUP_SQL, rusqlite::params![*text_hash as i64, full])
         }
         ClipboardEntry::Image { hash, .. } => {
-            conn.execute(
-                "DELETE FROM clipboard_history
-                 WHERE id NOT IN (SELECT row_id FROM clipboard_deleted)
-                   AND entry_type = 1 AND hash = ?1
-                   AND id != (SELECT id FROM clipboard_history
-                              WHERE id NOT IN (SELECT row_id FROM clipboard_deleted)
-                                AND entry_type = 1 AND hash = ?1
-                              ORDER BY id DESC LIMIT 1)",
-                rusqlite::params![*hash as i64],
-            ).map(|_| ())
+            collect_live_rows_with_content(conn, IMAGE_DEDUP_SQL, rusqlite::params![*hash as i64])
         }
     };
-    if let Err(e) = result {
-        crate::error_log!("CopyAttach: failed to delete matching entry: {e}");
+    match result {
+        Ok(rows) => {
+            if let Err(e) = keep_newest_row(conn, &rows) {
+                crate::error_log!("CopyAttach: failed to delete matching entry: {e}");
+            }
+        }
+        Err(e) => crate::error_log!("CopyAttach: failed to delete matching entry: {e}"),
     }
+}
+
+/// Live rows holding the same content, newest row last written first. The head
+/// is the row the dedup keeps; the tail is what it removes.
+const TEXT_DEDUP_SQL: &str =
+    "SELECT id, entry_id FROM clipboard_history
+     WHERE id NOT IN (SELECT row_id FROM clipboard_deleted)
+       AND entry_type = 0 AND hash = ?1 AND text = ?2
+     ORDER BY id DESC";
+
+/// As `TEXT_DEDUP_SQL`, for image rows (content identity is the hash alone).
+const IMAGE_DEDUP_SQL: &str =
+    "SELECT id, entry_id FROM clipboard_history
+     WHERE id NOT IN (SELECT row_id FROM clipboard_deleted)
+       AND entry_type = 1 AND hash = ?1
+     ORDER BY id DESC";
+
+fn collect_live_rows_with_content(
+    conn: &Connection,
+    sql: &str,
+    params: impl rusqlite::Params,
+) -> Result<Vec<(i64, i64)>, rusqlite::Error> {
+    let mut stmt = conn.prepare(sql)?;
+    let rows = stmt.query_map(params, |r| Ok((r.get(0)?, r.get(1)?)))?;
+    rows.collect()
+}
+
+/// Keep `rows[0]`, delete the rest, and hand their stars to the row that stays.
+///
+/// The star migration is not cosmetic: a favorite is keyed by `entry_id`, and the
+/// rows being removed can carry a DIFFERENT id from the survivor (undo re-inserts
+/// the original id while a re-capture of the same content minted a new one).
+/// Without the move, the star becomes an orphan that `prune_orphan_favorites`
+/// drops at the next launch — the user's star silently disappears after a
+/// restart. The alternative (rewriting the survivor's `entry_id`) is not an
+/// option: an `UPDATE` rewrites the whole row, multi-MB blobs included.
+///
+/// In the capture path the survivor and the duplicates share one `entry_id`
+/// (the caller persists the post-dedup in-memory entry), so the migration is a
+/// no-op there.
+fn keep_newest_row(conn: &Connection, rows: &[(i64, i64)]) -> Result<(), rusqlite::Error> {
+    let Some(&(survivor_id, survivor_entry_id)) = rows.first() else {
+        return Ok(());
+    };
+    for &(row_id, entry_id) in &rows[1..] {
+        if entry_id != survivor_entry_id
+            && conn.query_row(
+                "SELECT COUNT(*) FROM clipboard_favorites WHERE entry_id = ?1",
+                rusqlite::params![entry_id],
+                |r| r.get::<_, i64>(0),
+            )?
+                > 0
+        {
+            // Select-from-history keeps the invariant that a favorite only ever
+            // names a live row, even if the survivor were removed concurrently.
+            conn.execute(
+                "INSERT OR IGNORE INTO clipboard_favorites (entry_id)
+                 SELECT entry_id FROM clipboard_history WHERE id = ?1",
+                rusqlite::params![survivor_id],
+            )?;
+        }
+        conn.execute(
+            "DELETE FROM clipboard_history WHERE id = ?1",
+            rusqlite::params![row_id],
+        )?;
+    }
+    Ok(())
 }
 
 /// Trim the DB to at most `threshold` **non-favorite** entries (keeps the
@@ -549,6 +606,79 @@ pub(crate) fn undo_depth(conn: &Connection) -> Result<usize, ()> {
     })
 }
 
+/// Payload bytes of one history row (text + png + thumb), prefixed for a table
+/// aliased `h`.
+///
+/// Every column is COALESCEd INDIVIDUALLY: a text row has NULL png/thumb and an
+/// image row has NULL text, so `COALESCE(LENGTH(a) + LENGTH(b) + LENGTH(c), 0)`
+/// is NULL as soon as one term is NULL. The single outer COALESCE reported "0
+/// bytes retained" for every image row and the budget never fired (measured: 80
+/// MB of deleted screenshots stayed under a 64 MB budget).
+const ROW_PAYLOAD_BYTES: &str =
+    "COALESCE(LENGTH(h.text), 0) + COALESCE(LENGTH(h.png_data), 0) + COALESCE(LENGTH(h.thumb_data), 0)";
+
+/// Total payload bytes retained by soft-deleted rows.
+fn retained_deleted_payload_bytes(conn: &Connection) -> Result<i64, ()> {
+    let sql = format!(
+        "SELECT COALESCE(SUM({ROW_PAYLOAD_BYTES}), 0)
+         FROM clipboard_deleted d
+         JOIN clipboard_history h ON h.id = d.row_id"
+    );
+    conn.query_row(&sql, [], |row| row.get::<_, i64>(0))
+        .map_err(|e| {
+            crate::error_log!("CopyAttach: failed to size the retained deleted payload: {e}");
+        })
+}
+
+/// The deletions to drop in order to shed `excess` payload bytes, oldest
+/// deletion first.
+///
+/// ONE implementation behind both the sweep and the pre-delete preview. The
+/// preview is a promise made to the user ("继续删除将无法恢复 N 条"), so it
+/// must be the sweep's own arithmetic, not a second loop that merely resembles
+/// it — a divergence would either over-warn (blocking deletes that cost
+/// nothing) or under-warn (losing deletions the user was told were safe).
+fn collect_evictions(conn: &Connection, excess: i64) -> Result<Vec<i64>, ()> {
+    if excess <= 0 {
+        return Ok(Vec::new());
+    }
+    let sql = format!(
+        "SELECT d.row_id, {ROW_PAYLOAD_BYTES}
+         FROM clipboard_deleted d
+         JOIN clipboard_history h ON h.id = d.row_id
+         ORDER BY d.deleted_at ASC, d.row_id ASC"
+    );
+    let mut stmt = conn.prepare(&sql).map_err(|e| {
+        crate::error_log!("CopyAttach: failed to prepare the deleted-payload sweep: {e}");
+    })?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+    })
+    .map_err(|e| {
+        crate::error_log!("CopyAttach: failed to read the deleted-payload rows: {e}");
+    })?;
+
+    let mut remaining = excess;
+    let mut doomed: Vec<i64> = Vec::new();
+    for row in rows {
+        // A single unreadable row must not abandon the whole sweep: the budget
+        // would then stay over its cap with nothing logged about the cost.
+        let (row_id, bytes) = match row {
+            Ok(v) => v,
+            Err(e) => {
+                crate::error_log!("CopyAttach: deleted-payload row read error: {e}");
+                continue;
+            }
+        };
+        if remaining <= 0 {
+            break;
+        }
+        doomed.push(row_id);
+        remaining = remaining.saturating_sub(bytes.max(0));
+    }
+    Ok(doomed)
+}
+
 /// Purge deletions past their retention window, then shed the oldest until the
 /// retained payload fits the byte budget.
 ///
@@ -586,77 +716,16 @@ pub(crate) fn purge_expired_deleted_rows(
     }
 
     // 2. Age: everything deleted longer ago than the retention window.
-    let by_age = purge_deleted_by(conn, &format!("d.deleted_at < {cutoff_micros}"))?;
+    let mut purged = purge_deleted_by(conn, &format!("d.deleted_at < {cutoff_micros}"))?;
 
-    // 3. Byte budget. Each column is COALESCEd individually: a text row has
-    // NULL png/thumb and an image row has NULL text, and `LENGTH(a) + LENGTH(b)`
-    // is NULL as soon as any term is NULL. A single outer COALESCE therefore
-    // reported "0 bytes retained" for every image row and the budget never fired
-    // (measured: 80 MB of deleted screenshots stayed under a 64 MB budget).
-    let retained: i64 = conn
-        .query_row(
-            "SELECT COALESCE(SUM(
-                 COALESCE(LENGTH(h.text), 0)
-               + COALESCE(LENGTH(h.png_data), 0)
-               + COALESCE(LENGTH(h.thumb_data), 0)), 0)
-             FROM clipboard_deleted d
-             JOIN clipboard_history h ON h.id = d.row_id",
-            [],
-            |row| row.get::<_, i64>(0),
-        )
-        .map_err(|e| {
-            crate::error_log!("CopyAttach: failed to size the retained deleted payload: {e}");
-        })?;
-
-    let mut purged = by_age;
-    // Budget 0 means "unlimited": every deletion survives until the age window
-    // closes it.
-    if budget_bytes > crate::backend::UNDO_BUDGET_UNLIMITED && retained > budget_bytes {
-        // Walk oldest-deletion-first, collecting rows until enough bytes are
-        // shed, then delete exactly that set.
-        let mut excess = retained - budget_bytes;
-        let mut doomed: Vec<i64> = Vec::new();
-        {
-            let mut stmt = match conn.prepare(
-                "SELECT d.row_id,
-                        COALESCE(LENGTH(h.text), 0)
-                      + COALESCE(LENGTH(h.png_data), 0)
-                      + COALESCE(LENGTH(h.thumb_data), 0)
-                 FROM clipboard_deleted d
-                 JOIN clipboard_history h ON h.id = d.row_id
-                 ORDER BY d.deleted_at ASC, d.row_id ASC",
-            ) {
-                Ok(s) => s,
-                Err(e) => {
-                    crate::error_log!("CopyAttach: failed to prepare deleted-payload sweep: {e}");
-                    return Err(());
-                }
-            };
-            let rows = match stmt.query_map([], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
-            }) {
-                Ok(r) => r,
-                Err(e) => {
-                    crate::error_log!("CopyAttach: failed to read deleted-payload rows: {e}");
-                    return Err(());
-                }
-            };
-            for row in rows {
-                let (row_id, bytes) = match row {
-                    Ok(v) => v,
-                    Err(e) => {
-                        crate::error_log!("CopyAttach: deleted-payload row read error: {e}");
-                        continue;
-                    }
-                };
-                if excess <= 0 {
-                    break;
-                }
-                doomed.push(row_id);
-                excess = excess.saturating_sub(bytes.max(0));
-            }
+    // 3. Byte budget. Budget 0 means "unlimited": every deletion survives until
+    // the age window closes it.
+    if budget_bytes > crate::backend::UNDO_BUDGET_UNLIMITED {
+        let retained = retained_deleted_payload_bytes(conn)?;
+        if retained > budget_bytes {
+            let doomed = collect_evictions(conn, retained - budget_bytes)?;
+            purged += delete_payload_rows(conn, &doomed)?;
         }
-        purged += delete_payload_rows(conn, &doomed)?;
     }
 
     if purged > 0 {
@@ -669,10 +738,9 @@ pub(crate) fn purge_expired_deleted_rows(
 /// `incoming_payload_bytes` were deleted now.
 ///
 /// Used to warn the user BEFORE the delete happens: once the sweep runs, the
-/// evicted deletions are gone and cannot be reported after the fact. Mirrors
-/// the eviction in `purge_expired_deleted_rows` exactly — oldest deletion
-/// first, accumulate until the excess is covered — so the warning cannot drift
-/// from the real behaviour.
+/// evicted deletions are gone and cannot be reported after the fact. Shares
+/// `collect_evictions` with the sweep, so the promise cannot drift from the
+/// behaviour it describes.
 ///
 /// Returns 0 when the budget is unlimited or the incoming row still fits.
 pub(crate) fn pending_undo_evictions(
@@ -683,78 +751,20 @@ pub(crate) fn pending_undo_evictions(
     if budget_bytes <= crate::backend::UNDO_BUDGET_UNLIMITED {
         return Ok(0);
     }
-    let retained: i64 = conn
-        .query_row(
-            "SELECT COALESCE(SUM(
-                 COALESCE(LENGTH(h.text), 0)
-               + COALESCE(LENGTH(h.png_data), 0)
-               + COALESCE(LENGTH(h.thumb_data), 0)), 0)
-             FROM clipboard_deleted d
-             JOIN clipboard_history h ON h.id = d.row_id",
-            [],
-            |row| row.get::<_, i64>(0),
-        )
-        .map_err(|e| {
-            crate::error_log!("CopyAttach: failed to size the retained deleted payload: {e}");
-        })?;
-
+    let retained = retained_deleted_payload_bytes(conn)?;
     let after_insert = retained.saturating_add(incoming_payload_bytes);
-    if after_insert <= budget_bytes {
-        return Ok(0);
-    }
-    let mut excess = after_insert - budget_bytes;
-
-    let mut stmt = conn
-        .prepare(
-            "SELECT COALESCE(LENGTH(h.text), 0)
-                  + COALESCE(LENGTH(h.png_data), 0)
-                  + COALESCE(LENGTH(h.thumb_data), 0)
-             FROM clipboard_deleted d
-             JOIN clipboard_history h ON h.id = d.row_id
-             ORDER BY d.deleted_at ASC, d.row_id ASC",
-        )
-        .map_err(|e| {
-            crate::error_log!("CopyAttach: failed to prepare the eviction preview: {e}");
-        })?;
-    let rows = stmt
-        .query_map([], |row| row.get::<_, i64>(0))
-        .map_err(|e| {
-            crate::error_log!("CopyAttach: failed to read the eviction preview: {e}");
-        })?;
-
-    let mut count = 0usize;
-    for bytes in rows {
-        let bytes = match bytes {
-            Ok(v) => v,
-            Err(e) => {
-                crate::error_log!("CopyAttach: eviction-preview row read error: {e}");
-                continue;
-            }
-        };
-        if excess <= 0 {
-            break;
-        }
-        // A row is evicted whole, so a single oversized row can clear the excess.
-        excess -= bytes.max(1);
-        count += 1;
-    }
-    Ok(count)
+    Ok(collect_evictions(conn, after_insert - budget_bytes)?.len())
 }
 
-/// Payload bytes (text + png + thumb) of one history row, or `None` if the row
-/// is gone. Used to price a deletion before warning about evictions.
+/// Payload bytes (text + png + thumb) of one history row. Used to price a
+/// deletion before warning about evictions. `Err` when the row cannot be read
+/// (missing row or DB error) — the caller reports "unknown", never 0.
 pub(crate) fn history_row_payload_bytes(conn: &Connection, row_id: i64) -> Result<i64, ()> {
-    conn.query_row(
-        "SELECT COALESCE(LENGTH(text), 0)
-              + COALESCE(LENGTH(png_data), 0)
-              + COALESCE(LENGTH(thumb_data), 0)
-         FROM clipboard_history WHERE id = ?1",
-        rusqlite::params![row_id],
-        |row| row.get::<_, i64>(0),
-    )
-    .map_err(|e| {
-        crate::error_log!("CopyAttach: failed to size history row {row_id}: {e}");
-    })
+    let sql = format!("SELECT {ROW_PAYLOAD_BYTES} FROM clipboard_history h WHERE h.id = ?1");
+    conn.query_row(&sql, rusqlite::params![row_id], |row| row.get::<_, i64>(0))
+        .map_err(|e| {
+            crate::error_log!("CopyAttach: failed to size history row {row_id}: {e}");
+        })
 }
 
 /// Purge deletions matching a `clipboard_deleted` predicate. Returns how many

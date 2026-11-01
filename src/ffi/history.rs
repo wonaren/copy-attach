@@ -5,6 +5,7 @@ use std::sync::atomic::Ordering;
 use crate::backend::try_backend;
 use crate::history::add_to_history;
 use crate::types::ClipboardEntry;
+
 #[no_mangle]
 pub extern "C" fn clipboard_clear_history() -> c_int {
     let b = match try_backend() {
@@ -32,6 +33,10 @@ pub extern "C" fn clipboard_clear_history() -> c_int {
         let tx = conn.unchecked_transaction()?;
         tx.execute("DELETE FROM clipboard_history", [])?;
         tx.execute("DELETE FROM clipboard_favorites", [])?;
+        // The undo stack lives in this table; a side row whose payload row is
+        // gone would be pruned on the next read anyway, but leaving it behind
+        // makes "clear history" mean two different things to two tables.
+        tx.execute("DELETE FROM clipboard_deleted", [])?;
         tx.commit()
     })();
     if let Err(e) = cleared {
@@ -52,15 +57,6 @@ pub extern "C" fn clipboard_clear_history() -> c_int {
     1
 }
 
-/// Soft-delete one entry: stamp its row, drop its favorite, and remove it from
-/// the in-memory list. Returns 1 on success, 0 on failure.
-///
-/// The payload is NOT copied anywhere. The row keeps its text/png/thumb blobs,
-/// which makes a delete a couple of index writes — no blob read, no temp file,
-/// no resident memory. (The previous design materialized the payload to disk
-/// precisely because a deleted row had to leave the table.) Undo depth is
-/// therefore bounded by retention (`UNDO_RETENTION_SECS`) and a byte budget
-/// (the configurable undo budget), not by a step count.
 /// Would deleting this entry evict already-undoable deletions, and how many?
 ///
 /// The caller asks BEFORE deleting so the user can be warned while it is still
@@ -108,6 +104,15 @@ pub extern "C" fn clipboard_undo_eviction_preview(entry_id: u64) -> c_int {
     }
 }
 
+/// Soft-delete one entry: stamp its row, drop its favorite, and remove it from
+/// the in-memory list. Returns 1 on success, 0 on failure.
+///
+/// The payload is NOT copied anywhere. The row keeps its text/png/thumb blobs,
+/// which makes a delete a couple of index writes — no blob read, no temp file,
+/// no resident memory. (The previous design materialized the payload to disk
+/// precisely because a deleted row had to leave the table.) Undo depth is
+/// therefore bounded by retention (`UNDO_RETENTION_SECS`) and a byte budget
+/// (`undo_budget_bytes`), not by a step count.
 #[no_mangle]
 pub extern "C" fn clipboard_delete_by_id(entry_id: u64) -> c_int {
     let b = match try_backend() {
@@ -119,10 +124,10 @@ pub extern "C" fn clipboard_delete_by_id(entry_id: u64) -> c_int {
     // id it does not know is rejected before any write. The `db_id` it reports
     // is the row's full identity — a re-capture keeps the entry_id but points at
     // a different row — and it is what the stamp targets.
-    let (entry, db_id) = {
+    let db_id = {
         let hist = b.history.lock().unwrap();
         match hist.iter().find(|e| e.entry_id() == entry_id) {
-            Some(e) => (e.clone(), e.db_id()),
+            Some(e) => e.db_id(),
             None => {
                 crate::error_log!("CopyAttach: cannot delete entry {entry_id}: not in history");
                 return 0;
@@ -168,9 +173,9 @@ pub extern "C" fn clipboard_delete_by_id(entry_id: u64) -> c_int {
             })?;
             Ok(())
         })();
+        // The stamp (or the favorite drop) rolled back: the row is still live,
+        // so memory must stay untouched.
         if result.is_err() {
-            // The stamp (or the favorite drop) rolled back: the row is still
-            // live, so memory must stay untouched.
             return 0;
         }
         // Self-limit the retained deleted set now instead of at the next launch:
@@ -194,8 +199,6 @@ pub extern "C" fn clipboard_delete_by_id(entry_id: u64) -> c_int {
         crate::backend::mark_history_changed();
     }
 
-    // The cloned metadata is unused from here on: the undo path re-reads the row.
-    drop(entry);
     crate::debug_log!("CopyAttach: soft-deleted entry {entry_id} (db_id={db_id})");
     1
 }
@@ -240,13 +243,31 @@ struct UndoSource {
     was_favorite: bool,
 }
 
+/// Why `load_deleted_payload` came back empty.
+///
+/// The two cases are NOT interchangeable: an unrestorable row can never be
+/// restored and may have its undo entry dropped, while a read failure says
+/// nothing about the row — dropping the entry there would turn a transient IO
+/// error into a permanently lost undo (the payload row survives as a ghost and
+/// reappears as live history on the next launch).
+enum UndoLoadError {
+    /// Absent, structurally incomplete (no text/blob, unknown `entry_type`) or
+    /// unclaimable: nothing here can be restored.
+    Unrestorable,
+    /// The read itself failed. The row is untouched; a later undo may work.
+    Read,
+}
+
 /// Read a soft-deleted row's payload and rebuild its metadata entry.
 ///
 /// The entry's `timestamp` is restamped to now so the restored row sorts to the
 /// top like any other "just used" entry, and `db_id` is cleared (the caller
 /// assigns the new row id after the insert). `entry_id` is PRESERVED: Swift's
 /// favorites and the undo's own bookkeeping key on it.
-fn load_deleted_payload(conn: &rusqlite::Connection, row_id: i64) -> Option<UndoSource> {
+fn load_deleted_payload(
+    conn: &rusqlite::Connection,
+    row_id: i64,
+) -> Result<UndoSource, UndoLoadError> {
     type Row = (
         i32,            // entry_type
         Option<String>, // text
@@ -283,9 +304,16 @@ fn load_deleted_payload(conn: &rusqlite::Connection, row_id: i64) -> Option<Undo
             },
         )
         .map_err(|e| {
-            crate::error_log!("CopyAttach: undo could not read deleted row {row_id}: {e}");
-        })
-        .ok()?;
+            // `QueryReturnedNoRows` means the payload row is gone; anything else
+            // is a real read failure and must not be reported as "gone".
+            match e {
+                rusqlite::Error::QueryReturnedNoRows => UndoLoadError::Unrestorable,
+                e => {
+                    crate::error_log!("CopyAttach: undo could not read deleted row {row_id}: {e}");
+                    UndoLoadError::Read
+                }
+            }
+        })?;
     let (
         entry_type, text, png, thumb, tw, th, width, height, entry_id, hash, preview, label,
         custom_label, source_name, source_bundle_id, deleted_favorite,
@@ -298,13 +326,19 @@ fn load_deleted_payload(conn: &rusqlite::Connection, row_id: i64) -> Option<Undo
 
     let (entry, body) = match entry_type {
         0 => {
-            let body = text?;
+            let body = match text {
+                Some(t) => t,
+                None => {
+                    crate::error_log!("CopyAttach: deleted text row {row_id} carries no text — unrestorable");
+                    return Err(UndoLoadError::Unrestorable);
+                }
+            };
             // The body arrives through rusqlite, which may have grown it over
             // reusable-marked pages; claim before anything reads it. A rejected
             // claim means the kernel may zero it mid-use, so refuse.
             if !crate::backend::claim_pages(body.as_ptr(), body.capacity()) {
                 crate::error_log!("CopyAttach: undo text body for row {row_id} could not be claimed — unreadable");
-                return None;
+                return Err(UndoLoadError::Unrestorable);
             }
             let entry = ClipboardEntry::Text {
                 id: entry_id as u64,
@@ -320,8 +354,13 @@ fn load_deleted_payload(conn: &rusqlite::Connection, row_id: i64) -> Option<Undo
             (entry, DeletedBody::Text(body))
         }
         1 => {
-            let png = png?;
-            let thumb = thumb?;
+            let (png, thumb) = match (png, thumb) {
+                (Some(p), Some(t)) => (p, t),
+                _ => {
+                    crate::error_log!("CopyAttach: deleted image row {row_id} is missing its blobs — unrestorable");
+                    return Err(UndoLoadError::Unrestorable);
+                }
+            };
             // Same rule as the text body: an unclaimable blob is one the kernel
             // may zero while it is live, so refuse rather than restore an image
             // that would render as garbage.
@@ -334,7 +373,7 @@ fn load_deleted_payload(conn: &rusqlite::Connection, row_id: i64) -> Option<Undo
                 crate::backend::mark_pages_reusable(png.as_ptr(), png.capacity());
                 crate::backend::mark_pages_reusable(thumb.as_ptr(), thumb.capacity());
                 crate::error_log!("CopyAttach: undo image payload for row {row_id} could not be claimed — unreadable");
-                return None;
+                return Err(UndoLoadError::Unrestorable);
             }
             let entry = ClipboardEntry::Image {
                 id: entry_id as u64,
@@ -353,11 +392,11 @@ fn load_deleted_payload(conn: &rusqlite::Connection, row_id: i64) -> Option<Undo
         }
         other => {
             crate::error_log!("CopyAttach: deleted row {row_id} has unknown entry_type {other}");
-            return None;
+            return Err(UndoLoadError::Unrestorable);
         }
     };
 
-    Some(UndoSource {
+    Ok(UndoSource {
         entry,
         body,
         was_favorite: deleted_favorite != 0,
@@ -473,16 +512,23 @@ pub extern "C" fn clipboard_undo_delete() -> c_int {
         // delete's payload is ever touched again; `DeletedBody`'s Drop releases
         // its pages on every exit path.
         let source = match load_deleted_payload(&conn, old_row_id) {
-            Some(s) => s,
-            None => {
-                // The row is unreadable, so it can never be restored. Drop it
-                // rather than let a broken row block the undo stack forever, and
-                // report the failure so the caller can surface it.
-                crate::error_log!("CopyAttach: undo could not load payload for deleted row {old_row_id} — dropping it");
+            Ok(s) => s,
+            Err(UndoLoadError::Unrestorable) => {
+                // Nothing here can ever be restored, so the entry would block
+                // the undo stack forever. Drop it — and say so, because the
+                // payload row stays behind as history the user did not ask for.
+                crate::error_log!("CopyAttach: undo could not load payload for deleted row {old_row_id} — dropping the undo entry");
                 let _ = conn.execute(
                     "DELETE FROM clipboard_deleted WHERE row_id = ?1",
                     rusqlite::params![old_row_id],
                 );
+                return 0;
+            }
+            Err(UndoLoadError::Read) => {
+                // The row is still there and may be perfectly restorable: keep
+                // the undo entry (and the payload) instead of trading a
+                // transient read error for a lost undo.
+                crate::error_log!("CopyAttach: undo read of deleted row {old_row_id} failed — undo entry kept");
                 return 0;
             }
         };

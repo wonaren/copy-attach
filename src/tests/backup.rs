@@ -666,3 +666,59 @@ fn test_search_works_after_restore_without_explicit_rebuild() {
 
     let _ = std::fs::remove_file(&backup_path);
 }
+
+/// An overwrite restore replaces every history row, ids included, so a side row
+/// left in `clipboard_deleted` afterwards points at a DIFFERENT entry: the
+/// restored row goes invisible (its id is still marked deleted) and ⌘Z then
+/// hard-deletes it to revive the pre-restore one.
+///
+/// Reachable on the real path: export a backup, delete an entry, restore that
+/// backup — the archive still contains the deleted row under its original id.
+#[test]
+fn test_overwrite_restore_clears_the_undo_side_table() {
+    let (_src_path, mut src_conn) = make_temp_db("restore_undo_src");
+    let mut backup_path = std::env::temp_dir();
+    backup_path.push(format!("copyattach-restore-undo-{}.cabackup", std::process::id()));
+    let _ = std::fs::remove_file(&backup_path);
+
+    for (i, body) in ["FIRST", "SECOND", "THIRD"].iter().enumerate() {
+        let e = ClipboardEntry::text_entry(
+            new_entry_id(),
+            body,
+            1_700_000_000 + i as u64,
+            "App".into(),
+            "com.a".into(),
+            0,
+        );
+        insert_entry_to_db(&src_conn, &e, Some(body), None, None).unwrap();
+    }
+    export_backup(&src_conn, &backup_path).unwrap();
+
+    // The user deletes one entry AFTER taking that backup.
+    let second_row: i64 = src_conn
+        .query_row("SELECT id FROM clipboard_history WHERE text = 'SECOND'", [], |r| r.get(0))
+        .unwrap();
+    crate::db::soft_delete_row(&src_conn, second_row).unwrap();
+    assert_eq!(
+        crate::db::undo_depth(&src_conn).unwrap(),
+        1,
+        "precondition: the delete is undoable before the restore"
+    );
+
+    restore_backup_overwrite(&mut src_conn, &backup_path).unwrap();
+
+    let loaded = load_history_from_db(&src_conn, 3000);
+    assert_eq!(
+        loaded.len(),
+        3,
+        "every row in the archive must be visible after the restore, got {:?}",
+        loaded.iter().map(|e| e.label()).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        crate::db::undo_depth(&src_conn).unwrap(),
+        0,
+        "the restore replaced the rows the undo stack referred to"
+    );
+
+    let _ = std::fs::remove_file(&backup_path);
+}

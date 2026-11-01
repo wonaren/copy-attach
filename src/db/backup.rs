@@ -75,30 +75,29 @@ pub(crate) fn export_backup(
         ).map_err(|e| format!("创建备份元数据表失败: {e}"))?;
 
         // `VACUUM INTO` copies the whole table, soft-deleted rows included.
-        // Those are undo candidates, not history: a backup that carried them
-        // would restore deletions the user already made, and it would bloat the
-        // archive with payloads the restore path then has to re-import. Drop
-        // them from the snapshot (this is the backup file, never the live DB).
-        // The side table may be absent from an older build's database.
-        if backup_conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='clipboard_deleted'",
+        // Those are undo candidates, not history: an archive that carried them
+        // would restore deletions the user already made (and its own restore
+        // path would then have to re-import payloads nobody asked for). Drop
+        // them from the snapshot — this is the backup file, never the live DB.
+        //
+        // `clipboard_deleted` needs no existence probe: `VACUUM INTO` copies
+        // THIS database, which `ensure_history_table` has already migrated.
+        //
+        // The dropped payloads stay behind as freelist pages in the archive
+        // (SQLite only reclaims them with a full `VACUUM`), so the file can be
+        // up to the undo budget larger than its live rows. That is the accepted
+        // trade: the export runs synchronously on the main thread, and a second
+        // full rewrite to save a bounded number of bytes would double the hang.
+        backup_conn
+            .execute(
+                "DELETE FROM clipboard_history
+                 WHERE id IN (SELECT row_id FROM clipboard_deleted)",
                 [],
-                |r| r.get::<_, i64>(0),
             )
-            .unwrap_or(0) > 0
-        {
-            backup_conn
-                .execute(
-                    "DELETE FROM clipboard_history
-                     WHERE id IN (SELECT row_id FROM clipboard_deleted)",
-                    [],
-                )
-                .map_err(|e| format!("清理备份中的已删除记录失败: {e}"))?;
-            backup_conn
-                .execute("DELETE FROM clipboard_deleted", [])
-                .map_err(|e| format!("清理备份中的删除标记失败: {e}"))?;
-        }
+            .map_err(|e| format!("清理备份中的已删除记录失败: {e}"))?;
+        backup_conn
+            .execute("DELETE FROM clipboard_deleted", [])
+            .map_err(|e| format!("清理备份中的删除标记失败: {e}"))?;
 
         let count: i64 = backup_conn
             .query_row("SELECT COUNT(*) FROM clipboard_history", [], |r| r.get(0))
@@ -274,15 +273,23 @@ pub(crate) fn restore_backup_overwrite(
         // Overwrite clipboard_history and its favorite set. They are one
         // logical dataset: keeping the old favorites would leave ids that the
         // restored rows may not contain.
-        //
-        // The backup's own `deleted_at`/`deleted_favorite` are NOT copied: an
-        // exported archive has its deleted rows stripped (see `export_backup`),
-        // and a restore must bring back history, not a prior session's undo
-        // stack. The columns therefore keep their `DEFAULT 0` (live, unstarred).
         tx.execute("DELETE FROM main.clipboard_history", [])
             .map_err(|e| format!("清空当前历史表失败: {e}"))?;
         tx.execute("DELETE FROM main.clipboard_favorites", [])
             .map_err(|e| format!("清空当前收藏表失败: {e}"))?;
+
+        // The undo stack addresses rows BY ROWID (`clipboard_deleted.row_id ==
+        // clipboard_history.id`), and the copy below restores the archive's own
+        // ids. A side row that survived the DELETE would therefore mark a
+        // DIFFERENT, freshly restored entry as deleted: measurable on the real
+        // path by exporting a backup, deleting an entry, then restoring that
+        // backup — the restored copy of the deleted entry came back invisible
+        // and ⌘Z hard-deleted it to revive the pre-restore row. An archive
+        // carries no undo stack by design (`export_backup` strips deleted rows),
+        // so the stack is replaced along with the rows it describes.
+
+        tx.execute("DELETE FROM main.clipboard_deleted", [])
+            .map_err(|e| format!("清空撤销记录失败: {e}"))?;
 
         tx.execute_batch(
             "INSERT INTO main.clipboard_history (

@@ -419,9 +419,10 @@ pub(crate) fn set_favorite(conn: &Connection, entry_id: u64, favorite: bool) -> 
         return Err(());
     }
     // The INSERT selects from the history table, so a row that disappears
-    // between the existence check and this write cannot create an orphan.
-    // `deleted_at = 0` keeps the select from matching a soft-deleted row that
-    // still carries the same entry_id (a delete drops the favorite anyway).
+    // between the existence check and this write cannot create an orphan. The
+    // side-table exclusion keeps the select from matching a soft-deleted row
+    // that still carries the same `entry_id` (a delete drops the favorite
+    // anyway, so this only closes the window between the two writes).
     let sql = if favorite {
         "INSERT OR IGNORE INTO clipboard_favorites (entry_id)
          SELECT entry_id FROM clipboard_history

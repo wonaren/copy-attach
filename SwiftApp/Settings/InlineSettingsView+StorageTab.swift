@@ -49,8 +49,15 @@ extension InlineSettingsView {
     var undoBudgetChoice: UndoBudgetChoice {
         get { undoBudgetChoiceCache }
         nonmutating set {
+            guard backend.setUndoBudgetBytes(newValue.bytes) else {
+                // Nothing was stored, so the picker must not keep showing a
+                // choice the backend rejected — it would silently revert at the
+                // next launch. Snap back to the budget actually in force.
+                errorLog("undoBudget: backend rejected \(newValue.bytes) bytes — re-reading the stored budget")
+                undoBudgetChoiceCache = UndoBudgetChoice.nearest(to: backend.undoBudgetBytes())
+                return
+            }
             undoBudgetChoiceCache = newValue
-            backend.setUndoBudgetBytes(newValue.bytes)
         }
     }
 

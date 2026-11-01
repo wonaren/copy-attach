@@ -290,16 +290,23 @@ fn test_clear_removes_deleted_rows() {
     )
     .unwrap();
 
-    // The clear's transaction (see `clipboard_clear_history`).
+    // The clear's transaction (see `clipboard_clear_history`). The FFI-level
+    // coverage of the same path is `test_clear_history_also_clears_the_undo_stack`
+    // in `tests/backend.rs`; this one pins the SQL itself.
     let tx = conn.unchecked_transaction().unwrap();
     tx.execute("DELETE FROM clipboard_history", []).unwrap();
     tx.execute("DELETE FROM clipboard_favorites", []).unwrap();
+    tx.execute("DELETE FROM clipboard_deleted", []).unwrap();
     tx.commit().unwrap();
 
-    let remaining: i64 = conn
-        .query_row("SELECT COUNT(*) FROM clipboard_history", [], |r| r.get(0))
-        .unwrap();
-    assert_eq!(remaining, 0, "clear must remove live and deleted rows alike");
+    // Both tables: the payload rows alone are not enough — a surviving side row
+    // is an undo entry pointing at a row that no longer exists.
+    for table in ["clipboard_history", "clipboard_deleted"] {
+        let remaining: i64 = conn
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(remaining, 0, "clear must empty {table}");
+    }
 
     drop(conn);
     for suffix in ["", "-wal", "-shm"] {
@@ -539,6 +546,72 @@ fn test_unlimited_budget_never_evicts() {
         0,
         "an unlimited budget must purge nothing"
     );
+    drop(conn);
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+    }
+}
+
+/// Undo must not lose a star that the user put on the re-captured copy.
+///
+/// Sequence (all through the primitives the app uses): delete a favorite, copy
+/// the same content again, star the new copy, ⌘Z. The restore re-inserts the
+/// original `entry_id` and dedups the copy away — and because a star lives on an
+/// `entry_id`, dropping the copy would orphan its star, which
+/// `prune_orphan_favorites` removes at the next launch. Verified against the real
+/// startup sweep below, not just the immediate state.
+#[test]
+fn test_undo_keeps_the_star_of_the_recaptured_copy() {
+    let (path, conn) = file_db("undo_star");
+
+    // 1. Original row (NOT starred — its `was_favorite` is what undo replays),
+    //    then deleted. This is the undo entry.
+    let original_id = crate::backend::new_entry_id();
+    let original = ClipboardEntry::text_entry(original_id, "same-content", 100, String::new(), String::new(), 0);
+    crate::db::insert_entry_to_db(&conn, &original, Some("same-content"), None, None).unwrap();
+    let original_row = conn.last_insert_rowid();
+    crate::db::soft_delete_row(&conn, original_row).expect("delete the original");
+
+    // 2. The same content is copied again while it is deleted, and the user stars
+    //    THAT copy (a new entry_id).
+    let recaptured_id = crate::backend::new_entry_id();
+    let recaptured = ClipboardEntry::text_entry(recaptured_id, "same-content", 200, String::new(), String::new(), 0);
+    crate::db::insert_entry_to_db(&conn, &recaptured, Some("same-content"), None, None).unwrap();
+    crate::db::set_favorite(&conn, recaptured_id, true).expect("star the recaptured copy");
+
+    // 3. Undo: re-insert under the ORIGINAL id, then dedup the copy away (exactly
+    //    what `clipboard_undo_delete` does), and restore the original star.
+    let restored = ClipboardEntry::text_entry(original_id, "same-content", 300, String::new(), String::new(), 0);
+    crate::db::insert_entry_to_db(&conn, &restored, Some("same-content"), None, None).unwrap();
+    crate::db::delete_matching_entry(&conn, &restored, Some("same-content"));
+    // The old (soft-deleted) row has served its purpose: the undo removes both
+    // its side row and the payload row.
+    conn.execute("DELETE FROM clipboard_deleted WHERE row_id = ?1", rusqlite::params![original_row])
+        .expect("drop the undo entry");
+    conn.execute("DELETE FROM clipboard_history WHERE id = ?1", rusqlite::params![original_row])
+        .expect("drop the deleted payload row");
+    // `was_favorite` was 0 for the original, so the undo restores no star here:
+    // the ONLY star in play belongs to the row the dedup just removed.
+
+    // Exactly one row survives, and it is starred.
+    let surviving_rows: i64 = conn
+        .query_row("SELECT COUNT(*) FROM clipboard_history", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(surviving_rows, 1, "the dedup must collapse to one row");
+
+    // The star must survive the real startup prune and reload path.
+    crate::db::prune_orphan_favorites(&conn).expect("prune");
+    let favorites = crate::db::load_favorites(&conn).expect("load favorites");
+    assert_eq!(favorites.len(), 1, "exactly one star must remain: {favorites:?}");
+
+    let loaded = load_history_from_db(&conn, crate::backend::DEFAULT_CLEANUP_THRESHOLD);
+    assert_eq!(loaded.len(), 1, "one visible row");
+    assert!(
+        favorites.contains(&loaded[0].entry_id()),
+        "the surviving row must be the starred one (favorites={favorites:?}, row id={})",
+        loaded[0].entry_id()
+    );
+
     drop(conn);
     for suffix in ["", "-wal", "-shm"] {
         let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));

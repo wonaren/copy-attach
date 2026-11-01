@@ -112,8 +112,8 @@ fn bench_side_table_growth() {
     );
 
     println!(
-        "\n{:>10}  {:>14}  {:>16}  {:>14}  {:>12}",
-        "deleted", "load_history", "trim_db_history", "undo_depth", "undoable_MB"
+        "\n{:>10}  {:>14}  {:>16}  {:>14}  {:>12}  {:>12}",
+        "deleted", "load_history", "trim_db_history", "undo_depth", "undoable_MB", "evict_preview"
     );
 
     let mut marked = 0usize;
@@ -172,14 +172,32 @@ fn bench_side_table_growth() {
             let v = crate::db::undo_depth(&conn).expect("depth");
             std::hint::black_box(v);
         }, 50);
+        // Runs on EVERY delete (the eviction warning) and prices the deleted row
+        // first, so both queries sit between the keystroke and the row leaving
+        // the list. A 16 ms budget is one frame at 60 Hz.
+        let newest_row = ids[marked.min(ids.len() - 1)];
+        let (preview_ms, row_bytes) = {
+            let mut row_bytes = 0i64;
+            let ms = time_query(|| {
+                let incoming = crate::db::history_row_payload_bytes(&conn, newest_row)
+                    .expect("row payload bytes");
+                row_bytes = incoming;
+                let n = crate::db::pending_undo_evictions(&conn, incoming, 16 * 1024 * 1024)
+                    .expect("preview");
+                std::hint::black_box(n);
+            }, 20);
+            (ms, row_bytes)
+        };
 
         println!(
-            "{:>10}  {:>11.2} ms  {:>13.2} ms  {:>11.3} ms  {:>9.1} MB",
+            "{:>10}  {:>11.2} ms  {:>13.2} ms  {:>11.3} ms  {:>9.1} MB  {:>9.3} ms (row {} bytes)",
             deleted,
             load_ms,
             trim_ms,
             depth_ms,
-            bytes as f64 / (1024.0 * 1024.0)
+            bytes as f64 / (1024.0 * 1024.0),
+            preview_ms,
+            row_bytes
         );
     }
 }

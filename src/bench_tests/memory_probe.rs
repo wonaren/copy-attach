@@ -101,28 +101,20 @@ fn memory_probe_no_fts_index() {
 
     let rss0 = probe_rss_kb();
     let conn = probe_open_db(&db_path);
-    // Base table only — no FTS index. Same schema as the app minus the FTS.
+    // Production schema, then remove the FTS index: the probe's premise is
+    // "same database as the app, minus the index". The previous hand-rolled
+    // COPY of the table had silently rotted — it still described the schema
+    // from before `custom_label` and `clipboard_deleted`, so every insert
+    // failed (swallowed by `insert_entry_to_db(..).ok()`) and the probe
+    // "measured" an empty database. The triggers must go before the table they
+    // reference.
+    crate::db::ensure_history_table(&conn).expect("memory probe: schema");
     conn.execute_batch(
-        "CREATE TABLE clipboard_history (
-            id              INTEGER PRIMARY KEY AUTOINCREMENT,
-            entry_id        INTEGER NOT NULL DEFAULT 0,
-            entry_type      INTEGER NOT NULL,
-            text            TEXT,
-            png_data        BLOB,
-            width           INTEGER,
-            height          INTEGER,
-            thumb_data      BLOB,
-            thumb_width     INTEGER,
-            thumb_height    INTEGER,
-            hash            INTEGER,
-            timestamp       INTEGER NOT NULL DEFAULT 0,
-            source_name     TEXT NOT NULL DEFAULT '',
-            source_bundle_id TEXT NOT NULL DEFAULT '',
-            preview         TEXT NOT NULL DEFAULT '',
-            label           TEXT NOT NULL DEFAULT ''
-        );",
+        "DROP TRIGGER IF EXISTS clipboard_fts_ai;
+         DROP TRIGGER IF EXISTS clipboard_fts_ad;
+         DROP TABLE IF EXISTS clipboard_fts;",
     )
-    .expect("memory probe: schema");
+    .expect("memory probe: drop the FTS index");
     let rss1 = probe_rss_kb();
 
     for (i, text) in probe_corpus().iter().enumerate() {
