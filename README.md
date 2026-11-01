@@ -20,10 +20,6 @@
 
 <p align="center">
   <a href="https://copyattach.abovepast.shop/"><img src="assets/icon_inner.svg" alt="CopyAttach" height="14" style="vertical-align: -1px;"> 官方网站 copyattach.abovepast.shop</a>
-  &nbsp;&nbsp;·&nbsp;&nbsp;
-  <a href="https://github.com/wonaren/copy-attach/releases">GitHub Releases 下载</a>
-  &nbsp;&nbsp;·&nbsp;&nbsp;
-  <a href="https://dl.abovepast.shop/lanzou">蓝奏云高速镜像</a>
 </p>
 
 CopyAttach 是一款专为 macOS 设计的极轻量、高效、自由开源剪贴板管理器。它在后台默默记录你复制的一切——文本、代码、链接、图片，通过全局快捷键让你在任何应用中极速检索、预览与盲打粘贴。
@@ -35,7 +31,9 @@ CopyAttach 是一款专为 macOS 设计的极轻量、高效、自由开源剪�
 <p align="center">
   <a href="https://brew.sh"><img src="https://img.shields.io/badge/Homebrew-%E4%B8%80%E8%A1%8C%E5%AE%89%E8%A3%85-FBB040?style=for-the-badge&logo=homebrew&logoColor=white" alt="通过 Homebrew 一键安装"></a>
   &nbsp;
-  <a href="https://github.com/wonaren/copy-attach/releases/latest"><img src="https://img.shields.io/badge/%E4%B8%8B%E8%BD%BD-DMG-000000?style=for-the-badge&logo=apple&logoColor=white" alt="下载 DMG"></a>
+  <a href="https://github.com/wonaren/copy-attach/releases/latest"><img src="https://img.shields.io/badge/GitHub-%E4%B8%8B%E8%BD%BD_DMG-181717?style=for-the-badge&logo=github&logoColor=white" alt="从 GitHub Releases 下载 DMG"></a>
+  &nbsp;
+  <a href="https://dl.abovepast.shop/lanzou"><img src="https://img.shields.io/badge/%E8%93%9D%E5%A5%8F%E4%BA%91-%E9%93%BE%E6%8E%A5%28%E6%8F%90%E5%8F%96%E7%A0%811234%29-1E90FF?style=for-the-badge&logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI%2BPHBhdGggZmlsbD0iI2ZmZiIgZD0iTTE5LjM1IDEwLjA0QzE4LjY3IDYuNTkgMTUuNjQgNCAxMiA0IDkuMTEgNCA2LjYgNS42NCA1LjM1IDguMDQgMi4zNCA4LjM2IDAgMTAuOTEgMCAxNGMwIDMuMzEgMi42OSA2IDYgNmgxM2MyLjc2IDAgNS0yLjI0IDUtNSAwLTIuNjQtMi4wNS00Ljc4LTQuNjUtNC45NnoiLz48L3N2Zz4=&logoColor=white" alt="蓝奏云 链接（提取码 1234）"></a>
 </p>
 
 ```bash
