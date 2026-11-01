@@ -185,7 +185,7 @@ CI（`.github/workflows/build.yml`）已修复的关键坑：
 
 - Swift 解码一律离主线程（0.99.16）：列表行缩略图经 `ClipboardBackend.loadThumbnail`（Task.detached 内 FFI 读 + PNG 解码 → 8MB NSCache，countLimit 120），行 body 只做同步 NSCache 命中检查；预览大图经 `ImageDecode.previewImage`（预算 = min(源最长边, max(显示尺寸×scale, 2048px))，2048px 是下限 floor 而非上限）。
 - `AppIcon+Ext.swift`：bundleId → 36pt 单尺寸图标缓存（NSWorkspace 图标多尺寸全量可达数百 KB/张，18pt 行只用 36px，缓存前降采样）。
-- 日期分组：`DayGroup` 按日历日分组，`PopupRow` 在扁平列表中渲染分隔符+条目行。底栏计数用 `.contentTransition(.numericText())`。
+- 日期分组：`DayGroup` 按日历日分组，`PopupRow` 在扁平列表中渲染分隔符+条目行。**底栏计数的 `.contentTransition(.numericText())` 必须包 `.drawingGroup()`**：不隔离时每次值变化（如切分类）都会让 CA 重放整窗 display list，CoreGraphics 重新分配并滞留一批字形位图（栈为 `CA::Transaction::commit → CG display list → CGGlyphBuilderLockBitmaps`），约 1.4MB/次；20 次切 Tab 堆增长 +28.9MB，混合场景 footprint 81MB→49MB。包 `drawingGroup` 后原生数字逐位转场仍然工作（实测把动画拉长到 1.0s 抓中间帧，可见 559→5→6→63），而 20 次切 Tab 堆零增长（19.39→19.34MB），1.0s 长动画同样零增长——隔离层只重绘自己那一小块，主 hosting view 不再逐帧重放。泄漏与列表行数无关（559/50/2 行结果一致），换 `List`/`NSTableView` 也无效——不要为此重写列表。日期分隔符与队列 HUD 的 `numericText` 值变化频率低；若在这些路径观察到同样增长，同样加 `drawingGroup`。
 - swiftc 必须 `-O -whole-module-optimization`——缺省 `-Onone` 会让 SwiftUI 前端全速跑在未优化代码上（build.sh 已处理）。
 ## init 失败分级（0.105.4-dev）
 

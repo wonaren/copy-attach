@@ -960,6 +960,7 @@ struct HistoryPopupContent: View {
                 .foregroundColor(theme.popupSecondaryText)
                 .contentTransition(.numericText())
                 .animation(.easeOut(duration: 0.18), value: memo.items.count)
+                .drawingGroup()
             Text(" 项")
                 .font(.system(size: 10, weight: .medium))
                 .foregroundColor(theme.popupSecondaryText)
