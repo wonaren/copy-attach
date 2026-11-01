@@ -30,13 +30,17 @@ CopyAttach 是一款专为 macOS 设计的极轻量、高效、自由开源剪�
 
 自 **v0.108.0** 起，CopyAttach 全面转为**完全免费与开源**，代码遵循 **GNU General Public License v3.0 (GPLv3)**。从渲染帧率到磁盘写入，从原子内存回收（madvise）到功耗治理，每个环节都经过严苛打磨，坚守**纯本地离线、零数据上传、零后台遥测**的极客精神。
 
-## 安装
+## 安装 <img src="https://cdn.simpleicons.org/homebrew/FBB040" height="24" alt="Homebrew">
+
+<p align="center">
+  <a href="https://brew.sh"><img src="https://img.shields.io/badge/Homebrew-%E4%B8%80%E8%A1%8C%E5%AE%89%E8%A3%85-FBB040?style=for-the-badge&logo=homebrew&logoColor=white" alt="通过 Homebrew 一键安装"></a>
+  &nbsp;
+  <a href="https://github.com/wonaren/copy-attach/releases/latest"><img src="https://img.shields.io/badge/%E4%B8%8B%E8%BD%BD-DMG-000000?style=for-the-badge&logo=apple&logoColor=white" alt="下载 DMG"></a>
+</p>
 
 ```bash
 brew install --cask wonaren/tap/copyattach
 ```
-
-也可从 [GitHub Releases](https://github.com/wonaren/copy-attach/releases) 下载 DMG 拖入「应用程序」。仅支持 Apple Silicon（arm64）与 macOS 15.0+。
 
 ## 特性
 
