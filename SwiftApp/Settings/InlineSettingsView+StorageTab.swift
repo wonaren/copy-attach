@@ -186,7 +186,7 @@ extension InlineSettingsView {
                     .labelsHidden()
                     .pickerStyle(.menu)
                     .fixedSize()
-                    Text("删除后保留 7 天，空间满时淘汰最早记录")
+                    Text("删除后保留7天，溢出淘汰最早记录")
                         .font(.system(size: 11))
                         .foregroundColor(theme.secondaryText)
                         .fixedSize(horizontal: false, vertical: true)
