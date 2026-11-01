@@ -172,7 +172,7 @@ fn test_remove_deleted_entry_keeps_concurrent_recapture() {
     hist = add_to_history(hist, recaptured);
     assert_eq!(hist.len(), 1);
 
-    remove_deleted_entry(&mut hist, deleted_id, 7);
+    remove_deleted_entry(&mut hist, 7);
 
     assert_eq!(hist.len(), 1, "the fresh capture must survive the delete");
     assert_eq!(hist[0].db_id(), 42);
@@ -185,10 +185,9 @@ fn test_remove_deleted_entry_removes_the_deleted_row() {
     if let ClipboardEntry::Text { db_id, .. } = &mut entry {
         *db_id = 7;
     }
-    let id = entry.entry_id();
     hist = add_to_history(hist, entry);
 
-    remove_deleted_entry(&mut hist, id, 7);
+    remove_deleted_entry(&mut hist, 7);
 
     assert!(hist.is_empty(), "the entry pointing at the deleted row goes");
 }
@@ -201,9 +200,7 @@ fn test_remove_deleted_entry_no_match_is_noop() {
         *db_id = 7;
     }
     hist = add_to_history(hist, entry);
-    let id = hist[0].entry_id();
-
-    remove_deleted_entry(&mut hist, id, 999);
+    remove_deleted_entry(&mut hist, 999);
 
     assert_eq!(hist.len(), 1);
     assert_eq!(hist[0].db_id(), 7);

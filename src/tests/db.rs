@@ -744,3 +744,93 @@ mod db_failure_classification {
         base
     }
 }
+
+#[cfg(test)]
+mod auto_vacuum {
+    use rusqlite::Connection;
+
+    fn temp_db(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "copyattach-av-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("history.db")
+    }
+
+    fn fill_and_clear(conn: &Connection) {
+        for i in 0..200i64 {
+            let blob = vec![(i % 251) as u8; 100 * 1024];
+            conn.execute(
+                "INSERT INTO clipboard_history
+                    (entry_type, png_data, width, height, hash, timestamp, source_name,
+                     source_bundle_id, entry_id)
+                 VALUES (1, ?1, 1, 1, ?2, 0, 'AV', 'com.example.av', ?2)",
+                rusqlite::params![blob, i],
+            )
+            .unwrap();
+        }
+        conn.execute("DELETE FROM clipboard_history", []).unwrap();
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);").unwrap();
+    }
+
+    #[test]
+    fn test_incremental_auto_vacuum_reclaims_in_batches() {
+        let path = temp_db("incremental");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch("PRAGMA auto_vacuum = INCREMENTAL;").unwrap();
+            crate::db::ensure_history_table(&conn).unwrap();
+            assert_eq!(crate::db::auto_vacuum_mode(&conn), Some(2));
+            fill_and_clear(&conn);
+        }
+        let conn = Connection::open(&path).unwrap();
+        let free = crate::db::freelist_pages(&conn).unwrap();
+        assert!(free >= 1_000, "fixture must leave free pages, got {free}");
+        let before_size = std::fs::metadata(&path).unwrap().len();
+        let mut rounds = 0;
+        loop {
+            let freed = crate::db::reclaim_free_pages(&conn, 1_024).unwrap();
+            if freed == 0 {
+                break;
+            }
+            rounds += 1;
+            assert!(rounds < 1_000, "batch reclaim must converge");
+        }
+        assert_eq!(crate::db::freelist_pages(&conn), Some(0));
+        let after_size = std::fs::metadata(&path).unwrap().len();
+        assert!(
+            after_size < before_size,
+            "the file must shrink: {before_size} -> {after_size}"
+        );
+        drop(conn);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_conversion_enables_incremental_reclaim_on_an_existing_db() {
+        let path = temp_db("convert");
+        {
+            let conn = Connection::open(&path).unwrap();
+            crate::db::ensure_history_table(&conn).unwrap();
+            assert_eq!(crate::db::auto_vacuum_mode(&conn), Some(0));
+            fill_and_clear(&conn);
+        }
+        let conn = Connection::open(&path).unwrap();
+        assert!(crate::db::freelist_pages(&conn).unwrap() > 0);
+        crate::db::convert_to_incremental_auto_vacuum(&conn).unwrap();
+        assert_eq!(crate::db::auto_vacuum_mode(&conn), Some(2));
+        assert_eq!(crate::db::freelist_pages(&conn), Some(0));
+
+        fill_and_clear(&conn);
+        assert!(crate::db::freelist_pages(&conn).unwrap() > 0);
+        let freed = crate::db::reclaim_free_pages(&conn, 1_024).unwrap();
+        assert!(freed > 0, "converted databases must reclaim in batches");
+        drop(conn);
+        let _ = std::fs::remove_file(&path);
+    }
+}

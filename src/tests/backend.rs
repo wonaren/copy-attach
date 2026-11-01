@@ -3,7 +3,9 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use crate::backend::{set_backend, Backend};
-use crate::ffi::{clipboard_clear_history, clipboard_delete_by_id, clipboard_undo_delete};
+use crate::ffi::{
+    clipboard_clear_history, clipboard_delete_by_id, clipboard_set_favorite, clipboard_undo_delete,
+};
 use crate::ignore::IgnoreRules;
 use crate::types::{ClipboardEntry, SourceApp};
 use rusqlite::Connection;
@@ -324,6 +326,109 @@ fn test_undo_collapses_with_recaptured_duplicate() {
     }
 
     assert_eq!(live_rows, 1, "undo must not leave a duplicate row behind (found {live_rows})");
+}
+
+#[test]
+fn test_undo_after_recapture_keeps_db_entry_id_and_star() {
+    let _shared = shared_state_guard();
+    ensure_test_backend();
+    let b = crate::backend::try_backend().expect("backend initialized");
+
+    let body = "undo-recapture-identity";
+    let original_id: u64 = 946_000_001;
+    let recaptured_id: u64 = 946_000_002;
+
+    let original_row = {
+        let conn = b.db.lock().unwrap();
+        let entry = ClipboardEntry::text_entry(
+            original_id, body, 1, "RecapUndo".to_string(), "com.example.recapundo".to_string(), 0,
+        );
+        crate::db::insert_entry_to_db(&conn, &entry, Some(body), None, None).unwrap();
+        let row = conn.last_insert_rowid();
+        crate::db::set_favorite(&conn, original_id, true).unwrap();
+        row
+    };
+    {
+        let mut hist = b.history.lock().unwrap();
+        hist.push(ClipboardEntry::text_entry(
+            original_id, body, 1, "RecapUndo".to_string(), "com.example.recapundo".to_string(),
+            original_row,
+        ));
+        crate::backend::mark_history_changed();
+    }
+    b.favorites.lock().unwrap().insert(original_id);
+
+    assert_eq!(clipboard_delete_by_id(original_id), 1, "delete the original");
+
+    let recaptured_row = {
+        let mut conn = b.db.lock().unwrap();
+        let entry = ClipboardEntry::text_entry(
+            recaptured_id, body, 2, "RecapUndo".to_string(), "com.example.recapundo".to_string(), 0,
+        );
+        crate::db::persist_entry_to_db(&mut conn, &entry, Some(body), None, None, 3000)
+            .expect("recapture insert")
+    };
+    {
+        let mut hist = b.history.lock().unwrap();
+        let entry = ClipboardEntry::text_entry(
+            recaptured_id, body, 2, "RecapUndo".to_string(), "com.example.recapundo".to_string(),
+            recaptured_row,
+        );
+        *hist = crate::history::add_to_history(std::mem::take(&mut *hist), entry);
+        crate::backend::mark_history_changed();
+    }
+
+    assert_eq!(clipboard_undo_delete(), 1, "undo must succeed");
+
+    let (memory_id, memory_db_id) = {
+        let hist = b.history.lock().unwrap();
+        assert_eq!(hist.len(), 1, "the recaptured duplicate must collapse");
+        (hist[0].entry_id(), hist[0].db_id())
+    };
+    assert_eq!(
+        memory_id, original_id,
+        "the restored entry must keep the surviving DB row's entry_id"
+    );
+    let db_entry_id: i64 = {
+        let conn = b.db.lock().unwrap();
+        conn.query_row(
+            "SELECT entry_id FROM clipboard_history WHERE id = ?1",
+            rusqlite::params![memory_db_id],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(db_entry_id as u64, memory_id, "memory and DB identity must agree");
+    assert!(
+        b.favorites.lock().unwrap().contains(&memory_id),
+        "the restored star must be visible in the in-memory mirror"
+    );
+    assert_eq!(
+        clipboard_set_favorite(memory_id, 0),
+        1,
+        "the restored entry must accept favorite writes"
+    );
+
+    {
+        let conn = b.db.lock().unwrap();
+        let _ = conn.execute(
+            "DELETE FROM clipboard_history WHERE entry_id BETWEEN 946_000_000 AND 946_999_999",
+            [],
+        );
+        let _ = conn.execute(
+            "DELETE FROM clipboard_favorites WHERE entry_id BETWEEN 946_000_000 AND 946_999_999",
+            [],
+        );
+        let _ = conn.execute("DELETE FROM clipboard_deleted", []);
+    }
+    {
+        let mut hist = b.history.lock().unwrap();
+        hist.retain(|e| !(946_000_000..947_000_000).contains(&e.entry_id()));
+    }
+    b.favorites
+        .lock()
+        .unwrap()
+        .retain(|id| !(946_000_000..947_000_000).contains(id));
 }
 
 #[test]

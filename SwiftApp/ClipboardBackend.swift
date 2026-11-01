@@ -611,8 +611,6 @@ class ClipboardBackend {
     func undoDelete() -> Bool {
         guard clipboard_undo_delete() != 0 else { return false }
 
-        clearThumbnailCache()
-
         let restoredId = Int(clipboard_last_restored_id())
         guard restoredId > 0 else {
             errorLog("undoDelete: clipboard_undo_delete succeeded but last_restored_id is invalid (\(restoredId))")
@@ -712,10 +710,6 @@ class ClipboardBackend {
         }
     }
 
-    func canUndo() -> Bool {
-        clipboard_can_undo() != 0
-    }
-
     func undoDepth() -> Int {
         Int(clipboard_undo_depth())
     }
@@ -789,8 +783,12 @@ class ClipboardBackend {
         refresh()
     }
 
-    func getStorageSize() -> Int64 {
-        clipboard_get_storage_size()
+    func getStorageBreakdown() -> (text: Int64, image: Int64, undo: Int64)? {
+        var text: Int64 = 0
+        var image: Int64 = 0
+        var undo: Int64 = 0
+        guard clipboard_get_storage_breakdown(&text, &image, &undo) != 0 else { return nil }
+        return (text, image, undo)
     }
 
     struct BackupInfo {

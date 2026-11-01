@@ -66,7 +66,17 @@ extension InlineSettingsView {
     }
 
     private var storageStatsCard: some View {
-        settingsCard {
+        let storage = backend.getStorageBreakdown()
+        let textBytes = storage?.text ?? 0
+        let imageBytes = storage?.image ?? 0
+        let undoBytes = storage?.undo ?? 0
+        let totalBytes = textBytes + imageBytes + undoBytes
+        let countShareBase = max(textPct + imagePct, 1)
+        let shareBase = CGFloat(max(totalBytes, 1))
+        let textShare = CGFloat(textBytes) / shareBase
+        let imageShare = CGFloat(imageBytes) / shareBase
+        let undoShare = CGFloat(undoBytes) / shareBase
+        return settingsCard {
             HStack(spacing: 10) {
                 Image(systemName: "chart.pie")
                     .font(.system(size: 16))
@@ -81,39 +91,27 @@ extension InlineSettingsView {
             }
             .padding(.bottom, 12)
             HStack(spacing: 20) {
-                VStack(alignment: .leading, spacing: 6) {
-                    GeometryReader { geo in
-                        let w = geo.size.width
-                        ZStack(alignment: .leading) {
-                            RoundedRectangle(cornerRadius: 6)
-                                .fill(theme.cardBorder)
-                                .frame(height: 12)
-                            HStack(spacing: 0) {
-                                Color.accentColor
-                                    .frame(width: w * textPct)
-                                Color(nsColor: .systemGreen)
-                                    .frame(width: w * imagePct)
-                                Spacer(minLength: 0)
-                            }
-                            .frame(height: 12)
-                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                VStack(alignment: .leading, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        occupancyBar([
+                            (Color.accentColor, textPct / countShareBase),
+                            (Color(nsColor: .systemGreen), imagePct / countShareBase),
+                        ])
+                        HStack(spacing: 16) {
+                            occupancyLegend(Color.accentColor, "文本项目 (\(textCount))")
+                            occupancyLegend(Color(nsColor: .systemGreen), "图片项目 (\(imageCount))")
                         }
                     }
-                    .frame(height: 12)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 6)
-                            .stroke(theme.cardBorder, lineWidth: 1)
-                    )
-                    HStack(spacing: 16) {
-                        HStack(spacing: 5) {
-                            Circle().fill(Color.accentColor).frame(width: 8, height: 8)
-                            Text("文本项目 (\(textCount))")
-                                .font(.system(size: 10)).foregroundColor(theme.secondaryText)
-                        }
-                        HStack(spacing: 5) {
-                            Circle().fill(Color(nsColor: .systemGreen)).frame(width: 8, height: 8)
-                            Text("图片项目 (\(imageCount))")
-                                .font(.system(size: 10)).foregroundColor(theme.secondaryText)
+                    VStack(alignment: .leading, spacing: 6) {
+                        occupancyBar([
+                            (Color.accentColor, textShare),
+                            (Color(nsColor: .systemGreen), imageShare),
+                            (Color(nsColor: .systemOrange), undoShare),
+                        ])
+                        HStack(spacing: 12) {
+                            occupancyLegend(Color.accentColor, "文本 \(formatStorageSize(textBytes))")
+                            occupancyLegend(Color(nsColor: .systemGreen), "图片 \(formatStorageSize(imageBytes))")
+                            occupancyLegend(Color(nsColor: .systemOrange), "撤销栈 \(formatStorageSize(undoBytes))")
                         }
                     }
                 }
@@ -121,14 +119,11 @@ extension InlineSettingsView {
                     Text("已使用存储空间")
                         .font(.system(size: 11))
                         .foregroundColor(theme.secondaryText)
-                    Text(formatStorageSize(backend.getStorageSize()))
+                    Text(formatStorageSize(totalBytes))
                         .font(.system(size: 28, weight: .bold))
                         .foregroundColor(theme.primaryText)
-                    Text("共 \(backend.items.count) 个剪贴板历史项目")
-                        .font(.system(size: 11))
-                        .foregroundColor(theme.secondaryText)
                 }
-                .frame(width: 140)
+                .frame(width: 140, alignment: .leading)
                 .padding(.leading, 16)
                 .overlay(
                     Rectangle()
@@ -137,6 +132,41 @@ extension InlineSettingsView {
                     alignment: .leading
                 )
             }
+        }
+    }
+
+    private func occupancyBar(_ segments: [(Color, CGFloat)]) -> some View {
+        GeometryReader { geo in
+            let width = geo.size.width
+            ZStack(alignment: .leading) {
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(theme.cardBorder)
+                    .frame(height: 12)
+                HStack(spacing: 0) {
+                    ForEach(Array(segments.enumerated()), id: \.offset) { item in
+                        item.element.0
+                            .frame(width: max(0, width * item.element.1))
+                    }
+                    Spacer(minLength: 0)
+                }
+                .frame(height: 12)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+            }
+        }
+        .frame(height: 12)
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(theme.cardBorder, lineWidth: 1)
+        )
+    }
+
+    private func occupancyLegend(_ color: Color, _ label: String) -> some View {
+        HStack(spacing: 5) {
+            Circle().fill(color).frame(width: 8, height: 8)
+            Text(label)
+                .font(.system(size: 10))
+                .foregroundColor(theme.secondaryText)
+                .lineLimit(1)
         }
     }
 

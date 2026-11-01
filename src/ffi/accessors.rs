@@ -349,7 +349,14 @@ pub extern "C" fn clipboard_shrink_db_memory() -> c_int {
 }
 
 #[no_mangle]
-pub extern "C" fn clipboard_get_storage_size() -> i64 {
+pub extern "C" fn clipboard_get_storage_breakdown(
+    text_bytes: *mut i64,
+    image_bytes: *mut i64,
+    undo_bytes: *mut i64,
+) -> c_int {
+    if text_bytes.is_null() || image_bytes.is_null() || undo_bytes.is_null() {
+        return 0;
+    }
     let b = match try_backend() {
         Some(b) => b,
         None => return 0,
@@ -357,22 +364,20 @@ pub extern "C" fn clipboard_get_storage_size() -> i64 {
     let conn = match b.db.lock() {
         Ok(c) => c,
         Err(e) => {
-            crate::error_log!("CopyAttach: DB mutex poisoned in get_storage_size: {e}");
+            crate::error_log!("CopyAttach: DB mutex poisoned in get_storage_breakdown: {e}");
             return 0;
         }
     };
-    match conn.query_row(
-        "SELECT COALESCE(SUM(LENGTH(text)), 0) + COALESCE(SUM(LENGTH(png_data)), 0) + COALESCE(SUM(LENGTH(thumb_data)), 0)
-         FROM clipboard_history
-         WHERE id NOT IN (SELECT row_id FROM clipboard_deleted)",
-        [],
-        |row| row.get::<_, i64>(0),
-    ) {
-        Ok(size) => size,
-        Err(e) => {
-            crate::error_log!("CopyAttach: failed to query storage size: {e}");
-            0
+    match crate::db::storage_breakdown(&conn) {
+        Ok((text, image, undo)) => {
+            unsafe {
+                *text_bytes = text;
+                *image_bytes = image;
+                *undo_bytes = undo;
+            }
+            1
         }
+        Err(()) => 0,
     }
 }
 

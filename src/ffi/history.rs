@@ -3,7 +3,6 @@ use std::ffi::{c_char, c_int, CStr};
 use std::sync::atomic::Ordering;
 
 use crate::backend::try_backend;
-use crate::history::add_to_history;
 use crate::types::ClipboardEntry;
 
 #[no_mangle]
@@ -103,6 +102,7 @@ pub extern "C" fn clipboard_delete_by_id(entry_id: u64) -> c_int {
         return 0;
     }
 
+    let row_entry_id: u64;
     {
         let conn = match b.db.lock() {
             Ok(c) => c,
@@ -111,14 +111,14 @@ pub extern "C" fn clipboard_delete_by_id(entry_id: u64) -> c_int {
                 return 0;
             }
         };
-        let result: Result<(), ()> = (|| {
+        row_entry_id = match (|| -> Result<u64, ()> {
             let tx = conn.unchecked_transaction().map_err(|e| {
                 crate::error_log!("CopyAttach: failed to begin delete transaction: {e}");
             })?;
-            crate::db::soft_delete_row(&tx, db_id)?;
+            let row_entry_id = crate::db::soft_delete_row(&tx, db_id)?;
             tx.execute(
                 "DELETE FROM clipboard_favorites WHERE entry_id = ?1",
-                rusqlite::params![entry_id as i64],
+                rusqlite::params![row_entry_id as i64],
             )
             .map_err(|e| {
                 crate::error_log!("CopyAttach: failed to drop favorite for deleted entry {entry_id}: {e}");
@@ -126,22 +126,22 @@ pub extern "C" fn clipboard_delete_by_id(entry_id: u64) -> c_int {
             tx.commit().map_err(|e| {
                 crate::error_log!("CopyAttach: failed to commit delete of entry {entry_id}: {e}");
             })?;
-            Ok(())
-        })();
-        if result.is_err() {
-            return 0;
-        }
+            Ok(row_entry_id)
+        })() {
+            Ok(id) => id,
+            Err(()) => return 0,
+        };
         if crate::db::purge_expired_deleted_rows(&conn, crate::backend::undo_budget_bytes()).is_err() {
             crate::error_log!("CopyAttach: deleted-row sweep failed after delete; retried at next launch");
         }
     }
 
     if let Ok(mut favorites) = b.favorites.lock() {
-        favorites.remove(&entry_id);
+        favorites.remove(&row_entry_id);
     }
     {
         let mut hist = b.history.lock().unwrap();
-        crate::history::remove_deleted_entry(&mut hist, entry_id, db_id);
+        crate::history::remove_deleted_entry(&mut hist, db_id);
         crate::backend::mark_history_changed();
     }
 
@@ -380,7 +380,7 @@ pub extern "C" fn clipboard_undo_delete() -> c_int {
         None => return 0,
     };
 
-    let restored: Option<(u64, i64, bool)> = {
+    let restored: Option<(u64, i64, HashSet<u64>)> = {
         let conn = match b.db.lock() {
             Ok(c) => c,
             Err(e) => {
@@ -388,7 +388,7 @@ pub extern "C" fn clipboard_undo_delete() -> c_int {
                 return 0;
             }
         };
-        let (old_row_id, entry_id, _stamp, was_favorite_raw) =
+        let (old_row_id, entry_id, was_favorite) =
             match crate::db::newest_deleted_row(&conn) {
                 Ok(Some(t)) => t,
                 Ok(None) => {
@@ -397,16 +397,14 @@ pub extern "C" fn clipboard_undo_delete() -> c_int {
                 }
                 Err(()) => return 0,
             };
-        let was_favorite = was_favorite_raw != 0;
 
         let source = match load_deleted_payload(&conn, old_row_id) {
             Ok(s) => s,
             Err(UndoLoadError::Unrestorable) => {
-                crate::error_log!("CopyAttach: undo could not load payload for deleted row {old_row_id} — dropping the undo entry");
-                let _ = conn.execute(
-                    "DELETE FROM clipboard_deleted WHERE row_id = ?1",
-                    rusqlite::params![old_row_id],
-                );
+                crate::error_log!("CopyAttach: undo could not load payload for deleted row {old_row_id} — discarding it");
+                if crate::db::delete_payload_rows(&conn, &[old_row_id]).is_err() {
+                    crate::error_log!("CopyAttach: failed to discard unrestorable undo row {old_row_id}");
+                }
                 return 0;
             }
             Err(UndoLoadError::Read) => {
@@ -419,17 +417,6 @@ pub extern "C" fn clipboard_undo_delete() -> c_int {
             Ok(t) => t,
             Err(e) => {
                 crate::error_log!("CopyAttach: failed to begin undo transaction: {e}");
-                return 0;
-            }
-        };
-        let before_max: i64 = match tx.query_row(
-            "SELECT COALESCE(MAX(id), 0) FROM clipboard_history",
-            [],
-            |r| r.get(0),
-        ) {
-            Ok(v) => v,
-            Err(e) => {
-                crate::error_log!("CopyAttach: undo could not read the history id bound: {e}");
                 return 0;
             }
         };
@@ -456,11 +443,7 @@ pub extern "C" fn clipboard_undo_delete() -> c_int {
             [],
             |r| r.get::<_, i64>(0),
         ) {
-            Ok(v) if v > before_max => v,
-            Ok(v) => {
-                crate::error_log!("CopyAttach: undo insert produced no new history row (max id {v}, was {before_max})");
-                return 0;
-            }
+            Ok(v) => v,
             Err(e) => {
                 crate::error_log!("CopyAttach: undo could not locate the restored row: {e}");
                 return 0;
@@ -490,15 +473,25 @@ pub extern "C" fn clipboard_undo_delete() -> c_int {
                 return 0;
             }
         }
+        let favorites_after = match crate::db::load_favorites(&tx) {
+            Ok(set) => set,
+            Err(()) => {
+                crate::error_log!("CopyAttach: undo could not read back favorites for entry {entry_id}; rolling back");
+                return 0;
+            }
+        };
         if let Err(e) = tx.commit() {
             crate::error_log!("CopyAttach: failed to commit undo of entry {entry_id}: {e}");
             return 0;
         }
+        if let Ok(mut mirror) = b.favorites.lock() {
+            *mirror = favorites_after.clone();
+        }
         drop(source);
-        Some((entry_id, new_row_id, was_favorite))
+        Some((entry_id, new_row_id, favorites_after))
     };
 
-    let (entry_id, new_row_id, was_favorite) = match restored {
+    let (entry_id, new_row_id, favorites_after) = match restored {
         Some(v) => v,
         None => return 0,
     };
@@ -520,9 +513,10 @@ pub extern "C" fn clipboard_undo_delete() -> c_int {
         }
     };
 
+    let restored_favorite = favorites_after.contains(&entry_id);
     let restored_id = {
         let mut hist = b.history.lock().unwrap();
-        *hist = add_to_history(std::mem::take(&mut *hist), entry);
+        *hist = crate::history::insert_restored(std::mem::take(&mut *hist), entry);
         {
             let favorites = b.favorites.lock().unwrap();
             crate::backend::trim_history_memory(
@@ -536,36 +530,11 @@ pub extern "C" fn clipboard_undo_delete() -> c_int {
         id
     };
 
-    if was_favorite {
-        if let Ok(mut favorites) = b.favorites.lock() {
-            favorites.insert(entry_id);
-        }
-    }
-
     b.last_restored_id.store(restored_id, Ordering::SeqCst);
     crate::debug_log!(
-        "CopyAttach: undo restored entry {entry_id} as row {new_row_id} (favorite={was_favorite})"
+        "CopyAttach: undo restored entry {entry_id} as row {new_row_id} (favorite={restored_favorite})"
     );
     1
-}
-
-#[no_mangle]
-pub extern "C" fn clipboard_can_undo() -> c_int {
-    let b = match try_backend() {
-        Some(b) => b,
-        None => return 0,
-    };
-    let conn = match b.db.lock() {
-        Ok(c) => c,
-        Err(e) => {
-            crate::error_log!("CopyAttach: DB mutex poisoned in can_undo: {e}");
-            return 0;
-        }
-    };
-    match crate::db::undo_depth(&conn) {
-        Ok(depth) => c_int::from(depth > 0),
-        Err(()) => 0,
-    }
 }
 
 #[no_mangle]

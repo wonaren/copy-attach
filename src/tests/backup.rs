@@ -616,3 +616,53 @@ fn test_overwrite_restore_clears_the_undo_side_table() {
 
     let _ = std::fs::remove_file(&backup_path);
 }
+
+#[test]
+fn test_restoring_a_raw_history_db_skips_its_soft_deleted_rows() {
+    let (src_path, src_conn) = make_temp_db("raw_backup");
+    for (i, body) in ["LIVE-RAW", "DELETED-RAW"].iter().enumerate() {
+        let e = ClipboardEntry::text_entry(
+            new_entry_id(),
+            body,
+            1_700_000_000 + i as u64,
+            "App".into(),
+            "com.a".into(),
+            0,
+        );
+        insert_entry_to_db(&src_conn, &e, Some(body), None, None).unwrap();
+    }
+    let deleted_row: i64 = src_conn
+        .query_row("SELECT id FROM clipboard_history WHERE text = 'DELETED-RAW'", [], |r| r.get(0))
+        .unwrap();
+    crate::db::soft_delete_row(&src_conn, deleted_row).unwrap();
+    crate::db::store_undo_budget_bytes(&src_conn, 16 * 1024 * 1024).unwrap();
+    drop(src_conn);
+
+    let (_dst_path, mut dst_conn) = make_temp_db("raw_dst");
+    crate::db::store_undo_budget_bytes(&dst_conn, 64 * 1024 * 1024).unwrap();
+    restore_backup_overwrite(&mut dst_conn, &src_path).unwrap();
+
+    let loaded = load_history_from_db(&dst_conn, 3000);
+    let labels: Vec<String> = loaded.iter().map(|e| e.label()).collect();
+    assert_eq!(labels, vec!["LIVE-RAW"], "soft-deleted rows in a raw DB must not be imported");
+    assert_eq!(
+        crate::db::load_undo_budget_bytes(&dst_conn).unwrap(),
+        64 * 1024 * 1024,
+        "restoring a backup must not overwrite the device's undo budget"
+    );
+
+    let (_merge_path, mut merge_conn) = make_temp_db("raw_merge_dst");
+    let local = ClipboardEntry::text_entry(
+        new_entry_id(), "LOCAL-ONLY", 1_700_000_000, "App".into(), "com.a".into(), 0,
+    );
+    insert_entry_to_db(&merge_conn, &local, Some("LOCAL-ONLY"), None, None).unwrap();
+    let (added, _) = restore_backup_merge(&mut merge_conn, &src_path).unwrap();
+    assert_eq!(added, 1, "merge must import only the backup's live row");
+    let merged = load_history_from_db(&merge_conn, 3000);
+    assert!(
+        merged.iter().all(|e| e.label() != "DELETED-RAW"),
+        "merge must not resurrect a soft-deleted backup row"
+    );
+
+    let _ = std::fs::remove_file(&src_path);
+}

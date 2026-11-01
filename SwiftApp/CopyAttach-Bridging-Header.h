@@ -145,14 +145,13 @@ int32_t clipboard_clear_history(void);
 int32_t clipboard_trim_oldest_percent(int32_t percent);
 int32_t clipboard_get_cleanup_threshold(void);
 void clipboard_set_cleanup_threshold(int32_t threshold);
-int64_t clipboard_get_storage_size(void);
+int32_t clipboard_get_storage_breakdown(int64_t* text_bytes, int64_t* image_bytes, int64_t* undo_bytes);
 int32_t clipboard_shrink_db_memory(void);
 int32_t clipboard_delete_by_id(uint64_t entry_id);
 int32_t clipboard_set_custom_label(uint64_t entry_id, const char* label);
 // Persist a favorite on the entry (DB table + in-memory mirror). 1 = ok, 0 = failure.
 int32_t clipboard_set_favorite(uint64_t entry_id, int32_t favorite);
 int32_t clipboard_undo_delete(void);
-int32_t clipboard_can_undo(void);
 // Number of deletions currently undoable (deleted rows still inside retention).
 int32_t clipboard_undo_depth(void);
 // Deletions the byte budget would evict if this entry were deleted now.

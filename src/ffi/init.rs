@@ -444,10 +444,12 @@ pub extern "C" fn clipboard_set_ignore_rules(
 
 #[cfg(not(feature = "stress-test"))]
 fn spawn_compaction_if_fragmented(b: &'static crate::backend::Backend) {
-    const MIN_FREELIST_PAGES: i64 = 10_000;
-    const MIN_FREELIST_SHARE_PCT: i64 = 20;
+    const MIN_FULL_VACUUM_PAGES: i64 = 10_000;
+    const MIN_FULL_VACUUM_SHARE_PCT: i64 = 20;
+    const MIN_INCREMENTAL_PAGES: i64 = 1_024;
+    const INCREMENTAL_BATCH_PAGES: i64 = 1_024;
 
-    let (freelist, total) = {
+    let (freelist, total, auto_vacuum) = {
         let conn = match b.db.lock() {
             Ok(c) => c,
             Err(e) => {
@@ -455,24 +457,68 @@ fn spawn_compaction_if_fragmented(b: &'static crate::backend::Backend) {
                 return;
             }
         };
-        let read = |pragma: &str| -> i64 {
-            conn.query_row(&format!("PRAGMA {pragma}"), [], |r| r.get::<_, i64>(0))
-                .unwrap_or(0)
+        let (freelist, total, mode) = match (
+            crate::db::freelist_pages(&conn),
+            conn.query_row("PRAGMA page_count", [], |r| r.get::<_, i64>(0)).ok(),
+            crate::db::auto_vacuum_mode(&conn),
+        ) {
+            (Some(f), Some(t), Some(m)) => (f, t, m),
+            _ => {
+                crate::error_log!("CopyAttach: compaction check could not read the DB stats");
+                return;
+            }
         };
-        (read("freelist_count"), read("page_count"))
+        (freelist, total, mode)
     };
-    if total <= 0 || freelist < MIN_FREELIST_PAGES {
+    if total <= 0 {
         return;
     }
-    if freelist * 100 < total * MIN_FREELIST_SHARE_PCT {
+
+    if auto_vacuum == 2 {
+        if freelist < MIN_INCREMENTAL_PAGES {
+            return;
+        }
         crate::debug_log!(
-            "CopyAttach: skipping compaction, freelist={freelist}/{total} pages is under {MIN_FREELIST_SHARE_PCT}%"
+            "CopyAttach: reclaiming {freelist} free pages incrementally (batch {INCREMENTAL_BATCH_PAGES})"
+        );
+        std::thread::spawn(move || loop {
+            if !b.running.load(Ordering::SeqCst) {
+                return;
+            }
+            let freed = {
+                let conn = match b.db.lock() {
+                    Ok(c) => c,
+                    Err(e) => {
+                        crate::error_log!("CopyAttach: incremental reclaim could not lock the DB: {e}");
+                        return;
+                    }
+                };
+                match crate::db::reclaim_free_pages(&conn, INCREMENTAL_BATCH_PAGES) {
+                    Ok(n) => n,
+                    Err(()) => return,
+                }
+            };
+            if freed <= 0 {
+                crate::debug_log!("CopyAttach: incremental reclaim complete");
+                return;
+            }
+            thread::sleep(std::time::Duration::from_millis(20));
+        });
+        return;
+    }
+
+    if freelist < MIN_FULL_VACUUM_PAGES {
+        return;
+    }
+    if freelist * 100 < total * MIN_FULL_VACUUM_SHARE_PCT {
+        crate::debug_log!(
+            "CopyAttach: skipping compaction, freelist={freelist}/{total} pages is under {MIN_FULL_VACUUM_SHARE_PCT}%"
         );
         return;
     }
 
     crate::debug_log!(
-        "CopyAttach: compacting database in the background (freelist {freelist}/{total} pages)"
+        "CopyAttach: converting the database to incremental auto-vacuum (freelist {freelist}/{total} pages)"
     );
     std::thread::spawn(move || {
         let guard = match b.db.lock() {
@@ -486,17 +532,11 @@ fn spawn_compaction_if_fragmented(b: &'static crate::backend::Backend) {
             return;
         }
         let started = std::time::Instant::now();
-        match guard.execute_batch("VACUUM") {
-            Ok(()) => {
-                let _ = guard.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)");
-                crate::debug_log!(
-                    "CopyAttach: compaction complete in {} ms",
-                    started.elapsed().as_millis()
-                );
-            }
-            Err(e) => {
-                crate::error_log!("CopyAttach: compaction (VACUUM) failed: {e}");
-            }
+        if crate::db::convert_to_incremental_auto_vacuum(&guard).is_ok() {
+            crate::debug_log!(
+                "CopyAttach: conversion complete in {} ms",
+                started.elapsed().as_millis()
+            );
         }
     });
 }

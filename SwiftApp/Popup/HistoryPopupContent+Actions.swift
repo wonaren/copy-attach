@@ -73,8 +73,8 @@ extension HistoryPopupContent {
             return true
         }
         let alert = NSAlert()
-        alert.messageText = "撤销空间已满"
-        alert.informativeText = "继续删除将无法恢复 \(evicted) 条更早的记录。"
+        alert.messageText = "撤销记录将被清理"
+        alert.informativeText = "继续删除后，\(evicted) 条撤销记录将无法恢复。"
         alert.alertStyle = .informational
         alert.addButton(withTitle: "继续删除")
         alert.addButton(withTitle: "取消")
@@ -102,7 +102,7 @@ extension HistoryPopupContent {
     static let undoEvictionWarningKey = "UndoEvictionWarningDisabled"
 
     func performUndo() {
-        guard backend.canUndo() else { return }
+        guard backend.undoDepth() > 0 else { return }
 
         let perfUndo = PerfSpan.start("swift", "undo.perform")
         defer { perfUndo?.end() }

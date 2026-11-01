@@ -50,6 +50,22 @@ pub(crate) fn add_to_history(
     history
 }
 
+pub(crate) fn insert_restored(
+    mut history: Vec<ClipboardEntry>,
+    item: ClipboardEntry,
+) -> Vec<ClipboardEntry> {
+    match &item {
+        ClipboardEntry::Text { text_hash, .. } => history.retain(|e| {
+            !matches!(e, ClipboardEntry::Text { text_hash: h, .. } if h == text_hash)
+        }),
+        ClipboardEntry::Image { hash, .. } => history.retain(|e| {
+            !matches!(e, ClipboardEntry::Image { hash: h, .. } if h == hash)
+        }),
+    }
+    history.insert(0, item);
+    history
+}
+
 pub(crate) fn assign_db_id_by_text_hash(
     history: &mut [ClipboardEntry],
     text_hash: u64,
@@ -65,10 +81,6 @@ pub(crate) fn assign_db_id_by_text_hash(
     }
 }
 
-pub(crate) fn remove_deleted_entry(
-    history: &mut Vec<ClipboardEntry>,
-    entry_id: u64,
-    db_id: i64,
-) {
-    history.retain(|e| !(e.entry_id() == entry_id && e.db_id() == db_id));
+pub(crate) fn remove_deleted_entry(history: &mut Vec<ClipboardEntry>, db_id: i64) {
+    history.retain(|e| e.db_id() != db_id);
 }

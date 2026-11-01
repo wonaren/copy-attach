@@ -56,7 +56,8 @@ pub(crate) fn open_db() -> Result<Connection, DbFailure> {
         failure
     })?;
     if let Err(e) = conn.execute_batch(
-        "PRAGMA journal_mode = WAL;
+        "PRAGMA auto_vacuum = INCREMENTAL;
+         PRAGMA journal_mode = WAL;
          PRAGMA synchronous = NORMAL;
          PRAGMA mmap_size = 0;
          PRAGMA cache_size = -4096;"
@@ -338,6 +339,62 @@ pub(crate) fn import_favorites(conn: &Connection, ids: &[u64]) -> Result<usize, 
 pub(crate) const METADATA_VERSION: i32 = 4;
 
 pub(crate) const FTS_MAX_INDEXED_TEXT_LEN: i64 = 512 * 1024;
+
+pub(crate) fn auto_vacuum_mode(conn: &Connection) -> Option<i64> {
+    conn.query_row("PRAGMA auto_vacuum", [], |r| r.get(0)).ok()
+}
+
+pub(crate) fn freelist_pages(conn: &Connection) -> Option<i64> {
+    conn.query_row("PRAGMA freelist_count", [], |r| r.get(0)).ok()
+}
+
+pub(crate) fn reclaim_free_pages(conn: &Connection, pages: i64) -> Result<i64, ()> {
+    let before = freelist_pages(conn).ok_or_else(|| {
+        crate::error_log!("CopyAttach: incremental vacuum could not read the freelist");
+    })?;
+    if before <= 0 {
+        return Ok(0);
+    }
+    let pages = pages.clamp(1, 100_000);
+    let sql = match std::ffi::CString::new(format!("PRAGMA incremental_vacuum({pages});")) {
+        Ok(s) => s,
+        Err(e) => {
+            crate::error_log!("CopyAttach: incremental vacuum statement is invalid: {e}");
+            return Err(());
+        }
+    };
+    let rc = unsafe {
+        rusqlite::ffi::sqlite3_exec(
+            conn.handle(),
+            sql.as_ptr(),
+            None,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    if rc != rusqlite::ffi::SQLITE_OK {
+        crate::error_log!("CopyAttach: incremental vacuum failed with SQLite code {rc}");
+        return Err(());
+    }
+    let after = freelist_pages(conn).ok_or_else(|| {
+        crate::error_log!("CopyAttach: incremental vacuum could not re-read the freelist");
+    })?;
+    Ok((before - after).max(0))
+}
+
+pub(crate) fn convert_to_incremental_auto_vacuum(conn: &Connection) -> Result<(), ()> {
+    if let Err(e) = conn.execute_batch(
+        "PRAGMA auto_vacuum = INCREMENTAL;
+         VACUUM;",
+    ) {
+        crate::error_log!("CopyAttach: conversion to incremental auto-vacuum failed: {e}");
+        return Err(());
+    }
+    if let Err(e) = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);") {
+        crate::error_log!("CopyAttach: checkpoint after the auto-vacuum conversion failed: {e}");
+    }
+    Ok(())
+}
 
 fn backfill_text_metadata(conn: &Connection) -> Result<(), rusqlite::Error> {
     let version: i32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;

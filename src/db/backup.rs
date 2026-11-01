@@ -238,6 +238,23 @@ pub(crate) fn restore_backup_overwrite(
         )
         .map_err(|e| format!("导入备份历史数据失败: {e}"))?;
 
+        let backup_has_deleted: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM backup_db.sqlite_master
+                 WHERE type = 'table' AND name = 'clipboard_deleted'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|e| format!("检查备份删除标记表失败: {e}"))?;
+        if backup_has_deleted > 0 {
+            tx.execute(
+                "DELETE FROM main.clipboard_history
+                 WHERE id IN (SELECT row_id FROM backup_db.clipboard_deleted)",
+                [],
+            )
+            .map_err(|e| format!("剔除备份中已删除的记录失败: {e}"))?;
+        }
+
         let local_watermark = crate::db::schema::entry_id_watermark(&tx);
 
         tx.execute_batch(
@@ -261,7 +278,7 @@ pub(crate) fn restore_backup_overwrite(
             tx.execute(
                 "INSERT OR REPLACE INTO main.clipboard_meta (key, value)
                  SELECT key, value FROM backup_db.clipboard_meta
-                 WHERE key <> 'entry_id_watermark'",
+                 WHERE key NOT IN ('entry_id_watermark', 'undo_budget_bytes')",
                 [],
             )
             .map_err(|e| format!("恢复元数据失败: {e}"))?;
@@ -427,14 +444,28 @@ pub(crate) fn restore_backup_merge(
             custom_label: String,
         }
 
-        let mut stmt = tx
-            .prepare(
-                "SELECT entry_id, entry_type, text, png_data, width, height,
-                        thumb_data, thumb_width, thumb_height, hash, timestamp,
-                        source_name, source_bundle_id, preview, label, custom_label
-                 FROM backup_db.clipboard_history
-                 ORDER BY id ASC",
+        let backup_has_deleted: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM backup_db.sqlite_master
+                 WHERE type = 'table' AND name = 'clipboard_deleted'",
+                [],
+                |r| r.get(0),
             )
+            .map_err(|e| format!("检查备份删除标记表失败: {e}"))?;
+        let skip_deleted = if backup_has_deleted > 0 {
+            " WHERE id NOT IN (SELECT row_id FROM backup_db.clipboard_deleted)"
+        } else {
+            ""
+        };
+        let merge_rows_sql = format!(
+            "SELECT entry_id, entry_type, text, png_data, width, height,
+                    thumb_data, thumb_width, thumb_height, hash, timestamp,
+                    source_name, source_bundle_id, preview, label, custom_label
+             FROM backup_db.clipboard_history{skip_deleted}
+             ORDER BY id ASC"
+        );
+        let mut stmt = tx
+            .prepare(&merge_rows_sql)
             .map_err(|e| format!("读取备份条目失败: {e}"))?;
 
         let rows = stmt

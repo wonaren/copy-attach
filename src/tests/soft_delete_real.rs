@@ -4,6 +4,10 @@ static INIT: Once = Once::new();
 
 fn ensure_real_backend() {
     INIT.call_once(|| {
+        assert!(
+            std::env::var_os("COPYATTACH_DATA_DIR").is_some(),
+            "test_soft_delete_real_path mutates the live history; set COPYATTACH_DATA_DIR to a scratch directory"
+        );
         let rc = crate::ffi::clipboard_init_with_threshold_and_favorites(10_000, std::ptr::null());
         assert_eq!(rc, 1, "clipboard_init must succeed against COPYATTACH_DATA_DIR");
     });

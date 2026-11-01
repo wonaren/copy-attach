@@ -111,7 +111,11 @@ fn test_dedup_does_not_consume_a_deleted_row() {
     )
     .expect("stamp");
 
-    let (_id_b, _row_b) = insert_body(&conn, "same-content", 200);
+    let (id_b, _row_b) = insert_body(&conn, "same-content", 200);
+    let recaptured = ClipboardEntry::text_entry(
+        id_b, "same-content", 200, String::new(), String::new(), 0,
+    );
+    crate::db::delete_matching_entry(&conn, &recaptured, Some("same-content"));
 
     let deleted_rows: i64 = conn
         .query_row(
@@ -143,7 +147,7 @@ fn test_dedup_does_not_consume_a_deleted_row() {
 fn test_trim_counts_live_rows_only() {
     let (path, conn) = file_db("trim");
     let mut rows = Vec::new();
-    for i in 0..10 {
+    for i in 0..13 {
         let (_id, row) = insert_body(&conn, &format!("trim-content-{i}"), i as u64);
         rows.push(row);
     }
@@ -157,18 +161,23 @@ fn test_trim_counts_live_rows_only() {
         .unwrap();
     }
 
-    crate::db::trim_db_history(&conn, 10).expect("trim");
-    let live: i64 = conn
-        .query_row(
+    let live_count = |conn: &Connection| -> i64 {
+        conn.query_row(
             "SELECT COUNT(*) FROM clipboard_history WHERE id NOT IN (SELECT row_id FROM clipboard_deleted)",
             [],
             |r| r.get(0),
         )
-        .unwrap();
-    assert_eq!(live, 5, "trim must count live rows only, not deleted ones");
+        .unwrap()
+    };
+
+    crate::db::trim_db_history(&conn, 10).expect("trim");
+    assert_eq!(live_count(&conn), 8, "trim must count live rows only, not deleted ones");
+
+    crate::db::trim_db_history(&conn, 6).expect("trim");
+    assert_eq!(live_count(&conn), 6, "trim must shed only the live excess");
 
     let loaded = load_history_from_db(&conn, 10);
-    assert_eq!(loaded.len(), 5, "all live rows must remain loadable");
+    assert_eq!(loaded.len(), 6, "all live rows must remain loadable");
 
     drop(conn);
     for suffix in ["", "-wal", "-shm"] {
@@ -429,6 +438,109 @@ fn test_eviction_preview_matches_the_real_sweep() {
 }
 
 #[test]
+fn test_eviction_preview_counts_self_eviction() {
+    let (path, conn) = file_db("eviction_self");
+    let budget: i64 = 6 * 1024 * 1024;
+    let thumb = vec![0x11u8; 1024];
+    let blob = vec![0xABu8; 8 * 1024 * 1024];
+
+    let id = crate::backend::new_entry_id();
+    let entry = ClipboardEntry::Image {
+        id,
+        width: 100,
+        height: 100,
+        thumb_width: 10,
+        thumb_height: 10,
+        hash: id,
+        custom_label: String::new(),
+        timestamp: 2,
+        source_name: "EvictTest".to_string(),
+        source_bundle_id: "com.example.evict".to_string(),
+        db_id: 0,
+    };
+    let row = insert_image_row(&conn, &entry, &blob, &thumb);
+    let incoming_bytes = crate::db::history_row_payload_bytes(&conn, row).unwrap();
+    assert!(incoming_bytes > budget, "fixture must exceed the budget on its own");
+
+    let predicted = crate::db::pending_undo_evictions(&conn, incoming_bytes, budget).unwrap();
+    assert_eq!(predicted, 1, "the preview must warn that the item itself cannot be kept");
+
+    crate::db::soft_delete_row(&conn, row).unwrap();
+    crate::db::purge_expired_deleted_rows(&conn, budget).unwrap();
+    assert_eq!(
+        crate::db::undo_depth(&conn).unwrap(),
+        0,
+        "the over-budget deletion cannot stay undoable"
+    );
+
+    drop(conn);
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+    }
+}
+
+#[test]
+fn test_eviction_preview_excludes_expired_deletions() {
+    let (path, conn) = file_db("eviction_expired");
+    let budget: i64 = 6 * 1024 * 1024;
+    let thumb = vec![0x11u8; 1024];
+
+    let entry_for = |id: u64, ts: u64| ClipboardEntry::Image {
+        id,
+        width: 100,
+        height: 100,
+        thumb_width: 10,
+        thumb_height: 10,
+        hash: id,
+        custom_label: String::new(),
+        timestamp: ts,
+        source_name: "EvictTest".to_string(),
+        source_bundle_id: "com.example.evict".to_string(),
+        db_id: 0,
+    };
+
+    let expired_id = crate::backend::new_entry_id();
+    let expired_blob = vec![0xEEu8; 4 * 1024 * 1024];
+    let expired_row = insert_image_row(&conn, &entry_for(expired_id, 1), &expired_blob, &thumb);
+    conn.execute(
+        "INSERT INTO clipboard_deleted (row_id, entry_id, deleted_at, was_favorite)
+         VALUES (?1, ?2, ?3, 0)",
+        rusqlite::params![
+            expired_row,
+            expired_id as i64,
+            crate::backend::undo_stamp_now()
+                - (crate::backend::UNDO_RETENTION_SECS as i64 + 60) * 1_000_000
+        ],
+    )
+    .unwrap();
+
+    let incoming_id = crate::backend::new_entry_id();
+    let incoming_blob = vec![0xABu8; 4 * 1024 * 1024];
+    let incoming_row = insert_image_row(&conn, &entry_for(incoming_id, 2), &incoming_blob, &thumb);
+    let incoming_bytes = crate::db::history_row_payload_bytes(&conn, incoming_row).unwrap();
+    assert!(incoming_bytes <= budget, "fixture must fit the budget on its own");
+
+    let predicted = crate::db::pending_undo_evictions(&conn, incoming_bytes, budget).unwrap();
+    assert_eq!(
+        predicted, 0,
+        "expired deletions are swept by age and must not be charged to the byte budget"
+    );
+
+    crate::db::soft_delete_row(&conn, incoming_row).unwrap();
+    crate::db::purge_expired_deleted_rows(&conn, budget).unwrap();
+    assert_eq!(
+        crate::db::undo_depth(&conn).unwrap(),
+        1,
+        "the expired row is swept while the incoming deletion stays undoable"
+    );
+
+    drop(conn);
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+    }
+}
+
+#[test]
 fn test_unlimited_budget_never_evicts() {
     let (path, conn) = file_db("unlimited");
     let (_, row) = insert_body(&conn, "unlimited-probe", 1);
@@ -478,6 +590,12 @@ fn test_undo_keeps_the_star_of_the_recaptured_copy() {
         .unwrap();
     assert_eq!(surviving_rows, 1, "the dedup must collapse to one row");
 
+    let before_prune = crate::db::load_favorites(&conn).expect("load favorites");
+    assert_eq!(
+        before_prune.len(), 1,
+        "the star transfer must not leave the deduped entry's favorite behind: {before_prune:?}"
+    );
+
     crate::db::prune_orphan_favorites(&conn).expect("prune");
     let favorites = crate::db::load_favorites(&conn).expect("load favorites");
     assert_eq!(favorites.len(), 1, "exactly one star must remain: {favorites:?}");
@@ -489,6 +607,46 @@ fn test_undo_keeps_the_star_of_the_recaptured_copy() {
         "the surviving row must be the starred one (favorites={favorites:?}, row id={})",
         loaded[0].entry_id()
     );
+
+    drop(conn);
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+    }
+}
+
+#[test]
+fn test_storage_breakdown_separates_text_image_and_undo() {
+    let (path, conn) = file_db("storage_breakdown");
+    insert_body(&conn, "hello", 1);
+
+    let id = crate::backend::new_entry_id();
+    let entry = ClipboardEntry::Image {
+        id,
+        width: 1,
+        height: 1,
+        thumb_width: 10,
+        thumb_height: 10,
+        hash: id,
+        custom_label: String::new(),
+        timestamp: 2,
+        source_name: "StoreTest".to_string(),
+        source_bundle_id: "com.example.store".to_string(),
+        db_id: 0,
+    };
+    let png = vec![0xEEu8; 4096];
+    let thumb = vec![0x11u8; 1024];
+    let row = insert_image_row(&conn, &entry, &png, &thumb);
+
+    let (text, image, undo) = crate::db::storage_breakdown(&conn).expect("breakdown");
+    assert_eq!(text, 5, "live text bytes");
+    assert_eq!(image, 4096 + 1024, "live image bytes");
+    assert_eq!(undo, 0, "no undo payload yet");
+
+    crate::db::soft_delete_row(&conn, row).unwrap();
+    let (text, image, undo) = crate::db::storage_breakdown(&conn).expect("breakdown");
+    assert_eq!(text, 5, "deleting an image must not move its bytes into text");
+    assert_eq!(image, 0, "deleted image must leave the live image total");
+    assert_eq!(undo, 4096 + 1024, "the deleted payload must count as undo retention");
 
     drop(conn);
     for suffix in ["", "-wal", "-shm"] {

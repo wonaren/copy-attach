@@ -305,7 +305,7 @@ fn collect_live_rows_with_content(
 }
 
 fn keep_newest_row(conn: &Connection, rows: &[(i64, i64)]) -> Result<(), rusqlite::Error> {
-    let Some(&(survivor_id, survivor_entry_id)) = rows.first() else {
+    let Some(&(_, survivor_entry_id)) = rows.first() else {
         return Ok(());
     };
     for &(row_id, entry_id) in &rows[1..] {
@@ -318,9 +318,12 @@ fn keep_newest_row(conn: &Connection, rows: &[(i64, i64)]) -> Result<(), rusqlit
                 > 0
         {
             conn.execute(
-                "INSERT OR IGNORE INTO clipboard_favorites (entry_id)
-                 SELECT entry_id FROM clipboard_history WHERE id = ?1",
-                rusqlite::params![survivor_id],
+                "INSERT OR IGNORE INTO clipboard_favorites (entry_id) VALUES (?1)",
+                rusqlite::params![survivor_entry_id],
+            )?;
+            conn.execute(
+                "DELETE FROM clipboard_favorites WHERE entry_id = ?1",
+                rusqlite::params![entry_id],
             )?;
         }
         conn.execute(
@@ -349,7 +352,7 @@ pub(crate) fn trim_db_history(conn: &Connection, threshold: usize) -> Result<(),
     Ok(())
 }
 
-pub(crate) fn soft_delete_row(conn: &Connection, db_id: i64) -> Result<(u64, i64), ()> {
+pub(crate) fn soft_delete_row(conn: &Connection, db_id: i64) -> Result<u64, ()> {
     let stamp = crate::backend::undo_stamp_now();
     let (entry_id, was_favorite) = match conn.query_row(
         "SELECT h.entry_id,
@@ -378,15 +381,15 @@ pub(crate) fn soft_delete_row(conn: &Connection, db_id: i64) -> Result<(u64, i64
     .map_err(|e| {
         crate::error_log!("CopyAttach: failed to record deletion of row {db_id}: {e}");
     })?;
-    Ok((entry_id as u64, stamp))
+    Ok(entry_id as u64)
 }
 
 pub(crate) fn newest_deleted_row(
     conn: &Connection,
-) -> Result<Option<(i64, u64, i64, i64)>, ()> {
+) -> Result<Option<(i64, u64, bool)>, ()> {
     loop {
         let candidate = match conn.query_row(
-            "SELECT row_id, entry_id, deleted_at, was_favorite
+            "SELECT row_id, entry_id, was_favorite
              FROM clipboard_deleted
              ORDER BY deleted_at DESC, row_id DESC
              LIMIT 1",
@@ -396,7 +399,6 @@ pub(crate) fn newest_deleted_row(
                     row.get::<_, i64>(0)?,
                     row.get::<_, i64>(1)?,
                     row.get::<_, i64>(2)?,
-                    row.get::<_, i64>(3)?,
                 ))
             },
         ) {
@@ -407,7 +409,7 @@ pub(crate) fn newest_deleted_row(
                 return Err(());
             }
         };
-        let (row_id, entry_id, stamp, was_favorite) = match candidate {
+        let (row_id, entry_id, was_favorite) = match candidate {
             Some(v) => v,
             None => return Ok(None),
         };
@@ -421,7 +423,7 @@ pub(crate) fn newest_deleted_row(
                 crate::error_log!("CopyAttach: undo could not check payload for row {row_id}: {e}");
             })?;
         if payload_exists > 0 {
-            return Ok(Some((row_id, entry_id as u64, stamp, was_favorite)));
+            return Ok(Some((row_id, entry_id as u64, was_favorite != 0)));
         }
         crate::debug_log!("CopyAttach: dropping orphan undo entry for missing row {row_id}");
         conn.execute(
@@ -450,21 +452,30 @@ pub(crate) fn undo_depth(conn: &Connection) -> Result<usize, ()> {
 }
 
 const ROW_PAYLOAD_BYTES: &str =
-    "COALESCE(LENGTH(h.text), 0) + COALESCE(LENGTH(h.png_data), 0) + COALESCE(LENGTH(h.thumb_data), 0)";
+    "COALESCE(LENGTH(CAST(h.text AS BLOB)), 0) + COALESCE(LENGTH(h.png_data), 0) + COALESCE(LENGTH(h.thumb_data), 0)";
 
-fn retained_deleted_payload_bytes(conn: &Connection) -> Result<i64, ()> {
+fn retained_deleted_payload_bytes(
+    conn: &Connection,
+    cutoff_micros: Option<i64>,
+) -> Result<i64, ()> {
     let sql = format!(
         "SELECT COALESCE(SUM({ROW_PAYLOAD_BYTES}), 0)
          FROM clipboard_deleted d
-         JOIN clipboard_history h ON h.id = d.row_id"
+         JOIN clipboard_history h ON h.id = d.row_id
+         WHERE d.deleted_at >= ?1"
     );
-    conn.query_row(&sql, [], |row| row.get::<_, i64>(0))
+    let floor = cutoff_micros.unwrap_or(i64::MIN);
+    conn.query_row(&sql, rusqlite::params![floor], |row| row.get::<_, i64>(0))
         .map_err(|e| {
             crate::error_log!("CopyAttach: failed to size the retained deleted payload: {e}");
         })
 }
 
-fn collect_evictions(conn: &Connection, excess: i64) -> Result<Vec<i64>, ()> {
+fn collect_evictions(
+    conn: &Connection,
+    excess: i64,
+    cutoff_micros: Option<i64>,
+) -> Result<Vec<i64>, ()> {
     if excess <= 0 {
         return Ok(Vec::new());
     }
@@ -472,12 +483,14 @@ fn collect_evictions(conn: &Connection, excess: i64) -> Result<Vec<i64>, ()> {
         "SELECT d.row_id, {ROW_PAYLOAD_BYTES}
          FROM clipboard_deleted d
          JOIN clipboard_history h ON h.id = d.row_id
+         WHERE d.deleted_at >= ?1
          ORDER BY d.deleted_at ASC, d.row_id ASC"
     );
     let mut stmt = conn.prepare(&sql).map_err(|e| {
         crate::error_log!("CopyAttach: failed to prepare the deleted-payload sweep: {e}");
     })?;
-    let rows = stmt.query_map([], |row| {
+    let floor = cutoff_micros.unwrap_or(i64::MIN);
+    let rows = stmt.query_map(rusqlite::params![floor], |row| {
         Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
     })
     .map_err(|e| {
@@ -522,9 +535,9 @@ pub(crate) fn purge_expired_deleted_rows(
     let mut purged = purge_deleted_by(conn, &format!("d.deleted_at < {cutoff_micros}"))?;
 
     if budget_bytes > crate::backend::UNDO_BUDGET_UNLIMITED {
-        let retained = retained_deleted_payload_bytes(conn)?;
+        let retained = retained_deleted_payload_bytes(conn, None)?;
         if retained > budget_bytes {
-            let doomed = collect_evictions(conn, retained - budget_bytes)?;
+            let doomed = collect_evictions(conn, retained - budget_bytes, None)?;
             purged += delete_payload_rows(conn, &doomed)?;
         }
     }
@@ -543,9 +556,34 @@ pub(crate) fn pending_undo_evictions(
     if budget_bytes <= crate::backend::UNDO_BUDGET_UNLIMITED {
         return Ok(0);
     }
-    let retained = retained_deleted_payload_bytes(conn)?;
+    let cutoff_micros = crate::backend::undo_stamp_now()
+        - (crate::backend::UNDO_RETENTION_SECS as i64) * 1_000_000;
+    let retained = retained_deleted_payload_bytes(conn, Some(cutoff_micros))?;
     let after_insert = retained.saturating_add(incoming_payload_bytes);
-    Ok(collect_evictions(conn, after_insert - budget_bytes)?.len())
+    let older = collect_evictions(conn, after_insert - budget_bytes, Some(cutoff_micros))?.len();
+    let self_evicted = usize::from(incoming_payload_bytes > budget_bytes);
+    Ok(older + self_evicted)
+}
+
+pub(crate) fn storage_breakdown(conn: &Connection) -> Result<(i64, i64, i64), ()> {
+    let live = "id NOT IN (SELECT row_id FROM clipboard_deleted)";
+    let text_sql = format!(
+        "SELECT COALESCE(SUM(LENGTH(CAST(text AS BLOB))), 0)
+         FROM clipboard_history
+         WHERE {live} AND entry_type = 0"
+    );
+    let image_sql = format!(
+        "SELECT COALESCE(SUM(COALESCE(LENGTH(png_data), 0) + COALESCE(LENGTH(thumb_data), 0)), 0)
+         FROM clipboard_history
+         WHERE {live} AND entry_type = 1"
+    );
+    let text = conn.query_row(&text_sql, [], |r| r.get::<_, i64>(0)).map_err(|e| {
+        crate::error_log!("CopyAttach: failed to size live text payloads: {e}");
+    })?;
+    let image = conn.query_row(&image_sql, [], |r| r.get::<_, i64>(0)).map_err(|e| {
+        crate::error_log!("CopyAttach: failed to size live image payloads: {e}");
+    })?;
+    Ok((text, image, retained_deleted_payload_bytes(conn, None)?))
 }
 
 pub(crate) fn history_row_payload_bytes(conn: &Connection, row_id: i64) -> Result<i64, ()> {
@@ -578,7 +616,7 @@ fn purge_deleted_by(conn: &Connection, predicate: &str) -> Result<usize, ()> {
     delete_payload_rows(conn, &ids)
 }
 
-fn delete_payload_rows(conn: &Connection, ids: &[i64]) -> Result<usize, ()> {
+pub(crate) fn delete_payload_rows(conn: &Connection, ids: &[i64]) -> Result<usize, ()> {
     if ids.is_empty() {
         return Ok(0);
     }
@@ -591,14 +629,25 @@ fn delete_payload_rows(conn: &Connection, ids: &[i64]) -> Result<usize, ()> {
         let del_rows = format!(
             "DELETE FROM clipboard_history WHERE id IN ({placeholders})"
         );
-        if let Err(e) = conn.execute(&del_side, rusqlite::params_from_iter(chunk.iter())) {
+        let tx = match conn.unchecked_transaction() {
+            Ok(t) => t,
+            Err(e) => {
+                crate::error_log!("CopyAttach: failed to begin deleted-payload transaction: {e}");
+                return Err(());
+            }
+        };
+        if let Err(e) = tx.execute(&del_rows, rusqlite::params_from_iter(chunk.iter())) {
+            crate::error_log!("CopyAttach: failed to remove {} deleted payload rows: {e}", chunk.len());
+            return Err(());
+        }
+        if let Err(e) = tx.execute(&del_side, rusqlite::params_from_iter(chunk.iter())) {
             crate::error_log!("CopyAttach: failed to remove {} undo entries: {e}", chunk.len());
             return Err(());
         }
-        match conn.execute(&del_rows, rusqlite::params_from_iter(chunk.iter())) {
-            Ok(c) => removed += c,
+        match tx.commit() {
+            Ok(()) => removed += chunk.len(),
             Err(e) => {
-                crate::error_log!("CopyAttach: failed to remove {} deleted payload rows: {e}", chunk.len());
+                crate::error_log!("CopyAttach: failed to commit deleted-payload sweep: {e}");
                 return Err(());
             }
         }
