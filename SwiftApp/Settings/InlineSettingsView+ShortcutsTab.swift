@@ -1,7 +1,5 @@
 import SwiftUI
 
-// MARK: - 🟢 SHORTCUTS TAB
-
 extension InlineSettingsView {
     var shortcutsTab: some View {
         ScrollView {

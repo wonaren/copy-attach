@@ -2,37 +2,13 @@ import AppKit
 import ApplicationServices
 import SwiftUI
 
-// MARK: - Drop target resolution
-
-/// Resolves the app that owns the drop point.
-///
-/// The drop point is the user's intent; `NSWorkspace.frontmostApplication` is
-/// not. Measured on this machine: with TextEdit frontmost, a queued batch
-/// dropped over a visible window at (1100, 300) made the old "frontmost + any
-/// of its windows contains the point" check find no TextEdit window and
-/// silently drop the batch. The window list alone is also wrong:
-/// `.optionOnScreenOnly` reports windows from other Spaces with identical
-/// full-screen bounds (four apps all reported 0,33 1470×923), so "first window
-/// containing the point" can name an app the user cannot see.
-///
-/// `AXUIElementCopyElementAtPosition` is the authoritative signal: it returns
-/// the topmost accessibility element at the point (measured: Ghostty's
-/// `AXTextArea` at (1100,300) while TextEdit was frontmost; TextEdit's
-/// `AXTextArea` at (1200,300) once its window was visible there). It is only
-/// used outside our own popup — inside the popup it resolves to the app behind
-/// us, which is why the caller checks `popupFrame` first. If AX returns nothing
-/// (an app with no accessibility tree), the batch is refused with a notice
-/// instead of guessing another app; guessing is exactly how a batch lands in a
-/// window the user did not drop on.
 enum DropTargetResolver {
     struct Target {
         let pid: pid_t
         let name: String
     }
 
-    /// Drop point in Cocoa screen coordinates (`NSEvent.mouseLocation`).
     static func target(at cocoaPoint: NSPoint) -> Target? {
-        // Cocoa (bottom-left origin) -> CG (top-left origin of the primary screen)
         guard let primaryHeight = NSScreen.screens.first?.frame.height else {
             debugLog("BatchDrag: no screen available")
             return nil
@@ -50,8 +26,6 @@ enum DropTargetResolver {
             debugLog("BatchDrag: AX pid \(pid) has no running application")
             return nil
         }
-        // Menus, the Dock and system UI are not paste targets. Accessory/HUD
-        // windows either have no editable focus or swallow ⌘V silently.
         guard app.activationPolicy == .regular else {
             debugLog("BatchDrag: \(app.localizedName ?? "pid \(pid)") is not a regular app (policy \(app.activationPolicy.rawValue))")
             return nil
@@ -81,33 +55,18 @@ enum DropTargetResolver {
     }
 }
 
-// MARK: - Controller
-
-/// Owns the "this drag carries the whole queued set" state, and turns the drop
-/// into a dispatch.
-///
-/// The set is `PasteQueueManager.queueItems` — the queue is the app's one
-/// ordered multi-selection (badges show the order), so batch drag introduces no
-/// second selection model. The drag payload is an empty placeholder (see
-/// `BatchDragPlan`); every item travels through `BatchDispenseRunner`.
 @MainActor
 final class BatchDragController {
     static let shared = BatchDragController()
 
-    /// True between `.onDrag` firing and the drag ending (mouse-up or the popup
-    /// resigning key).
     private(set) var isActive = false
 
-    /// Ordered snapshot taken at drag start.
     private var items: [ClipboardItem] = []
 
-    /// Pending activation of a target that the drop did not bring forward.
     private var activationTask: Task<Void, Never>?
 
     private init() {}
 
-    /// Called from the row's `.onDrag` when the dragged row is part of a
-    /// multi-item queue.
     func begin(items: [ClipboardItem]) {
         activationTask?.cancel()
         activationTask = nil
@@ -120,10 +79,6 @@ final class BatchDragController {
         debugLog("BatchDrag: drag started with \(items.count) items")
     }
 
-    /// Abandon an armed drag. Deliberately does NOT touch a dispatch that
-    /// `dragEnded` already committed to: `HistoryPopupWindow.close()` calls this
-    /// on every close, and cancelling the activation task here would silently
-    /// drop a legitimate batch.
     func cancel() {
         guard isActive || !items.isEmpty else { return }
         debugLog("BatchDrag: cancelled with \(items.count) items pending")
@@ -131,24 +86,16 @@ final class BatchDragController {
         items = []
     }
 
-    /// True while a batch is waiting for target activation or pasting. The popup
-    /// uses this to cancel the whole sequence when the user summons history.
     var isDispatching: Bool {
         activationTask != nil || BatchDispenseRunner.shared.isRunning
     }
 
-    /// Stop a dispatch that is still waiting for target activation (or, through
-    /// the runner, one that is already sending). Used when the user reopens the
-    /// popup while a batch is starting.
     func abortPendingDispatch() {
         activationTask?.cancel()
         activationTask = nil
         BatchDispenseRunner.shared.cancel()
     }
 
-    /// Called by the popup on BOTH drag-end exits: `completeItemDrag` (mouse-up
-    /// while the popup is still key) and `didResignKey` (the drop activated
-    /// another app). Idempotent — the first call wins.
     func dragEnded(at cocoaPoint: NSPoint, popupFrame: NSRect) {
         guard isActive else { return }
         isActive = false
@@ -156,17 +103,11 @@ final class BatchDragController {
         activationTask?.cancel()
         activationTask = nil
 
-        // A drop onto our own popup is not a drop into another app. Refuse
-        // before anything is pasted.
         guard !popupFrame.contains(cocoaPoint) else {
             debugLog("BatchDrag: drop point is inside the popup; treated as cancel")
             return
         }
 
-        // Revalidate against the live history before committing. A queued entry
-        // can disappear while the list is open (history trim, external delete);
-        // the queue is the selection, so a stale item must not abort the batch at
-        // item K and leave the rest unreachable.
         let pruned = PasteQueueManager.shared.pruneStaleEntries()
         let live = PasteQueueManager.shared.queueItems
         if pruned > 0 {
@@ -178,11 +119,6 @@ final class BatchDragController {
             return
         }
 
-        // `prepare_paste` refuses without Accessibility, but only after it has
-        // written the pasteboard — on the second item of a batch that reads as a
-        // half-delivered set. Check first so the failure is one explicit notice.
-        // It must come before AX: `AXUIElementCopyElementAtPosition` also needs
-        // Accessibility and would otherwise be reported as "no target".
         guard ClipboardBackend.shared.checkPermission() else {
             debugLog("BatchDrag: accessibility not granted; nothing dispatched")
             abortDispatch("批量粘贴需要辅助功能权限")
@@ -202,11 +138,6 @@ final class BatchDragController {
             return
         }
 
-        // The empty placeholder drop often does not activate the target
-        // (measured: TextEdit/Notes reject the empty payload). A synthesized ⌘V
-        // is only meaningful in the frontmost app, so bring the app named by the
-        // drop point forward explicitly. The task waits for the popup close and
-        // any focus restore it performs before activating.
         guard let app = NSRunningApplication(processIdentifier: target.pid) else {
             abortDispatch("目标应用已退出")
             return
@@ -220,9 +151,6 @@ final class BatchDragController {
                 self.abortDispatch("无法激活目标应用")
                 return
             }
-            // Activation is asynchronous and a large app can take a few hundred
-            // milliseconds to become frontmost. Poll instead of one fixed sleep:
-            // a premature "not activated" would refuse a legitimate cross-app drop.
             var activated = false
             for _ in 0..<10 {
                 if NSWorkspace.shared.frontmostApplication?.processIdentifier == target.pid {
@@ -245,8 +173,6 @@ final class BatchDragController {
         }
     }
 
-    /// A dispatch that never started is still a staged selection: keep it for a
-    /// retry instead of letting the next popup open clear it.
     private func abortDispatch(_ message: String) {
         BatchHUDNotice.shared.show(message)
         if PasteQueueManager.shared.hasItems {
@@ -264,21 +190,8 @@ final class BatchDragController {
     }
 }
 
-// MARK: - Drag preview
-
-/// The drag image for every row drag: a single entry, or a batch whose payload
-/// is only its first item.
-///
-/// One view type serves both cases on purpose. Picking between two preview
-/// types in the row's body gave the row two possible view types, and every flip
-/// (the queue crossing 1 -> 2 entries) rebuilt the row subtree and replayed its
-/// transitions. The count capsule appears only when more than one entry will be
-/// delivered: the payload is a single pasteboard item, so the drag cannot show N
-/// stacked row images (one `NSDraggingItem` per pasteboard item), and "N 条" is
-/// the honest representation of "one payload, N to follow".
 struct DragChip: View {
     let item: ClipboardItem
-    /// How many entries the drop delivers; 1 for an ordinary single-entry drag.
     let count: Int
     @Environment(\.appTheme) private var theme
     @Environment(\.colorScheme) private var colorScheme

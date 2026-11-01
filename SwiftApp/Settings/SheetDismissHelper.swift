@@ -1,11 +1,6 @@
 import AppKit
 import SwiftUI
 
-// MARK: - Sheet Outside Click Dismissal (Apple HIG)
-
-/// An NSViewRepresentable that attaches to a sheet's view hierarchy, monitors
-/// mouse-down events, and dismisses the sheet when a click occurs outside the
-/// sheet's window frame or outside the application.
 struct SheetOutsideClickDetector: NSViewRepresentable {
     let onDismiss: () -> Void
 
@@ -38,11 +33,9 @@ final class SheetDetectorNSView: NSView {
     private func setupMonitors() {
         removeMonitors()
 
-        // 1. Local monitor: detects clicks within this app
         localMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
             guard let self = self, let sheetWindow = self.window else { return event }
 
-            // If an NSOpenPanel/NSSavePanel modal session is running, let it handle events
             if NSApp.modalWindow != nil {
                 return event
             }
@@ -50,31 +43,26 @@ final class SheetDetectorNSView: NSView {
                 if eventWindow is NSOpenPanel || eventWindow is NSSavePanel {
                     return event
                 }
-                // Allow internal popup menus and popovers without dismissing the sheet
                 let className = String(describing: type(of: eventWindow))
                 if className.contains("Menu") || className.contains("Popover") {
                     return event
                 }
             }
 
-            // If the click is inside the sheet window, allow normal interaction
             if event.window === sheetWindow {
                 return event
             }
 
-            // Click is outside the sheet window!
             DispatchQueue.main.async {
                 self.onDismiss?()
             }
 
-            // If click was on the parent window, consume it so background controls aren't triggered
             if event.window === sheetWindow.sheetParent {
                 return nil
             }
             return event
         }
 
-        // 2. Global monitor: detects clicks outside the application (desktop, other apps)
         globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
             guard let self = self, self.window != nil else { return }
             if NSApp.modalWindow != nil { return }
@@ -100,8 +88,6 @@ final class SheetDetectorNSView: NSView {
     }
 }
 
-// MARK: - View Modifier
-
 struct SheetDismissOnOutsideClickModifier: ViewModifier {
     let onDismiss: () -> Void
 
@@ -109,7 +95,6 @@ struct SheetDismissOnOutsideClickModifier: ViewModifier {
         content
             .background(SheetOutsideClickDetector(onDismiss: onDismiss))
             .background(
-                // Support Escape key to dismiss as well (macOS HIG standard)
                 Button("") {
                     onDismiss()
                 }
@@ -121,7 +106,6 @@ struct SheetDismissOnOutsideClickModifier: ViewModifier {
 }
 
 extension View {
-    /// Dismisses the sheet when clicking outside the sheet window or pressing Escape.
     func sheetDismissOnOutsideClick(onDismiss: @escaping () -> Void) -> some View {
         modifier(SheetDismissOnOutsideClickModifier(onDismiss: onDismiss))
     }

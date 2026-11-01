@@ -6,18 +6,11 @@ final class BatchDispenseHostingView: NSHostingView<AnyView> {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
-/// Pill that reports batch-dispatch progress after a batch drag.
-///
-/// Separate window and separate model from `PasteQueueHUDWindow`: the queue's
-/// pill is driven by `PasteQueueManager.status` (⌘V-paced dispensing) and mixing
-/// the two state machines in one window makes each one's teardown depend on the
-/// other's.
 @MainActor
 final class BatchDispenseHUDWindow: NSPanel {
     static let shared = BatchDispenseHUDWindow()
 
     static let pillSize = NSSize(width: 268, height: 36)
-    /// Transparent margin so the SwiftUI drop shadow is not clipped.
     static let windowPadding: CGFloat = 14
     static var windowSize: NSSize {
         NSSize(width: pillSize.width + windowPadding * 2, height: pillSize.height + windowPadding * 2)
@@ -44,7 +37,6 @@ final class BatchDispenseHUDWindow: NSPanel {
         hasShadow = false
         isMovableByWindowBackground = false
         animationBehavior = .none
-        // Same contract as the queue pill: a status indicator, never a click sink.
         ignoresMouseEvents = true
     }
 

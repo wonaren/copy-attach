@@ -2,32 +2,26 @@ import AppKit
 import Foundation
 import SwiftUI
 
-// MARK: - Measurement Report
-
 struct StressReport: Codable {
     var timestamp: Date
     var totalEntries: Int
     var textEntries: Int
     var imageEntries: Int
 
-    // Performance
     var snapshotLockAvgUs: Double
     var countLockAvgNs: Double
     var startupRssMB: Double
     var startupTimeMs: Double
 
-    // Memory
-    var footprintMB: Double     // phys_footprint — matches Activity Monitor
+    var footprintMB: Double
     var peakRssMB: Double
     var residentSizeMB: Double
     var vmSizeMB: Double
 
-    // Image
     var thumbLoadAvgMs: Double
     var fullImageLoadAvgMs: Double
     var thumbCacheHitRate: Double
 
-    // Scoring
     var performanceScore: Double
     var memoryScore: Double
     var smoothnessScore: Double
@@ -40,7 +34,6 @@ struct StressReport: Codable {
         return f
     }()
 
-    /// Returns a markdown-formatted report
     func markdown() -> String {
         let dateStr = Self.df.string(from: timestamp)
         return """
@@ -84,8 +77,6 @@ struct StressReport: Codable {
     }
 }
 
-// MARK: - View Model
-
 @MainActor
 @Observable
 class StressTestViewModel {
@@ -94,8 +85,6 @@ class StressTestViewModel {
     var progress: String = ""
     var progressPercent: Double = 0
     var logLines: [String] = ["应力测试面板已就绪"]
-
-    // MARK: - Data Injection (via FFI — fast for moderate sizes)
 
     func injectTestData(count: Int = 10000, textRatio: Double = 0.6, seed: Int64 = 42) {
         isRunning = true
@@ -114,8 +103,6 @@ class StressTestViewModel {
             }
         }
     }
-
-    // MARK: - Data Reset
 
     func reloadHistory() {
         isRunning = true
@@ -141,8 +128,6 @@ class StressTestViewModel {
         addLog("reset: 重置应力测试数据")
 
         clipboard_stress_reset()
-        // Trigger immediate backend refresh by bumping revision
-        // The 0.5s timer will pick it up
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
             guard let self else { return }
@@ -151,8 +136,6 @@ class StressTestViewModel {
             self.isRunning = false
         }
     }
-
-    // MARK: - Run Benchmarks
 
     func runAllBenchmarks() {
         isRunning = true
@@ -163,7 +146,6 @@ class StressTestViewModel {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
 
-            // 1. Snapshot lock benchmark (100 iterations, release each)
             let snapSamples = 100
             var snapTotalNs: UInt64 = 0
             for _ in 0..<snapSamples {
@@ -174,17 +156,15 @@ class StressTestViewModel {
                 }
                 snapTotalNs += nowNanoseconds() - t0
             }
-            let snapAvg = Double(snapTotalNs) / Double(snapSamples) / 1000.0 // µs
+            let snapAvg = Double(snapTotalNs) / Double(snapSamples) / 1000.0
 
-            // 2. Count call benchmark (1000 iterations)
             let countSamples = 1000
             let countT0 = nowNanoseconds()
             for _ in 0..<countSamples {
                 _ = clipboard_get_count()
             }
-            let countAvg = Double(nowNanoseconds() - countT0) / Double(countSamples) // ns
+            let countAvg = Double(nowNanoseconds() - countT0) / Double(countSamples)
 
-            // 3. Rust internal bench (cross-check)
             var rustSnapAvg = snapAvg
             var rustCountAvg = countAvg
             let benchStr = clipboard_stress_run_bench()
@@ -198,11 +178,9 @@ class StressTestViewModel {
                 }
             }
 
-            // 4. Memory
             let mem = measureMemory()
             let entryCount = Int(clipboard_get_count())
 
-            // 5. Image load benchmarks
             var thumbTimes: [Double] = []
             var fullTimes: [Double] = []
             var thumbHits = 0
@@ -223,19 +201,17 @@ class StressTestViewModel {
                 }
                 clipboard_snapshot_release(snap)
 
-                // Thumbnail loads
                 for (idx, dbId) in dbIds.enumerated() {
                     let t0 = nowNanoseconds()
                     var len: Int32 = 0
                     if let ptr = clipboard_get_image_thumb_by_db_id(dbId, &len) {
-                        thumbTimes.append(Double(nowNanoseconds() - t0) / 1_000_000) // ms
+                        thumbTimes.append(Double(nowNanoseconds() - t0) / 1_000_000)
                         clipboard_free_bytes(ptr, len)
                         thumbHits += 1
                     } else {
                         thumbMisses += 1
                     }
 
-                    // Full image (subset only)
                     if idx < maxFullSamples {
                         let t0 = nowNanoseconds()
                         var len: Int32 = 0
@@ -251,11 +227,9 @@ class StressTestViewModel {
             let fullAvg = fullTimes.isEmpty ? 0 : fullTimes.reduce(0, +) / Double(fullTimes.count)
             let hitRate = Double(thumbHits) / Double(max(thumbHits + thumbMisses, 1))
 
-            // 6. Scoring
             let perfScore = Self.scorePerformance(snapUs: rustSnapAvg, countNs: rustCountAvg, thumbMs: thumbAvg)
             let memScore = Self.scoreMemory(footprintMB: mem.footprintMB, peakMB: mem.peakMB)
             let smoothScore = Self.scoreSmoothness(thumbMs: thumbAvg, fullMs: fullAvg)
-            // Power score: assumed 4.0 (can't measure without sudo)
             let powerScore = 4.0
             let totalScore = perfScore * 0.35 + memScore * 0.25 + smoothScore * 0.20 + powerScore * 0.20
 
@@ -307,10 +281,8 @@ class StressTestViewModel {
         }
     }
 
-    // MARK: - Memory
-
     struct MemoryInfo {
-        var footprintMB: Double    // phys_footprint — matches Activity Monitor
+        var footprintMB: Double
         var residentMB: Double
         var peakMB: Double
         var vmMB: Double
@@ -320,9 +292,6 @@ class StressTestViewModel {
         var vmInfo = task_vm_info_data_t()
         var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<natural_t>.size)
 
-        // TASK_VM_INFO = 22, TASK_VM_INFO_PURGEABLE = 23 (from <mach/task_info.h>).
-        // The values changed in a recent macOS SDK — using the raw numeric constants
-        // avoids relying on #define macros that aren't imported into Swift.
         let kr = withUnsafeMutablePointer(to: &vmInfo) {
             $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
                 task_info(mach_task_self_, task_flavor_t(22), $0, &count)
@@ -330,9 +299,8 @@ class StressTestViewModel {
         }
 
         if kr == KERN_SUCCESS {
-            // phys_footprint is the exact value shown in Activity Monitor's "Memory" column.
             let fp = vmInfo.phys_footprint
-            if fp > 0 && fp < 1_000_000_000_000 { // sanity: reject impossibly large values
+            if fp > 0 && fp < 1_000_000_000_000 {
                 return MemoryInfo(
                     footprintMB: Double(fp) / 1_048_576,
                     residentMB: Double(vmInfo.resident_size) / 1_048_576,
@@ -342,7 +310,6 @@ class StressTestViewModel {
             }
         }
 
-        // Fallback: estimate from resident_size
         return MemoryInfo(
             footprintMB: Double(vmInfo.resident_size) / 1_048_576 * 0.65,
             residentMB: Double(vmInfo.resident_size) / 1_048_576,
@@ -351,16 +318,12 @@ class StressTestViewModel {
         )
     }
 
-    // MARK: - High-precision timing
-
     nonisolated func nowNanoseconds() -> UInt64 {
         var timebase = mach_timebase_info_data_t()
         mach_timebase_info(&timebase)
         let raw = mach_absolute_time()
         return raw * UInt64(timebase.numer) / UInt64(timebase.denom)
     }
-
-    // MARK: - Scoring
 
     nonisolated static func scorePerformance(snapUs: Double, countNs: Double, thumbMs: Double) -> Double {
         let snap = snapUs <= 1.0 ? 5.0 : snapUs <= 2.0 ? 4.5 : snapUs <= 5.0 ? 4.0 : snapUs <= 10.0 ? 3.0 : snapUs <= 20.0 ? 2.0 : 1.0
@@ -380,8 +343,6 @@ class StressTestViewModel {
         let f = fullMs <= 50 ? 5.0 : fullMs <= 100 ? 4.5 : fullMs <= 200 ? 4.0 : fullMs <= 500 ? 3.0 : fullMs <= 1000 ? 2.0 : 1.0
         return (t + f) / 2.0
     }
-
-    // MARK: - Helpers
 
     func addLog(_ line: String) {
         let f = DateFormatter()

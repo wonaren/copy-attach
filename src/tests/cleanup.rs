@@ -1,10 +1,6 @@
-// Auto-cleanup threshold, trim-oldest-percent, and dynamic threshold tests.
-
 use crate::history::add_to_history;
 use super::{assign_row_ids, fill_and_trim_to, make_text, simulate_trim_oldest_percent, simulate_trim_oldest_percent_with_favorites};
 
-/// Build `n` distinct text entries carrying real row ids, newest first — the
-/// shape the production list has (head = newest = largest db_id).
 fn with_rows(n: usize) -> Vec<crate::types::ClipboardEntry> {
     let mut hist: Vec<_> = (0..n).map(|i| make_text(&format!("t-{}", i), i as u64)).collect();
     hist.reverse();
@@ -12,14 +8,6 @@ fn with_rows(n: usize) -> Vec<crate::types::ClipboardEntry> {
     hist
 }
 
-/// Guards the temp-file TTL sweep used by both `Paste/` and `Drag/`.
-///
-/// The behaviour this pins down is the drag directory's old rule: it deleted
-/// every file at the START of the next image drag, so the last drag's PNG was
-/// retained forever for anyone who dragged an image only once (measured: a
-/// 207 KB PNG from the previous day still on disk across several restarts).
-/// The sweep must be age-based, and must leave fresh files alone — a drop
-/// destination can still be reading the file the current drag produced.
 #[test]
 fn test_temp_purge_removes_only_aged_out_files() {
     use std::time::{Duration, SystemTime};
@@ -33,7 +21,6 @@ fn test_temp_purge_removes_only_aged_out_files() {
     std::fs::write(&stale, b"stale").expect("write stale");
     std::fs::write(&fresh, b"fresh").expect("write fresh");
 
-    // Age one file past the TTL by writing its mtime directly.
     let old_time = SystemTime::now() - Duration::from_secs(600);
     let f = std::fs::File::options().write(true).open(&stale).expect("open stale");
     f.set_modified(old_time).expect("set mtime");
@@ -240,7 +227,6 @@ fn test_trim_percent_40_preserves_favorites() {
     assert_eq!(hist.len(), 100);
     assign_row_ids(&mut hist);
 
-    // Pick 4 favorites: the two oldest entries (at the tail), one in the middle, and newest (head).
     let fav_0 = hist[99].entry_id();
     let fav_1 = hist[98].entry_id();
     let fav_50 = hist[50].entry_id();
@@ -253,9 +239,6 @@ fn test_trim_percent_40_preserves_favorites() {
 
     let (kept, removed) = simulate_trim_oldest_percent_with_favorites(hist, 40, &favorites);
 
-    // Cleanable entries = 100 - 4 = 96.
-    // 40% of 96 = ceil(38.4) = 39 removed.
-    // Kept = 100 - 39 = 61.
     assert_eq!(removed.len(), 39);
     assert_eq!(kept.len(), 61);
 

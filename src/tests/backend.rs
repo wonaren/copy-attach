@@ -1,5 +1,3 @@
-// FFI delete-failure semantics and the undo-stack caps.
-
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
@@ -10,9 +8,6 @@ use crate::ignore::IgnoreRules;
 use crate::types::{ClipboardEntry, SourceApp};
 use rusqlite::Connection;
 
-/// The FFI-level tests in this file share one process-wide Backend singleton
-/// (OnceLock). Both must run their setup through this single Once so a second
-/// `set_backend` never fires.
 static INIT: std::sync::Once = std::sync::Once::new();
 
 fn ensure_test_backend() {
@@ -42,64 +37,34 @@ fn ensure_test_backend() {
     });
 }
 
-/// Serializes the tests that share the process-wide Backend singleton's
-/// in-memory history. Rust runs tests on parallel threads, and these tests all
-/// mutate the same global `Vec`: without a lock one test can insert an entry
-/// another asserts is absent, or trim away an entry another is mid-way through
-/// checking. The lock also makes the ordering of `hist.push` relative to a
-/// `hist.pop` deterministic. `unwrap_or_else(into_inner)` keeps a panic in one
-/// test from poisoning the lock for the rest.
 static SHARED_STATE_LOCK: Mutex<()> = Mutex::new(());
 
 fn shared_state_guard() -> std::sync::MutexGuard<'static, ()> {
     SHARED_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Guards the P0 fix: the FFI accessors must never panic when the backend is
-/// uninitialized. They are reached from Swift before or without a successful
-/// clipboard_init, and a panic across extern "C" aborts the whole process.
-///
-/// In-process proof is impossible here (this suite holds the process-wide
-/// singleton), so the end-to-end proof is the C harness against the built
-/// dylib. This test documents the invariant and fails the build if the
-/// recoverable accessor disappears from the public surface.
 #[test]
 fn test_recoverable_backend_accessor_is_the_only_accessor() {
-    // try_backend must exist and be usable without initialization.
-    // (The absent case is exercised by the C harness; here we only pin the
-    // API shape so a future refactor cannot silently reintroduce a panicking
-    // accessor without touching this test.)
     let _ = crate::backend::try_backend;
 }
 
 #[test]
 fn test_clipboard_delete_by_id_returns_zero_on_failure() {
-    // Verify that clipboard_delete_by_id returns 0 (failure) when the entry
-    // doesn't exist — proving the failure path that Finding 1 relies on.
-    //
-    // This path triggers in the Swift deleteItem(at:) flow when:
-    //   1. deleteKeyNotification handler -> deleteItem(at: itemIndex)
-    //   2. backend.deleteEntry(at:) calls clipboard_delete_by_id in Rust
-    //   3. If this returns 0, deleteEntry returns false
-    //   4. But searchResults.removeAll { $0.id == item.id } has already run
     let _shared = shared_state_guard();
     ensure_test_backend();
 
-    // Test 1: non-existent entry ID → returns 0
     assert_eq!(
         clipboard_delete_by_id(99999),
         0,
         "deleting a non-existent entry ID must return 0 (failure)"
     );
 
-    // Test 2: entry ID 0 (never valid) → returns 0
     assert_eq!(
         clipboard_delete_by_id(0),
         0,
         "deleting entry ID 0 must return 0 (failure)"
     );
 
-    // Test 3: empty history → any ID returns 0
     assert_eq!(
         clipboard_delete_by_id(1),
         0,
@@ -107,21 +72,12 @@ fn test_clipboard_delete_by_id_returns_zero_on_failure() {
     );
 }
 
-/// Soft-delete undo: unlimited depth, LIFO order, favorite restoration,
-/// dedup on restore, and the retention/byte sweeps.
-///
-/// The previous design kept a one-slot in-memory stack of on-disk payloads; a
-/// delete is now a stamp on the row, so depth is bounded by retention
-/// (`UNDO_RETENTION_SECS`) and the configurable byte budget
-/// instead of a step count. These assertions pin that contract.
 #[test]
 fn test_soft_delete_undo_depth_is_not_capped() {
     let _shared = shared_state_guard();
     ensure_test_backend();
     let b = crate::backend::try_backend().expect("backend initialized");
 
-    // 40 deletions — far past the old one-slot stack, and past any step count a
-    // future UI might hardcode.
     let base: u64 = 940_000_000;
     let n: u64 = 40;
     let mut db_ids: Vec<i64> = Vec::new();
@@ -161,8 +117,6 @@ fn test_soft_delete_undo_depth_is_not_capped() {
         }
     }
 
-    // Delete every one of them. Each delete must succeed, and the depth must
-    // grow monotonically — no shedding.
     for i in 0..n {
         assert_eq!(
             clipboard_delete_by_id(base + i),
@@ -188,7 +142,6 @@ fn test_soft_delete_undo_depth_is_not_capped() {
         );
     }
 
-    // Undo in strict LIFO order: the most recent deletion comes back first.
     for i in (0..n).rev() {
         assert_eq!(clipboard_undo_delete(), 1, "undo of deletion {i} must succeed");
         let restored = crate::backend::try_backend()
@@ -206,7 +159,6 @@ fn test_soft_delete_undo_depth_is_not_capped() {
         );
     }
 
-    // Unwind the fixture (the rows came back live, with new row ids).
     {
         let conn = b.db.lock().unwrap();
         conn.execute(
@@ -221,15 +173,6 @@ fn test_soft_delete_undo_depth_is_not_capped() {
     }
 }
 
-/// A delete must be undoable *and* must not resurrect a duplicate when the same
-/// content was re-captured while it was deleted.
-///
-/// The old undo path inserted without dedup, so `delete A → copy A → delete A →
-/// undo ×2` left two identical rows that survived a restart.
-/// "清空历史" is a hard delete that must take the undo stack with it: the
-/// confirmation the user accepts says the action cannot be undone, and the side
-/// table IS the stack. Leaving it behind also means `clipboard_can_undo` keeps
-/// advertising an undo whose payload rows were just deleted.
 #[test]
 fn test_clear_history_also_clears_the_undo_stack() {
     let _shared = shared_state_guard();
@@ -322,8 +265,6 @@ fn test_undo_collapses_with_recaptured_duplicate() {
             .unwrap();
             conn.last_insert_rowid()
         };
-        // The re-capture: same content, new row, and (as `add_to_history` does)
-        // the same stable entry_id.
         let row_b = {
             conn.execute(
                 "INSERT INTO clipboard_history
@@ -337,7 +278,6 @@ fn test_undo_collapses_with_recaptured_duplicate() {
         };
         (row_a, row_b)
     };
-    // In memory the dedup already collapsed them to one entry pointing at row_b.
     {
         let mut hist = b.history.lock().unwrap();
         hist.push(ClipboardEntry::Text {
@@ -358,7 +298,6 @@ fn test_undo_collapses_with_recaptured_duplicate() {
     assert_eq!(clipboard_delete_by_id(entry_a), 1, "delete of the live duplicate must succeed");
     assert_eq!(clipboard_undo_delete(), 1, "undo must succeed");
 
-    // Exactly one live row of this content may remain — not two.
     let live_rows: i64 = {
         let conn = b.db.lock().unwrap();
         conn.query_row(
@@ -387,7 +326,6 @@ fn test_undo_collapses_with_recaptured_duplicate() {
     assert_eq!(live_rows, 1, "undo must not leave a duplicate row behind (found {live_rows})");
 }
 
-/// Deleting a favorited entry must drop the star, and undo must bring it back.
 #[test]
 fn test_undo_restores_favorite_state() {
     let _shared = shared_state_guard();
@@ -428,7 +366,6 @@ fn test_undo_restores_favorite_state() {
 
     assert_eq!(clipboard_delete_by_id(entry_id), 1, "delete must succeed");
 
-    // The star must be gone from both the table and the mirror while deleted.
     let fav_rows_after_delete: i64 = {
         let conn = b.db.lock().unwrap();
         conn.query_row(
@@ -453,7 +390,6 @@ fn test_undo_restores_favorite_state() {
     };
     let in_mirror_after_undo = b.favorites.lock().unwrap().contains(&entry_id);
 
-    // Unwind.
     {
         let conn = b.db.lock().unwrap();
         let _ = conn.execute(
@@ -477,17 +413,12 @@ fn test_undo_restores_favorite_state() {
     assert!(in_mirror_after_undo, "undo must restore the favorite mirror entry");
 }
 
-/// The retention window and byte budget are the only things that discard a
-/// deletion — and they must actually discard it.
 #[test]
 fn test_deleted_rows_are_swept_by_age_and_byte_budget() {
     let _shared = shared_state_guard();
     ensure_test_backend();
     let b = crate::backend::try_backend().expect("backend initialized");
 
-    // --- Age sweep ---
-    // One row stamped just inside the window (must survive) and one far outside
-    // (must be purged).
     let base: u64 = 944_000_000;
     {
         let conn = b.db.lock().unwrap();
@@ -530,9 +461,6 @@ fn test_deleted_rows_are_swept_by_age_and_byte_budget() {
         .unwrap()
     };
 
-    // --- Byte budget ---
-    // Two deleted rows of ~40 MB each exceed the 64 MB budget; the older
-    // deletion must be shed, the newer kept (that is the undo order).
     let big_base: u64 = 945_000_000;
     {
         let conn = b.db.lock().unwrap();
@@ -577,7 +505,6 @@ fn test_deleted_rows_are_swept_by_age_and_byte_budget() {
         .unwrap()
     };
 
-    // Unwind.
     {
         let conn = b.db.lock().unwrap();
         let _ = conn.execute(
@@ -599,12 +526,6 @@ fn test_deleted_rows_are_swept_by_age_and_byte_budget() {
     );
 }
 
-/// Regression: undoing an image deletion must not pin the deleted image's
-/// PNG/thumb allocations inside the in-memory history Vec.
-///
-/// The deleted row keeps its blobs; only the undo's read-back copy passes
-/// through memory, and the restored history entry must be metadata-only after
-/// `clipboard_undo_delete` re-inserts the blobs into a fresh DB row.
 #[test]
 fn test_undo_image_restore_releases_blob_capacity() {
     let _shared = shared_state_guard();
@@ -614,8 +535,6 @@ fn test_undo_image_restore_releases_blob_capacity() {
     let png = vec![0xABu8; 64 * 1024];
     let thumb = vec![0xCDu8; 512];
 
-    // Insert an image row and a matching in-memory entry, then delete it
-    // through the same FFI path the UI uses.
     let db_id = {
         let conn = b.db.lock().unwrap();
         conn.execute(
@@ -646,9 +565,6 @@ fn test_undo_image_restore_releases_blob_capacity() {
 
     assert_eq!(clipboard_delete_by_id(777_000), 1, "delete must succeed");
 
-    // The row must still be present with its blobs, and the side table must
-    // carry the deletion stamp: soft delete keeps the payload in the table
-    // instead of materializing it to a temp file.
     {
         let conn = b.db.lock().unwrap();
         let (stamp, png_len, thumb_len): (i64, i64, i64) = conn
@@ -684,15 +600,10 @@ fn test_undo_image_restore_releases_blob_capacity() {
     );
 }
 
-/// The capture pipeline's decode buffer is pooled: one allocation is reused
-/// across captures (macOS retains large freed regions, so alloc+free per
-/// capture ratchets RSS upward), and an oversized buffer is released rather
-/// than pooled so a single huge image cannot pin its peak size.
 #[test]
 fn test_image_decode_buffer_pool_lifecycle() {
     use crate::backend::{ImageDecodeBuffer, IMAGE_DECODE_SCRATCH_RETAIN_CAP};
 
-    // Buffer returned to the pool on drop, then reused by the next acquire.
     {
         let mut buf = ImageDecodeBuffer::acquire();
         buf.as_mut_vec().resize(1024 * 1024, 0);
@@ -705,7 +616,6 @@ fn test_image_decode_buffer_pool_lifecycle() {
     );
     drop(reused);
 
-    // An over-cap buffer is released on drop — never pooled.
     {
         let mut big = ImageDecodeBuffer::acquire();
         big.as_mut_vec().resize(IMAGE_DECODE_SCRATCH_RETAIN_CAP + 1, 0);
@@ -722,8 +632,6 @@ fn test_image_decode_buffer_pool_lifecycle() {
 #[test]
 fn test_prepare_paste_by_id_missing_returns_zero() {
     ensure_test_backend();
-    // Nonexistent entry must be rejected before any pasteboard write, in both
-    // delivery modes, and must return the documented 0 sentinel.
     assert_eq!(crate::ffi::clipboard_prepare_paste_by_id(999_999_999, false, 0), 0);
     assert_eq!(crate::ffi::clipboard_prepare_paste_by_id(999_999_999, false, 1), 0);
 }
@@ -731,8 +639,6 @@ fn test_prepare_paste_by_id_missing_returns_zero() {
 #[test]
 fn test_prepare_paste_rejects_unknown_delivery_mode() {
     ensure_test_backend();
-    // `delivery_mode` is a closed set. An unknown value must be an explicit
-    // failure, never a silent fallback to "paste" or "copy".
     assert_eq!(crate::ffi::clipboard_prepare_paste_by_id(999_999_999, false, 2), 0);
     assert_eq!(crate::ffi::clipboard_prepare_paste_by_id(999_999_999, false, -1), 0);
 }
@@ -771,14 +677,12 @@ fn test_clipboard_set_custom_label_ffi() {
     let ret = crate::ffi::clipboard_set_custom_label(entry_id, c_label.as_ptr());
     assert_eq!(ret, 1, "custom label update must succeed");
 
-    // In-memory check
     {
         let hist = b.history.lock().unwrap();
         let entry = hist.iter().find(|e| e.entry_id() == entry_id).unwrap();
         assert_eq!(entry.custom_label(), "My FFI Remark");
     }
 
-    // SQLite check
     {
         let conn = b.db.lock().unwrap();
         let stored: String = conn.query_row(
@@ -789,16 +693,12 @@ fn test_clipboard_set_custom_label_ffi() {
         assert_eq!(stored, "My FFI Remark");
     }
 
-    // Nonexistent entry must return 0
     let ret_nonexistent = crate::ffi::clipboard_set_custom_label(888_888_888, c_label.as_ptr());
     assert_eq!(ret_nonexistent, 0);
 
-    // Null pointer must return 0
     let ret_null = crate::ffi::clipboard_set_custom_label(entry_id, std::ptr::null());
     assert_eq!(ret_null, 0);
 
-    // Over-long label is a caller contract violation: rejected, and neither the
-    // in-memory entry nor the DB row may change.
     let long_label = std::ffi::CString::new(
         "x".repeat(crate::types::MAX_CUSTOM_LABEL_SCALARS + 1),
     ).unwrap();
@@ -822,7 +722,6 @@ fn test_clipboard_set_custom_label_ffi() {
         assert_eq!(stored, "My FFI Remark");
     }
 
-    // A label exactly at the cap is accepted.
     let at_cap = std::ffi::CString::new("y".repeat(crate::types::MAX_CUSTOM_LABEL_SCALARS)).unwrap();
     assert_eq!(
         crate::ffi::clipboard_set_custom_label(entry_id, at_cap.as_ptr()),
@@ -830,8 +729,6 @@ fn test_clipboard_set_custom_label_ffi() {
         "label at the scalar cap must be accepted"
     );
 
-    // An id present in the DB but absent from the in-memory history is rejected
-    // before any write — the history is the authority on what may be labelled.
     let db_only_id = crate::backend::new_entry_id();
     {
         let conn = b.db.lock().unwrap();
@@ -889,19 +786,6 @@ fn test_update_entry_custom_label_requires_existing_row() {
     assert_eq!(stored, "real");
 }
 
-/// Regression: a threshold trim must publish a revision bump.
-///
-/// Lowering the cleanup threshold deletes rows from the in-memory history, and
-/// the settings "存储统计" card reads `backend.items.count` straight off that
-/// list. When the popup is closed there is no event waiter running, so the
-/// count only updates when something explicitly reloads — which is why the
-/// Swift side reloads after `setCleanupThreshold` (see ClipboardBackend).
-/// This test pins the Rust half: the trim must advance `HISTORY_REVISION` so a
-/// running waiter is woken, and a no-op threshold change must NOT publish (an
-/// unconditional bump would cost a full reload on every raise of the slider).
-///
-/// Negative control: deleting the `if hist.len() != before` guard makes the
-/// first assertion fail with `(1 -> 1)`.
 #[test]
 fn test_history_mutations_publish_a_revision() {
     let _shared = shared_state_guard();
@@ -909,9 +793,6 @@ fn test_history_mutations_publish_a_revision() {
     let b = crate::backend::try_backend().expect("backend initialized");
     let rev = || crate::backend::HISTORY_REVISION.load(std::sync::atomic::Ordering::Relaxed);
 
-    // --- set_cleanup_threshold: a real trim must publish. ---
-    // Appended at the tail (hist.push), so the head — which other tests assert
-    // on — is untouched for the whole window.
     let pad: u64 = 555_100_000;
     let pad_count: u64 = 150;
     {
@@ -932,16 +813,10 @@ fn test_history_mutations_publish_a_revision() {
     );
     assert!(b.history.lock().unwrap().len() <= 100, "trim must bound the list");
 
-    // A no-op threshold change (list already under the limit) must not publish:
-    // otherwise every slider drag would force a needless full reload.
     let before_noop = rev();
     crate::ffi::clipboard_set_cleanup_threshold(100);
     assert_eq!(rev(), before_noop, "a no-op threshold change must not publish");
 
-    // Restore the shared backend: the pad entries were only ever in memory
-    // (the DB trim is bounded by the same threshold and self-heals on the next
-    // insert). Removing them by the reserved id range keeps any entries other
-    // tests left behind.
     crate::ffi::clipboard_set_cleanup_threshold(3000);
     {
         let mut hist = b.history.lock().unwrap();
@@ -949,12 +824,6 @@ fn test_history_mutations_publish_a_revision() {
     }
 }
 
-/// End-to-end favorite toggle through the FFI: the durable table, the
-/// in-memory mirror, and the packed snapshot flag must agree.
-///
-/// This is the bridge the UI actually crosses (⌥P -> toggleFavorite ->
-/// clipboard_set_favorite); the DB helper tests alone cannot prove the FFI
-/// wiring, the publish, or the snapshot flag.
 #[test]
 fn test_set_favorite_updates_db_mirror_and_packed_snapshot() {
     let _shared = shared_state_guard();
@@ -992,7 +861,6 @@ fn test_set_favorite_updates_db_mirror_and_packed_snapshot() {
     let toggled = crate::ffi::clipboard_set_favorite(entry_id, 1);
     let after_rev = crate::backend::HISTORY_REVISION.load(std::sync::atomic::Ordering::Relaxed);
 
-    // Read the packed snapshot's flag for our row.
     let mut packed_len: i32 = 0;
     let ptr = crate::ffi::clipboard_snapshot_packed_acquire(&mut packed_len);
     let mut snapshot_flag = false;
@@ -1029,7 +897,6 @@ fn test_set_favorite_updates_db_mirror_and_packed_snapshot() {
     };
     let in_mirror = b.favorites.lock().unwrap().contains(&entry_id);
 
-    // Reverse the toggle and unwind the fixture before asserting.
     let untoggled = crate::ffi::clipboard_set_favorite(entry_id, 0);
     let removed_db: bool;
     {
@@ -1059,23 +926,12 @@ fn test_set_favorite_updates_db_mirror_and_packed_snapshot() {
     assert!(removed_db, "un-favoriting must remove the durable row");
 }
 
-/// Guards the DB-first contract of `clipboard_trim_oldest_percent`: when the
-/// DB DELETE fails, memory must be left untouched AND the call must report 0.
-///
-/// The write failure is produced for real (`PRAGMA query_only`), not mocked —
-/// the regression was that the old code logged the DB error and then removed
-/// the entries from memory anyway, so every "removed" entry reappeared on the
-/// next launch while the caller still reported a successful removal.
-///
-/// Cleanup runs BEFORE the assertions so a failing assert cannot leak the
-/// fixture into the shared history for the other tests in this file.
 #[test]
 fn test_trim_oldest_percent_leaves_memory_intact_when_db_delete_fails() {
     let _shared = shared_state_guard();
     ensure_test_backend();
     let b = crate::backend::try_backend().expect("backend initialized");
 
-    // Reserved id range so cleanup can find exactly this test's entries.
     let base: u64 = 910_000_000;
     let n: u64 = 8;
     let mut fixture_ids: Vec<i64> = Vec::new();
@@ -1109,7 +965,6 @@ fn test_trim_oldest_percent_leaves_memory_intact_when_db_delete_fails() {
     }
     let before = b.history.lock().unwrap().len();
 
-    // Every write now fails inside SQLite.
     {
         let conn = b.db.lock().unwrap();
         conn.pragma_update(None, "query_only", true).expect("enable query_only");
@@ -1117,7 +972,6 @@ fn test_trim_oldest_percent_leaves_memory_intact_when_db_delete_fails() {
     let removed = crate::ffi::clipboard_trim_oldest_percent(40);
     let after = b.history.lock().unwrap().len();
 
-    // Restore writability and unwind the fixture before asserting.
     {
         let conn = b.db.lock().unwrap();
         conn.pragma_update(None, "query_only", false).expect("disable query_only");
@@ -1178,11 +1032,6 @@ fn test_trim_oldest_percent_preserves_favorites() {
         }
     }
 
-    // Favorite the two oldest entries: base+0 and base+1. The durable table is
-    // the authority; the in-memory set is the process mirror.
-    // Total entries = 10. Cleanable = 8.
-    // 40% of 8 = ceil(3.2) = 4.
-    // Oldest cleanable entries to be removed: base+2, base+3, base+4, base+5.
     {
         let conn = b.db.lock().unwrap();
         for id in [base, base + 1] {
@@ -1196,7 +1045,6 @@ fn test_trim_oldest_percent_preserves_favorites() {
     }
     let removed = crate::ffi::clipboard_trim_oldest_percent(40);
 
-    // Verify DB: favorites (base+0, base+1) must still exist; unfavorited base+2 must be removed!
     let fav0_db: bool;
     let fav1_db: bool;
     let nonfav2_db: bool;
@@ -1219,7 +1067,6 @@ fn test_trim_oldest_percent_preserves_favorites() {
         ).unwrap() > 0;
     }
 
-    // Verify Memory: favorites must still exist; unfavorited base+2 must be removed!
     let fav0_mem: bool;
     let fav1_mem: bool;
     let nonfav2_mem: bool;
@@ -1230,7 +1077,6 @@ fn test_trim_oldest_percent_preserves_favorites() {
         nonfav2_mem = hist.iter().any(|e| e.entry_id() == base + 2);
     }
 
-    // Unwind fixture before assertions
     {
         let conn = b.db.lock().unwrap();
         for db_id in &fixture_ids {
@@ -1307,20 +1153,14 @@ fn test_set_cleanup_threshold_leaves_memory_intact_when_db_delete_fails() {
     }
     let before = b.history.lock().unwrap().len();
 
-    // Make DB read-only.
     {
         let conn = b.db.lock().unwrap();
         conn.pragma_update(None, "query_only", true).expect("enable query_only");
     }
 
-    // Try setting threshold to 100 (which would be lower if we padded or if count > 100,
-    // but here we clamp to 100 which is minimum. To guarantee threshold < hist.len(),
-    // we set it to 100 when hist has > 100 entries, or we can check with current count).
-    // If before <= 100, clamping to 100 won't exceed len. But let's verify before > 0.
     crate::ffi::clipboard_set_cleanup_threshold(100);
     let after = b.history.lock().unwrap().len();
 
-    // Restore writability and cleanup fixture.
     {
         let conn = b.db.lock().unwrap();
         conn.pragma_update(None, "query_only", false).expect("disable query_only");
@@ -1335,7 +1175,6 @@ fn test_set_cleanup_threshold_leaves_memory_intact_when_db_delete_fails() {
         let mut hist = b.history.lock().unwrap();
         hist.retain(|e| !(e.entry_id() >= base && e.entry_id() < base + n));
     }
-    // Restore default threshold
     crate::ffi::clipboard_set_cleanup_threshold(3000);
 
     assert_eq!(
@@ -1361,4 +1200,3 @@ fn test_log_timestamp_is_utc_plus_8() {
         "2025-09-08 22:11:15 +0800"
     );
 }
-

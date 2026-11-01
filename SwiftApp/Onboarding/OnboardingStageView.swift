@@ -1,14 +1,6 @@
 import AppKit
 import SwiftUI
 
-// MARK: - Onboarding Stage
-
-/// The tour window's root view.
-///
-/// The whole tour lives in one window that changes shape, so this switches
-/// between the welcome content and the progress card with a cross-fade while
-/// the window itself animates to its new frame. The two must run together: the
-/// fade alone would look like a content swap, the frame alone like a resize.
 struct OnboardingStageView: View {
     let guide: OnboardingGuide
 
@@ -26,11 +18,6 @@ struct OnboardingStageView: View {
     }
 }
 
-// MARK: - Welcome Card
-
-/// First-run welcome: what the app is, what is about to happen, and the two
-/// ways out. 「开始引导」 morphs this window into the progress card; the text
-/// button opts out of the tour entirely.
 struct OnboardingWelcomeView: View {
     let guide: OnboardingGuide
 

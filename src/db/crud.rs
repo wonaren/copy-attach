@@ -3,17 +3,6 @@ use rusqlite::Connection;
 use crate::db::schema::bump_entry_id_watermark;
 use crate::types::ClipboardEntry;
 
-/// One-time onboarding rows shown the very first time the app opens with an
-/// empty database. Each tip is a normal text entry, so it renders, pastes, and
-/// searches exactly like any real capture — but its source is CopyAttach
-/// itself, which makes the row show the app's own icon (Swift resolves the
-/// source icon by `source_bundle_id` through NSWorkspace).
-///
-/// Guarded on the table being empty before any real capture: a fresh install
-/// has no rows and gets the tips; once anything is captured (or a legacy JSON
-/// migration lands) the table is non-empty and seeding is a no-op forever. The
-/// first tip is written last so it gets the newest rowid and sits at the top
-/// of the newest-first list; timestamps are staggered for realism.
 pub(crate) fn seed_first_launch_tips(conn: &Connection) {
     const TIPS: &[&str] = &[
         "欢迎使用 CopyAttach !",
@@ -41,7 +30,7 @@ pub(crate) fn seed_first_launch_tips(conn: &Connection) {
         }
     };
     if count > 0 {
-        return; // Existing user (or migrated history) — never re-seed.
+        return;
     }
 
     let now = std::time::SystemTime::now()
@@ -57,13 +46,8 @@ pub(crate) fn seed_first_launch_tips(conn: &Connection) {
         }
     };
 
-    // Insert in reverse display order so the first tip (intended to be read
-    // first) gets the newest rowid and tops the newest-first history.
     for (i, tip) in TIPS.iter().enumerate().rev() {
         let full = tip.to_string();
-        // db_id = 0 here is fine: these rows are reloaded from the DB on
-        // launch (load assigns the real rowid), the in-memory entry is never
-        // used for paste-by-id before that.
         let entry = ClipboardEntry::text_entry(
             crate::backend::new_entry_id(),
             &full,
@@ -88,40 +72,8 @@ pub(crate) fn seed_first_launch_tips(conn: &Connection) {
     );
 }
 
-/// Newest-first row order for both the list and the trim cutoff.
-///
-/// Keyed on `timestamp`, not on `id`. Row order and time order diverge as soon
-/// as rows are inserted out of chronological order — which `restore_backup_merge`
-/// does by definition (it appends older history to a live DB). With `id` as the
-/// key, merged rows took the largest rowids, so they displaced the user's own
-/// newer rows from the visible window and were evicted last instead of first.
-/// `paste` and `undo` already re-stamp an entry's timestamp when they move it to
-/// the head, so `timestamp` is the ordering the rest of the app maintains.
-/// `id` is only the tiebreaker, which keeps the order identical to the previous
-/// `id`-based one for a DB whose timestamps are in insertion order.
 const ORDER_NEWEST_FIRST: &str = "ORDER BY timestamp DESC, id DESC";
 
-/// Load the newest `threshold` **non-favorite** rows plus every favorite,
-/// newest first.
-///
-/// The plain `LIMIT ?` is not enough now that favorites survive trimming: a
-/// favorite can sit arbitrarily far down the list, and truncating to the newest
-/// N rows would silently hide it. It is also not enough to take the newest N
-/// rows and add favorites: a favorite that happens to *be* in the newest N
-/// consumes one of the N slots, so the oldest cleanable row disappears from the
-/// list while the trim (which caps only cleanable rows) leaves it in the DB.
-/// Measured live: 100 non-favorites + 2 favorites with one favorite re-copied
-/// to the top rendered 101 rows instead of 102. The subquery therefore excludes
-/// favorites before applying `LIMIT`, matching `trim_db_history`'s cap exactly.
-///
-/// Soft-deleted rows (those with a `clipboard_deleted` side row) are excluded:
-/// they are undo candidates, not list entries.
-///
-/// Only metadata is read: the full `text` column is never touched at load.
-/// Preview/label/text-hash were persisted at insert time (and backfilled for
-/// legacy rows by `ensure_history_table`), so a cold start reads a bounded,
-/// per-row payload no matter how large the stored documents are. Image entries
-/// carry only metadata (`png_data` is empty, loaded on demand).
 pub(crate) fn load_history_from_db(conn: &Connection, threshold: usize) -> Vec<ClipboardEntry> {
     let mut stmt = match conn.prepare(
         &format!(
@@ -192,16 +144,9 @@ pub(crate) fn load_history_from_db(conn: &Connection, threshold: usize) -> Vec<C
                 continue;
             }
         };
-        // Use the persisted entry_id, or assign a fresh one for legacy rows.
         let id = if entry_id != 0 { entry_id as u64 } else { crate::backend::new_entry_id() };
         match entry_type {
             0 => {
-                // Text metadata must be persisted (backfill ran at schema
-                // ensure). An empty preview means the row was written before
-                // the metadata backfill and never got it — reading its full
-                // text here would silently reintroduce the cold-start cost we
-                // removed, so fail loud instead: the row is skipped and
-                // reported, not transparently recovered.
                 let preview = preview.unwrap_or_default();
                 if preview.is_empty() {
                     crate::debug_log!("CopyAttach: text row {db_id} has no persisted preview — skipped");
@@ -245,10 +190,6 @@ pub(crate) fn load_history_from_db(conn: &Connection, threshold: usize) -> Vec<C
     result
 }
 
-/// Insert an entry into the DB. Image data (png, thumb) is provided as separate
-/// slices and stored inline; the in-memory `ClipboardEntry` keeps only metadata.
-/// For text entries the full body travels separately via `text` (the in-memory
-/// entry does not hold it) — mirrors the image split.
 pub(crate) fn insert_entry_to_db(
     conn: &Connection,
     entry: &ClipboardEntry,
@@ -265,10 +206,6 @@ pub(crate) fn insert_entry_to_db(
                     return Err(());
                 }
             };
-            // Preview/label/custom_label/text-hash are persisted alongside the body so the
-            // cold-start load never reads the full `text` column. The hash
-            // column doubles as the text dedup hash (image rows store the
-            // content hash there).
             conn.execute(
                 "INSERT INTO clipboard_history
                     (entry_type, text, png_data, width, height,
@@ -313,28 +250,12 @@ pub(crate) fn insert_entry_to_db(
             ).map(|_| ()).map_err(|e| { crate::error_log!("CopyAttach: failed to insert image entry: {e}"); })
         }
     };
-    // Persisting a row is the moment its entry_id enters the durable identity
-    // space, so the high-water mark is raised here rather than at shutdown:
-    // a crash (or a clear before quitting) must not lose the record, or a
-    // later session would re-issue an id a favorite still points at.
     if result.is_ok() && bump_entry_id_watermark(conn, entry.entry_id()).is_err() {
         crate::error_log!("CopyAttach: entry-id watermark not raised after insert; ids stay unique only while rows survive");
     }
     result
 }
 
-/// Delete duplicate entries from the DB, keeping only the newest row for the
-/// given entry's content. Text entries dedup by exact text (full body passed
-/// separately, as the in-memory entry no longer holds it); images by hash.
-///
-/// Both lookups narrow through the `(entry_type, hash)` index: the hash
-/// selects candidate rows, and for text the exact-text predicate still
-/// enforces full equality (a 2^-64 hash collision can at worst miss a dedup,
-/// never delete a different text's row).
-///
-/// Only LIVE rows are matched: a soft-deleted row of the same content is an undo
-/// candidate, and removing it here would make the delete silently un-undoable
-/// just because the content was copied again.
 pub(crate) fn delete_matching_entry(conn: &Connection, entry: &ClipboardEntry, text: Option<&str>) {
     let result = match entry {
         ClipboardEntry::Text { text_hash, .. } => {
@@ -361,15 +282,12 @@ pub(crate) fn delete_matching_entry(conn: &Connection, entry: &ClipboardEntry, t
     }
 }
 
-/// Live rows holding the same content, newest row last written first. The head
-/// is the row the dedup keeps; the tail is what it removes.
 const TEXT_DEDUP_SQL: &str =
     "SELECT id, entry_id FROM clipboard_history
      WHERE id NOT IN (SELECT row_id FROM clipboard_deleted)
        AND entry_type = 0 AND hash = ?1 AND text = ?2
      ORDER BY id DESC";
 
-/// As `TEXT_DEDUP_SQL`, for image rows (content identity is the hash alone).
 const IMAGE_DEDUP_SQL: &str =
     "SELECT id, entry_id FROM clipboard_history
      WHERE id NOT IN (SELECT row_id FROM clipboard_deleted)
@@ -386,19 +304,6 @@ fn collect_live_rows_with_content(
     rows.collect()
 }
 
-/// Keep `rows[0]`, delete the rest, and hand their stars to the row that stays.
-///
-/// The star migration is not cosmetic: a favorite is keyed by `entry_id`, and the
-/// rows being removed can carry a DIFFERENT id from the survivor (undo re-inserts
-/// the original id while a re-capture of the same content minted a new one).
-/// Without the move, the star becomes an orphan that `prune_orphan_favorites`
-/// drops at the next launch — the user's star silently disappears after a
-/// restart. The alternative (rewriting the survivor's `entry_id`) is not an
-/// option: an `UPDATE` rewrites the whole row, multi-MB blobs included.
-///
-/// In the capture path the survivor and the duplicates share one `entry_id`
-/// (the caller persists the post-dedup in-memory entry), so the migration is a
-/// no-op there.
 fn keep_newest_row(conn: &Connection, rows: &[(i64, i64)]) -> Result<(), rusqlite::Error> {
     let Some(&(survivor_id, survivor_entry_id)) = rows.first() else {
         return Ok(());
@@ -412,8 +317,6 @@ fn keep_newest_row(conn: &Connection, rows: &[(i64, i64)]) -> Result<(), rusqlit
             )?
                 > 0
         {
-            // Select-from-history keeps the invariant that a favorite only ever
-            // names a live row, even if the survivor were removed concurrently.
             conn.execute(
                 "INSERT OR IGNORE INTO clipboard_favorites (entry_id)
                  SELECT entry_id FROM clipboard_history WHERE id = ?1",
@@ -428,26 +331,6 @@ fn keep_newest_row(conn: &Connection, rows: &[(i64, i64)]) -> Result<(), rusqlit
     Ok(())
 }
 
-/// Trim the DB to at most `threshold` **non-favorite** entries (keeps the
-/// newest rows, never deletes a favorite).
-///
-/// Favorites are excluded from both the count and the delete, so the cap applies
-/// to cleanable history only: the table may hold `threshold` non-favorites plus
-/// every favorite. That is the product promise — a starred entry is never
-/// removed by automatic cleanup.
-///
-/// The excess is `total - favorites`, which is exact because the favorite table
-/// is kept free of orphans (every delete path removes the favorite in the same
-/// transaction, and init prunes legacy leftovers). The DELETE then walks only
-/// the OLDEST `excess` cleanable rows, so a steady-state capture (excess = 1)
-/// costs a count plus a couple of index rows — measured 15–140 µs at 10 000
-/// rows. The previous newest-first cutoff subquery had to walk the whole window
-/// and, once the favorite exclusion made it non-covering, cost 1.9 ms per
-/// capture at the same size.
-///
-/// "Oldest" is `(timestamp, id)`, the same order the list uses: trimming by
-/// rowid instead would evict the user's own newer rows first whenever the table
-/// holds rows inserted out of chronological order (a merge).
 pub(crate) fn trim_db_history(conn: &Connection, threshold: usize) -> Result<(), ()> {
     let sql = "DELETE FROM clipboard_history
                WHERE id IN (SELECT id FROM clipboard_history
@@ -466,27 +349,8 @@ pub(crate) fn trim_db_history(conn: &Connection, threshold: usize) -> Result<(),
     Ok(())
 }
 
-/// Mark a live row as deleted in the side table, recording whether it was
-/// favorited.
-///
-/// Returns the row's `(entry_id, deleted_at)` on success. `Err` means the row
-/// was missing, already deleted, or the write failed; every caller treats that
-/// as an explicit failure (0), never a silent success.
-///
-/// This writes ONLY the side table. The payload row in `clipboard_history` is
-/// never updated, which is the whole point: an `UPDATE` on an image row rewrites
-/// its multi-MB PNG + thumbnail blobs and was measured at +24 MB retained RSS
-/// for 34 deletions.
 pub(crate) fn soft_delete_row(conn: &Connection, db_id: i64) -> Result<(u64, i64), ()> {
     let stamp = crate::backend::undo_stamp_now();
-    // Read the row's identity and star state in one probe; a row that is
-    // already in the side table is not deletable again.
-    //
-    // "No such row" and "the read failed" are DIFFERENT outcomes and must not be
-    // collapsed: a failed read (IO error, lock timeout, damaged schema) is a
-    // defect in the main path, and reporting it as "the row isn't there" would
-    // hide it behind a plausible business answer. Only `QueryReturnedNoRows`
-    // means the row is genuinely absent.
     let (entry_id, was_favorite) = match conn.query_row(
         "SELECT h.entry_id,
                 (SELECT COUNT(*) FROM clipboard_favorites f WHERE f.entry_id = h.entry_id)
@@ -517,17 +381,6 @@ pub(crate) fn soft_delete_row(conn: &Connection, db_id: i64) -> Result<(u64, i64
     Ok((entry_id as u64, stamp))
 }
 
-/// The most recently deleted row's identity, or `None` when nothing is
-/// undoable. Drives `clipboard_can_undo` and the undo path itself.
-///
-/// `(row_id, entry_id, deleted_at, was_favorite)`. A side row whose payload row
-/// is already gone is skipped and cleaned up: it cannot be restored, and
-/// letting it sit at the head would block every older deletion behind it.
-///
-/// `Err` is a real read failure and must be surfaced, not flattened into
-/// `None`: "nothing is undoable" is a normal state the UI acts on (it disables
-/// ⌘Z), so reporting an IO error that way would make a broken database look
-/// like an empty undo stack.
 pub(crate) fn newest_deleted_row(
     conn: &Connection,
 ) -> Result<Option<(i64, u64, i64, i64)>, ()> {
@@ -558,8 +411,6 @@ pub(crate) fn newest_deleted_row(
             Some(v) => v,
             None => return Ok(None),
         };
-        // An orphan side row (payload row already purged) is dropped and the
-        // next-newest deletion is considered.
         let payload_exists: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM clipboard_history WHERE id = ?1",
@@ -573,9 +424,6 @@ pub(crate) fn newest_deleted_row(
             return Ok(Some((row_id, entry_id as u64, stamp, was_favorite)));
         }
         crate::debug_log!("CopyAttach: dropping orphan undo entry for missing row {row_id}");
-        // The drop MUST succeed before looping: on failure the same row would be
-        // selected again forever, so this returns an explicit error instead of
-        // retrying silently.
         conn.execute(
             "DELETE FROM clipboard_deleted WHERE row_id = ?1",
             rusqlite::params![row_id],
@@ -588,11 +436,6 @@ pub(crate) fn newest_deleted_row(
     }
 }
 
-/// Number of deletions currently undoable.
-///
-/// `Err` (not 0) on a read failure: the caller uses this to enable/disable ⌘Z,
-/// and a failed count reported as "0" would silently disable undo while the
-/// deleted rows are still there.
 pub(crate) fn undo_depth(conn: &Connection) -> Result<usize, ()> {
     conn.query_row(
         "SELECT COUNT(*) FROM clipboard_deleted d
@@ -606,18 +449,9 @@ pub(crate) fn undo_depth(conn: &Connection) -> Result<usize, ()> {
     })
 }
 
-/// Payload bytes of one history row (text + png + thumb), prefixed for a table
-/// aliased `h`.
-///
-/// Every column is COALESCEd INDIVIDUALLY: a text row has NULL png/thumb and an
-/// image row has NULL text, so `COALESCE(LENGTH(a) + LENGTH(b) + LENGTH(c), 0)`
-/// is NULL as soon as one term is NULL. The single outer COALESCE reported "0
-/// bytes retained" for every image row and the budget never fired (measured: 80
-/// MB of deleted screenshots stayed under a 64 MB budget).
 const ROW_PAYLOAD_BYTES: &str =
     "COALESCE(LENGTH(h.text), 0) + COALESCE(LENGTH(h.png_data), 0) + COALESCE(LENGTH(h.thumb_data), 0)";
 
-/// Total payload bytes retained by soft-deleted rows.
 fn retained_deleted_payload_bytes(conn: &Connection) -> Result<i64, ()> {
     let sql = format!(
         "SELECT COALESCE(SUM({ROW_PAYLOAD_BYTES}), 0)
@@ -630,14 +464,6 @@ fn retained_deleted_payload_bytes(conn: &Connection) -> Result<i64, ()> {
         })
 }
 
-/// The deletions to drop in order to shed `excess` payload bytes, oldest
-/// deletion first.
-///
-/// ONE implementation behind both the sweep and the pre-delete preview. The
-/// preview is a promise made to the user ("继续删除将无法恢复 N 条"), so it
-/// must be the sweep's own arithmetic, not a second loop that merely resembles
-/// it — a divergence would either over-warn (blocking deletes that cost
-/// nothing) or under-warn (losing deletions the user was told were safe).
 fn collect_evictions(conn: &Connection, excess: i64) -> Result<Vec<i64>, ()> {
     if excess <= 0 {
         return Ok(Vec::new());
@@ -661,8 +487,6 @@ fn collect_evictions(conn: &Connection, excess: i64) -> Result<Vec<i64>, ()> {
     let mut remaining = excess;
     let mut doomed: Vec<i64> = Vec::new();
     for row in rows {
-        // A single unreadable row must not abandon the whole sweep: the budget
-        // would then stay over its cap with nothing logged about the cost.
         let (row_id, bytes) = match row {
             Ok(v) => v,
             Err(e) => {
@@ -679,25 +503,6 @@ fn collect_evictions(conn: &Connection, excess: i64) -> Result<Vec<i64>, ()> {
     Ok(doomed)
 }
 
-/// Purge deletions past their retention window, then shed the oldest until the
-/// retained payload fits the byte budget.
-///
-/// This is the only thing that removes a soft-deleted row without an undo: a
-/// deleted row keeps its payload, so without a sweep the deleted set would grow
-/// forever. Runs at startup (cheap: the age query is index-only) and after each
-/// delete (so a burst of large deletions self-limits immediately).
-///
-/// Purging means removing the PAYLOAD row (that is what frees disk) plus its
-/// side-table row. Orphan side rows are pruned in the same pass.
-///
-/// Returns how many payload rows were purged. A DB error is reported and
-/// returned as `Err`; the caller logs it, and nothing else depends on the sweep
-/// succeeding.
-///
-/// `budget_bytes` is passed in rather than read from the backend: the two
-/// callers (the delete path and startup) must agree on one policy, and a
-/// parameter makes that explicit instead of depending on process-global state
-/// (which also makes the behaviour testable without a backend singleton).
 pub(crate) fn purge_expired_deleted_rows(
     conn: &Connection,
     budget_bytes: i64,
@@ -705,7 +510,6 @@ pub(crate) fn purge_expired_deleted_rows(
     let now_micros = crate::backend::undo_stamp_now();
     let cutoff_micros = now_micros - (crate::backend::UNDO_RETENTION_SECS as i64) * 1_000_000;
 
-    // 1. Orphan side rows: their payload row is already gone.
     if let Err(e) = conn.execute(
         "DELETE FROM clipboard_deleted
          WHERE NOT EXISTS (SELECT 1 FROM clipboard_history h WHERE h.id = clipboard_deleted.row_id)",
@@ -715,11 +519,8 @@ pub(crate) fn purge_expired_deleted_rows(
         return Err(());
     }
 
-    // 2. Age: everything deleted longer ago than the retention window.
     let mut purged = purge_deleted_by(conn, &format!("d.deleted_at < {cutoff_micros}"))?;
 
-    // 3. Byte budget. Budget 0 means "unlimited": every deletion survives until
-    // the age window closes it.
     if budget_bytes > crate::backend::UNDO_BUDGET_UNLIMITED {
         let retained = retained_deleted_payload_bytes(conn)?;
         if retained > budget_bytes {
@@ -734,15 +535,6 @@ pub(crate) fn purge_expired_deleted_rows(
     Ok(purged)
 }
 
-/// How many already-deleted rows the byte budget would shed if a row of
-/// `incoming_payload_bytes` were deleted now.
-///
-/// Used to warn the user BEFORE the delete happens: once the sweep runs, the
-/// evicted deletions are gone and cannot be reported after the fact. Shares
-/// `collect_evictions` with the sweep, so the promise cannot drift from the
-/// behaviour it describes.
-///
-/// Returns 0 when the budget is unlimited or the incoming row still fits.
 pub(crate) fn pending_undo_evictions(
     conn: &Connection,
     incoming_payload_bytes: i64,
@@ -756,9 +548,6 @@ pub(crate) fn pending_undo_evictions(
     Ok(collect_evictions(conn, after_insert - budget_bytes)?.len())
 }
 
-/// Payload bytes (text + png + thumb) of one history row. Used to price a
-/// deletion before warning about evictions. `Err` when the row cannot be read
-/// (missing row or DB error) — the caller reports "unknown", never 0.
 pub(crate) fn history_row_payload_bytes(conn: &Connection, row_id: i64) -> Result<i64, ()> {
     let sql = format!("SELECT {ROW_PAYLOAD_BYTES} FROM clipboard_history h WHERE h.id = ?1");
     conn.query_row(&sql, rusqlite::params![row_id], |row| row.get::<_, i64>(0))
@@ -767,8 +556,6 @@ pub(crate) fn history_row_payload_bytes(conn: &Connection, row_id: i64) -> Resul
         })
 }
 
-/// Purge deletions matching a `clipboard_deleted` predicate. Returns how many
-/// payload rows were removed.
 fn purge_deleted_by(conn: &Connection, predicate: &str) -> Result<usize, ()> {
     let ids: Vec<i64> = {
         let sql = format!("SELECT d.row_id FROM clipboard_deleted d WHERE {predicate}");
@@ -791,7 +578,6 @@ fn purge_deleted_by(conn: &Connection, predicate: &str) -> Result<usize, ()> {
     delete_payload_rows(conn, &ids)
 }
 
-/// Remove the given payload rows and their side-table entries.
 fn delete_payload_rows(conn: &Connection, ids: &[i64]) -> Result<usize, ()> {
     if ids.is_empty() {
         return Ok(0);
@@ -820,11 +606,6 @@ fn delete_payload_rows(conn: &Connection, ids: &[i64]) -> Result<usize, ()> {
     Ok(removed)
 }
 
-/// The capture/paste write-through as ONE transaction: insert + dedup delete +
-/// trim commit together. With WAL + `synchronous=NORMAL` this is a single WAL
-/// append and one fsync, where the previous three autocommit statements each
-/// paid a full journal sync. Returns the new row id on success; on any failure
-/// the transaction rolls back and nothing is committed.
 pub(crate) fn persist_entry_to_db(
     conn: &mut Connection,
     entry: &ClipboardEntry,
@@ -834,15 +615,11 @@ pub(crate) fn persist_entry_to_db(
     threshold: usize,
 ) -> Result<i64, ()> {
     let perf = crate::perf::PerfSpan::start("rust", "db.write");
-    // `unchecked_transaction` skips the BEGIN round-trip: the first write
-    // statement opens the implicit transaction and `commit` closes it.
     let tx = conn.unchecked_transaction().map_err(|e| {
         crate::error_log!("CopyAttach: failed to begin write transaction: {e}");
     })?;
     insert_entry_to_db(&tx, entry, text, image_png, image_thumb)?;
     delete_matching_entry(&tx, entry, text);
-    // Trim is part of the same transaction: a failure must roll the whole
-    // write back rather than commit a capture that left the table over the cap.
     trim_db_history(&tx, threshold)?;
     let row_id = tx.last_insert_rowid();
     tx.commit().map_err(|e| {
@@ -857,11 +634,6 @@ pub(crate) fn persist_entry_to_db(
     Ok(row_id)
 }
 
-/// Update the custom label / remark for an entry by its stable `entry_id`.
-///
-/// A zero-row update is a failure, not a success: the caller's in-memory entry
-/// and its DB row are required to agree, so silently "succeeding" against a
-/// missing row would leave the remark memory-only and lose it on restart.
 pub(crate) fn update_entry_custom_label(
     conn: &Connection,
     entry_id: u64,

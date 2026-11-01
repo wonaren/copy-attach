@@ -1,24 +1,13 @@
-//! Capture-time ignore rules.
-//!
-//! Rules are evaluated before an entry is allocated, inserted into history, or
-//! persisted. Application matching deliberately uses bundle identifiers: display
-//! names are mutable and are not an application identity.
-
 #[derive(Clone, Debug, Default)]
 pub(crate) struct IgnoreRules {
     pub(crate) app_bundle_ids: Vec<String>,
     pub(crate) ignore_text: bool,
     pub(crate) ignore_images: bool,
-    /// Ignore text whose Unicode scalar count is strictly below this value.
-    /// `None` means that no length rule is active.
     pub(crate) min_text_characters: Option<usize>,
-    /// Ignore sensitive clipboard items (passwords, concealed, transient types).
     pub(crate) ignore_sensitive: bool,
 }
 
 impl IgnoreRules {
-    /// Decodes the newline-delimited bundle-ID wire format used by the FFI.
-    /// Empty fields are omitted and duplicates retain their first occurrence.
     pub(crate) fn from_encoded(
         encoded_bundle_ids: &str,
         ignore_text: bool,
@@ -96,7 +85,6 @@ mod tests {
         assert!(!rules.ignores_text("abc"));
         assert!(rules.ignores_text("你好"));
         assert!(!rules.ignores_text("你好啊"));
-        // A combining mark is a Unicode scalar and is intentionally counted.
         assert!(rules.ignores_text("e\u{301}"));
         assert!(!rules.ignores_text("e\u{301}x"));
     }
@@ -137,7 +125,6 @@ mod tests {
         assert!(rules.ignore_text);
         assert!(rules.ignores_image());
         assert!(rules.ignores_sensitive());
-        // The type toggle takes precedence, even at the length boundary.
         assert!(rules.ignores_text("1234"));
         assert!(rules.ignores_text("12345"));
     }

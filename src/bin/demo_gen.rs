@@ -1,14 +1,3 @@
-//! CLI: write the CopyAttach demo dataset to a standalone SQLite file.
-//!
-//! Usage:
-//!   cargo run --bin demo-gen --features demo-data -- [--db-path PATH]
-//!       [--images-dir DIR] [--force]
-//!
-//! The output is what `demo.sh` swaps in as the live history. `--force`
-//! replaces an existing file (the swap script asks for a rebuild explicitly).
-//! `--images-dir` is the photo cache: missing files are downloaded there once
-//! and reused by later regenerations.
-
 use std::path::PathBuf;
 
 struct Args {
@@ -62,7 +51,6 @@ fn usage_exit(message: &str) -> ! {
 fn main() {
     let args = parse_args();
     if args.force {
-        // Refuse nothing: the caller asked for this file to be replaced.
         copy_attach::demo::remove_db_files(&args.db_path);
     }
     match copy_attach::demo::generate(&args.db_path, &args.images_dir) {

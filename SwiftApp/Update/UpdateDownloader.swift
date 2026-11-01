@@ -2,21 +2,6 @@ import AppKit
 import Combine
 import Foundation
 
-// MARK: - Update downloader
-
-/// Seamless update engine: downloads the installer in the background (lanzou
-/// via NFD cloud parser first, GitHub release as fallback), then installs and
-/// relaunches.
-///
-/// Download sources:
-///   - 蓝奏云 (primary): fixed share `https://wwbvw.lanzouv.com/b0341lhs5g`,
-///     password `1234`, file `CopyAttach-v<version>-macOS.zip`, resolved through
-///     the NFD cloud parser (`lz0.qaiu.top`) which yields a plain HTTPS direct
-///     link on its own CDN. Verified end-to-end (0.5s / 2.7MB). The lanzou
-///     native download hop (`developer2.lanrar.com/file/?token`) rejects
-///     non-browser clients (400 Time Out), so it is not used directly.
-///   - GitHub (fallback): `https://github.com/wonaren/copy-attach/releases/
-///     download/v<version>/CopyAttach-<version>-macos-<arch>.dmg`
 @MainActor
 final class UpdateDownloader: NSObject, ObservableObject, URLSessionDownloadDelegate {
     static let shared = UpdateDownloader()
@@ -25,14 +10,10 @@ final class UpdateDownloader: NSObject, ObservableObject, URLSessionDownloadDele
 
     enum DownloadPhase: Equatable {
         case idle
-        case downloading(Double)  // progress 0...1
+        case downloading(Double)
         case installing
         case failed(String)
 
-        /// True while a download/install is in flight. Used to drive the
-        /// appear/disappear animation only — progress updates must NOT be
-        /// implicitly animated (an easeOut on every tick makes the bar look
-        /// frozen while the download races ahead of the interpolation).
         var isBusy: Bool {
             switch self {
             case .downloading, .installing: return true
@@ -53,7 +34,6 @@ final class UpdateDownloader: NSObject, ObservableObject, URLSessionDownloadDele
         }
     }
 
-    // 蓝奏云 share constants (fixed share + fixed password, per release distribution)
     private static let lanzouShareURL: URL = {
         guard let url = URL(string: "https://wwbvw.lanzouv.com/b0341lhs5g") else {
             preconditionFailure("Invalid built-in Lanzou share URL")
@@ -62,16 +42,10 @@ final class UpdateDownloader: NSObject, ObservableObject, URLSessionDownloadDele
     }()
     private static let lanzouPassword = "1234"
     private static let lanzouFileBase = "https://wwbvw.lanzouv.com/"
-    /// NFD cloud parser: resolves lanzou shares to plain HTTPS direct links
-    /// (verified working; the lanzou native hop rejects non-browser clients).
     private static let nfdBase = "https://lz0.qaiu.top"
 
     private let dataSession: URLSession
     private var downloadSession: URLSession?
-    /// Written on the main thread in `downloadFile`; read in the download
-    /// delegate callbacks, which run on the main queue (delegateQueue: .main).
-    /// nonisolated(unsafe) because the synchronous move in the callback must
-    /// not hop — URLSession deletes the temp file when the callback returns.
     nonisolated(unsafe) private var downloadContinuation: CheckedContinuation<URL, Error>?
     nonisolated(unsafe) private var downloadDestination: URL?
 
@@ -86,8 +60,6 @@ final class UpdateDownloader: NSObject, ObservableObject, URLSessionDownloadDele
         super.init()
         downloadSession = URLSession(configuration: config, delegate: self, delegateQueue: .main)
     }
-
-    // MARK: - Public API
 
     private static func normalizeVersion(_ version: String) -> String {
         var v = version.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -111,13 +83,9 @@ final class UpdateDownloader: NSObject, ObservableObject, URLSessionDownloadDele
         Task { await performDownload(version: cleanVersion) }
     }
 
-    // MARK: - Download pipeline
-
     private func performDownload(version: String) async {
         let cleanVersion = Self.normalizeVersion(version)
         do {
-            // 1) 蓝奏云 via NFD cloud parser (primary — stable, no anti-bot);
-            //    GitHub release asset as fallback.
             let package: URL
             do {
                 debugLog("[update] downloading from lanzou (NFD): v\(cleanVersion)")
@@ -127,7 +95,6 @@ final class UpdateDownloader: NSObject, ObservableObject, URLSessionDownloadDele
                 package = try await downloadFromGitHub(version: cleanVersion)
             }
 
-            // 2) verify + install
             guard Self.looksLikeInstaller(package) else {
                 throw UpdateError.install("下载的安装包无效（文件不完整）")
             }
@@ -153,10 +120,6 @@ final class UpdateDownloader: NSObject, ObservableObject, URLSessionDownloadDele
         return try await downloadFile(from: url)
     }
 
-    /// The release workflow uploads `CopyAttach-<version>-macos-<arch>.dmg`
-    /// (`.github/workflows/build.yml`), so the arch segment is part of the
-    /// filename — omitting it asked for an asset that has never existed and
-    /// made the fallback path 404 even when GitHub was fully reachable.
     private func githubAssetURL(version: String) -> URL {
         let cleanVersion = Self.normalizeVersion(version)
         #if arch(arm64)
@@ -170,8 +133,6 @@ final class UpdateDownloader: NSObject, ObservableObject, URLSessionDownloadDele
         return url
     }
 
-    /// Cheap preflight so a blocked GitHub (DNS pollution / GFW) or missing asset
-    /// surfaces accurate diagnostics without making the user stare at 0% progress.
     private func checkGitHubAssetReachable(_ url: URL) async -> Result<Void, UpdateError> {
         var request = URLRequest(url: url)
         request.httpMethod = "HEAD"
@@ -189,14 +150,8 @@ final class UpdateDownloader: NSObject, ObservableObject, URLSessionDownloadDele
         return .success(())
     }
 
-    // MARK: - Lanzou flow (via NFD cloud parser)
-
-    /// Two-step resolution through NFD: folder listing → pick the matching
-    /// version → direct link on NFD's CDN. The direct hop is a plain HTTPS
-    /// download with progress reporting.
     private func downloadFromLanzou(version: String) async throws -> URL {
         let cleanVersion = Self.normalizeVersion(version)
-        // 1) folder listing (password-protected share)
         guard let listURL = URL(string: "\(Self.nfdBase)/v2/getFileList?url=\(Self.urlEncode(Self.lanzouShareURL.absoluteString))&pwd=\(Self.lanzouPassword)") else {
             throw UpdateError.lanzou("蓝奏云列表地址无效")
         }
@@ -204,10 +159,6 @@ final class UpdateDownloader: NSObject, ObservableObject, URLSessionDownloadDele
         guard let files = listJSON["data"] as? [[String: Any]] else {
             throw UpdateError.lanzou("蓝奏云文件列表解析失败")
         }
-        // Architecture selection, strictest first. A bare `contains(version)`
-        // also matched a longer version sharing the prefix (v0.101.4 vs
-        // v0.101.40), and excluding only the *other* arch silently accepted an
-        // unmarked build — which can be the wrong architecture entirely.
         #if arch(arm64)
         let wantedArch = "arm64"
         let otherArch = "x86_64"
@@ -215,7 +166,6 @@ final class UpdateDownloader: NSObject, ObservableObject, URLSessionDownloadDele
         let wantedArch = "x86_64"
         let otherArch = "arm64"
         #endif
-        // The trailing separator is what kills the version-prefix ambiguity.
         let versionTokens = ["v\(cleanVersion)-", "\(cleanVersion)-"]
         let candidates: [(name: String, id: String)] = files.compactMap { file in
             guard let name = file["fileName"] as? String,
@@ -234,8 +184,7 @@ final class UpdateDownloader: NSObject, ObservableObject, URLSessionDownloadDele
         let fileID = entry.id
         debugLog("[update] lanzou (NFD) found: \(fileName)")
 
-        // 2) resolve the direct link
-        let fileURL = Self.lanzouFileBase + fileID  // fileID may carry ?webpage=…
+        let fileURL = Self.lanzouFileBase + fileID
         guard let parserURL = URL(string: "\(Self.nfdBase)/json/parser?url=\(Self.urlEncode(fileURL))&pwd=\(Self.lanzouPassword)") else {
             throw UpdateError.lanzou("蓝奏云解析地址无效")
         }
@@ -249,7 +198,6 @@ final class UpdateDownloader: NSObject, ObservableObject, URLSessionDownloadDele
         return try await downloadFile(from: directURL)
     }
 
-    /// GET a URL and decode its JSON body (non-200 codes surface as errors).
     private func fetchJSON(_ url: URL) async throws -> [String: Any] {
         var request = URLRequest(url: url)
         request.timeoutInterval = 25
@@ -266,10 +214,6 @@ final class UpdateDownloader: NSObject, ObservableObject, URLSessionDownloadDele
         }
         return json
     }
-
-    // MARK: - Download primitives
-
-
 
     private func downloadFile(from url: URL) async throws -> URL {
         let dir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("CopyAttachUpdate", isDirectory: true)
@@ -288,11 +232,6 @@ final class UpdateDownloader: NSObject, ObservableObject, URLSessionDownloadDele
         }
     }
 
-    // MARK: - Install
-
-    /// Install the package (DMG or ZIP containing a DMG) over the running app,
-    /// then relaunch via a detached script (the script must be the last thing
-    /// to touch this process — SIGTERM terminates it immediately).
     private func install(package: URL, version: String) throws {
         let fm = FileManager.default
         let myPID = ProcessInfo.processInfo.processIdentifier
@@ -336,7 +275,6 @@ final class UpdateDownloader: NSObject, ObservableObject, URLSessionDownloadDele
         debugLog("[update] staging new app (\(version)) at \(staging.path)")
         try runAndCheck("/bin/cp", ["-R", appSrc.path, staging.path], "复制新版本失败")
 
-        // Unmount disk image in main flow; fail explicitly if detach fails.
         try runAndCheck("/usr/bin/hdiutil", ["detach", mountPoint.path, "-quiet"], "卸载安装包失败")
         isMounted = false
 
@@ -349,7 +287,6 @@ final class UpdateDownloader: NSObject, ObservableObject, URLSessionDownloadDele
         }
         debugLog("[update] new app installed at \(appDest.path)")
 
-        // Detached relaunch script: kill this process, clean up temp dirs, then open the new app.
         phase = .installing
         let downloadDir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("CopyAttachUpdate", isDirectory: true)
         let scriptURL = workDir.appendingPathComponent("relaunch.sh")
@@ -373,8 +310,6 @@ final class UpdateDownloader: NSObject, ObservableObject, URLSessionDownloadDele
     }
 
     private var debugLogPath: String { "/tmp/copyattach_debug.log" }
-
-    // MARK: - Process helpers
 
     @discardableResult
     private func runCapture(_ executable: String, _ arguments: [String]) throws -> String {
@@ -401,10 +336,6 @@ final class UpdateDownloader: NSObject, ObservableObject, URLSessionDownloadDele
         }
     }
 
-    // MARK: - URLSessionDownloadDelegate
-
-    /// The class must stay @MainActor for its published state; the session
-    /// delegate callbacks arrive on the main queue and hop explicitly.
     nonisolated func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
                                 didWriteData bytesWritten: Int64, totalBytesWritten: Int64,
                                 totalBytesExpectedToWrite: Int64) {
@@ -419,9 +350,6 @@ final class UpdateDownloader: NSObject, ObservableObject, URLSessionDownloadDele
 
     nonisolated func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
                                 didFinishDownloadingTo location: URL) {
-        // The temp file must be moved SYNCHRONOUSLY in this callback: URLSession
-        // removes it as soon as the callback returns. An async hop (Task) risks
-        // racing a busy main thread and failing with "couldn't be moved…".
         guard let destination = downloadDestination else { return }
         let continuation = downloadContinuation
         downloadContinuation = nil
@@ -451,22 +379,12 @@ final class UpdateDownloader: NSObject, ObservableObject, URLSessionDownloadDele
         }
     }
 
-    // MARK: - Lanzou challenge solver
-
-    /// acw_sc__v2 anti-crawler challenge: fixed permutation of `arg1` followed
-    /// by a hex XOR with the known key (reimplemented from the share page's JS).
-
-
-    // MARK: - Helpers
-
-
     static func urlEncode(_ value: String) -> String {
         var allowed = CharacterSet.alphanumerics
         allowed.insert(charactersIn: "-._~")
         return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
     }
 
-    /// DMG (koly trailer at EOF) or ZIP (PK magic at start).
     static func looksLikeInstaller(_ url: URL) -> Bool {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return false }
         defer { try? handle.close() }
@@ -484,9 +402,6 @@ final class UpdateDownloader: NSObject, ObservableObject, URLSessionDownloadDele
         "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
-    // MARK: - Legacy cleanup
-
-    /// Detaches any lingering disk images and removes temporary update directories.
     nonisolated static func cleanupLegacyArtifacts() {
         DispatchQueue.global(qos: .utility).async {
             let fm = FileManager.default

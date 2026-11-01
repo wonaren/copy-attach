@@ -3,16 +3,12 @@ import SwiftUI
 import ServiceManagement
 import UniformTypeIdentifiers
 
-// MARK: - Inline Settings View
-
 struct InlineSettingsView: View {
     @State var backend = ClipboardBackend.shared
     @State var hotkeyManager = HotkeyManager.shared
     @State private var selectedTab: Int
     @State var launchAtLogin = UserDefaults.standard.bool(forKey: "LaunchAtLogin")
     @State var runInBackground = UserDefaults.standard.object(forKey: "RunInBackground") as? Bool ?? true
-    /// Paste delivery preference. Default is keystroke: choosing an entry inserts
-    /// it at the caret. Off = clipboard-only, which needs no Accessibility grant.
     @State var autoPasteAtCursor = PasteDeliveryMode.current == .keystroke
     @State var showMenuBarIcon = UserDefaults.standard.object(forKey: "ShowMenuBarIcon") as? Bool ?? true
     @State var cleanupThreshold: Double = {
@@ -27,8 +23,6 @@ struct InlineSettingsView: View {
     @State var shortTextThreshold = UserDefaults.standard.integer(forKey: "ShortTextThreshold") > 0 ? UserDefaults.standard.integer(forKey: "ShortTextThreshold") : 3
     @State var pendingThreshold: Int? = nil
     @State var thresholdBeforeEdit: Double = 3000
-    /// Cached undo-capacity choice (see `InlineSettingsView+StorageTab`). Seeded
-    /// from the persisted backend value so the card opens on the real setting.
     @State var undoBudgetChoiceCache: UndoBudgetChoice = UndoBudgetChoice.nearest(
         to: ClipboardBackend.shared.undoBudgetBytes()
     )
@@ -44,15 +38,8 @@ struct InlineSettingsView: View {
     @State var isHoveringDragIcon = false
     @State var backupStatusMessage: String? = nil
     @State var updateState: UpdateCheckState = .idle
-    /// Drives the spinner/disabled state independently of `updateState`, so a
-    /// background revalidation never erases the currently displayed result (a
-    /// new release would otherwise disappear from the badge for the duration
-    /// of every check).
     @State var isCheckingUpdate = false
-    /// Alert item, decoupled from `updateState` so dismissing an alert does not
-    /// clear the badge / download button (which persist until a re-check).
     @State var updateAlert: UpdateCheckState? = nil
-    /// Seamless download/install engine (Lanzou primary, GitHub fallback).
     @StateObject var updater = UpdateDownloader.shared
     @Environment(\.appTheme) var theme
     @Environment(\.colorScheme) var colorScheme
@@ -60,8 +47,6 @@ struct InlineSettingsView: View {
     init(initialTab: Int = 0) {
         _selectedTab = State(initialValue: initialTab)
     }
-
-    // MARK: - Update Check
 
     enum UpdateCheckState: Equatable, Identifiable {
         case idle
@@ -87,9 +72,6 @@ struct InlineSettingsView: View {
         .frame(width: 520, height: 600)
         .background(theme.background)
         .task(id: backend.permissionGranted) {
-            // Actively poll while permission is ungranted so that toggling the
-            // switch in System Settings immediately updates the UI without
-            // requiring the user to manually click back or reopen settings.
             guard !backend.permissionGranted else { return }
             while !Task.isCancelled && !backend.permissionGranted {
                 try? await Task.sleep(nanoseconds: 600_000_000)
@@ -112,13 +94,11 @@ struct InlineSettingsView: View {
     private let tabTitles = ["通用", "快捷键", "存储", "忽略", "关于"]
     private let tabIcons = ["gearshape", "keyboard", "externaldrive", "eye.slash", "info.circle"]
 
-    // MARK: - Tab Bar
     @State private var hoveredTab: Int? = nil
     @Namespace private var tabGlassNamespace
 
     private let tabCornerRadius: CGFloat = 10
 
-    /// Fallback "glass" pill for macOS < 26: hand-layered inner highlight + rim light.
     @ViewBuilder
     private var liquidGlassSelectedBackground: some View {
         ZStack {
@@ -153,9 +133,6 @@ struct InlineSettingsView: View {
         .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.35 : 0.12), radius: 3, x: 0, y: 1.5)
     }
 
-    /// Native Liquid Glass material for the selected tab (macOS 26+).
-    /// Neutral tint (Tahoe toolbar-style): the material itself carries the
-    /// selection, so the accent-colored icon/label stays readable on top.
     @available(macOS 26.0, *)
     private var selectionGlass: Glass {
         .regular
@@ -167,8 +144,6 @@ struct InlineSettingsView: View {
     private func tabItemBackground(for index: Int) -> some View {
         if selectedTab == index {
             if #available(macOS 26.0, *) {
-                // Real glass is applied directly to the label (see tabItemLabel),
-                // so nothing is drawn behind it here.
                 EmptyView()
             } else {
                 liquidGlassSelectedBackground
@@ -194,10 +169,6 @@ struct InlineSettingsView: View {
         .frame(width: 68, height: 48)
     }
 
-    /// On macOS 26+ the glass is applied to the label itself, so the icon and
-    /// text render *on* the glass (crisp, with system vibrancy) instead of
-    /// being seen *through* it. The stable `glassEffectID` lets the single
-    /// glass element morph between tabs inside the `GlassEffectContainer`.
     @ViewBuilder
     private func tabItemLabel(_ i: Int) -> some View {
         if #available(macOS 26.0, *), selectedTab == i {
@@ -217,8 +188,6 @@ struct InlineSettingsView: View {
             Spacer()
             ForEach(tabTitles.indices, id: \.self) { i in
                 Button {
-                    // System-standard smooth curve: bouncy springs visibly
-                    // distort glass shapes while morphing (WWDC25 guidance).
                     withAnimation(.smooth(duration: 0.3)) {
                         selectedTab = i
                     }
@@ -253,13 +222,11 @@ struct InlineSettingsView: View {
                 tabButtons
             }
         }
-        // Scoped value animation so hover highlights fade like native controls.
         .animation(.easeInOut(duration: 0.15), value: hoveredTab)
         .padding(.top, 8)
         .background(theme.tabBackground)
     }
 
-    // MARK: - Tab Content Router
     private var tabContent: some View {
         Group {
             if selectedTab == 0 { generalTab }
@@ -268,14 +235,10 @@ struct InlineSettingsView: View {
             else if selectedTab == 3 { ignoreTab }
             else { aboutTab }
         }
-        // Native cross-dissolve on section change (System Settings behavior);
-        // animated by the same `.smooth` transaction as the glass pill morph.
         .id(selectedTab)
         .transition(.opacity)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
-
-    // MARK: - Reusable Components
 
     func settingsCard<Content: View>(@ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 0) { content() }

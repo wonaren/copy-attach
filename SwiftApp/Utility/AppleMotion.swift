@@ -1,36 +1,20 @@
 import AppKit
 import SwiftUI
 
-// MARK: - Apple Motion Design System
-//
-// Encapsulates Apple-standard physics-based springs, linear sweep animations
-// (shimmer for stealing perceived latency), and tactile button styles.
-// Designed specifically to maintain 60/120fps ProMotion fluidity while adding
-// rich, tactile motion and perceived responsiveness with ZERO visual dizziness or blur fatigue.
-
 enum AppleMotion {
-    /// Snappy physical spring for micro-interactions: tab pills, button presses,
-    /// icon bounces. Settle time ~200ms with zero visible overshoot.
     static var snappy: Animation {
         .spring(response: 0.22, dampingFraction: 0.78, blendDuration: 0)
     }
 
-    /// Smooth spring for layout/frame morphing and window-level transitions.
     static var smooth: Animation {
         .spring(response: 0.30, dampingFraction: 0.82, blendDuration: 0)
     }
 
-    /// Tactile spring for active press feedback on interactive elements.
     static var tactilePress: Animation {
         .spring(response: 0.16, dampingFraction: 0.70, blendDuration: 0)
     }
 }
 
-// MARK: - Crisp Micro-Scale & Fade Transition (纯净微缩放淡入淡出转场 - 清晰不晃眼)
-
-/// Apple-grade crisp cross-dissolve with subtle micro-scale (0.992).
-/// Completely eliminates Gaussian blur to protect readability and prevent eye fatigue.
-/// Used for settings tabs, modal states, and transient HUDs.
 extension AnyTransition {
     static var appleScaleFade: AnyTransition {
         .asymmetric(
@@ -40,10 +24,6 @@ extension AnyTransition {
     }
 }
 
-// MARK: - Apple Tactile Button Style (即时按压触觉反馈 - 0ms 响应)
-
-/// Emil Kowalski rule: "Buttons must feel responsive: Add transform: scale(0.97)
-/// on active press. This gives instant feedback, confirming the interface heard the user."
 struct AppleTactileButtonStyle: ButtonStyle {
     var scale: CGFloat = 0.96
 
@@ -54,12 +34,6 @@ struct AppleTactileButtonStyle: ButtonStyle {
     }
 }
 
-// MARK: - Linear Shimmer Sweep Modifier (线性扫光动效 - 偷时间/感知流畅度)
-
-/// Hardware-accelerated linear gradient sweep that runs continuously while
-/// background operations (decoding thumbnails, encoding PNGs, loading previews)
-/// are in progress. Steals perceived latency by assuring the user that the system
-/// is actively working for them, with crisp geometric borders and zero blur.
 struct LinearShimmerModifier: ViewModifier {
     @State private var isAnimating = false
     var isActive: Bool = true
@@ -97,18 +71,11 @@ struct LinearShimmerModifier: ViewModifier {
 }
 
 extension View {
-    /// Applies an Apple-grade linear shimmer sweep over this view.
-    /// Completely inactive when `isActive` is false to avoid GPU overhead.
     func linearShimmer(isActive: Bool = true, duration: Double = 1.35) -> some View {
         modifier(LinearShimmerModifier(isActive: isActive, duration: duration))
     }
 }
 
-// MARK: - Shimmer Placeholder Card (图片加载与编码的骨架微光卡片)
-
-/// A sleek, translucent placeholder card with a linear shimmer sweep and pulsing icon.
-/// Used in ItemRowView while thumbnails decode or images undergo Phase 2 encoding.
-/// Completely sharp and crisp with zero Gaussian blur.
 struct ShimmerPlaceholderCard: View {
     let title: String
     let iconName: String
@@ -145,10 +112,6 @@ struct ShimmerPlaceholderCard: View {
     }
 }
 
-// MARK: - Apple Toast HUD (轻量毛玻璃浮动反馈卡片)
-
-/// Floating capsule HUD with ultra-thin material and subtle drop shadow.
-/// Confirms user clipboard and favorite mutations instantly with crisp, legible typography.
 struct AppleToastCard: View {
     let message: String
     let iconName: String

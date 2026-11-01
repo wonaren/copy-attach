@@ -11,22 +11,16 @@ pub extern "C" fn clipboard_get_count() -> c_int {
     b.history.lock().unwrap().len() as c_int
 }
 
-/// Monotonic counter bumped when Phase 2 image encoding finishes.
 #[no_mangle]
 pub extern "C" fn clipboard_get_image_encoding_counter() -> u64 {
     IMAGE_ENCODING_COUNTER.load(Ordering::Relaxed)
 }
 
-/// Monotonic revision of in-memory history ordering and metadata.
 #[no_mangle]
 pub extern "C" fn clipboard_get_history_revision() -> u64 {
     HISTORY_REVISION.load(Ordering::Relaxed)
 }
 
-// Image Loading (by db_id)
-
-/// Load full image directly by database row id (no history lock).
-/// Caller must free with `clipboard_free_bytes()`.
 #[no_mangle]
 pub extern "C" fn clipboard_get_image_full_by_db_id(db_id: i64, out_len: *mut c_int) -> *mut u8 {
     if db_id == 0 || out_len.is_null() {
@@ -54,7 +48,6 @@ pub extern "C" fn clipboard_get_image_full_by_db_id(db_id: i64, out_len: *mut c_
         }
     };
 
-    // Same blob-read contract as preview/paste/undo.
     if !crate::backend::claim_pages(data.as_ptr(), data.capacity()) {
         crate::error_log!("CopyAttach: full image blob for db_id={db_id} could not be claimed — returning null");
         return std::ptr::null_mut();
@@ -64,8 +57,6 @@ pub extern "C" fn clipboard_get_image_full_by_db_id(db_id: i64, out_len: *mut c_
     vec_to_raw(data)
 }
 
-/// Load thumbnail directly by database row id (no history lock).
-/// Caller must free with `clipboard_free_bytes()`.
 #[no_mangle]
 pub extern "C" fn clipboard_get_image_thumb_by_db_id(db_id: i64, out_len: *mut c_int) -> *mut u8 {
     if db_id == 0 || out_len.is_null() {
@@ -94,7 +85,6 @@ pub extern "C" fn clipboard_get_image_thumb_by_db_id(db_id: i64, out_len: *mut c
         }
     };
 
-    // Same blob-read contract as preview/paste/undo.
     if !crate::backend::claim_pages(thumb_data.as_ptr(), thumb_data.capacity()) {
         crate::error_log!("CopyAttach: thumbnail blob for db_id={db_id} could not be claimed — returning null");
         return std::ptr::null_mut();
@@ -107,9 +97,6 @@ pub extern "C" fn clipboard_get_image_thumb_by_db_id(db_id: i64, out_len: *mut c
     vec_to_raw(thumb_data)
 }
 
-/// Decode a stored image downscaled to at most `max_dim`, returning an RGBA8
-/// buffer owned by the caller (release via `clipboard_preview_buffer_release`).
-/// Animated GIFs are flagged and returned as null so Swift can use NSImage(data:).
 #[no_mangle]
 pub extern "C" fn clipboard_decode_preview_by_db_id(
     db_id: i64,
@@ -155,8 +142,6 @@ pub extern "C" fn clipboard_decode_preview_by_db_id(
             return std::ptr::null_mut();
         }
     };
-    // Claim pages before the decoder reads the blob; an unclaimable blob is
-    // reported as a decode failure rather than decoded from reclaimable pages.
     if !crate::backend::claim_pages(png.as_ptr(), png.capacity()) {
         crate::error_log!("CopyAttach: preview blob for db_id={db_id} could not be claimed — returning null");
         return std::ptr::null_mut();
@@ -167,7 +152,6 @@ pub extern "C" fn clipboard_decode_preview_by_db_id(
         crate::debug_log!("CopyAttach: preview db_id={db_id}: stored png_data is empty");
         return std::ptr::null_mut();
     }
-    // Let Swift handle animated GIFs via NSImage(data:) instead of decoding here.
     if png.starts_with(&[0x47, 0x49, 0x46, 0x38]) {
         unsafe { *out_is_gif = 1 };
         return std::ptr::null_mut();
@@ -179,8 +163,6 @@ pub extern "C" fn clipboard_decode_preview_by_db_id(
             .expect("preview buffer layout must be valid")
     };
 
-    // Decode into the pooled buffer or a fresh Vec; the delivered buffer is
-    // a separate allocation owned by the caller.
     let mut pooled = crate::backend::ImageDecodeBuffer::acquire();
     let delivered: Option<(*mut u8, u32, u32, usize)> =
         if let Some((w, h)) = crate::image::decode_png_rgba8_into(png, pooled.as_mut_vec()) {
@@ -191,10 +173,6 @@ pub extern "C" fn clipboard_decode_preview_by_db_id(
                 crate::error_log!("CopyAttach: preview alloc failed for {byte_len} bytes");
                 None
             } else {
-                // Claim pages before Swift owns the long-lived buffer. This buffer
-                // is delivered to the UI as a CGImage and lives until the preview
-                // closes, so it must never be reclaimable: an unclaimable one is
-                // released and reported as a decode failure.
                 if !crate::backend::claim_pages(dst, byte_len) {
                     crate::error_log!("CopyAttach: preview buffer for db_id={db_id} could not be claimed — returning null");
                     unsafe { std::alloc::dealloc(dst, layout_for(byte_len)) };
@@ -273,7 +251,6 @@ pub extern "C" fn clipboard_decode_preview_by_db_id(
     }
 }
 
-/// Release a preview buffer, marking its pages reusable before freeing.
 #[no_mangle]
 pub extern "C" fn clipboard_preview_buffer_release(ptr: *mut u8, len: c_int) {
     if ptr.is_null() || len <= 0 {
@@ -287,14 +264,9 @@ pub extern "C" fn clipboard_preview_buffer_release(ptr: *mut u8, len: c_int) {
     unsafe { std::alloc::dealloc(ptr, layout) }
 }
 
-// Image Size
-
-// Memory Management Helpers
-
 #[no_mangle]
 pub extern "C" fn clipboard_free_string(s: *mut c_char) {
     if s.is_null() { return; }
-    // Mark pages reusable before freeing, matching `clipboard_free_bytes`.
     let byte_len = unsafe { std::ffi::CStr::from_ptr(s).to_bytes().len() + 1 };
     crate::backend::mark_pages_reusable(s as *const u8, byte_len);
     unsafe { let _ = CString::from_raw(s); }
@@ -303,13 +275,10 @@ pub extern "C" fn clipboard_free_string(s: *mut c_char) {
 #[no_mangle]
 pub extern "C" fn clipboard_free_bytes(data: *mut u8, len: c_int) {
     if data.is_null() || len < 0 { return; }
-    // Mark pages reusable before freeing (small/unaligned buffers are no-ops).
     crate::backend::mark_pages_reusable(data, len as usize);
     let slice_ptr = std::ptr::slice_from_raw_parts_mut(data, len as usize);
     unsafe { drop(Box::from_raw(slice_ptr)); }
 }
-
-// Cleanup Threshold
 
 #[no_mangle]
 pub extern "C" fn clipboard_get_cleanup_threshold() -> i32 {
@@ -317,11 +286,6 @@ pub extern "C" fn clipboard_get_cleanup_threshold() -> i32 {
         .map_or(DEFAULT_CLEANUP_THRESHOLD as i32, |b| b.cleanup_threshold.load(Ordering::Relaxed) as i32)
 }
 
-/// Clamped to [100, 10000]. Immediately trims both DB and in-memory history.
-///
-/// Conforms to the "DB failure leaves memory intact" contract: the DB trim
-/// is executed first. If the DB operation fails (e.g. read-only or locked),
-/// in-memory history is left untouched so entries never "resurrect" on restart.
 #[no_mangle]
 pub extern "C" fn clipboard_set_cleanup_threshold(threshold: i32) {
     if let Some(b) = try_backend() {
@@ -331,7 +295,6 @@ pub extern "C" fn clipboard_set_cleanup_threshold(threshold: i32) {
         ) as usize;
         b.cleanup_threshold.store(t, Ordering::Relaxed);
 
-        // Step 1: trim DB first. If DB fails, leave memory intact.
         let db_trimmed = match b.db.lock() {
             Ok(conn) => match crate::db::trim_db_history(&conn, t) {
                 Ok(()) => true,
@@ -346,7 +309,6 @@ pub extern "C" fn clipboard_set_cleanup_threshold(threshold: i32) {
             }
         };
 
-        // Step 2: only trim memory when DB trim succeeded.
         if db_trimmed {
             let mut hist = b.history.lock().unwrap();
             let before = hist.len();
@@ -361,12 +323,6 @@ pub extern "C" fn clipboard_set_cleanup_threshold(threshold: i32) {
     }
 }
 
-// Storage & Permissions
-
-/// Release unused SQLite page-cache memory back to the OS. Safe to call only
-/// when no transaction is active; the popup-close path invokes this after the
-/// monitor has gone idle, so the next search/thumbnail read simply rebuilds the
-/// (bounded, ≤4MB) cache from disk.
 #[no_mangle]
 pub extern "C" fn clipboard_shrink_db_memory() -> c_int {
     let b = match try_backend() {
@@ -434,7 +390,6 @@ pub extern "C" fn clipboard_open_preferences() {
     macos::open_preferences();
 }
 
-/// Reload in-memory history from the DB using the current cleanup threshold.
 #[no_mangle]
 pub extern "C" fn clipboard_reload_history() -> c_int {
     let b = match try_backend() {

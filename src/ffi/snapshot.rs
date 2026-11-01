@@ -5,9 +5,6 @@ use super::to_ffi_cstring;
 use crate::backend::try_backend;
 use crate::types::ClipboardEntry;
 
-/// Lightweight snapshot row: exactly the fields the frontend list consumes.
-/// The full text is deliberately NOT carried — a refresh snapshot must stay
-/// small even when history holds many multi-KB pasted documents.
 pub(crate) struct SnapshotRow {
     pub(crate) entry_type: i32,
     pub(crate) id: i64,
@@ -16,8 +13,8 @@ pub(crate) struct SnapshotRow {
     pub(crate) custom_label: String,
     pub(crate) source_name: String,
     pub(crate) source_bundle_id: String,
-    pub(crate) preview: String, // text entries only; empty for images
-    pub(crate) db_id: i64,      // image entries only; 0 otherwise
+    pub(crate) preview: String,
+    pub(crate) db_id: i64,
     pub(crate) width: i32,
     pub(crate) height: i32,
 }
@@ -49,16 +46,8 @@ impl SnapshotRow {
     }
 }
 
-/// Opaque handle to a lightweight snapshot of clipboard history, taken under a
-/// single history lock. Holds compact metadata + bounded previews — never full
-/// text — so acquiring it does not deep-clone potentially many MB of pasted
-/// content. All reads from this snapshot are race-free: the background monitor
-/// thread cannot modify it.
 pub struct Snapshot(Vec<SnapshotRow>);
 
-/// Acquire a consistent snapshot of all history entries under one lock.
-/// Returns an opaque handle (or null if the backend is uninitialized).
-/// Caller must release with `clipboard_snapshot_release()`.
 #[no_mangle]
 pub extern "C" fn clipboard_snapshot_acquire() -> *mut Snapshot {
     let hist = match try_backend() {
@@ -66,10 +55,6 @@ pub extern "C" fn clipboard_snapshot_acquire() -> *mut Snapshot {
         None => return std::ptr::null_mut(),
     };
     let rows: Vec<SnapshotRow> = hist.iter().map(SnapshotRow::from_entry).collect();
-    // Swift reads the rows across the FFI for the popup's lifetime; claim any
-    // reusable-marked pages the allocator handed back (see vec_to_raw). An
-    // unclaimable rows array would let the list render from reclaimable
-    // memory, so report "no snapshot" and let the reload be retried.
     if !crate::backend::claim_pages(
         rows.as_ptr().cast::<u8>(),
         rows.capacity() * std::mem::size_of::<SnapshotRow>(),
@@ -83,34 +68,11 @@ pub extern "C" fn clipboard_snapshot_acquire() -> *mut Snapshot {
     }
     Box::into_raw(Box::new(Snapshot(rows)))
 }
-// Packed snapshot wire format (one allocation, no per-field CString churn)
-//
-// The per-row snapshot API above allocates and frees one CString per string
-// field on every full-history reload. For 3000 rows that is ~9k-12k tiny
-// allocations per refresh, all of them in the malloc small zone and exactly
-// the transient churn that keeps dirty pages at a high water mark. This API
-// serializes the whole snapshot into a single caller-owned byte buffer:
-//
-//   header  : 4 bytes "CSNP", u32 version, u32 row_count, u32 flags
-//   per row : 60-byte fixed header (all integers little-endian)
-//             i32 entry_type, i64 id, i64 timestamp, i64 db_id,
-//             i32 width, i32 height,
-//             u32 custom_label_len,
-//             u32 label_len, u32 source_name_len, u32 source_bundle_id_len,
-//             u32 preview_len,
-//             u32 flags (bit 0 = favorited)
-//             followed by the five UTF-8 byte spans: custom_label, label, source_name, source_bundle_id, preview
-//
-// Text rows carry custom_label + label + source metadata + bounded preview. Image rows carry
-// custom_label + the synthesized "Image (WxH)" label + source metadata and an empty preview.
-// The caller owns the returned buffer and releases it with
-// `clipboard_free_bytes` (which marks its pages reusable before freeing).
 
 pub(crate) const PACKED_SNAPSHOT_MAGIC: &[u8; 4] = b"CSNP";
 pub(crate) const PACKED_SNAPSHOT_VERSION: u32 = 3;
 pub(crate) const PACKED_ROW_HEADER_LEN: usize = 60;
 
-/// Row flag bit 0: the entry is in `clipboard_favorites`.
 pub(crate) const PACKED_ROW_FLAG_FAVORITE: u32 = 1;
 
 fn row_flags(entry: &ClipboardEntry, favorites: &HashSet<u64>) -> u32 {
@@ -157,7 +119,6 @@ fn push_decimal_u32(out: &mut Vec<u8>, mut value: u32) {
 }
 
 fn image_label_len(width: u32, height: u32) -> usize {
-    // "Image (" + width + "x" + height + ")" - multiplication sign U+00D7, two UTF-8 bytes.
     10 + decimal_len_u32(width) + decimal_len_u32(height)
 }
 
@@ -169,11 +130,8 @@ fn push_image_label(out: &mut Vec<u8>, width: u32, height: u32) {
     out.extend_from_slice(b")");
 }
 
-/// Serialize history into the packed format without cloning any per-row
-/// `String`. The image label is written digit-by-digit into the output buffer,
-/// so even that `format!("Image ({w}x{h})")` allocation disappears.
 pub(crate) fn encode_snapshot_packed(hist: &[ClipboardEntry], favorites: &HashSet<u64>) -> Vec<u8> {
-    let mut total = 16usize; // magic + version + row_count + flags
+    let mut total = 16usize;
     for entry in hist {
         total += PACKED_ROW_HEADER_LEN;
         match entry {
@@ -205,7 +163,7 @@ pub(crate) fn encode_snapshot_packed(hist: &[ClipboardEntry], favorites: &HashSe
     out.extend_from_slice(PACKED_SNAPSHOT_MAGIC);
     push_u32(&mut out, PACKED_SNAPSHOT_VERSION);
     push_u32(&mut out, hist.len() as u32);
-    push_u32(&mut out, 0); // flags reserved
+    push_u32(&mut out, 0);
 
     for entry in hist {
         match entry {
@@ -273,9 +231,6 @@ pub(crate) fn encode_snapshot_packed(hist: &[ClipboardEntry], favorites: &HashSe
     out
 }
 
-/// Acquire the whole snapshot as one packed byte buffer. The caller owns the
-/// buffer and must release it with `clipboard_free_bytes`. Returns null when
-/// the backend is unavailable; on success `*out_len` receives the byte length.
 #[no_mangle]
 pub extern "C" fn clipboard_snapshot_packed_acquire(out_len: *mut c_int) -> *mut u8 {
     let b = match try_backend() {
@@ -284,7 +239,6 @@ pub extern "C" fn clipboard_snapshot_packed_acquire(out_len: *mut c_int) -> *mut
     };
     let hist = b.history.lock().unwrap();
     let perf = crate::perf::PerfSpan::start("rust", "snapshot.pack");
-    // Lock order is history -> favorites (see Backend::favorites).
     let favorites = match b.favorites.lock() {
         Ok(f) => f.clone(),
         Err(e) => {
@@ -345,7 +299,6 @@ pub extern "C" fn clipboard_snapshot_item_timestamp(
     snap.0.get(index as usize).map_or(0, |row| row.timestamp)
 }
 
-/// Caller must free with `clipboard_free_string()`.
 #[no_mangle]
 pub extern "C" fn clipboard_snapshot_item_label(
     snap: *const Snapshot,
@@ -361,9 +314,6 @@ pub extern "C" fn clipboard_snapshot_item_label(
     }
 }
 
-/// Custom label (user-defined remark) for a snapshot item.
-/// Caller must free with `clipboard_free_string()`.
-/// Returns null when no custom label is set.
 #[no_mangle]
 pub extern "C" fn clipboard_snapshot_item_custom_label(
     snap: *const Snapshot,
@@ -385,11 +335,6 @@ pub extern "C" fn clipboard_snapshot_item_custom_label(
     }
 }
 
-/// Bounded preview text for a text item (≤ 256 Unicode scalars; long entries
-/// elided to head……tail so the row shows the real ending). The list row only
-/// renders ~50 visual chars, so the snapshot carries this bounded preview
-/// instead of cloning the full text into the frontend. Caller must free
-/// with `clipboard_free_string()`. Image items return null.
 #[no_mangle]
 pub extern "C" fn clipboard_snapshot_item_preview(
     snap: *const Snapshot,
@@ -411,7 +356,6 @@ pub extern "C" fn clipboard_snapshot_item_preview(
     }
 }
 
-/// Caller must free with `clipboard_free_string()`.
 #[no_mangle]
 pub extern "C" fn clipboard_snapshot_item_source_name(
     snap: *const Snapshot,
@@ -427,7 +371,6 @@ pub extern "C" fn clipboard_snapshot_item_source_name(
     }
 }
 
-/// Caller must free with `clipboard_free_string()`.
 #[no_mangle]
 pub extern "C" fn clipboard_snapshot_item_source_bundle_id(
     snap: *const Snapshot,
@@ -473,7 +416,6 @@ pub extern "C" fn clipboard_snapshot_get_image_height(
     snap.0.get(index as usize).map_or(0, |row| row.height)
 }
 
-/// Safe to call with null pointer (no-op).
 #[no_mangle]
 pub extern "C" fn clipboard_snapshot_release(snap: *mut Snapshot) {
     if snap.is_null() {
@@ -481,9 +423,6 @@ pub extern "C" fn clipboard_snapshot_release(snap: *mut Snapshot) {
     }
     unsafe {
         let boxed = Box::from_raw(snap);
-        // Release-path symmetry with the claim in `clipboard_snapshot_acquire`:
-        // the rows array was claimed before Swift read it, so its pages must be
-        // marked reusable before the Vec drops.
         crate::backend::mark_pages_reusable(
             boxed.0.as_ptr().cast::<u8>(),
             boxed.0.capacity() * std::mem::size_of::<SnapshotRow>(),

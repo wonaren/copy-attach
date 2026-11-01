@@ -1,15 +1,3 @@
-//! Performance benchmarks for clipboard history management and image processing.
-//!
-//! Run with: cargo test --features stress-test -- --nocapture
-//!
-//! Individual benchmarks:
-//!   cargo test --features stress-test benchmark_thresholds -- --nocapture
-//!   cargo test --features stress-test benchmark_images -- --nocapture
-//!
-//! Submodules: `thresholds` (history-size scaling), `images` (capture/DB
-//! throughput), `memory_probe` (FTS index resident-memory isolation). Shared
-//! measurement helpers live here.
-
 use crate::types::ClipboardEntry;
 use rusqlite::Connection;
 
@@ -18,7 +6,6 @@ mod images;
 mod memory_probe;
 mod side_table;
 
-/// Estimate total heap allocation for a history Vec (vec backing + string buffers).
 fn estimate_vec_heap(hist: &[ClipboardEntry]) -> usize {
     let vec_backing = std::mem::size_of_val(hist);
     let string_heap: usize = hist
@@ -47,9 +34,6 @@ fn format_bytes(bytes: usize) -> String {
     }
 }
 
-/// Create the full app schema — including the FTS5 index and its sync triggers —
-/// so the benchmark's DB write measurements include index maintenance, exactly
-/// as they happen in the real backend.
 fn create_bench_table(conn: &Connection) {
     crate::db::ensure_history_table(conn).expect("bench: failed to create table");
 }

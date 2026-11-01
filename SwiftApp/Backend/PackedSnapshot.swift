@@ -1,27 +1,12 @@
 import Foundation
 
-/// Decoder for the Rust `clipboard_snapshot_packed_acquire` wire format.
-///
-/// The old snapshot path performed one CString allocation per string field
-/// (label, source name, bundle id, preview) for every row on every reload.
-/// For a 3000-row history that is roughly 9k-12k transient small-zone
-/// allocations per refresh. This decoder reads the same data from one packed
-/// buffer, builds Swift `String` copies while the buffer is alive, and then
-/// lets the caller release the buffer through `clipboard_free_bytes`.
 enum PackedSnapshot {
     fileprivate static let magic: [UInt8] = Array("CSNP".utf8)
     fileprivate static let version: UInt32 = 3
     fileprivate static let headerLength = 16
     fileprivate static let rowHeaderLength = 60
-    /// Row flag bit 0: the entry is in the DB's `clipboard_favorites` table.
     fileprivate static let rowFlagFavorite: UInt32 = 1
 
-    /// Decode one packed snapshot into its rows plus the durable favorite set.
-    ///
-    /// Favorites travel per row (a flag) so the list and the set cannot drift:
-    /// both are decoded from the same snapshot. This replaces the old
-    /// UserDefaults id set, which had to be reconciled against the list after
-    /// every publish.
     static func decodeItems(from ptr: UnsafeRawPointer, length: Int) -> ([ClipboardItem], Set<Int>)? {
         guard length >= headerLength else { return nil }
         for (index, byte) in magic.enumerated() {
@@ -36,8 +21,6 @@ enum PackedSnapshot {
         var favoriteIds: Set<Int> = []
         var offset = headerLength
 
-        // Sub-phase accumulation. Measuring per row would flood the log; the
-        // totals answer "where did the 16 ms go" without perturbing the loop.
         let profiling = Perf.isEnabled
         var stringNs: UInt64 = 0
         var formatNs: UInt64 = 0

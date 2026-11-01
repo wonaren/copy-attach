@@ -1,8 +1,6 @@
 import AppKit
 import SwiftUI
 
-// MARK: - ⚪ ABOUT TAB
-
 extension InlineSettingsView {
     var aboutTab: some View {
         ScrollView {
@@ -84,8 +82,6 @@ extension InlineSettingsView {
                         .multilineTextAlignment(.center)
                         .frame(maxWidth: 320)
 
-                        // Manual escape hatch when programmatic download fails:
-                        // open the release page / lanzou share in the browser.
                         Button {
                         if let repoURL {
                             NSWorkspace.shared.open(repoURL)
@@ -138,7 +134,6 @@ extension InlineSettingsView {
                     dismissButton: .default(Text("好的"))
                 )
             case .idle:
-                // Should never be shown — updateAlert is only set for terminal states.
                 return Alert(title: Text(""))
             }
         }
@@ -147,14 +142,8 @@ extension InlineSettingsView {
         }
     }
 
-    // MARK: - About tab actions
-
     private var updateButtonsRow: some View {
         HStack(spacing: 12) {
-            // Secondary action, in the same neutral idiom as the rest of
-            // Settings (buttonBackground + cardBorder). A filled accent put
-            // white on #007AFF at 4.0:1 — under AA — and while an update was
-            // pending it competed with the one action that actually matters.
             Button {
                 checkForUpdates()
             } label: {
@@ -183,11 +172,6 @@ extension InlineSettingsView {
             .disabled(isCheckingUpdate)
             .buttonStyle(.plain)
 
-            // Primary action, only while an update is pending. The version
-            // rides in the label: it used to be a separate red badge pinned
-            // over the check button, shown under the exact same condition, so
-            // it carried no information the download button didn't already
-            // carry — at 3.4:1 for 9 pt text.
             if case .updateAvailable(let latestVersion, _, _) = updateState {
                 Button {
                     startDirectDownload()
@@ -215,7 +199,6 @@ extension InlineSettingsView {
 
     private var updateProgressCard: some View {
         VStack(spacing: 8) {
-            // 上方：通栏进度条
             if case .downloading(let progress) = updater.phase {
                 ProgressView(value: progress)
                     .progressViewStyle(.linear)
@@ -224,7 +207,6 @@ extension InlineSettingsView {
                     .progressViewStyle(.linear)
             }
 
-            // 下方：提示文案与进度百分比/状态指示
             HStack(spacing: 6) {
                 if case .downloading(let progress) = updater.phase {
                     Text("下载中...")
@@ -275,46 +257,25 @@ extension InlineSettingsView {
         NSWorkspace.shared.open(repoURL)
     }
 
-    /// Silent check when the About tab appears. Never shows the alert — the
-    /// result surfaces only through the badge / download button.
-    ///
-    /// The last known answer is painted immediately; the network is only hit
-    /// when that cache has aged out. Opening a settings tab must never wait on
-    /// a socket, and a check must cost the fastest source's latency rather
-    /// than the slowest one's timeout (see `UpdateChecker`).
     private func autoCheckForUpdates() {
         if let cached = UpdateChecker.cachedRelease() {
             evaluateVersion(latestVersion: cached.version,
                             releaseURL: cached.releaseURL,
                             showAlert: false)
         }
-        // Always revalidate, even when the cache is still warm. Painting the
-        // cached answer must not suppress the check: with a 15 min lifetime and
-        // a source that caches for 10 min, a release published moments ago
-        // stayed invisible for up to 25 min (measured 2026-10-20). The check is
-        // async and a failure never clears the painted result, so this costs no
-        // latency — it only lets the answer catch up.
         checkForUpdates(showAlert: false)
     }
 
-    /// Seamless update: download + install in the background (lanzou first,
-    /// GitHub fallback), then auto-relaunch. No browser, no manual steps.
     private func startDirectDownload() {
         guard case .updateAvailable(let latestVersion, _, _) = updateState else { return }
         updater.startDownload(version: latestVersion)
     }
 
-    /// Strip pre-release suffix (e.g. "-dev") for version comparison.
-    /// "0.82.0-dev" → "0.82.0" so that a released "0.82.0" is correctly
-    /// detected as newer.
     private static func stripDevSuffix(_ version: String) -> String {
         version.components(separatedBy: "-").first ?? version
     }
     private func stripDevSuffix(_ version: String) -> String { Self.stripDevSuffix(version) }
 
-    /// Check for updates without blocking the UI. Manual checks always bypass
-    /// the cache. The spinner lives in `isCheckingUpdate`, so a revalidation
-    /// never erases the result currently on screen.
     private func checkForUpdates(showAlert: Bool = true) {
         guard !isCheckingUpdate else { return }
         isCheckingUpdate = true
@@ -329,9 +290,6 @@ extension InlineSettingsView {
                 let message = (error as? LocalizedError)?.errorDescription
                     ?? "无法连接到更新服务器：\(error.localizedDescription)"
                 debugLog("[update] check failed: \(error.localizedDescription)")
-                // A silent revalidation failure must not wipe a cached result
-                // (that would hide a known update and its download button) —
-                // only a manual check or a blank tab surfaces the error.
                 if showAlert || updateState == .idle {
                     finishUpdateCheck(.error(message), showAlert: showAlert)
                 }
@@ -347,19 +305,14 @@ extension InlineSettingsView {
         let isDev = currentVersion != currentBase
 
         if latestVersion.compare(currentBase, options: .numeric) == .orderedDescending {
-            // Normal upgrade: a newer version exists
             finishUpdateCheck(.updateAvailable(latestVersion: latestVersion, releaseURL: releaseURL, isDowngrade: false), showAlert: showAlert)
         } else if isDev {
-            // Dev → stable: offer the stable release even if it's the same
-            // version number or slightly behind (downgrade from dev)
             finishUpdateCheck(.updateAvailable(latestVersion: latestVersion, releaseURL: releaseURL, isDowngrade: true), showAlert: showAlert)
         } else {
             finishUpdateCheck(.upToDate(currentVersion: currentVersion), showAlert: showAlert)
         }
     }
 
-    /// Terminal-state sink: drives the badge / download button, and optionally
-    /// the alert (manual checks only — auto checks stay silent).
     private func finishUpdateCheck(_ result: UpdateCheckState, showAlert: Bool) {
         updateState = result
         if showAlert { updateAlert = result }

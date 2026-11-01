@@ -1,31 +1,15 @@
-//! Throwaway measurement: what does the soft-delete side table cost as it grows?
-//!
-//! Question being answered: is the undo byte budget doing anything besides
-//! capping disk, and would raising it slow the hot capture path?
-//!
-//! Method: build a realistic history (3000 rows, a share of them multi-MB PNG
-//! blobs), then sweep the number of deleted rows from 0 to 5000 and time the two
-//! queries that sit on the capture path (`load_history_from_db` and
-//! `trim_db_history`) plus the undo-path query (`undo_depth`).
-//!
-//! Run: COPYATTACH_BENCH=1 cargo test --lib bench_side_table_growth -- --ignored --nocapture
-
 use rusqlite::Connection;
 use std::time::Instant;
 
 use crate::db::{ensure_history_table, insert_entry_to_db, load_history_from_db};
 use crate::types::ClipboardEntry;
 
-/// A ~4 MB PNG-shaped blob. Content does not matter for the query plans under
-/// test; only the stored length does. Built once and cloned so the fixture is
-/// not paying random-fill time per row.
 fn big_blob() -> Vec<u8> {
     vec![0xABu8; 4 * 1024 * 1024]
 }
 
 fn bench_db() -> Connection {
     let conn = Connection::open_in_memory().expect("open bench db");
-    // Match production pragmas closely enough for the plans to be realistic.
     conn.execute_batch(
         "PRAGMA journal_mode = WAL;
          PRAGMA synchronous = OFF;
@@ -37,8 +21,6 @@ fn bench_db() -> Connection {
     conn
 }
 
-/// Fill `live_rows` history rows; every `image_every`-th one carries a 4 MB
-/// PNG + a small thumbnail, so the deleted-payload byte budget is exercised.
 fn fill_history(conn: &Connection, live_rows: usize, image_every: usize) -> Vec<i64> {
     let blob = big_blob();
     let thumb = vec![0xCDu8; 8 * 1024];
@@ -74,8 +56,6 @@ fn fill_history(conn: &Connection, live_rows: usize, image_every: usize) -> Vec<
     ids
 }
 
-/// Mark `n` live rows as deleted, newest-deletion-last so the undo head is the
-/// last one marked.
 fn mark_deleted(conn: &Connection, ids: &[i64], n: usize) {
     let base = crate::backend::undo_stamp_now();
     for (i, row_id) in ids.iter().enumerate().take(n) {
@@ -89,8 +69,6 @@ fn mark_deleted(conn: &Connection, ids: &[i64], n: usize) {
 }
 
 fn time_query<F: FnMut()>(mut f: F, iters: usize) -> f64 {
-    // One warm-up pass so page cache / statement prep is not attributed to the
-    // measurement.
     f();
     let start = Instant::now();
     for _ in 0..iters {
@@ -104,7 +82,7 @@ fn time_query<F: FnMut()>(mut f: F, iters: usize) -> f64 {
 fn bench_side_table_growth() {
     let conn = bench_db();
     let live_rows = 3000;
-    let image_every = 20; // 150 images x 4 MB ≈ 600 MB of payload; small enough to stay fast
+    let image_every = 20;
     let ids = fill_history(&conn, live_rows, image_every);
     println!(
         "history: {live_rows} rows ({} images x 4 MB)",
@@ -117,9 +95,6 @@ fn bench_side_table_growth() {
     );
 
     let mut marked = 0usize;
-    // Sweep the side table from empty to far past any realistic undo depth. The
-    // images are the interesting part (each adds ~4 MB), so the steps are dense
-    // at first and sparse later.
     for target in [0usize, 10, 50, 100, 150, 300, 600, 1200, 2400] {
         if target > marked {
             mark_deleted(&conn, &ids[marked..], target - marked);
@@ -145,8 +120,6 @@ fn bench_side_table_growth() {
             std::hint::black_box(v);
         }, 5);
         let trim_ms = time_query(|| {
-            // Measure the plan, not the deletion: `EXPLAIN QUERY PLAN` forces
-            // SQLite to compile the same statement the capture path runs.
             let mut stmt = conn
                 .prepare(
                     "DELETE FROM clipboard_history
@@ -172,9 +145,6 @@ fn bench_side_table_growth() {
             let v = crate::db::undo_depth(&conn).expect("depth");
             std::hint::black_box(v);
         }, 50);
-        // Runs on EVERY delete (the eviction warning) and prices the deleted row
-        // first, so both queries sit between the keystroke and the row leaving
-        // the list. A 16 ms budget is one frame at 60 Hz.
         let newest_row = ids[marked.min(ids.len() - 1)];
         let (preview_ms, row_bytes) = {
             let mut row_bytes = 0i64;

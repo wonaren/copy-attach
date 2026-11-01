@@ -2,21 +2,12 @@ import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
-// MARK: - 🟡 STORAGE TAB
-
 extension InlineSettingsView {
-    /// The undo-capacity choices the settings UI offers.
-    ///
-    /// Deliberately coarse: the exact byte figure is a policy knob, not
-    /// something a user tunes precisely. 16 MB is the default (about four 4 MB
-    /// screenshots — enough for the "wrong row" mistake this feature exists
-    /// for), and 0 means "keep everything until the 7-day window closes it".
     enum UndoBudgetChoice: CaseIterable, Identifiable {
         case small, medium, large, unlimited
 
         var id: Self { self }
 
-        /// Payload bytes this choice allows; 0 means unlimited.
         var bytes: Int64 {
             switch self {
             case .small: return 16 * 1024 * 1024
@@ -35,24 +26,16 @@ extension InlineSettingsView {
             }
         }
 
-        /// Nearest choice for a stored byte value, so a value written by another
-        /// build (or a partial write) still selects something sensible.
         static func nearest(to bytes: Int64) -> UndoBudgetChoice {
             if bytes <= 0 { return .unlimited }
             return allCases.min(by: { abs($0.bytes - bytes) < abs($1.bytes - bytes) }) ?? .small
         }
     }
 
-    /// Current budget choice. Cached in `@State` because it comes from an FFI
-    /// call SwiftUI cannot observe: rendering must read cached state, and the
-    /// setter writes through to the backend then refreshes the cache.
     var undoBudgetChoice: UndoBudgetChoice {
         get { undoBudgetChoiceCache }
         nonmutating set {
             guard backend.setUndoBudgetBytes(newValue.bytes) else {
-                // Nothing was stored, so the picker must not keep showing a
-                // choice the backend rejected — it would silently revert at the
-                // next launch. Snap back to the budget actually in force.
                 errorLog("undoBudget: backend rejected \(newValue.bytes) bytes — re-reading the stored budget")
                 undoBudgetChoiceCache = UndoBudgetChoice.nearest(to: backend.undoBudgetBytes())
                 return
@@ -332,8 +315,6 @@ extension InlineSettingsView {
         }
     }
 
-    // MARK: - 💾 Backup & Restore Card
-
     private var backupRestoreCard: some View {
         settingsCard {
             HStack(spacing: 8) {
@@ -482,8 +463,6 @@ extension InlineSettingsView {
         }
     }
 }
-
-// MARK: - 🗂 Storage Action Tile
 
 private struct StorageActionTile: View {
     let icon: String

@@ -2,8 +2,6 @@ import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
-// MARK: - 🟣 IGNORE TAB
-
 extension InlineSettingsView {
     var ignoreTab: some View {
         ScrollView {
@@ -14,8 +12,6 @@ extension InlineSettingsView {
             .padding(20)
         }
     }
-
-    // MARK: - Ignored Applications Entry & Modal Sheet (Apple Design)
 
     private var ignoreAppsCard: some View {
         settingsCard {
@@ -50,12 +46,10 @@ extension InlineSettingsView {
 
                 Spacer()
 
-                // Miniature app icons stack preview
                 if !ignoredAppBundleIDs.isEmpty {
                     ignoredAppsMiniIconsPreview
                 }
 
-                // Native Apple-style "查看列表…" button
                 Button(action: {
                     showIgnoredAppsSheet = true
                 }) {
@@ -112,11 +106,8 @@ extension InlineSettingsView {
         }
     }
 
-    // MARK: - Ignored Applications Modal Sheet (Apple Design)
-
     private var ignoredAppsListSheet: some View {
         VStack(alignment: .leading, spacing: 14) {
-            // Sheet Header
             HStack(spacing: 10) {
                 Image(systemName: "app.badge")
                     .font(.system(size: 18))
@@ -140,7 +131,6 @@ extension InlineSettingsView {
                 .foregroundColor(theme.secondaryText)
                 .lineSpacing(2)
 
-            // Inset grouped list container
             VStack(spacing: 0) {
                 if ignoredAppBundleIDs.isEmpty {
                     VStack(spacing: 8) {
@@ -187,7 +177,6 @@ extension InlineSettingsView {
 
             Spacer(minLength: 4)
 
-            // Sheet Footer Bar
             HStack {
                 Text("在读取剪贴板前过滤，不占存储")
                     .font(.system(size: 11))
@@ -213,7 +202,6 @@ extension InlineSettingsView {
 
     private func ignoredAppRow(bundleID: String) -> some View {
         HStack(spacing: 10) {
-            // App Icon with Apple squircle clip and shadow
             if let icon = getAppIcon(for: bundleID) {
                 Image(nsImage: icon)
                     .resizable()
@@ -232,7 +220,6 @@ extension InlineSettingsView {
                 }
             }
 
-            // App Name & Bundle ID
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text(applicationName(for: bundleID))
@@ -254,7 +241,6 @@ extension InlineSettingsView {
 
             Spacer()
 
-            // Delete button
             Button {
                 withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
                     ignoredAppBundleIDs.removeAll { $0 == bundleID }

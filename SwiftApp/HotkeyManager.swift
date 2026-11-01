@@ -3,15 +3,6 @@ import Foundation
 import Carbon
 import Observation
 
-// MARK: - Global Hotkey Manager
-//
-// Uses two mechanisms for reliability:
-// 1. Carbon RegisterEventHotKey (primary) - works without Accessibility permissions
-// 2. NSEvent global monitor (fallback) - needs Accessibility permissions
-//
-// Carbon handles background hotkeys without requiring Accessibility on modern macOS;
-// the NSEvent monitor serves as an AX-dependent fallback if Carbon registration fails.
-
 @MainActor
 @Observable
 class HotkeyManager {
@@ -28,29 +19,21 @@ class HotkeyManager {
 
     var isRecording: Bool = false
 
-    /// Callback triggered when the hotkey is pressed
     var onHotkeyPressed: (() -> Void)?
 
-    // Carbon hotkey reference
     private var carbonHotKeyRef: EventHotKeyRef?
-    /// Retry bookkeeping for eventHotKeyExistsErr (-9878): a previous
-    /// instance that is still tearing down may hold the combo for a moment.
     private var carbonRetryAttempts = 0
     private var carbonRetryTask: Task<Void, Never>?
     private static let carbonRetryMax = 5
 
-    // NSEvent global monitor
     private var nsEventMonitor: Any?
 
-    // Local event monitor for recording hotkeys
     private var localEventMonitor: Any?
 
-    // Carbon event handler ref (installed once)
     private static var eventHandlerRef: EventHandlerRef?
 
     private init() {
         debugLog("HotkeyManager init started")
-        // Load saved config or use default
         if let data = UserDefaults.standard.data(forKey: defaultsKey),
            let saved = try? JSONDecoder().decode(HotkeyConfig.self, from: data) {
             self.config = saved
@@ -60,10 +43,8 @@ class HotkeyManager {
             debugLog("Using default hotkey config: \(config.displayString)")
         }
 
-        // Install the Carbon event handler once
         Self.installCarbonEventHandler()
 
-        // Register both hotkey mechanisms
         registerBoth()
         debugLog("HotkeyManager init completed")
     }
@@ -75,8 +56,6 @@ class HotkeyManager {
         }
     }
 
-    // MARK: - Persistence
-
     private func saveConfig() {
         do {
             let data = try JSONEncoder().encode(config)
@@ -86,9 +65,6 @@ class HotkeyManager {
         }
     }
 
-    // MARK: - Carbon Event Handler Setup (one-time)
-
-    /// Install the Carbon event handler for hotkey events.
     private static func installCarbonEventHandler() {
         guard eventHandlerRef == nil else { return }
 
@@ -97,7 +73,6 @@ class HotkeyManager {
             eventKind: UInt32(kEventHotKeyPressed)
         )
 
-        // Create the C callback
         let callback: @convention(c) (
             EventHandlerCallRef?,
             EventRef?,
@@ -147,8 +122,6 @@ class HotkeyManager {
         }
     }
 
-    // MARK: - Carbon Hotkey Registration
-
     private func registerCarbon() {
         unregisterCarbon()
 
@@ -173,9 +146,6 @@ class HotkeyManager {
         carbonHotKeyRef = nil
         errorLog("Carbon RegisterEventHotKey failed: \(status) for '\(config.displayString)'")
 
-        // eventHotKeyExistsErr: another process owns this combo. If it is a
-        // previous CopyAttach instance mid-exit, the combo frees within a
-        // second — retry with backoff before giving up.
         guard status == OSStatus(eventHotKeyExistsErr) else { return }
         guard carbonRetryAttempts < Self.carbonRetryMax else {
             carbonRetryAttempts = 0
@@ -195,9 +165,6 @@ class HotkeyManager {
         }
     }
 
-    /// Both mechanisms are dead: Carbon lost the combo and the NSEvent
-    /// global monitor cannot see keys without Accessibility. Silence here
-    /// would leave the user with a hotkey that simply does nothing.
     private func presentHotkeyConflictAlert() {
         NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
@@ -220,8 +187,6 @@ class HotkeyManager {
         }
     }
 
-    // MARK: - NSEvent Monitor Registration
-
     private func registerNSEvent() {
         unregisterNSEvent()
 
@@ -230,7 +195,6 @@ class HotkeyManager {
 
             let keyCode = event.keyCode
             let allFlags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-            // Only check the standard modifier keys
             let sigFlags: NSEvent.ModifierFlags = [.command, .option, .control, .shift]
             let pressedFlags = allFlags.intersection(sigFlags)
 
@@ -262,8 +226,6 @@ class HotkeyManager {
         }
     }
 
-    // MARK: - Combined Registration
-
     private func registerBoth() {
         registerCarbon()
         registerNSEvent()
@@ -279,15 +241,11 @@ class HotkeyManager {
         registerBoth()
     }
 
-    // MARK: - Recording
-
     func startRecording() {
         isRecording = true
 
-        // Install a local event monitor to capture key events while recording
         localEventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             self?.captureKeyEvent(event)
-            // Return nil to swallow the event during recording (prevent beep)
             return nil
         }
     }
@@ -304,7 +262,6 @@ class HotkeyManager {
         }
     }
 
-    /// Call this when a key event is captured during recording
     func captureKeyEvent(_ event: NSEvent) {
         guard isRecording else { return }
 
@@ -314,7 +271,6 @@ class HotkeyManager {
         let hasModifier = flags.contains(.command) || flags.contains(.option) ||
                           flags.contains(.control) || flags.contains(.shift)
 
-        // Pressing Escape (keyCode 53) without modifiers cancels recording.
         if keyCode == 53 && !hasModifier {
             debugLog("Hotkey recording cancelled by user pressing Escape")
             stopRecording()
@@ -330,7 +286,6 @@ class HotkeyManager {
         stopRecording()
     }
 
-    /// Reset to default hotkey (⌥Space)
     func resetToDefault() {
         config = .default
     }

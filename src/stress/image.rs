@@ -1,19 +1,9 @@
-// Image generation for stress-test data — fast block-based RGBA rendering.
-
 use super::splitmix64;
 
-/// Generate a RGBA pixel buffer using fast block-based rendering.
-///
-/// Much faster than per-pixel computation at high resolutions.
-/// The image is divided into a grid of cells. Each cell gets a solid colour
-/// derived from its position + seed.  Thin horizontal lines and window blocks
-/// are drawn using slice fills (not per-pixel loops), making this viable even
-/// at 8K resolution.
 pub(super) fn generate_image_rgba(width: u32, height: u32, seed: u64) -> Vec<u8> {
     let total = (width as usize) * (height as usize) * 4;
     let mut pixels = vec![0u8; total];
 
-    // Grid size scales with resolution to keep block count manageable.
     let grid = if width >= 3840 { 12 } else if width >= 1920 { 8 } else { 4 };
     let cell_w = (width / grid).max(1);
     let cell_h = (height / grid).max(1);
@@ -27,7 +17,6 @@ pub(super) fn generate_image_rgba(width: u32, height: u32, seed: u64) -> Vec<u8>
         for cx in 0..grid {
             let (r0, g0, b0) = cell_colors[(cy * grid + cx) as usize];
 
-            // Warm up the base with a gradient shift
             let grad_r = (cy as f64 / grid as f64 * 60.0) as u8;
             let grad_g = (cx as f64 / grid as f64 * 40.0) as u8;
             let grad_b = ((grid - cy) as f64 / grid as f64 * 50.0) as u8;
@@ -39,7 +28,6 @@ pub(super) fn generate_image_rgba(width: u32, height: u32, seed: u64) -> Vec<u8>
 
             let has_window = (cx + cy) % 3 == 1;
 
-            // Pre-compute the two colors used in this cell
             let base_r = r0.wrapping_add(grad_r);
             let base_g = g0.wrapping_add(grad_g);
             let base_b = b0.wrapping_add(grad_b);
@@ -65,7 +53,6 @@ pub(super) fn generate_image_rgba(width: u32, height: u32, seed: u64) -> Vec<u8>
                 let row = &mut pixels[row_start..row_end];
 
                 let (r, g, b) = if y % 12 < 2 {
-                    // Text line
                     (text_r, text_g, text_b)
                 } else if is_window_cell && y > y0 + win_margin && y < y1 - win_margin {
                     (win_r, win_g, win_b)
@@ -73,7 +60,6 @@ pub(super) fn generate_image_rgba(width: u32, height: u32, seed: u64) -> Vec<u8>
                     (base_r, base_g, base_b)
                 };
 
-                // Fast uniform fill of the entire row slice
                 let rgba = [r, g, b, 255];
                 let (chunks, _) = row.as_chunks_mut::<4>();
                 for chunk in chunks {

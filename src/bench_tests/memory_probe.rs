@@ -1,20 +1,7 @@
-// Memory probes — isolate the FTS index's resident-memory cost.
-//
-// The trigram FTS index lives in the same DB file as the base table. With the
-// app's real connection settings (mmap disabled + 4MB LRU page cache) index
-// pages become resident as they are read
-// (searches, and the triggers' insert/delete on every capture), so a large
-// index can inflate process RSS. These probes insert an identical corpus into
-// a DB WITH the FTS index and one WITHOUT, and print the RSS at each stage.
-// Run them separately (each must be a fresh process):
-//   cargo test --features stress-test memory_probe_fts_index -- --nocapture
-//   cargo test --features stress-test memory_probe_no_fts_index -- --nocapture
-
 use crate::backend::new_entry_id;
 use crate::types::ClipboardEntry;
 use rusqlite::Connection;
 
-/// Current process RSS in KB (macOS `ps -o rss=`; KB on darwin).
 fn probe_rss_kb() -> u64 {
     let out = std::process::Command::new("ps")
         .args(["-o", "rss=", "-p"])
@@ -24,10 +11,6 @@ fn probe_rss_kb() -> u64 {
     String::from_utf8_lossy(&out.stdout).trim().parse().expect("memory probe: parse rss")
 }
 
-/// Deterministic mixed-size corpus (3000 texts, ~1.3KB avg → ~4MB total):
-/// mimics a real history small enough that the trigram index (~3.5× text) still
-/// leaves the whole DB file under the 32MB mmap cap — the regime where index
-/// pages are mmap'd into the process and become resident memory.
 fn probe_corpus() -> Vec<String> {
     (0..3000)
         .map(|i| {
@@ -44,7 +27,6 @@ fn probe_corpus() -> Vec<String> {
         .collect()
 }
 
-/// Open the real app connection settings (no mmap + 4MB LRU page cache).
 fn probe_open_db(path: &std::path::Path) -> Connection {
     let conn = Connection::open(path).expect("memory probe: open db");
     conn.execute_batch(
@@ -101,13 +83,6 @@ fn memory_probe_no_fts_index() {
 
     let rss0 = probe_rss_kb();
     let conn = probe_open_db(&db_path);
-    // Production schema, then remove the FTS index: the probe's premise is
-    // "same database as the app, minus the index". The previous hand-rolled
-    // COPY of the table had silently rotted — it still described the schema
-    // from before `custom_label` and `clipboard_deleted`, so every insert
-    // failed (swallowed by `insert_entry_to_db(..).ok()`) and the probe
-    // "measured" an empty database. The triggers must go before the table they
-    // reference.
     crate::db::ensure_history_table(&conn).expect("memory probe: schema");
     conn.execute_batch(
         "DROP TRIGGER IF EXISTS clipboard_fts_ai;

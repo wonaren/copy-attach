@@ -1,12 +1,5 @@
-//! In-memory clipboard history — dedup, ordering, and threshold-based eviction.
-
 use crate::types::ClipboardEntry;
 
-/// Insert `item` at the head of the history Vec and remove any duplicate
-/// entries of the same type (matching text hash for text entries, hash for
-/// images). Preserves the old entry's stable ID and custom label on dedup so
-/// Swift-side favorites and user-defined remarks survive background re-capture.
-/// Returns the updated Vec (the caller must assign it back to the history slot).
 pub(crate) fn add_to_history(
     mut history: Vec<ClipboardEntry>,
     mut item: ClipboardEntry,
@@ -57,16 +50,6 @@ pub(crate) fn add_to_history(
     history
 }
 
-/// Assign a freshly inserted SQLite rowid to the text entry whose content
-/// hash matches, wherever it sits in the list. Never assigns by head
-/// position: a concurrent select-and-paste (or undo) may have moved another
-/// entry to the front between the in-memory insert and the DB write-through.
-/// Writing our rowid into that head entry would orphan the captured one
-/// (db_id=0 forever — unpasteable, undeletable) while pointing the other at
-/// a row that a later delete would remove from under it.
-///
-/// Mirrors the image Phase 2 assignment in the monitor, which matches by
-/// content hash; this is its text twin.
 pub(crate) fn assign_db_id_by_text_hash(
     history: &mut [ClipboardEntry],
     text_hash: u64,
@@ -82,16 +65,6 @@ pub(crate) fn assign_db_id_by_text_hash(
     }
 }
 
-/// Remove exactly the entry whose DB row a delete just removed, identified by
-/// entry_id AND db_id.
-///
-/// entry_id alone is not identity: add_to_history preserves a re-captured
-/// entry's stable id, so a capture landing between the DB delete and this
-/// removal adopts the deleted entry's id. Removing by id alone would delete
-/// that fresh capture too — it disappears from the list while its row stays
-/// behind as an orphan (until a later same-content dedup or a restart).
-/// The deleted row's id pins the entry that was actually deleted; the
-/// re-capture already points at a different (newer) row.
 pub(crate) fn remove_deleted_entry(
     history: &mut Vec<ClipboardEntry>,
     entry_id: u64,

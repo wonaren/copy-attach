@@ -1,18 +1,11 @@
 import AppKit
 import SwiftUI
 
-// MARK: - Preview Window (non-key, auto-sized, content driven by direct value)
-
 class PreviewWindow: NSPanel {
     private let centerAnchor: NSPoint
     private var hostingView: NSHostingView<AnyView>?
     private var currentItemId: Int = 0
 
-    /// Cache text heights per entryId so arrow-key navigation doesn't re-layout.
-    /// Bounded: the static dictionary would otherwise keep an entry for every
-    /// item ever previewed across the whole process lifetime (including
-    /// deleted entries). 512 entries is far beyond any realistic preview
-    /// session; older entries are evicted and simply re-measured.
     private static var textHeightCache: [Int: CGFloat] = [:]
     private static let textHeightCacheMaxEntries = 512
 
@@ -59,9 +52,6 @@ class PreviewWindow: NSPanel {
         self.hostingView = hosting
     }
 
-    /// Fade the panel in from transparent. Mirrors the popup's window-level
-    /// alpha fade (content scale stays with the popup); the window is created
-    /// per session, so this only ever runs on a fresh panel.
     func fadeIn(duration: TimeInterval = 0.14) {
         alphaValue = 0
         NSAnimationContext.runAnimationGroup { ctx in
@@ -69,19 +59,12 @@ class PreviewWindow: NSPanel {
             ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
             animator().alphaValue = 1
         }
-        // Same hazard as the popup's fade-in: a CA transaction on a window's
-        // first frame can be silently dropped, which would leave this panel on
-        // screen at alpha 0 — invisible but present. Verify and snap.
         DispatchQueue.main.asyncAfter(deadline: .now() + duration + 0.1) { [weak self] in
             guard let self, self.isVisible, self.alphaValue < 0.5 else { return }
             self.alphaValue = 1
         }
     }
 
-    /// Fade out, then close. Mirrors the popup's `closeWithAnimation`: the fade
-    /// is best-effort, and a backstop timer guarantees the close even when the
-    /// CA completion is never delivered (event-tracking run loop mode), so the
-    /// panel can never linger invisible on screen.
     func fadeOutAndClose(duration: TimeInterval = 0.1) {
         guard isVisible else { close(); return }
         NSAnimationContext.runAnimationGroup({ ctx in
@@ -91,8 +74,6 @@ class PreviewWindow: NSPanel {
         }, completionHandler: {
             MainActor.assumeIsolated { self.close() }
         })
-        // A closed window reports isVisible == false, so this is a no-op when
-        // the completion above already ran.
         DispatchQueue.main.asyncAfter(deadline: .now() + duration + 0.15) { [weak self] in
             MainActor.assumeIsolated {
                 guard let self, self.isVisible else { return }
@@ -101,18 +82,10 @@ class PreviewWindow: NSPanel {
         }
     }
 
-    /// Update displayed content and resize window — called by popup on selection change.
     func updateContent(item: ClipboardItem) {
         guard currentItemId != item.id else { return }
         currentItemId = item.id
 
-        // No CATransition here: a cross-fade makes CA keep snapshots of both
-        // the old and new frames while the transition runs. Under rapid
-        // arrow-key switching those snapshots accumulate as software-rendered
-        // (Whippet) drawables — measured at ~7 MB per switch on big-image
-        // previews, some of which never got released after close. Direct root
-        // replacement is visually equivalent for 150 ms and keeps the window
-        // to a single backing store.
         hostingView?.rootView = AnyView(PreviewContent(item: item).id(item.id).withAppTheme())
         resizeToFitContent(for: item)
     }
@@ -120,10 +93,6 @@ class PreviewWindow: NSPanel {
     override func close() {
         Self.textHeightCache.removeAll()
 
-        // contentView is not the only owner: hostingView is retained by this
-        // window so it can update previews in place. Detach its root first;
-        // otherwise PreviewContent keeps its NSImage, which keeps the CGImage
-        // provider and Rust preview buffer alive after the window closes.
         hostingView?.rootView = AnyView(EmptyView())
         hostingView = nil
         self.contentView = nil
@@ -131,8 +100,6 @@ class PreviewWindow: NSPanel {
         super.close()
         self.alphaValue = 1.0
     }
-
-    // MARK: - Window resizing
 
     private func resizeToFitContent(for item: ClipboardItem) {
         let targetScreen = NSScreen.screens.first(where: { NSPointInRect(centerAnchor, $0.frame) }) ?? NSScreen.main
@@ -152,8 +119,6 @@ class PreviewWindow: NSPanel {
         }
     }
 
-    // MARK: - Auto-sizing
-
     private static func contentSize(for item: ClipboardItem, screenFrame: NSRect) -> NSSize {
         let maxW = screenFrame.width * 0.85
         let maxH = screenFrame.height * 0.85
@@ -162,8 +127,6 @@ class PreviewWindow: NSPanel {
         case .text(let entryId, _, _, _, _, _, let text, _):
             let prepared = PreviewTextLayout.prepare(text)
             let pad: CGFloat = 32
-            // Comfortable typographic measure: clamp maximum line measure to avoid
-            // excessively wide lines that hurt readability on wide displays.
             let maxErgonomicWidth: CGFloat = (prepared.kind == .prose) ? 680 : 880
             let effectiveMaxW = min(maxErgonomicWidth, maxW)
             let widthLimit = effectiveMaxW - pad
@@ -180,7 +143,6 @@ class PreviewWindow: NSPanel {
             let textWidth = min(max(longestLineWidth + pad, minW), effectiveMaxW)
             let containerW = textWidth - pad
 
-            // Vertical budget: 28pt top+bottom textContainerInset + 29pt footer (28pt footer + 1pt divider) = 57pt overhead
             let verticalOverhead: CGFloat = 57
             let maxTextH = max(maxH - verticalOverhead, 50)
             let textH = calculateTextHeight(
@@ -197,7 +159,6 @@ class PreviewWindow: NSPanel {
             guard w > 0, h > 0 else {
                 return NSSize(width: 320, height: 240)
             }
-            // Cap display height at 720; don't upscale images shorter than that.
             let capH: CGFloat = 720
             let displayH = CGFloat(h) < capH ? CGFloat(h) : capH
             let aspect = CGFloat(w) / CGFloat(h)

@@ -1,14 +1,3 @@
-//! Database backup and restore operations for CopyAttach.
-//!
-//! Provides atomic, zero-overhead export via SQLite `VACUUM INTO`, pre-inspection of
-//! backup packages, and transactional restore (both overwrite and merge modes).
-//!
-//! Preserves:
-//! - Complete clipboard history (text, full PNG blobs, thumbnails, dimensions, timestamps, source apps)
-//! - User remarks (`custom_label`)
-//! - User favorites (persisted inside `clipboard_backup_favorites` table)
-//! - Monotonic `entry_id` sequence watermark
-
 use rusqlite::{Connection, OpenFlags};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -16,7 +5,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::db::schema::bump_entry_id_watermark;
 
-/// Summary information extracted from a backup file during inspection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BackupInspectInfo {
     pub item_count: usize,
@@ -28,10 +16,6 @@ fn escape_sql_string(s: &str) -> String {
     s.replace('\'', "''")
 }
 
-/// Export the current database to a standalone `.cabackup` file.
-///
-/// Uses `VACUUM INTO` to create a compact, consistent snapshot of all tables
-/// without memory overhead, then records metadata and favorite IDs.
 pub(crate) fn export_backup(
     conn: &Connection,
     target_path: &Path,
@@ -59,7 +43,6 @@ pub(crate) fn export_backup(
     conn.execute_batch(&vacuum_sql)
         .map_err(|e| format!("执行 VACUUM INTO 导出失败: {e}"))?;
 
-    // Now enrich the exported standalone snapshot with backup metadata and favorite IDs.
     let item_count: usize = {
         let backup_conn = Connection::open(&tmp_path)
             .map_err(|e| format!("打开临时备份文件失败: {e}"))?;
@@ -74,20 +57,6 @@ pub(crate) fn export_backup(
             );"
         ).map_err(|e| format!("创建备份元数据表失败: {e}"))?;
 
-        // `VACUUM INTO` copies the whole table, soft-deleted rows included.
-        // Those are undo candidates, not history: an archive that carried them
-        // would restore deletions the user already made (and its own restore
-        // path would then have to re-import payloads nobody asked for). Drop
-        // them from the snapshot — this is the backup file, never the live DB.
-        //
-        // `clipboard_deleted` needs no existence probe: `VACUUM INTO` copies
-        // THIS database, which `ensure_history_table` has already migrated.
-        //
-        // The dropped payloads stay behind as freelist pages in the archive
-        // (SQLite only reclaims them with a full `VACUUM`), so the file can be
-        // up to the undo budget larger than its live rows. That is the accepted
-        // trade: the export runs synchronously on the main thread, and a second
-        // full rewrite to save a bounded number of bytes would double the hang.
         backup_conn
             .execute(
                 "DELETE FROM clipboard_history
@@ -113,9 +82,6 @@ pub(crate) fn export_backup(
             stmt.execute(["total_items", &count.to_string()]).map_err(|e| e.to_string())?;
         }
 
-        // The favorite set lives in the live DB's `clipboard_favorites` table
-        // (`VACUUM INTO` copies it too); the backup format's own table is what
-        // older builds and the restore path read, so mirror it explicitly.
         backup_conn
             .execute(
                 "INSERT OR IGNORE INTO clipboard_backup_favorites (entry_id)
@@ -127,15 +93,6 @@ pub(crate) fn export_backup(
         count.max(0) as usize
     };
 
-    // Atomically replace target file.
-    //
-    // The stale-sidecar purge is load-bearing, not hygiene. `VACUUM INTO` writes
-    // a *fresh* database at `tmp_path`, but a previous export to the same
-    // `target_path` can have left `target_path-wal` / `-shm` behind. SQLite
-    // replays a `-wal` that sits beside a database file, so after the rename a
-    // reader would see the OLD WAL's contents layered over the NEW snapshot —
-    // reproduced locally as a reader returning pre-export rows. Removing the
-    // sidecars first is what makes the rename a real replacement.
     for suffix in ["-wal", "-shm"] {
         let mut sidecar = target_path.as_os_str().to_os_string();
         sidecar.push(suffix);
@@ -153,8 +110,6 @@ pub(crate) fn export_backup(
     std::fs::rename(&tmp_path, target_path)
         .map_err(|e| format!("重命名备份临时文件至目标路径失败: {e}"))?;
 
-    // The temp database was written through a WAL-mode connection, so its own
-    // sidecars can survive the rename under names nothing will ever look for.
     for suffix in ["-wal", "-shm"] {
         let mut sidecar = tmp_path.as_os_str().to_os_string();
         sidecar.push(suffix);
@@ -164,7 +119,6 @@ pub(crate) fn export_backup(
     Ok(item_count)
 }
 
-/// Inspect a backup file to check its validity and extract high-level summary statistics.
 pub(crate) fn inspect_backup(backup_path: &Path) -> Result<BackupInspectInfo, String> {
     if !backup_path.exists() {
         return Err("备份文件不存在".to_string());
@@ -183,10 +137,6 @@ pub(crate) fn inspect_backup(backup_path: &Path) -> Result<BackupInspectInfo, St
         return Err("不是有效的 CopyAttach 备份文件（缺少剪贴板历史表）".to_string());
     }
 
-    // Older backups predate the soft-delete side table, so the filter cannot be
-    // a hard-coded `id NOT IN (clipboard_deleted)`: a pre-soft-delete archive
-    // has no such table and the query would fail to prepare. Check first and
-    // fall back to the plain count. (Such an archive has no deleted rows anyway.)
     let has_deleted_table: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'clipboard_deleted'",
@@ -248,14 +198,10 @@ pub(crate) fn inspect_backup(backup_path: &Path) -> Result<BackupInspectInfo, St
     })
 }
 
-/// Completely overwrite the active database with data from the backup file.
-///
-/// Returns `(restored_item_count, restored_favorites)`.
 pub(crate) fn restore_backup_overwrite(
     conn: &mut Connection,
     backup_path: &Path,
 ) -> Result<(usize, Vec<u64>), String> {
-    // 1. Inspect first to validate file format and ensure clipboard_history exists.
     let _info = inspect_backup(backup_path)?;
 
     let backup_str = backup_path
@@ -270,23 +216,10 @@ pub(crate) fn restore_backup_overwrite(
             .unchecked_transaction()
             .map_err(|e| format!("开启恢复事务失败: {e}"))?;
 
-        // Overwrite clipboard_history and its favorite set. They are one
-        // logical dataset: keeping the old favorites would leave ids that the
-        // restored rows may not contain.
         tx.execute("DELETE FROM main.clipboard_history", [])
             .map_err(|e| format!("清空当前历史表失败: {e}"))?;
         tx.execute("DELETE FROM main.clipboard_favorites", [])
             .map_err(|e| format!("清空当前收藏表失败: {e}"))?;
-
-        // The undo stack addresses rows BY ROWID (`clipboard_deleted.row_id ==
-        // clipboard_history.id`), and the copy below restores the archive's own
-        // ids. A side row that survived the DELETE would therefore mark a
-        // DIFFERENT, freshly restored entry as deleted: measurable on the real
-        // path by exporting a backup, deleting an entry, then restoring that
-        // backup — the restored copy of the deleted entry came back invisible
-        // and ⌘Z hard-deleted it to revive the pre-restore row. An archive
-        // carries no undo stack by design (`export_backup` strips deleted rows),
-        // so the stack is replaced along with the rows it describes.
 
         tx.execute("DELETE FROM main.clipboard_deleted", [])
             .map_err(|e| format!("清空撤销记录失败: {e}"))?;
@@ -305,32 +238,8 @@ pub(crate) fn restore_backup_overwrite(
         )
         .map_err(|e| format!("导入备份历史数据失败: {e}"))?;
 
-        // Adopt the backup's meta EXCEPT the entry-id watermark, which must
-        // never move backwards.
-        //
-        // `bump_entry_id_watermark` is `MAX(value, excluded)`, so copying the
-        // backup's watermark over the live one and then bumping is a no-op if
-        // the backup's is larger — but if the backup's is SMALLER it wins, and
-        // the ids this database already issued can be handed out again. Those
-        // ids are exactly what Swift's Favorites list stores, so a favorite
-        // would then light up on unrelated new content (the hazard
-        // `schema.rs::bump_entry_id_watermark` exists to prevent).
-        //
-        // The watermark is read back and re-applied as a floor below, after the
-        // row copy, so the local value always survives.
         let local_watermark = crate::db::schema::entry_id_watermark(&tx);
 
-        // `clipboard_meta` may be absent from the archive, and it cannot be
-        // guarded with `EXISTS` in the same statement: SQLite resolves
-        // `backup_db.clipboard_meta` at PREPARE time, so a missing table fails
-        // the statement before the guard is ever evaluated. That failure was
-        // also being swallowed by `let _ =` on the whole batch — and because
-        // `execute_batch` stops at the first error, the `CREATE TABLE
-        // IF NOT EXISTS main.clipboard_meta` that preceded it never applied
-        // either. Verified against a meta-less archive: the batch aborted with
-        // `no such table: backup_db.clipboard_meta` and `main.clipboard_meta`
-        // was left absent, so every later meta read and write failed silently.
-        // Checking at runtime, in its own statement, keeps the failure local.
         tx.execute_batch(
             "CREATE TABLE IF NOT EXISTS main.clipboard_meta (
                 key TEXT PRIMARY KEY,
@@ -358,7 +267,6 @@ pub(crate) fn restore_backup_overwrite(
             .map_err(|e| format!("恢复元数据失败: {e}"))?;
         }
 
-        // Read restored favorite IDs
         let has_fav_table: i64 = tx
             .query_row(
                 "SELECT COUNT(*) FROM backup_db.sqlite_master WHERE type='table' AND name='clipboard_backup_favorites'",
@@ -368,9 +276,6 @@ pub(crate) fn restore_backup_overwrite(
             .unwrap_or(0);
 
         if has_fav_table > 0 {
-            // Restore the durable set only for rows that actually came back:
-            // joining the restored history drops ids whose row is absent from
-            // the archive (or was removed by an older trim).
             tx.execute(
                 "INSERT OR IGNORE INTO main.clipboard_favorites (entry_id)
                  SELECT f.entry_id
@@ -390,24 +295,6 @@ pub(crate) fn restore_backup_overwrite(
             rows.flatten().filter(|id| *id > 0).map(|id| id as u64).collect()
         };
 
-        // No explicit FTS rebuild here. `ensure_history_table` installs
-        // AFTER INSERT / AFTER DELETE triggers on `clipboard_history` that keep
-        // `clipboard_fts` in sync, and they fire for the restore's own writes:
-        // the `DELETE FROM main.clipboard_history` above fires the delete
-        // trigger for each removed row, and `INSERT ... SELECT` fires the insert
-        // trigger for each restored row. Verified by
-        // `test_search_works_after_restore_without_explicit_rebuild`.
-        //
-        // The previous `INSERT INTO clipboard_fts(clipboard_fts)
-        // VALUES('rebuild')` was redundant work: measured 69 ms on a
-        // 6 000-text-row fixture, paid while holding the DB mutex the capture
-        // path also needs, to rebuild an index the triggers had already built.
-        // (For the same reason there is no rebuild in the merge path.)
-
-        // Ensure the watermark covers both the highest entry_id now present AND
-        // the local watermark captured before the meta copy. Applied
-        // unconditionally — including when the restored table is empty — so a
-        // restore can never leave the DB issuing ids it already issued before.
         let max_entry_id: i64 = tx
             .query_row(
                 "SELECT COALESCE(MAX(entry_id), 0) FROM clipboard_history",
@@ -433,10 +320,6 @@ pub(crate) fn restore_backup_overwrite(
     res
 }
 
-/// Merge clipboard records from the backup file into the active database.
-///
-/// Merges deduplicated entries, preserves newer remarks, and consolidates favorites.
-/// Returns `(newly_added_item_count, merged_favorites)`.
 pub(crate) fn restore_backup_merge(
     conn: &mut Connection,
     backup_path: &Path,
@@ -455,7 +338,6 @@ pub(crate) fn restore_backup_merge(
             .unchecked_transaction()
             .map_err(|e| format!("开启合并事务失败: {e}"))?;
 
-        // Read backup favorite IDs
         let has_fav_table: i64 = tx
             .query_row(
                 "SELECT COUNT(*) FROM backup_db.sqlite_master WHERE type='table' AND name='clipboard_backup_favorites'",
@@ -479,7 +361,6 @@ pub(crate) fn restore_backup_merge(
             }
         }
 
-        // The live favorite set is the durable table, not a Swift argument.
         let mut merged_fav_set: HashSet<u64> = {
             let mut stmt = tx
                 .prepare("SELECT entry_id FROM main.clipboard_favorites")
@@ -490,7 +371,6 @@ pub(crate) fn restore_backup_merge(
             rows.flatten().filter(|id| *id > 0).map(|id| id as u64).collect()
         };
 
-        // Query active entry IDs and max watermark to prevent ID conflicts
         let mut used_entry_ids: HashSet<u64> = HashSet::new();
         {
             let mut stmt = tx
@@ -510,13 +390,6 @@ pub(crate) fn restore_backup_merge(
         let current_watermark = crate::db::schema::entry_id_watermark(&tx);
         max_entry_id = max_entry_id.max(current_watermark);
 
-        // Ids the backup carries count as "seen" even when every one of them
-        // deduplicates away. The watermark is a high-water mark of ids this
-        // database has ever been shown — not merely of ids it currently stores —
-        // and the whole point of "only ever rises" is that an id can never be
-        // reissued once it has appeared. A dedup-only merge previously left the
-        // watermark untouched (measured: watermark 3 against backup ids up to
-        // 9001), so the next capture could mint an id the backup still refers to.
         {
             let backup_max: i64 = tx
                 .query_row(
@@ -535,12 +408,6 @@ pub(crate) fn restore_backup_merge(
 
         let mut newly_added = 0usize;
 
-        // One row at a time. Collecting every row into a `Vec` first held the
-        // whole backup's blobs in memory at once: measured +588 MB peak RSS on a
-        // 570 MB / 10 000-row archive (a full-size history), which on a 16 GB
-        // machine is the difference between a restore and a memory event. The
-        // SELECT and the INSERTs touch different databases (`backup_db` vs
-        // `main`), so the read cursor stays valid while we write.
         struct RawBackupRow {
             entry_id: i64,
             entry_type: i32,
@@ -594,9 +461,6 @@ pub(crate) fn restore_backup_merge(
             .map_err(|e| format!("查询备份记录失败: {e}"))?;
 
         for row in rows {
-            // A malformed row is reported, not silently dropped: the old
-            // `.flatten()` hid read errors, so a partially-readable archive
-            // restored "successfully" with rows missing.
             let item = match row {
                 Ok(r) => r,
                 Err(e) => {
@@ -607,7 +471,6 @@ pub(crate) fn restore_backup_merge(
             let is_fav = backup_fav_set.contains(&(item.entry_id as u64));
 
             if item.entry_type == 0 {
-                // Text entry
                 let full_text = match &item.text {
                     Some(t) => t.as_str(),
                     None => continue,
@@ -640,9 +503,6 @@ pub(crate) fn restore_backup_merge(
                         final_eid = max_entry_id;
                     }
                     used_entry_ids.insert(final_eid);
-                    // An id adopted verbatim from the backup may be the highest
-                    // this database has ever seen; the watermark must cover it
-                    // (the counter above only advances on collisions).
                     max_entry_id = max_entry_id.max(final_eid);
 
                     let res = tx.execute(
@@ -666,7 +526,6 @@ pub(crate) fn restore_backup_merge(
                     }
                 }
             } else if item.entry_type == 1 {
-                // Image entry
                 let png = match &item.png_data {
                     Some(p) => p.as_slice(),
                     None => continue,
@@ -703,9 +562,6 @@ pub(crate) fn restore_backup_merge(
                         final_eid = max_entry_id;
                     }
                     used_entry_ids.insert(final_eid);
-                    // An id adopted verbatim from the backup may be the highest
-                    // this database has ever seen; the watermark must cover it
-                    // (the counter above only advances on collisions).
                     max_entry_id = max_entry_id.max(final_eid);
 
                     let res = tx.execute(
@@ -741,19 +597,10 @@ pub(crate) fn restore_backup_merge(
         }
         drop(stmt);
 
-        // Raise the watermark whenever the ids the backup carried could exceed
-        // it — not only when rows were inserted. A merge that deduplicated every
-        // row (same content on both sides) still revealed ids this database has
-        // never issued; leaving the watermark below them lets the next capture
-        // reuse one. `max_entry_id` already folds in the pre-merge watermark and
-        // the highest id present locally.
         if max_entry_id > 0 {
             let _ = bump_entry_id_watermark(&tx, max_entry_id);
         }
 
-        // Persist the consolidated favorite set. The ids were collected against
-        // rows that are present after this transaction, so this is the durable
-        // write the old implementation expressed by returning them to Swift.
         {
             let mut fav_stmt = tx
                 .prepare("INSERT OR IGNORE INTO main.clipboard_favorites (entry_id) VALUES (?1)")
@@ -764,12 +611,6 @@ pub(crate) fn restore_backup_merge(
                     .map_err(|e| format!("写入合并收藏失败: {e}"))?;
             }
         }
-
-        // No explicit FTS rebuild here either — see the note in
-        // `restore_backup_overwrite`. The `INSERT`s above fire the
-        // `clipboard_fts_ai` trigger, so the index is already current; the
-        // rebuild was redundant work (69 ms on a 6 000-text-row fixture) paid
-        // while holding the DB mutex.
 
         tx.commit().map_err(|e| format!("提交合并事务失败: {e}"))?;
 

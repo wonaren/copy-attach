@@ -1,8 +1,6 @@
 import AppKit
 import SwiftUI
 
-// MARK: - Preview Content
-
 struct PreviewContent: View {
     let item: ClipboardItem
 
@@ -27,21 +25,16 @@ struct PreviewContent: View {
         return dbId
     }
 
-    /// Stored pixel dimensions of the image item (capture-time decode size).
     private var imagePixelSize: (w: Int, h: Int) {
         guard case .image(_, _, let w, let h, _, _, _, _, _) = item else { return (0, 0) }
         return (w, h)
     }
 
-    /// Derive NSColor from theme.previewPrimaryText so there's a single source
-    /// of truth for the preview text color.
     private var previewTextNSColor: NSColor {
         if let cgColor = theme.previewPrimaryText.cgColor,
            let color = NSColor(cgColor: cgColor) {
             return color
         }
-        // Fallback: should not be reached since AppTheme uses numeric Color values,
-        // but guarded in case a semantic Color is introduced in the future.
         return colorScheme == .dark
             ? NSColor(white: 0.83, alpha: 1.0)
             : NSColor(white: 0.22, alpha: 1.0)
@@ -95,7 +88,6 @@ struct PreviewContent: View {
                     .foregroundColor(theme.previewSecondaryText)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                // Sleek Apple QuickLook placeholder canvas with linear shimmer while decoding
                 ZStack {
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
                         .fill(theme.previewBackground)
@@ -114,13 +106,10 @@ struct PreviewContent: View {
                 .linearShimmer(isActive: true, duration: 1.3)
             }
         }
-        // Auto-cancels previous task and restarts when dbId changes
         .task(id: dbId, priority: .userInitiated) {
             await loadImage(dbId: dbId)
         }
         .onDisappear {
-            // Break the NSImage -> CGImage -> PreviewBufferBox ownership chain
-            // as soon as this preview content leaves the hosting view.
             image = nil
             hasFailed = false
         }
@@ -129,31 +118,19 @@ struct PreviewContent: View {
     private func loadImage(dbId: Int) async {
         guard dbId != 0 else { return }
 
-        // Fast check if thumbnail became available right after init
         if image == nil, let cached = ClipboardBackend.shared.cachedThumbnail(dbId: dbId) {
             image = cached
         }
 
-        // The decode budget depends on the display constraints and the item's
-        // stored pixel size; capture them on the main actor, then decode fully
-        // off-main. The Rust backend downscales and delivers an exactly-sized
-        // RGBA buffer whose pages stop counting against the footprint when the
-        // preview closes (ImageIO's decodes lingered as `MALLOC_LARGE
-        // (empty)` residue — see ImageDecode).
         let screenSize = NSScreen.main?.visibleFrame.size ?? NSSize(width: 1440, height: 900)
         let scale = NSScreen.main?.backingScaleFactor ?? 2
         let size = imagePixelSize
         let maxPixel = ImageDecode.previewBudget(width: size.w, height: size.h,
                                                  screenSize: screenSize, scale: scale)
-        // Concurrency-bounded inside `previewImageAsync`: an unbounded burst of
-        // selections (fast arrow-key navigation) would otherwise stack whole
-        // decode buffers, since cancelling this task cannot interrupt a decode
-        // already running in Rust.
         let decoded = await ImageDecode.previewImageAsync(dbId: dbId, maxPixel: maxPixel)
 
         guard currentDbId == dbId, !Task.isCancelled else { return }
 
-        // Only apply if we're still showing the same item
         if let decoded {
             image = decoded.image
             hasFailed = false

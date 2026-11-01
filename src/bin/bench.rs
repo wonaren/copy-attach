@@ -1,6 +1,3 @@
-//! Standalone benchmark binary for CopyAttach performance metrics.
-//! Usage: cargo run --bin bench --features stress-test
-
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -8,16 +5,12 @@ fn main() {
     println!("CopyAttach Performance Benchmarks");
     println!("==================================\n");
 
-    // ── 1. Snapshot clone benchmark ──
     bench_snapshot();
 
-    // ── 2. Count lock benchmark ──
     bench_count();
 
-    // ── 3. Image encode/decode benchmark ──
     bench_images();
 
-    // ── 4. Search/filter benchmark ──
     bench_search();
 
     println!("==================================");
@@ -64,8 +57,6 @@ fn bench_count() {
     println!();
 }
 
-// ── Inlined image code (avoids making crate internals pub) ──
-
 fn splitmix64(mut state: u64) -> impl FnMut() -> u64 {
     move || {
         state = state.wrapping_add(0x9E3779B97F4A7C15);
@@ -108,7 +99,6 @@ fn bench_images() {
     println!();
     println!("  -- Thumbnail (display box, generated at thumb size) --");
     for &(w, h, label) in resolutions {
-        // Mirrors image::THUMB_BOX_W/H (this binary inlines image code).
         const BOX_W: u32 = 460 * 2;
         const BOX_H: u32 = 100 * 2;
         let (tw, th) = if w <= BOX_W && h <= BOX_H {

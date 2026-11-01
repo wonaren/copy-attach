@@ -1,20 +1,11 @@
 import AppKit
 import SwiftUI
 
-// MARK: - Drag anti-occlusion parking mechanics
-
-/// Edge the popup is parked at during an item drag (nil = centered).
-/// Shared with `HistoryPopupWindow` (the stored `parkedSide` state).
 enum ParkSide {
     case left, right
 }
 
 extension HistoryPopupWindow {
-    /// Screen-zone based parking: divides the screen into 45% : 10% : 45%.
-    /// Mouse in right 45% (> 55% width) parks popup at left edge;
-    /// mouse in left 45% (< 45% width) parks popup at right edge.
-    /// Center 10% (45%..55%) and minor movements within the current zone
-    /// do not trigger window repositioning.
     func tickDragParking() {
         guard let screen = self.screen ?? NSScreen.main else { return }
         let visible = screen.visibleFrame
@@ -30,9 +21,6 @@ extension HistoryPopupWindow {
         }
     }
 
-    /// Animates the popup to the fixed position at the given edge of its
-    /// screen (same y — the popup only slides sideways, never jumps
-    /// vertically).
     func park(at side: ParkSide) {
         guard parkedSide != side else { return }
         parkedSide = side
@@ -52,9 +40,6 @@ extension HistoryPopupWindow {
         lastParkTickX = origin.x
         parkSlideStallTicks = 0
         debugLog("Drag parking: \(side == .left ? "left" : "right") edge")
-        // NB: `animator().setFrameOrigin` does not animate (silently no-ops on
-        // borderless panels); `animator().setFrame(_:display:)` is the API that
-        // actually slides the window.
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = Self.dragParkDuration
             ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
@@ -65,12 +50,6 @@ extension HistoryPopupWindow {
         }
     }
 
-    /// Watches the park slide make progress. Window frame animations are CA
-    /// transactions, which can stall while the run loop is in event tracking
-    /// mode (the same constraint that motivates closeWithAnimation's
-    /// guarantee timer); a stalled slide would leave the popup blocking the
-    /// drag path. If the frame has not moved for three consecutive ticks,
-    /// land the window directly.
     func tickParkingSlide() {
         guard let target = pendingParkTargetX else { return }
         let x = self.frame.origin.x
@@ -93,9 +72,6 @@ extension HistoryPopupWindow {
         lastParkTickX = x
     }
 
-    /// Slides the popup back to its centered position when a drag ends with
-    /// the popup still open (close-after-drag disabled) — the popup only
-    /// parks while a drag is actually in flight.
     func restoreFromParking() {
         resetDragParking()
         guard let screen = self.screen ?? NSScreen.main else { return }

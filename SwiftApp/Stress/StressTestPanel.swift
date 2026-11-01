@@ -1,8 +1,6 @@
 import AppKit
 import SwiftUI
 
-// MARK: - Stress Test Panel
-
 struct StressTestPanel: View {
     @State private var vm = StressTestViewModel()
 
@@ -24,8 +22,6 @@ struct StressTestPanel: View {
         .frame(width: 580, height: 700)
         .background(Color(NSColor.windowBackgroundColor))
     }
-
-    // MARK: - Header
 
     var headerSection: some View {
         HStack {
@@ -49,8 +45,6 @@ struct StressTestPanel: View {
     var divider: some View {
         Divider()
     }
-
-    // MARK: - Data
 
     var dataSection: some View {
         GroupBox(label: Label("测试数据", systemImage: "cylinder")) {
@@ -77,7 +71,6 @@ struct StressTestPanel: View {
                     .disabled(vm.isRunning)
 
                     Button("重新加载（阈值 10000）") {
-                        // Set threshold to 10000 then reload history from DB
                         UserDefaults.standard.set(10000, forKey: "CleanupThreshold")
                         clipboard_set_cleanup_threshold(10000)
                         vm.reloadHistory()
@@ -94,8 +87,6 @@ struct StressTestPanel: View {
             .padding(8)
         }
     }
-
-    // MARK: - Benchmark
 
     var benchmarkSection: some View {
         GroupBox(label: Label("基准测试", systemImage: "chart.bar")) {
@@ -123,8 +114,6 @@ struct StressTestPanel: View {
             .padding(8)
         }
     }
-
-    // MARK: - Results
 
     @ViewBuilder
     var resultsSection: some View {
@@ -166,8 +155,6 @@ struct StressTestPanel: View {
         }
     }
 
-    // MARK: - Log
-
     var logSection: some View {
         GroupBox(label: Label("日志", systemImage: "text.alignleft")) {
             ScrollViewReader { proxy in
@@ -191,8 +178,6 @@ struct StressTestPanel: View {
         }
     }
 }
-
-// MARK: - Sub-views
 
 private struct ScoreRow: View {
     let title: String
@@ -235,8 +220,6 @@ private struct StatBadge: View {
         .cornerRadius(6)
     }
 }
-
-// MARK: - Window Controller
 
 class StressTestWindowController: NSWindowController {
     convenience init() {

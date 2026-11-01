@@ -1,10 +1,5 @@
 import SwiftUI
 
-// MARK: - Day Grouping Helpers (non-actor, safe from any thread)
-
-/// Pure functions for day-based grouping and date label formatting.
-/// Kept outside any View to avoid `@MainActor` isolation — these are called
-/// from background search tasks as well as the main thread.
 enum DayGroup {
     private static func dayComponents(for date: Date, calendar: Calendar) -> (era: Int, year: Int, month: Int, day: Int)? {
         let components = calendar.dateComponents([.era, .year, .month, .day], from: date)
@@ -17,15 +12,11 @@ enum DayGroup {
         return (era, year, month, day)
     }
 
-    /// "7月21日 今天" / "7月20日 昨天" / "7月19日" / "2025年12月23日"
     static func label(for timestamp: UInt64) -> String {
         let parts = labelParts(for: timestamp)
         return parts.relative.map { "\(parts.date) \($0)" } ?? parts.date
     }
 
-    /// Stable identity for a calendar day, independent of its first entry.
-    /// The Int.min namespace is reserved for separators, while entry IDs are
-    /// positive. Encoding calendar components avoids timestamp truncation.
     static func separatorID(for timestamp: UInt64) -> Int {
         let date = Date(timeIntervalSince1970: TimeInterval(timestamp))
         guard let components = dayComponents(for: date, calendar: Calendar.current) else {
@@ -39,8 +30,6 @@ enum DayGroup {
         return Int(Int64.min + key)
     }
 
-    /// Split the date and relative-day label so the separator can preserve its
-    /// identity while updating only the text that actually changed.
     static func labelParts(for timestamp: UInt64) -> (date: String, relative: String?) {
         let date = Date(timeIntervalSince1970: TimeInterval(timestamp))
         let cal = Calendar.current
@@ -59,8 +48,6 @@ enum DayGroup {
         return (dateText, nil)
     }
 
-    /// True when both Unix-second timestamps fall on the same calendar day
-    /// in the user's current time zone.
     static func isSameDay(_ a: UInt64, _ b: UInt64) -> Bool {
         let da = Date(timeIntervalSince1970: TimeInterval(a))
         let db = Date(timeIntervalSince1970: TimeInterval(b))
@@ -68,11 +55,6 @@ enum DayGroup {
     }
 }
 
-// MARK: - Date Section Separator
-
-/// Visual day separator shown between clipboard entries that fall on different
-/// calendar days. Purely decorative — it does not participate in selection or
-/// keyboard navigation, which index into the underlying item array directly.
 struct DateSeparatorView: View {
     let timestamp: UInt64
     @Environment(\.appTheme) private var theme

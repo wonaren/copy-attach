@@ -6,11 +6,6 @@ use crate::backend::try_backend;
 use crate::db::backup::{export_backup, inspect_backup, restore_backup_merge, restore_backup_overwrite};
 use crate::db::{entry_id_watermark, load_history_from_db};
 
-/// Export full database and favorites to a standalone `.cabackup` file.
-///
-/// Returns non-negative item count on success, or negative error code on failure:
-/// -1 = backend unavailable or invalid path
-/// -2 = database error or export failure
 #[no_mangle]
 pub extern "C" fn clipboard_export_backup(target_path: *const c_char) -> c_int {
     if target_path.is_null() {
@@ -47,10 +42,6 @@ pub extern "C" fn clipboard_export_backup(target_path: *const c_char) -> c_int {
     }
 }
 
-/// Pre-inspect a backup file.
-///
-/// Populates `out_item_count`, `out_fav_count`, and `out_timestamp`.
-/// Returns 1 on success, 0 on failure or invalid format.
 #[no_mangle]
 pub extern "C" fn clipboard_inspect_backup(
     backup_path: *const c_char,
@@ -83,11 +74,6 @@ pub extern "C" fn clipboard_inspect_backup(
     }
 }
 
-/// Overwrite active database with backup data.
-///
-/// On success, outputs comma-separated restored favorite IDs in `out_fav_str`
-/// (caller must free with `clipboard_free_string`) and returns restored item count (>= 0).
-/// On failure, returns negative error code.
 #[no_mangle]
 pub extern "C" fn clipboard_restore_backup_overwrite(
     backup_path: *const c_char,
@@ -119,25 +105,18 @@ pub extern "C" fn clipboard_restore_backup_overwrite(
 
     match restore_backup_overwrite(&mut conn, path) {
         Ok((count, fav_ids)) => {
-            // Historical references are invalidated: the overwrite deleted
-            // every row, soft-deleted ones included, so nothing is undoable.
-            // (The rows are gone, which is what makes the undo stack empty.)
 
-            // Reload memory history from newly populated database
             let threshold = b.cleanup_threshold.load(Ordering::Relaxed);
             *hist = load_history_from_db(&conn, threshold);
-            // The restore transaction already read the final table; mirror it.
             if let Ok(mut favorites) = b.favorites.lock() {
                 *favorites = fav_ids.iter().copied().collect();
             }
 
-            // Re-align monotonic entry_id counter
             let max_loaded = hist.iter().map(|e| e.entry_id()).max().unwrap_or(0);
             let watermark = entry_id_watermark(&conn);
             let next = max_loaded.max(watermark) + 1;
             crate::backend::prime_entry_id(next);
 
-            // Publish change so UI refreshes immediately
             crate::backend::mark_history_changed();
 
             let fav_csv = fav_ids
@@ -165,11 +144,6 @@ pub extern "C" fn clipboard_restore_backup_overwrite(
     }
 }
 
-/// Merge records from backup into active database.
-///
-/// On success, outputs comma-separated consolidated favorite IDs in `out_fav_str`
-/// (caller must free with `clipboard_free_string`) and returns newly added item count (>= 0).
-/// On failure, returns negative error code.
 #[no_mangle]
 pub extern "C" fn clipboard_restore_backup_merge(
     backup_path: *const c_char,
@@ -203,8 +177,6 @@ pub extern "C" fn clipboard_restore_backup_merge(
         Ok((added_count, merged_fav_ids)) => {
             let threshold = b.cleanup_threshold.load(Ordering::Relaxed);
             *hist = load_history_from_db(&conn, threshold);
-            // The merge wrote the consolidated set into the table (and returned
-            // it); mirror that exact set.
             if let Ok(mut favorites) = b.favorites.lock() {
                 *favorites = merged_fav_ids.iter().copied().collect();
             }

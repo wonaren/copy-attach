@@ -9,26 +9,11 @@ use crate::ignore::IgnoreRules;
 use crate::monitor::clipboard_monitor;
 use crate::types::ClipboardEntry;
 
-// init return codes, mirrored by Swift's ClipboardBackend.StartResult:
-//   1  = started
-//   0  = retryable (transient; the UI retries on a cooldown)
-//  -1  = corrupt database (replacing the file is the only fix)
-//  -2  = environment failure (read-only / permissions / disk full / path not
-//        openable). A classification, not a terminal state: the caller keeps
-//        retrying with backoff, so the app auto-recovers once the user fixes
-//        the environment out of band. Distinct from -1: the database is
-//        intact, so offering a "back up and rebuild" would needlessly destroy
-//        a good file.
 const INIT_OK: c_int = 1;
 const INIT_RETRYABLE: c_int = 0;
 const INIT_CORRUPT: c_int = -1;
 const INIT_PERMANENT_ENV: c_int = -2;
 
-/// Move a corrupt `history.db` (plus WAL/SHM sidecars) aside as
-/// `history.db.corrupt-<unix-secs>` so the next `clipboard_init` starts
-/// with a fresh database. The user keeps the old file for manual salvage.
-/// Returns 1 on success, 0 if the main file could not be renamed. Must only
-/// be called while no backend holds a connection (i.e. after init returned -1).
 #[no_mangle]
 pub extern "C" fn clipboard_recover_corrupt_db() -> c_int {
     let Some(dir) = get_persist_dir() else {
@@ -45,8 +30,6 @@ pub extern "C" fn clipboard_recover_corrupt_db() -> c_int {
         crate::error_log!("CopyAttach: recover_corrupt_db: rename {} failed: {e}", main.display());
         return 0;
     }
-    // Sidecars carry pages of the same corrupt image; a stale WAL replayed
-    // onto a fresh file would re-corrupt it. Their absence is normal.
     for suffix in ["-wal", "-shm"] {
         let side = dir.join(format!("history.db{suffix}"));
         if side.exists() {
@@ -60,16 +43,6 @@ pub extern "C" fn clipboard_recover_corrupt_db() -> c_int {
     1
 }
 
-/// Init with the saved threshold AND the legacy favorites list.
-///
-/// Legacy favorites used to live only in the UI's UserDefaults. They must be
-/// imported **before** the launch trim runs, or the first launch of this build
-/// would delete a favorite that happens to sit below the trim cutoff and then
-/// import nothing — the exact data loss this migration exists to prevent. A
-/// `threshold` <= 0 means "no saved preference" (same as `clipboard_init`).
-///
-/// Returns the same codes as `clipboard_init`; when the import itself fails the
-/// call is retryable (0) so the caller keeps its legacy list and tries again.
 #[no_mangle]
 pub extern "C" fn clipboard_init_with_threshold_and_favorites(
     threshold: c_int,
@@ -84,12 +57,7 @@ fn clipboard_init_inner(threshold: Option<c_int>, legacy_favorites: &[u64]) -> c
         .map(|t| (t.max(0) as usize).clamp(MIN_CLEANUP_THRESHOLD, MAX_CLEANUP_THRESHOLD))
         .unwrap_or(DEFAULT_CLEANUP_THRESHOLD);
 
-    // OnceLock intentionally retains the backend for process lifetime. Resume
-    // the existing backend instead of attempting to replace the singleton.
     if let Some(b) = crate::backend::try_backend() {
-        // A resumed init must also honor the legacy favorites list: the caller
-        // only drops its UserDefaults copy after this returns 1, so a silent
-        // skip here would lose the list for good.
         if !legacy_favorites.is_empty() {
             let imported = match b.db.lock() {
                 Ok(conn) => match crate::db::import_favorites(&conn, legacy_favorites) {
@@ -154,7 +122,6 @@ fn clipboard_init_inner(threshold: Option<c_int>, legacy_favorites: &[u64]) -> c
     if let Err(e) = ensure_history_table(&conn) {
         match crate::db::classify_db_error(&e) {
             crate::db::DbFailure::Corrupt => {
-                // Replacing the file is the only fix; the user decides.
                 crate::error_log!("CopyAttach: database is corrupt, init aborted: {e}");
                 return INIT_CORRUPT;
             }
@@ -171,14 +138,8 @@ fn clipboard_init_inner(threshold: Option<c_int>, legacy_favorites: &[u64]) -> c
 
     migrate_from_json_to_db(&mut conn);
 
-    // One-time onboarding: seed usage tips (source icon = CopyAttach) only when
-    // the history is empty. Runs before load so the tips are picked up as
-    // normal rows; a no-op for any existing user.
     seed_first_launch_tips(&conn);
 
-    // Import the legacy UserDefaults favorite list BEFORE any trimming: the
-    // rows it references must be protected by the trim below, not deleted and
-    // then looked up. `INSERT ... SELECT` skips ids with no surviving row.
     if !legacy_favorites.is_empty() {
         match crate::db::import_favorites(&conn, legacy_favorites) {
             Ok(imported) => crate::debug_log!(
@@ -191,10 +152,6 @@ fn clipboard_init_inner(threshold: Option<c_int>, legacy_favorites: &[u64]) -> c
         }
     }
 
-    // Favorites are durable rows keyed by entry_id. Drop any whose entry is
-    // gone (a database written by the old UserDefaults-only build can leave
-    // them behind), then load the set into memory so the capture/trim paths and
-    // the snapshot never have to query SQLite.
     if let Err(()) = crate::db::prune_orphan_favorites(&conn) {
         crate::error_log!("CopyAttach: orphan-favorite cleanup failed; stale ids may linger");
     }
@@ -206,33 +163,11 @@ fn clipboard_init_inner(threshold: Option<c_int>, legacy_favorites: &[u64]) -> c
         }
     };
 
-    // Load with the startup threshold, THEN trim to it. Order matters: trimming
-    // first would delete rows below the load bound before they can be read.
-    //
-    // The bound is the user's own setting (see
-    // `clipboard_init_with_threshold_and_favorites`),
-    // not a compile-time default: any other choice silently drops rows the user
-    // asked to keep on every launch.
-    //
-    // `load_history_from_db` returns the newest `threshold` rows plus every
-    // favorite, because `trim_db_history` caps only cleanable rows and a
-    // favorite may sit below the cutoff.
     let saved = load_history_from_db(&conn, startup_threshold);
     if trim_db_history(&conn, startup_threshold).is_err() {
         crate::error_log!("CopyAttach: startup trim failed; the table stays over the load cap until the next capture's transactional trim");
     }
 
-    // Prime the entry-id counter above every id this database has ever issued.
-    //
-    // The loaded rows are NOT sufficient on their own: after a clear (or after
-    // a trim that removed everything) nothing is loaded, and priming from 0
-    // would restart ids at 1 — walking straight through the ids recorded in
-    // Swift's Favorites list, so old favorites would light up on unrelated new
-    // captures. The persisted watermark is what survives a clear.
-    //
-    // Loaded ids still contribute (a database written by an older build has no
-    // watermark yet), and `prime_entry_id` is monotonic, so neither source can
-    // move the counter backwards.
     {
         let max_loaded = saved.iter().map(|e| match e {
             ClipboardEntry::Text { id, .. } | ClipboardEntry::Image { id, .. } => *id,
@@ -240,20 +175,11 @@ fn clipboard_init_inner(threshold: Option<c_int>, legacy_favorites: &[u64]) -> c
         let watermark = entry_id_watermark(&conn);
         let next = max_loaded.max(watermark) + 1;
         crate::backend::prime_entry_id(next);
-        if watermark < max_loaded {
-            // Adopt this database's existing ids into the watermark so the next
-            // launch needs no loaded rows to stay collision-free.
-            if bump_entry_id_watermark(&conn, max_loaded).is_err() {
-                crate::error_log!("CopyAttach: entry-id watermark not recorded; ids stay safe only while history is non-empty");
-            }
+        if watermark < max_loaded && bump_entry_id_watermark(&conn, max_loaded).is_err() {
+            crate::error_log!("CopyAttach: entry-id watermark not recorded; ids stay safe only while history is non-empty");
         }
     }
 
-    // The undo byte budget is a persisted policy, not a per-call argument: the
-    // sweep runs from both startup and the delete path, and reading it here
-    // (before the first sweep) means the two can never disagree. A read failure
-    // is retryable — falling back to the default would silently evict the
-    // deletions a user who chose "unlimited" expects to keep.
     let undo_budget = match crate::db::load_undo_budget_bytes(&conn) {
         Ok(v) => v,
         Err(()) => {
@@ -262,10 +188,6 @@ fn clipboard_init_inner(threshold: Option<c_int>, legacy_favorites: &[u64]) -> c
         }
     };
 
-    // Sweep soft-deleted rows past their retention window (and over the byte
-    // budget) before the history is published. Deleted rows keep their
-    // payloads, so without this the deleted set would grow forever; the same
-    // sweep also runs after every delete, and both are idempotent.
     if crate::db::purge_expired_deleted_rows(&conn, undo_budget).is_err() {
         crate::error_log!("CopyAttach: startup deleted-row sweep failed; retried after the next delete");
     }
@@ -298,58 +220,24 @@ fn clipboard_init_inner(threshold: Option<c_int>, legacy_favorites: &[u64]) -> c
     };
 
     if set_backend(backend).is_err() {
-        return 0; // Already initialized
+        return 0;
     }
 
-    // Purge stale materialized paste PNGs once at launch: the per-paste
-    // purge only runs when an image paste happens, so a long stretch without
-    // one leaves stale files until the OS cleans $TMPDIR.
     super::paste::purge_stale_paste_images();
 
-    // Same contract for drag PNGs, whose only other sweep happens when a new
-    // image drag materializes — i.e. never, for a user who dragged once.
     super::paste::purge_stale_drag_images();
 
-    // Purge stale materialized undo payloads left by builds that predate soft
-    // delete. The undo stack itself now lives in the database (deleted rows), so
-    // this directory is dead storage from an older version.
     crate::backend::purge_legacy_undo_payload_dir();
 
-    // Reclaim disk the freelist is holding.
-    //
-    // Deleting a row (a trim eviction, a soft delete, a purge) leaves its pages
-    // on SQLite's freelist — the FILE never shrinks on its own, and
-    // `auto_vacuum=INCREMENTAL` was measured to reclaim a single page per call
-    // on this SQLite/WAL combination, so it is not an option. Only a full
-    // `VACUUM` compacts (measured: a 200 MB file with every row deleted drops to
-    // 0 MB). It rewrites the whole database, so it runs on a background thread,
-    // only at startup, and only once the file is large enough that the win is
-    // worth the IO.
     #[cfg(not(feature = "stress-test"))]
     if let Some(b) = crate::backend::try_backend() {
         spawn_compaction_if_fragmented(b);
     }
 
-    // One-time image metadata migration (DefaultHasher → stable FNV-1a hashes
-    // and 300px → display-box thumbnails, user_version 3 → 4) on a background
-    // thread: decoding ~250 MB of stored PNGs takes seconds, and the DB lock is
-    // held one row at a time so captures keep flowing during the window.
-    // Idempotent — an interrupted run is redone on the next launch. Skipped in
-    // stress-test builds, whose DBs are generated fresh with the new algorithm.
     #[cfg(not(feature = "stress-test"))]
     if let Some(b) = crate::backend::try_backend() {
         spawn_metadata_migration(b);
     }
-
-    // NOTE: no baseline clipboard read here. The monitor seeds
-    // `last_change_count` from the pasteboard changeCount at startup, so the
-    // first poll never treats the pre-existing clipboard state as a new
-    // capture — the baseline is the changeCount seed, not the payload.
-    // Decoding the current clipboard image here used to cost ~65MB of
-    // retained ImageIO decode buffers at every launch (measured: the
-    // buffers are vm_allocate'd outside the malloc zone, so neither
-    // `malloc_zone_pressure_relief` nor natural malloc reuse reclaims
-    // them promptly).
 
     let handle = thread::spawn(|| clipboard_monitor(
         history, running, source_app, db,
@@ -366,29 +254,8 @@ fn clipboard_init_inner(threshold: Option<c_int>, legacy_favorites: &[u64]) -> c
     1
 }
 
-/// Background driver for the image metadata migration (user_version 3 → 4):
-/// `schema::migrate_one_image_row` rehashes, `schema::migrate_one_thumbnail_row`
-/// re-encodes stored thumbnails to the display-box fit.
-///
-/// Collects the image row ids once, then decodes and rewrites each row on a
-/// fresh DB lock — the lock is never held across a decode, so the capture
-/// monitor and paste paths only ever wait for a single row (~tens of ms). The
-/// in-memory entry's hash and thumbnail dims are mirrored as each row
-/// completes, so same-session re-capture dedup and fresh rows see the new values
-/// immediately. On completion stamps `user_version = METADATA_VERSION`;
-/// failures are logged and counted but do not block the stamp — an undecodable
-/// row will never decode, and retrying it forever would waste every later
-/// launch. An interrupted run simply re-runs next launch (idempotent).
-///
-/// Each pass is gated on its own starting version, so a user already at 3 only
-/// re-encodes thumbnails instead of also re-decoding every PNG for a hash that
-/// is already stable. They share one `user_version` stamp at the end: two
-/// independent writers would race, and whichever stamped first would make the
-/// other's half appear done.
 #[cfg(not(feature = "stress-test"))]
 fn spawn_metadata_migration(b: &'static crate::backend::Backend) {
-    // Skip entirely once the image generation is stamped (4) — a later launch
-    // must not re-decode the whole corpus.
     let version: i32 = match b.db.lock() {
         Ok(c) => match c.query_row("PRAGMA user_version", [], |r| r.get(0)) {
             Ok(v) => v,
@@ -403,11 +270,6 @@ fn spawn_metadata_migration(b: &'static crate::backend::Backend) {
     let thumb_pending = version < 4;
     let ids: Vec<i64> = match b.db.lock() {
         Ok(c) => {
-            // Order by decreasing source size so the reusable decode buffers
-            // reach their high-water mark on the first row and are then reused
-            // without further growth. An arbitrary order makes the scratch
-            // ratchet through several allocations, each of which keeps its
-            // pages resident after MADV_FREE_REUSABLE.
             let mut stmt = match c.prepare(
                 "SELECT id FROM clipboard_history WHERE entry_type = 1
                  ORDER BY width * height DESC, LENGTH(png_data) DESC",
@@ -430,7 +292,6 @@ fn spawn_metadata_migration(b: &'static crate::backend::Backend) {
         Err(_) => return,
     };
     if ids.is_empty() {
-        // Nothing to migrate — stamp the generation directly.
         if let Ok(c) = b.db.lock() {
             let _ = c.pragma_update(None, "user_version", crate::db::METADATA_VERSION);
         }
@@ -440,15 +301,11 @@ fn spawn_metadata_migration(b: &'static crate::backend::Backend) {
         let mut updated = 0usize;
         let mut thumbs = 0usize;
         let mut failed = 0usize;
-        // One blob buffer reused for every row: a fresh 4-7 MB Vec per row
-        // churns malloc, and each freed one stayed resident after being marked
-        // reusable (measured 132 MB of Malloc Large (Reusable) retained, and a
-        // 180 MB peak across 137 mixed-size rows).
         let mut thumb_blob: Vec<u8> = Vec::new();
         let mut thumb_scratch: Vec<u8> = Vec::new();
         for id in ids {
             if !b.running.load(Ordering::SeqCst) {
-                return; // shutting down — next launch resumes (idempotent)
+                return;
             }
             let mut new_hash: Option<u64> = None;
             if hash_pending {
@@ -478,9 +335,6 @@ fn spawn_metadata_migration(b: &'static crate::backend::Backend) {
                     Err(_) => failed += 1,
                 }
             }
-            // Mirror into the in-memory entry: same-session re-capture dedup
-            // needs the stable hash, and the row's stored dims must match the
-            // blob now in the DB.
             if new_hash.is_some() || new_dims.is_some() {
                 if let Ok(mut hist) = b.history.lock() {
                     for entry in hist.iter_mut() {
@@ -499,16 +353,10 @@ fn spawn_metadata_migration(b: &'static crate::backend::Backend) {
                             }
                         }
                     }
-                    // Publish under the history lock: the mirrored hash/dims are
-                    // now part of the visible row state.
                     crate::backend::mark_history_changed();
                 }
             }
         }
-        // Hand both reusable buffers' pages back before this thread exits.
-        // They are caller-owned and outlive the loop, so without this the
-        // idle process keeps a blob-sized and a scratch-sized region resident
-        // long after the migration finished.
         crate::backend::mark_pages_reusable(thumb_blob.as_ptr(), thumb_blob.capacity());
         crate::backend::mark_pages_reusable(thumb_scratch.as_ptr(), thumb_scratch.capacity());
         if let Ok(c) = b.db.lock() {
@@ -533,19 +381,12 @@ pub extern "C" fn clipboard_cleanup() {
     }
 }
 
-/// Enable or disable Rust-side stderr logging at runtime.
-///
-/// Default is `cfg!(debug_assertions)`: debug builds log, release builds do
-/// not. The Swift settings UI calls this to persist an explicit user choice.
 #[no_mangle]
 pub extern "C" fn clipboard_set_debug_logging(enabled: c_int) -> c_int {
     crate::backend::set_debug_logging(enabled != 0);
     1
 }
 
-/// Returns 1 if Rust-side stderr logging is currently enabled. Mainly used by
-/// the settings UI to show the correct switch state before a user override
-/// exists.
 #[no_mangle]
 pub extern "C" fn clipboard_is_debug_logging() -> c_int {
     c_int::from(crate::backend::debug_log_enabled())
@@ -567,8 +408,6 @@ pub extern "C" fn clipboard_set_source_app(name: *const c_char, bundle_id: *cons
     }
 }
 
-/// Replaces the configured rules atomically with respect to capture. Strings
-/// are copied only when the user commits a settings change, never per poll.
 #[no_mangle]
 pub extern "C" fn clipboard_set_ignore_rules(
     app_bundle_ids: *const c_char,
@@ -603,26 +442,9 @@ pub extern "C" fn clipboard_set_ignore_rules(
     }
 }
 
-/// Compact the database at startup when the freelist has grown large enough to
-/// be worth rewriting the file for.
-///
-/// Why this exists: SQLite never shrinks a database file on its own. Every
-/// deleted row (trim eviction, soft delete, retention purge) leaves its pages on
-/// the freelist, so the file keeps its high-water size forever — measured live
-/// on a real library: 507 MB file, 71 MB of live payload, 433 MB of freelist.
-/// `auto_vacuum=INCREMENTAL` is not a substitute: measured on this SQLite
-/// (3.54, WAL) it reclaimed ONE page per call, leaving the file unchanged.
-///
-/// Safety of running it at all: `VACUUM` needs free space roughly equal to the
-/// database size and rewrites every page, so it runs once per launch, on a
-/// background thread, and only when the freelist exceeds both a floor and a
-/// share of the file. A failure is logged and retried next launch — compaction
-/// is an optimisation, and nothing depends on it succeeding.
 #[cfg(not(feature = "stress-test"))]
 fn spawn_compaction_if_fragmented(b: &'static crate::backend::Backend) {
-    /// Below this freelist size the rewrite costs more than it reclaims.
-    const MIN_FREELIST_PAGES: i64 = 10_000; // ~40 MB at 4 KB pages
-    /// And the freelist must be at least this share of the whole file.
+    const MIN_FREELIST_PAGES: i64 = 10_000;
     const MIN_FREELIST_SHARE_PCT: i64 = 20;
 
     let (freelist, total) = {
@@ -653,9 +475,6 @@ fn spawn_compaction_if_fragmented(b: &'static crate::backend::Backend) {
         "CopyAttach: compacting database in the background (freelist {freelist}/{total} pages)"
     );
     std::thread::spawn(move || {
-        // Hold the DB lock for the whole VACUUM: nothing may write while the
-        // file is being rewritten, and the capture path already tolerates
-        // waiting on it.
         let guard = match b.db.lock() {
             Ok(g) => g,
             Err(e) => {
@@ -664,13 +483,11 @@ fn spawn_compaction_if_fragmented(b: &'static crate::backend::Backend) {
             }
         };
         if !b.running.load(Ordering::SeqCst) {
-            return; // shutting down
+            return;
         }
         let started = std::time::Instant::now();
         match guard.execute_batch("VACUUM") {
             Ok(()) => {
-                // `VACUUM` rewrites the main file; the WAL from before it is
-                // dead weight, so truncate it and let the file size settle.
                 let _ = guard.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)");
                 crate::debug_log!(
                     "CopyAttach: compaction complete in {} ms",
@@ -678,9 +495,6 @@ fn spawn_compaction_if_fragmented(b: &'static crate::backend::Backend) {
                 );
             }
             Err(e) => {
-                // Not fatal: the freed pages stay on the freelist and the next
-                // launch retries. Loud because a persistent failure means the
-                // disk is never reclaimed.
                 crate::error_log!("CopyAttach: compaction (VACUUM) failed: {e}");
             }
         }

@@ -3,8 +3,6 @@ import SwiftUI
 import ServiceManagement
 import UniformTypeIdentifiers
 
-// MARK: - 🔵 GENERAL TAB
-
 extension InlineSettingsView {
     var generalTab: some View {
         ScrollView {
@@ -20,7 +18,6 @@ extension InlineSettingsView {
 
     private var permissionBanner: some View {
         VStack(alignment: .leading, spacing: 12) {
-            // Header — always visible
             HStack(spacing: 10) {
                 Image(systemName: backend.permissionGranted ? "checkmark.shield.fill" : "exclamationmark.shield.fill")
                     .font(.system(size: 18))
@@ -237,12 +234,6 @@ extension InlineSettingsView {
         }
     }
 
-    // MARK: - Rich Text Drag Applications Card (Apple Design)
-
-    // MARK: - Rich Text Drag Applications Entry Row
-
-    /// Single compact row inside the unified settings card.
-    /// Clicking "查看列表…" opens the native modal sheet.
     private var richTextDragRow: some View {
         HStack(spacing: 12) {
             Image(systemName: "doc.richtext")
@@ -275,12 +266,10 @@ extension InlineSettingsView {
 
             Spacer()
 
-            // Miniature app icons stack preview
             if !richTextDragApps.isEmpty {
                 richTextMiniIconsPreview
             }
 
-            // Native Apple-style "查看列表…" button that opens the modal sheet
             Button(action: {
                 showRichTextListSheet = true
             }) {
@@ -301,11 +290,8 @@ extension InlineSettingsView {
         .padding(.vertical, 4)
     }
 
-    // MARK: - Rich Text Drag Applications Modal Sheet (Apple Design)
-
     private var richTextAppListSheet: some View {
         VStack(alignment: .leading, spacing: 14) {
-            // Sheet Header
             HStack(spacing: 10) {
                 Image(systemName: "doc.richtext")
                     .font(.system(size: 18))
@@ -329,7 +315,6 @@ extension InlineSettingsView {
                 .foregroundColor(theme.secondaryText)
                 .lineSpacing(2)
 
-            // Inset grouped list container
             VStack(spacing: 0) {
                 if richTextDragApps.isEmpty {
                     VStack(spacing: 8) {
@@ -376,7 +361,6 @@ extension InlineSettingsView {
 
             Spacer(minLength: 4)
 
-            // Sheet Footer Bar
             HStack {
                 Text("按唤起弹窗时的前台应用判定")
                     .font(.system(size: 11))
@@ -434,7 +418,6 @@ extension InlineSettingsView {
 
     private func richTextAppRow(bundleID: String) -> some View {
         HStack(spacing: 10) {
-            // App Icon with Apple squircle clip and shadow
             if let icon = getAppIcon(for: bundleID) {
                 Image(nsImage: icon)
                     .resizable()
@@ -453,7 +436,6 @@ extension InlineSettingsView {
                 }
             }
 
-            // App Name & Bundle ID
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text(richTextDragApplicationName(for: bundleID))
@@ -475,7 +457,6 @@ extension InlineSettingsView {
 
             Spacer()
 
-            // Delete button
             Button {
                 withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
                     richTextDragApps.removeAll { $0 == bundleID }

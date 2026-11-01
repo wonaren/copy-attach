@@ -1,22 +1,11 @@
 import AppKit
 import SwiftUI
 
-// MARK: - Right-Click Context Menu
-
 extension HistoryPopupContent {
-    /// The current displayItems index of the entry, or nil if it no longer
-    /// exists (deleted, filtered out, or the list changed while the menu was
-    /// open). Actions re-resolve by stable entry id instead of trusting the
-    /// index captured when the menu was built.
     private func currentIndex(of entryId: Int) -> Int? {
         displayItems.firstIndex(where: { $0.id == entryId })
     }
 
-    /// Resolve an armed right-click against the one-shot row-frame snapshot.
-    /// Disarms unconditionally (the snapshot is single-use); presents the
-    /// menu only when the click landed on a row. Presentation hops to the
-    /// next runloop tick — the preference callback runs inside a SwiftUI
-    /// layout pass, and NSMenu.popUp must not start mid-update.
     func resolveContextMenu(frames: [Int: CGRect], request: PopupContextMenuRequest) {
         guard let (entryId, _) = frames.first(where: { $0.value.contains(request.viewPoint) }) else {
             return
@@ -25,15 +14,11 @@ extension HistoryPopupContent {
                                                viewPoint: request.viewPoint,
                                                windowPoint: request.windowPoint)
         DispatchQueue.main.async { [self] in
-            // The popup may have closed or the row may have been filtered out
-            // during the async gap — re-resolve by stable id before presenting.
             guard currentIndex(of: entryId) != nil else { return }
             showContextMenu(for: resolved)
         }
     }
 
-    /// Presented by `PopupHostingView.rightMouseDown` via notification.
-    /// Selects the right-clicked row, then shows a native NSMenu at the cursor.
     private func showContextMenu(for request: PopupContextMenuRequest) {
         guard let entryId = request.entryId,
               let index = currentIndex(of: entryId) else { return }
@@ -89,7 +74,6 @@ extension HistoryPopupContent {
             } else {
                 self.showToast("收藏失败，请重试", icon: "exclamationmark.triangle.fill")
             }
-            // Favorites may shrink displayItems; keep the selection valid.
             if self.selectedIndex > self.maxIndex {
                 self.selectedIndex = max(0, self.maxIndex)
             }
@@ -119,8 +103,6 @@ extension HistoryPopupContent {
                               action: #selector(ContextMenuItemTarget.invoke(_:)),
                               keyEquivalent: "")
         item.target = handler
-        // NSMenuItem.target is weak; representedObject (strong) keeps the
-        // handler alive for as long as the menu owns the item.
         item.representedObject = handler
         item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)
         if destructive {
@@ -132,8 +114,6 @@ extension HistoryPopupContent {
         menu.addItem(item)
     }
 
-    /// Copy the entry's full content to the system pasteboard without pasting.
-    /// Returns true on success, false if the payload could not be loaded or materialized.
     @discardableResult
     private func copyItemContent(_ item: ClipboardItem) -> Bool {
         switch item {
@@ -150,21 +130,6 @@ extension HistoryPopupContent {
                 debugLog("copyItemContent: image not ready (entry \(item.id))")
                 return false
             }
-            // File-URL clipboard write — the same convention as the paste and
-            // drag paths. Putting the raw PNG DATA on the pasteboard instead
-            // makes the pasteboard machinery eagerly decode the full image
-            // in-process and keep a TIFF representation alive per write
-            // (measured: every image-data write pins ~2 full-size RGBA
-            // buffers forever, across NSPasteboard, NSPasteboardItem, AND the
-            // raw CorePasteboard API — 29 copies ≈ 320MB of permanent
-            // resident memory). A file-URL string write costs bytes and is
-            // consumed exactly like a Finder file copy: notes/chat apps
-            // attach the file, terminals and TUI agents get the path text.
-            // The file lives OUTSIDE the CopyAttach temp root
-            // (`CopyAttach-copy/`), so the monitor re-captures it (dedup
-            // keeps the entry and moves it to top — the same re-copy
-            // semantics as the old data write) instead of skipping it as a
-            // self-materialization.
             let url: URL
             do {
                 url = try Self.copyImageURL(entryId: item.id)
@@ -179,10 +144,6 @@ extension HistoryPopupContent {
         }
     }
 
-    /// Destination for a copied image's temp PNG. Purges previous copy
-    /// artifacts past the in-flight window: only the newest URL can still
-    /// reference the pasteboard, and a paste target may read it asynchronously
-    /// (mirrors the Rust paste-file TTL).
     private static func copyImageURL(entryId: Int) throws -> URL {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("CopyAttach-copy", isDirectory: true)
@@ -203,7 +164,6 @@ extension HistoryPopupContent {
         return dir.appendingPathComponent("clipboard-\(entryId)-\(UUID().uuidString).png")
     }
 
-    /// Save an image entry to a user-chosen location as a PNG file.
     private func saveImageItem(_ item: ClipboardItem) {
         guard item.isImage, let data = item.imageData else { return }
         let timestamp = item.timestamp
@@ -214,12 +174,6 @@ extension HistoryPopupContent {
         formatter.dateFormat = "yyyy-MM-dd-HHmmss"
         let date = Date(timeIntervalSince1970: TimeInterval(timestamp))
         panel.nameFieldStringValue = "CopyAttach-\(formatter.string(from: date)).png"
-        // The save panel is a modal window of this app: it takes key status
-        // from the nonactivating popup, and the popup must survive that focus
-        // transfer — it stays behind the panel and remains the session the
-        // user returns to. `isPresentingModalPanel` suppresses the resign-key
-        // dismissal for exactly this window; key status is handed back after
-        // the modal loop ends.
         let popup = popupWindow
         popup?.isPresentingModalPanel = true
         defer { popup?.isPresentingModalPanel = false }

@@ -1,7 +1,5 @@
 import AppKit
 
-// MARK: - Content Kind & Prepared Text
-
 enum TextContentKind: Equatable, Sendable {
     case prose
     case code
@@ -17,8 +15,6 @@ struct PreparedPreviewText: Equatable, Sendable {
     let charCount: Int
     let byteCount: Int
 }
-
-// MARK: - Text Classification & Formatting
 
 enum PreviewTextClassifier {
     static func prepare(_ rawText: String) -> PreparedPreviewText {
@@ -54,28 +50,21 @@ enum PreviewTextClassifier {
             return (text, .prose)
         }
 
-        // 1. JSON fast detection (bounded to 120KB to keep validation < 1ms)
         if trimmed.count <= 120_000,
            (trimmed.hasPrefix("{") && trimmed.hasSuffix("}")) ||
            (trimmed.hasPrefix("[") && trimmed.hasSuffix("]")),
            let data = trimmed.data(using: .utf8),
            (try? JSONSerialization.jsonObject(with: data)) != nil {
             if trimmed.contains("\n") {
-                // Already formatted multiline JSON: strictly preserve raw content
-                // (no re-serializing, no escaping slashes into \/, no key re-ordering)
                 return (text, .json)
             } else {
-                // Compact single-line JSON: pretty-print purely by adding indentation,
-                // copying all string literals verbatim so slashes / are never escaped to \/
                 let formatted = prettyPrintSingleLineJSON(trimmed)
                 return (formatted, .json)
             }
         }
 
-        // 2. Fast sampling of first 800 characters
         let sample = String(trimmed.prefix(800))
 
-        // Single-line token/URL/path
         if !sample.contains("\n") {
             if sample.hasPrefix("http://") || sample.hasPrefix("https://") || sample.hasPrefix("file://") || sample.hasPrefix("/") {
                 return (text, .code)
@@ -100,7 +89,6 @@ enum PreviewTextClassifier {
             }
         }
 
-        // Indentation check in sample
         let lines = sample.components(separatedBy: .newlines)
         var indentedLines = 0
         for line in lines {
@@ -112,7 +100,6 @@ enum PreviewTextClassifier {
             codeScore += 3
         }
 
-        // Symbol and CJK distribution
         var symbolCount = 0
         var cjkCount = 0
         for scalar in sample.unicodeScalars {
@@ -127,7 +114,6 @@ enum PreviewTextClassifier {
             codeScore += 2
         }
 
-        // Substantial CJK without dense code markers is overwhelmingly prose
         if cjkCount > 10 && codeScore < 4 {
             return (text, .prose)
         }
@@ -139,8 +125,6 @@ enum PreviewTextClassifier {
         return (text, .prose)
     }
 
-    /// Pure formatting for single-line JSON that injects indentation without
-    /// mutating any string literals (preventing / from escaping to \/) or reordering keys.
     private static func prettyPrintSingleLineJSON(_ input: String) -> String {
         var result = ""
         result.reserveCapacity(input.utf8.count + 512)
@@ -219,8 +203,6 @@ enum PreviewTextClassifier {
     }
 }
 
-// MARK: - Lightweight Syntax Highlighting
-
 @MainActor
 enum PreviewHighlighter {
     private static let jsonStringRegex: NSRegularExpression? = {
@@ -257,13 +239,11 @@ enum PreviewHighlighter {
     ) {
         guard kind != .prose else { return }
         let length = storage.length
-        // Budget execution to 60,000 characters (< 1ms execution)
         guard length > 0, length <= 60_000 else { return }
 
         let str = storage.string
         let fullRange = NSRange(location: 0, length: length)
 
-        // Palette tuned for high contrast and calm readability
         let keyColor: NSColor = isDark
             ? NSColor(calibratedRed: 0.45, green: 0.72, blue: 0.95, alpha: 1.0)
             : NSColor(calibratedRed: 0.10, green: 0.40, blue: 0.80, alpha: 1.0)
@@ -283,33 +263,26 @@ enum PreviewHighlighter {
         storage.beginEditing()
         switch kind {
         case .json:
-            // 1. Strings
             jsonStringRegex?.enumerateMatches(in: str, range: fullRange) { m, _, _ in
                 if let r = m?.range { storage.addAttribute(.foregroundColor, value: stringColor, range: r) }
             }
-            // 2. Keys (override strings before colon)
             jsonKeyRegex?.enumerateMatches(in: str, range: fullRange) { m, _, _ in
                 if let r = m?.range { storage.addAttribute(.foregroundColor, value: keyColor, range: r) }
             }
-            // 3. Literals (numbers, booleans, null)
             jsonLiteralRegex?.enumerateMatches(in: str, range: fullRange) { m, _, _ in
                 if let r = m?.range { storage.addAttribute(.foregroundColor, value: numberColor, range: r) }
             }
 
         case .code:
-            // 1. Numbers
             codeNumberRegex?.enumerateMatches(in: str, range: fullRange) { m, _, _ in
                 if let r = m?.range { storage.addAttribute(.foregroundColor, value: numberColor, range: r) }
             }
-            // 2. Keywords
             codeKeywordRegex?.enumerateMatches(in: str, range: fullRange) { m, _, _ in
                 if let r = m?.range { storage.addAttribute(.foregroundColor, value: keywordColor, range: r) }
             }
-            // 3. Strings
             codeStringRegex?.enumerateMatches(in: str, range: fullRange) { m, _, _ in
                 if let r = m?.range { storage.addAttribute(.foregroundColor, value: stringColor, range: r) }
             }
-            // 4. Comments (override all)
             codeCommentRegex?.enumerateMatches(in: str, range: fullRange) { m, _, _ in
                 if let r = m?.range { storage.addAttribute(.foregroundColor, value: commentColor, range: r) }
             }
@@ -321,18 +294,11 @@ enum PreviewHighlighter {
     }
 }
 
-// MARK: - Shared Typography & Metrics
-
-/// Shared text attributes for preview text (font + line spacing).
-/// Both the height measurement in PreviewWindow and the rendering in
-/// LargeTextView must use the same metrics so the window height matches
-/// the actual text layout.
 @MainActor
 enum PreviewTextLayout {
     static let proseFont: NSFont = .systemFont(ofSize: 14.5, weight: .regular)
     static let codeFont: NSFont = .monospacedSystemFont(ofSize: 13.5, weight: .regular)
 
-    /// Backwards-compatible default font.
     static var font: NSFont { codeFont }
 
     static func font(for kind: TextContentKind) -> NSFont {
@@ -377,12 +343,10 @@ enum PreviewTextLayout {
         ]
     }
 
-    /// Backwards-compatible attributes using default code font.
     static func attributes(textColor: NSColor) -> [NSAttributedString.Key: Any] {
         attributes(for: .code, textColor: textColor)
     }
 
-    /// Measure the rendered height of `text` constrained to `width` and bounded by `maxHeight`.
     static func measureHeight(_ text: String, kind: TextContentKind, width: CGFloat, maxHeight: CGFloat) -> CGFloat {
         let approxLineHeight: CGFloat = (kind == .prose) ? 22.0 : 19.0
         let maxLinesNeeded = Int(ceil(maxHeight / approxLineHeight)) + 2
@@ -399,7 +363,6 @@ enum PreviewTextLayout {
             return maxHeight
         }
 
-        // Short text: precise layout
         let textStorage = NSTextStorage()
         let layoutManager = NSLayoutManager()
         let textContainer = NSTextContainer(containerSize: NSSize(width: width, height: .greatestFiniteMagnitude))
@@ -411,7 +374,6 @@ enum PreviewTextLayout {
         return min(layoutManager.usedRect(for: textContainer).height, maxHeight)
     }
 
-    /// Backwards-compatible measureHeight.
     static func measureHeight(_ text: String, width: CGFloat, maxHeight: CGFloat) -> CGFloat {
         measureHeight(text, kind: .code, width: width, maxHeight: maxHeight)
     }

@@ -1,27 +1,3 @@
-//! Curated demo dataset for feature-demo videos.
-//!
-//! Gated behind the `demo-data` feature: nothing here ships in the release
-//! library, and only the `demo-gen` binary (which requires the same feature)
-//! calls it.
-//!
-//! Why a generator instead of a checked-in `history.db`: the dataset must look
-//! *recent* (the popup groups rows by day, so a frozen DB would drift into
-//! "上周"), and image rows need real PNG bytes plus a display-box thumbnail —
-//! both are cheap to produce through the production helpers, and going through
-//! `db::insert_entry_to_db` / `image::create_thumbnail_fast` keeps the FTS
-//! triggers, the entry-id watermark, the content hashes and the thumbnail
-//! geometry identical to a captured row.
-//!
-//! Image rows use real photographs (Unsplash Licence: free to use, no
-//! attribution required) rather than procedurally drawn mock UI: a demo video
-//! is judged on whether the history looks like somebody's real clipboard, and
-//! flat grey bars never do. The files are downloaded once into an images cache
-//! (gitignored, shared by every regeneration) and re-encoded to PNG the way a
-//! capture stores them.
-//!
-//! The output is a personal-data-free DB: `demo.sh` swaps it in as the live
-//! history and parks the user's own DB aside.
-
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -33,12 +9,9 @@ use crate::db::{ensure_history_table, set_favorite, insert_entry_to_db, METADATA
 use crate::image::{create_thumbnail_fast, encode_png, image_hash};
 use crate::types::ClipboardEntry;
 
-/// Marker row in `clipboard_meta`; its presence is how `demo.sh` (and a human
-/// with `sqlite3`) tells a demo DB from the user's own.
 pub const MARKER_KEY: &str = "demo_dataset";
 
 struct DemoText {
-    /// Seconds before generation time. Larger = older.
     ago: u64,
     source: &'static str,
     bundle: &'static str,
@@ -47,19 +20,14 @@ struct DemoText {
 }
 
 struct DemoImage {
-    /// Seconds before generation time. Larger = older.
     ago: u64,
     source: &'static str,
     bundle: &'static str,
     favorite: bool,
-    /// Filename inside the images cache; the download keeps its original
-    /// encoding (JPEG) and is re-encoded to PNG at insertion time.
     file: &'static str,
     url: &'static str,
 }
 
-/// Newest first, so this list reads like the popup. Insertion flips it to
-/// oldest-first, which is what keeps rowids and timestamps in the same order.
 const TEXTS: &[DemoText] = &[
     DemoText {
         ago: 45,
@@ -312,7 +280,6 @@ const IMAGES: &[DemoImage] = &[
     },
 ];
 
-/// What `generate` produced, for the CLI summary.
 pub struct Summary {
     pub texts: usize,
     pub images: usize,
@@ -320,13 +287,6 @@ pub struct Summary {
     pub generated_at: u64,
 }
 
-/// Create a ready-to-use demo database at `path`, downloading any missing
-/// demo photographs into `images_dir` first.
-///
-/// Refuses to overwrite: the caller decides (the `demo-gen` CLI does it via
-/// `--force`). The DB is written to a sibling `.tmp` file and renamed only
-/// after the journal is closed, so an interrupted run never leaves a
-/// half-populated `history.db` that the app would happily load.
 pub fn generate(path: &Path, images_dir: &Path) -> Result<Summary, String> {
     let parent = path
         .parent()
@@ -359,8 +319,6 @@ pub fn generate(path: &Path, images_dir: &Path) -> Result<Summary, String> {
     for (i, img) in IMAGES.iter().enumerate() {
         items.push((img.ago, Item::Image(i)));
     }
-    // Oldest first: entry ids, rowids and timestamps then all ascend together,
-    // which is what `ORDER BY timestamp DESC, id DESC` assumes.
     items.sort_by_key(|(ago, _)| std::cmp::Reverse(*ago));
 
     let mut favorites: Vec<u64> = Vec::new();
@@ -388,8 +346,6 @@ pub fn generate(path: &Path, images_dir: &Path) -> Result<Summary, String> {
                 let d = &IMAGES[*i];
                 let file = cached_image(images_dir, d)?;
                 let (rgba, width, height) = load_rgba(&file)?;
-                // Same two blobs a capture stores: the full image as PNG and
-                // the display-box thumbnail produced by the production resize.
                 let png = encode_png(width, height, &rgba)
                     .ok_or_else(|| format!("PNG encode failed for {}", file.display()))?;
                 let (thumb_png, tw, th) = create_thumbnail_fast(width, height, &rgba)
@@ -427,13 +383,9 @@ pub fn generate(path: &Path, images_dir: &Path) -> Result<Summary, String> {
     )
     .map_err(|e| format!("cannot write demo marker: {e}"))?;
 
-    // Stamp the current metadata generation so a first launch does not treat
-    // these rows as legacy (no hash recompute, no thumbnail re-encode).
     conn.pragma_update(None, "user_version", METADATA_VERSION)
         .map_err(|e| format!("cannot stamp user_version: {e}"))?;
 
-    // Close the journal so the single .db file is complete before the rename;
-    // a leftover -wal would be orphaned by it.
     conn.query_row("PRAGMA journal_mode = DELETE", [], |row| row.get::<_, String>(0))
         .map_err(|e| format!("cannot checkpoint journal: {e}"))?;
     drop(conn);
@@ -450,12 +402,6 @@ pub fn generate(path: &Path, images_dir: &Path) -> Result<Summary, String> {
     })
 }
 
-/// Return the cached file for `image`, downloading it if this cache is cold.
-///
-/// The cache is shared by every regeneration (the demo DB is disposable, the
-/// photographs are not), so re-running `demo.sh demo --regen` costs no network.
-/// A download is written to `.part` and renamed, so a failed or interrupted
-/// fetch never leaves a truncated image that would decode on the next run.
 fn cached_image(dir: &Path, image: &DemoImage) -> Result<PathBuf, String> {
     fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     let path = dir.join(image.file);
@@ -485,11 +431,6 @@ fn cached_image(dir: &Path, image: &DemoImage) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-/// Decode any format the `image` crate supports into raw RGBA8.
-///
-/// Decoding here (rather than resizing inside a renderer) is what guarantees
-/// the stored blob is a normal captured image: the hash and thumbnail are then
-/// computed from the same pixels the app would have seen.
 fn load_rgba(path: &Path) -> Result<(Vec<u8>, u32, u32), String> {
     let bytes = fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     let decoded = image::load_from_memory(&bytes)
@@ -505,8 +446,6 @@ fn tmp_path(path: &Path) -> PathBuf {
     path.with_file_name(name)
 }
 
-/// Remove a database and its sidecars. Used for the temp file (and by the CLI
-/// with `--force`, which is why it is `pub`).
 pub fn remove_db_files(path: &Path) {
     for suffix in ["", "-wal", "-shm"] {
         let mut name = path.as_os_str().to_os_string();
@@ -525,15 +464,12 @@ enum Item {
 mod tests {
     use super::*;
 
-    /// The generator must produce a loadable history, not just rows. Images
-    /// are pre-seeded into the cache so this runs offline.
     #[test]
     fn generated_db_loads_through_the_reader() {
         let dir = std::env::temp_dir().join(format!("copyattach_demo_test_{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         let images = dir.join("images");
         fs::create_dir_all(&images).unwrap();
-        // A tiny PNG per manifest entry stands in for the downloaded photos.
         let pixels = vec![128u8; 24 * 16 * 4];
         let png = encode_png(24, 16, &pixels).unwrap();
         for image in IMAGES {
@@ -548,8 +484,6 @@ mod tests {
         let conn = Connection::open(&path).unwrap();
         let loaded = crate::db::load_history_from_db(&conn, 10_000);
         assert_eq!(loaded.len(), TEXTS.len() + IMAGES.len());
-        // Text previews are what the list renders; an empty one would make the
-        // loader skip that row entirely.
         assert!(loaded.iter().all(|e| match e {
             ClipboardEntry::Text { preview, .. } => !preview.is_empty(),
             ClipboardEntry::Image { thumb_width, .. } => *thumb_width > 0,
@@ -557,8 +491,6 @@ mod tests {
         let favorites = crate::db::load_favorites(&conn).unwrap();
         assert_eq!(favorites.len(), 4);
 
-        // The stored blobs must round-trip through the decoders the app uses,
-        // or the row renders as a broken placeholder instead of an image.
         let (png, width, height): (Vec<u8>, i64, i64) = conn
             .query_row(
                 "SELECT png_data, width, height FROM clipboard_history WHERE entry_type = 1",

@@ -2,15 +2,6 @@ import AppKit
 import Foundation
 import Observation
 
-// MARK: - Onboarding Steps
-
-/// The core CopyAttach operations the guided tour walks through, in order.
-///
-/// Every step maps to one real user action inside the popup or the system, so
-/// finishing the tour proves the user actually exercised the feature instead of
-/// only reading about it. Steps are strictly sequential: `record(_:)` advances
-/// only when the reported action matches the current step, which keeps the
-/// instruction on screen and the action the user performs in lockstep.
 enum OnboardingStep: Int, CaseIterable, Identifiable {
     case copyContent
     case openPopup
@@ -57,15 +48,12 @@ enum OnboardingStep: Int, CaseIterable, Identifiable {
         }
     }
 
-    /// Static key badge. `.openPopup` returns nil because its hint is the
-    /// user's recorded hotkey, supplied by the guide view.
     var keyHint: String? {
         switch self {
         case .preview: return "Space"
         case .favorite: return "⌥P"
         case .deleteAndUndo: return "⌃⌫ / ⌘Z"
         case .pasteQueue: return "⌘C / ⏎"
-        // Dragging is a gesture, not a shortcut — the instruction carries it.
         case .copyContent, .openPopup, .search, .paste: return nil
         }
     }
@@ -84,24 +72,11 @@ enum OnboardingStep: Int, CaseIterable, Identifiable {
     }
 }
 
-// MARK: - Onboarding Phase
-
-/// Which shape the tour surface is in.
-///
-/// The tour is a *single* window that changes shape: it opens as a centered
-/// welcome card and, on 「开始引导」, shrinks into the corner progress card. One
-/// window is what makes the transition continuous — a second window appearing
-/// in the corner reads as coming out of nowhere.
 enum OnboardingPhase: Equatable {
     case welcome
     case guiding
 }
 
-// MARK: - Onboarding Events
-
-/// A real user action observed on the popup / backend paths. Reported through
-/// `OnboardingGuide.record(_:)`, which advances the tour when the action is the
-/// one the current step asks for.
 enum OnboardingEvent {
     case copied
     case popupOpened
@@ -113,67 +88,38 @@ enum OnboardingEvent {
     case queueToggled
     case queueStarted
     case queuePasted
-    /// A native item drag finished — the tour's last step.
     case dragged
 }
 
-// MARK: - Onboarding Guide
-
-/// First-run guided tour over the core clipboard workflow.
-///
-/// The guide owns its own progress state and a floating non-key panel; the
-/// rest of the app only reports events (`record(_:)`) and kicks it off when the
-/// backend becomes live. Progress is persisted so quitting mid-tour resumes
-/// where the user left off, while completing or skipping suppresses the tour
-/// for future launches.
 @MainActor
 @Observable
 final class OnboardingGuide {
     static let shared = OnboardingGuide()
 
-    /// Set once the tour is finished or explicitly skipped; suppresses auto-start.
     private static let completedKey = "OnboardingCompleted"
-    /// Raw values of the steps already done, so a relaunch resumes mid-tour.
     private static let progressKey = "OnboardingProgress"
 
-    /// True while the tour is on screen (including the completion celebration).
     private(set) var isActive = false
-    /// Welcome card or progress card. Nil when the tour is not running.
     private(set) var phase: OnboardingPhase?
     private(set) var completedSteps: Set<OnboardingStep> = []
-    /// Sub-action flags for the combined delete/undo step.
     private(set) var deleteActionDone = false
     private(set) var undoActionDone = false
-    /// Sub-action flags for the sequential paste queue step.
     private(set) var queueEnqueueDone = false
     private(set) var queueStartDone = false
     private(set) var queuePasteDone = false
 
     private var panel: OnboardingGuidePanel?
     private var spotlight: SpotlightOverlayWindow?
-    /// Target control geometry reported by the popup, in its hosting space.
     private var spotlightGeometry = SpotlightGeometry()
-    /// Last place the selected row was seen. A row stops reporting once the
-    /// lazy stack recycles it, which must not be mistaken for "nothing is
-    /// selected" — that would snap the cutout out to the whole list mid-scroll.
     private var lastRowRect: CGRect?
-    /// What the cutout is currently on, to tell a step change from a move.
     private var lastFocusKind: SpotlightFocusKind?
-    /// True while the user is dragging an item out of the popup.
     private var isItemDragInProgress = false
-    /// Follows the popup while the user drags it, so the cutout stays on it.
     private var popupMoveObserver: NSObjectProtocol?
     private var copyBaselineRevision: UInt64 = 0
     private var copyPollTimer: Timer?
 
     private init() {}
 
-    // MARK: - Derived State
-
-    /// The first step the user has not completed, or nil when all are done.
-    ///
-    /// Nil during the welcome phase: the tour has not started, so there is no
-    /// step to show and nothing to point the spotlight at.
     var currentStep: OnboardingStep? {
         guard isActive, phase == .guiding else { return nil }
         return OnboardingStep.allCases.first { !completedSteps.contains($0) }
@@ -181,18 +127,10 @@ final class OnboardingGuide {
 
     var totalStepCount: Int { OnboardingStep.allCases.count }
 
-    /// The control inside the popup the current step points at, if any.
-    ///
-    /// Doubles as the gate for the spotlight scrim: with no target there is
-    /// nothing to point at, and dimming the display while the user works in
-    /// another app would fight the very step (copying) being asked for.
     var spotlightTarget: SpotlightTarget? {
         guard let step = currentStep else { return nil }
         switch step {
         case .search: return .searchField
-        // These steps all act on the entry under the cursor, so the cutout
-        // rides the selected row and follows ↑/↓ — the strongest possible
-        // statement of "this one".
         case .preview, .favorite, .deleteAndUndo, .paste:
             return .selectedRow
         case .pasteQueue:
@@ -202,16 +140,11 @@ final class OnboardingGuide {
         }
     }
 
-    // MARK: - Lifecycle
-
-    /// Auto-start hook, called once the Rust backend is up. A finished tour
-    /// stays finished; a partially completed one resumes.
     func startIfNeeded() {
         guard !UserDefaults.standard.bool(forKey: Self.completedKey) else { return }
         start(resetProgress: false)
     }
 
-    /// Menu-bar entry point: replay the tour from the first step.
     func restart() {
         UserDefaults.standard.set(false, forKey: Self.completedKey)
         start(resetProgress: true)
@@ -225,7 +158,6 @@ final class OnboardingGuide {
         teardown()
     }
 
-    /// Tear down timers/panel at app termination.
     func stop() {
         stopCopyPolling()
         closePanel()
@@ -244,15 +176,12 @@ final class OnboardingGuide {
             queueStartDone = false
             queuePasteDone = false
             persistProgress()
-            // A fresh run must not reuse geometry measured for the last one.
             resetReportedGeometry()
         } else {
             loadProgress()
         }
 
         guard completedSteps.count < OnboardingStep.allCases.count else {
-            // Progress recorded a full tour without the completion flag (e.g. the
-            // app was killed during the celebration). Treat it as done.
             UserDefaults.standard.set(true, forKey: Self.completedKey)
             return
         }
@@ -263,15 +192,10 @@ final class OnboardingGuide {
         queueEnqueueDone = false
         queueStartDone = false
         queuePasteDone = false
-        // A drag left in flight by a previous run would keep the scrim hidden.
         isItemDragInProgress = false
 
-        // A brand-new user meets the welcome card first; someone resuming a
-        // partly finished tour goes straight back to the progress card.
         phase = completedSteps.isEmpty ? .welcome : .guiding
         if panel?.isVisible == true {
-            // Restarted while the window is still up: morph back to the welcome
-            // shape rather than snapping.
             morphPanel()
         } else {
             showPanel()
@@ -280,8 +204,6 @@ final class OnboardingGuide {
         debugLog("Onboarding guide started at step \(completedSteps.count + 1)/\(OnboardingStep.allCases.count)")
     }
 
-    /// Welcome card 「开始引导」: morph the window into the progress card and
-    /// start watching for the first step.
     func beginTour() {
         guard isActive, phase == .welcome else { return }
         debugLog("Onboarding guide: welcome card accepted")
@@ -290,7 +212,6 @@ final class OnboardingGuide {
         startCopyPollingIfNeeded()
     }
 
-    /// Finish (all steps done) or skip: persist completion and hide the panel.
     private func teardown() {
         isActive = false
         phase = nil
@@ -303,19 +224,11 @@ final class OnboardingGuide {
         debugLog("Onboarding guide finished")
     }
 
-    // MARK: - Event Reporting
-
-    /// Report a real user action. Only the action the current step asks for
-    /// advances the tour; anything else is ignored so the narrative stays
-    /// coherent.
     func record(_ event: OnboardingEvent) {
         guard isActive, let step = currentStep else { return }
         switch (step, event) {
         case (.copyContent, .copied):
             complete(step)
-            // The user may have opened the popup before copying. Asking them to
-            // close and reopen it would be busywork — the step is already
-            // satisfied by the window being on screen.
             if HistoryPopupWindow.existing?.isVisible == true { record(.popupOpened) }
         case (.openPopup, .popupOpened),
              (.search, .searched),
@@ -348,7 +261,6 @@ final class OnboardingGuide {
 
     private func completeDeleteAndUndoIfReady() {
         guard deleteActionDone && undoActionDone else {
-            // Only half the step landed — repaint so the card shows which half.
             refreshPanel()
             return
         }
@@ -361,9 +273,6 @@ final class OnboardingGuide {
         persistProgress()
         debugLog("Onboarding step completed: \(step.title) (\(completedSteps.count)/\(OnboardingStep.allCases.count))")
 
-        // The last step is paste: the content has already landed in the user's
-        // app, so the tour gets out of the way right away instead of sitting on
-        // top of whatever they want to do next.
         if completedSteps.count == OnboardingStep.allCases.count {
             UserDefaults.standard.set(true, forKey: Self.completedKey)
             teardown()
@@ -372,19 +281,11 @@ final class OnboardingGuide {
         refreshPanel()
     }
 
-    /// Arm the clipboard watch for the first step.
-    ///
-    /// That step is the only one performed with no popup on screen, and the
-    /// only one that needs a poll to detect it.
     private func startCopyPollingIfNeeded() {
         guard !completedSteps.contains(.copyContent) else { return }
         copyBaselineRevision = clipboard_get_history_revision()
         beginCopyPolling()
     }
-
-
-
-    // MARK: - Progress Persistence
 
     private func loadProgress() {
         let raw = UserDefaults.standard.array(forKey: Self.progressKey) as? [Int] ?? []
@@ -394,13 +295,6 @@ final class OnboardingGuide {
     private func persistProgress() {
         UserDefaults.standard.set(completedSteps.map(\.rawValue), forKey: Self.progressKey)
     }
-
-    // MARK: - Copy Detection
-    //
-    // The first step happens outside the popup, where the app's UI poll is
-    // stopped by design. The history revision is a pure FFI atomic, so a 0.5s
-    // watch is effectively free — and it stops itself as soon as the step is
-    // done (or the tour moves on).
 
     private func beginCopyPolling() {
         stopCopyPolling()
@@ -425,8 +319,6 @@ final class OnboardingGuide {
         copyPollTimer = nil
     }
 
-    // MARK: - Panel
-
     private func showPanel() {
         let panel = self.panel ?? OnboardingGuidePanel()
         self.panel = panel
@@ -436,17 +328,12 @@ final class OnboardingGuide {
         applySpotlight(focus)
     }
 
-    /// Repaint the card and re-park it beside the current target.
     private func refreshPanel() {
         let focus = spotlightFocus()
         panel?.update(guide: self, focus: focus?.rect, morph: false)
         applySpotlight(focus)
     }
 
-    /// Welcome card → progress card. The window slides and resizes to its new
-    /// place in one continuous animation while its content cross-fades, so the
-    /// corner card is visibly the welcome card shrinking away rather than a
-    /// new window appearing out of nowhere.
     private func morphPanel() {
         let focus = spotlightFocus()
         panel?.update(guide: self, focus: focus?.rect, morph: true)
@@ -458,13 +345,6 @@ final class OnboardingGuide {
         panel = nil
     }
 
-    // MARK: - Spotlight
-
-    /// What the cutout is currently locked onto.
-    ///
-    /// Distinguishes a *step* change from the target merely moving underneath
-    /// the cutout: the former earns the travel animation that steers the eye,
-    /// the latter must land exactly or it would trail the row it is framing.
     private enum SpotlightFocusKind: Equatable {
         case searchField
         case selectedRow
@@ -478,21 +358,13 @@ final class OnboardingGuide {
         let kind: SpotlightFocusKind
     }
 
-    /// Sync the spotlight cutout with the control the current step points at.
-    ///
-    /// Callers are the guide's own state changes plus every event that can move
-    /// or hide the popup and the preview panel. The guide card is deliberately
-    /// left alone here: it must not chase the popup while the user drags it.
     func refreshSpotlight() {
         applySpotlight(spotlightFocus())
     }
 
-    /// Geometry reported by the popup, in its SwiftUI (hosting) coordinate
-    /// space. Reported only while the tour is running.
     func updateSpotlightGeometry(_ geometry: SpotlightGeometry) {
         guard geometry != spotlightGeometry else { return }
         spotlightGeometry = geometry
-        // Fresh layout: land the cutout exactly rather than easing into place.
         let focus = spotlightFocus()
         applySpotlight(focus)
         panel?.update(guide: self, focus: focus?.rect, morph: false)
@@ -522,23 +394,11 @@ final class OnboardingGuide {
         installPopupMoveObserver()
     }
 
-    /// The screen rect to light up, the corner to trace it with, and what it is.
-    ///
-    /// Nil when there is nothing to point at (see `spotlightTarget`), or when
-    /// the popup has not reported the target's geometry yet. In the latter case
-    /// the spotlight waits for the next layout pass instead of lighting the
-    /// whole popup and then contracting onto the control: that two-step read as
-    /// a jarring jump right as the popup opened.
     private func spotlightFocus() -> SpotlightFocus? {
-        // While an item is in flight the user has to see the whole screen to
-        // pick a drop target; dimming everything outside the popup would fight
-        // the very gesture the step is teaching.
         guard !isItemDragInProgress else { return nil }
         guard let target = spotlightTarget else { return nil }
         guard let popup = HistoryPopupWindow.existing, popup.isVisible else { return nil }
 
-        // The preview panel covers the popup; while it is up it *is* the thing
-        // to look at, and it sits below the scrim on its own level.
         if let preview = popup.previewPanel, preview.isVisible {
             return SpotlightFocus(rect: preview.frame, cornerRadius: 12, kind: .preview)
         }
@@ -548,14 +408,9 @@ final class OnboardingGuide {
                 lastRowRect = local
                 return rowFocus(local, in: popup)
             }
-            // The row is outside the viewport (scrolling, or the lazy stack
-            // recycled it). Hold the cutout where it was last seen rather than
-            // blowing it back up to the whole list.
             if spotlightGeometry.hasSelectedRow, let local = lastRowRect {
                 return rowFocus(local, in: popup)
             }
-            // Nothing is selected at all (the search field owns focus) — point
-            // at the list until the user picks a row.
             if let local = spotlightGeometry.frames[.list] {
                 return SpotlightFocus(
                     rect: screenRect(local, in: popup),
@@ -584,7 +439,6 @@ final class OnboardingGuide {
         )
     }
 
-    /// Hosting space (origin top-left, y down) → screen space.
     private func screenRect(_ local: CGRect, in window: NSWindow) -> NSRect {
         let frame = window.frame
         return NSRect(
@@ -595,7 +449,6 @@ final class OnboardingGuide {
         )
     }
 
-    /// Track a native item drag so the scrim can step out of its way.
     func setItemDragInProgress(_ inProgress: Bool) {
         guard isItemDragInProgress != inProgress else { return }
         isItemDragInProgress = inProgress
@@ -609,7 +462,6 @@ final class OnboardingGuide {
         removePopupMoveObserver()
     }
 
-    /// Drop everything the popup measured for the tour.
     private func resetReportedGeometry() {
         spotlightGeometry = SpotlightGeometry()
         lastRowRect = nil
@@ -624,7 +476,6 @@ final class OnboardingGuide {
             queue: .main
         ) { [weak self] _ in
             MainActor.assumeIsolated {
-                // No easing while dragging: the hole must stay welded to the window.
                 self?.refreshSpotlight()
             }
         }

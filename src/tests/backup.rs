@@ -30,7 +30,6 @@ fn test_backup_export_inspect_and_overwrite() {
     let (_src_path, src_conn) = make_temp_db("src");
     let now = 1700000000u64;
 
-    // 1. Seed source DB with text and image entries with custom remarks
     let e1_id = new_entry_id();
     let text1 = "重要的备忘录与账号信息";
     let mut e1 = ClipboardEntry::text_entry(
@@ -71,7 +70,6 @@ fn test_backup_export_inspect_and_overwrite() {
         Some((dummy_thumb, 200, 150)),
     ).unwrap();
 
-    // Favorites: favorite e1_id in the durable table
     crate::db::set_favorite(&src_conn, e1_id, true).expect("favorite e1");
 
     let mut backup_path = std::env::temp_dir();
@@ -80,17 +78,14 @@ fn test_backup_export_inspect_and_overwrite() {
         let _ = std::fs::remove_file(&backup_path);
     }
 
-    // 2. Export backup
     let count = export_backup(&src_conn, &backup_path).expect("export_backup must succeed");
     assert_eq!(count, 2, "must export 2 items");
 
-    // 3. Inspect backup
     let info = inspect_backup(&backup_path).expect("inspect_backup must succeed");
     assert_eq!(info.item_count, 2);
     assert_eq!(info.favorite_count, 1);
     assert!(info.timestamp > 0);
 
-    // 4. Overwrite restore into fresh destination DB
     let (_dst_path, mut dst_conn) = make_temp_db("dst");
     let (restored_count, restored_favs) = restore_backup_overwrite(&mut dst_conn, &backup_path)
         .expect("restore_backup_overwrite must succeed");
@@ -101,7 +96,6 @@ fn test_backup_export_inspect_and_overwrite() {
     let loaded = load_history_from_db(&dst_conn, 100);
     assert_eq!(loaded.len(), 2);
 
-    // Verify remarks preserved
     let text_row = loaded.iter().find(|e| matches!(e, ClipboardEntry::Text { .. })).unwrap();
     if let ClipboardEntry::Text { custom_label, .. } = text_row {
         assert_eq!(custom_label, "账号备注");
@@ -118,11 +112,9 @@ fn test_backup_export_inspect_and_overwrite() {
         panic!("expected image row");
     }
 
-    // Verify FTS search index works after rebuild
     let search_results = search_history(&dst_conn, "备忘录");
     assert_eq!(search_results.len(), 1);
 
-    // Clean up
     let _ = std::fs::remove_file(&backup_path);
 }
 
@@ -131,7 +123,6 @@ fn test_backup_restore_merge_behavior() {
     let (_src_path, src_conn) = make_temp_db("merge_src");
     let now = 1700000000u64;
 
-    // Item A in backup: has remark "备份中的备注" and is favorited
     let item_a_id = new_entry_id();
     let text_a = "合并测试条目 A (相同内容)";
     let mut item_a = ClipboardEntry::text_entry(
@@ -147,7 +138,6 @@ fn test_backup_restore_merge_behavior() {
     }
     insert_entry_to_db(&src_conn, &item_a, Some(text_a), None, None).unwrap();
 
-    // Item B in backup: new item, not in active DB
     let item_b_id = new_entry_id();
     let text_b = "仅在备份中的独立条目 B";
     let item_b = ClipboardEntry::text_entry(
@@ -168,7 +158,6 @@ fn test_backup_restore_merge_behavior() {
     crate::db::set_favorite(&src_conn, item_b_id, true).unwrap();
     export_backup(&src_conn, &backup_path).unwrap();
 
-    // Destination DB already has Item A without remark
     let (_dst_path, mut dst_conn) = make_temp_db("merge_dst");
     let dst_item_a_id = new_entry_id();
     let dst_item_a = ClipboardEntry::text_entry(
@@ -181,15 +170,12 @@ fn test_backup_restore_merge_behavior() {
     );
     insert_entry_to_db(&dst_conn, &dst_item_a, Some(text_a), None, None).unwrap();
 
-    // Active favorites has none initially
     let (added_count, merged_favs) = restore_backup_merge(&mut dst_conn, &backup_path)
         .expect("restore_backup_merge must succeed");
 
-    // Only Item B was newly inserted (Item A was deduplicated and updated)
     assert_eq!(added_count, 1);
 
     let fav_set: HashSet<u64> = merged_favs.into_iter().collect();
-    // dst_item_a_id should now be favorited because it matched Item A in backup!
     assert!(fav_set.contains(&dst_item_a_id), "existing item A must adopt favorite status");
 
     let loaded = load_history_from_db(&dst_conn, 100);
@@ -221,20 +207,9 @@ fn test_backup_inspect_invalid_file() {
     let _ = std::fs::remove_file(&invalid_file);
 }
 
-// ─── Regression tests for the restore/merge defects found in review ───
-//
-// Each of these failed against the code as shipped in v0.107.0.
-
-/// Merge must not push the user's own (newer) rows out of the visible window.
-///
-/// `restore_backup_merge` inserts without an explicit `id`, so merged rows get
-/// the largest rowids. The list is ordered newest-first, and the trim deletes
-/// from the old end — both keyed on row order. Merging older history therefore
-/// buried the local rows and then evicted them first.
 #[test]
 fn test_merge_keeps_local_rows_visible_and_newest_first() {
     let (_src_path, src_conn) = make_temp_db("order_src");
-    // Backup holds OLD rows.
     let mut old_ids = Vec::new();
     for i in 0..3u64 {
         let e = ClipboardEntry::text_entry(new_entry_id(), &format!("backup-old-{i}"), 1_700_000_000 + i,
@@ -249,7 +224,6 @@ fn test_merge_keeps_local_rows_visible_and_newest_first() {
 
     assert_eq!(old_ids.len(), 3);
 
-    // Destination holds NEWER rows.
     let (_dst_path, mut dst_conn) = make_temp_db("order_dst");
     for i in 0..3u64 {
         let e = ClipboardEntry::text_entry(new_entry_id(), &format!("local-new-{i}"), 1_780_000_000 + i,
@@ -260,18 +234,15 @@ fn test_merge_keeps_local_rows_visible_and_newest_first() {
     let (added, _favs) = restore_backup_merge(&mut dst_conn, &backup_path).unwrap();
     assert_eq!(added, 3, "all three backup rows are new to this DB");
 
-    // The list the UI shows, newest-first.
     let loaded = load_history_from_db(&dst_conn, 3000);
     assert_eq!(loaded.len(), 6);
 
-    // Newest-first by TIMESTAMP: the local rows are newer, so they lead.
     let labels: Vec<String> = loaded.iter().map(|e| e.label().to_string()).collect();
     let first_local = labels.iter().position(|l| l.starts_with("local-new")).unwrap();
     let last_backup = labels.iter().rposition(|l| l.starts_with("backup-old")).unwrap();
     assert!(first_local < last_backup,
         "local (newer) rows must sort above merged (older) rows; got {labels:?}");
 
-    // And a trim to the local count must evict the OLD merged rows, not the local ones.
     crate::db::trim_db_history(&dst_conn, 3).unwrap();
     let kept = load_history_from_db(&dst_conn, 3000);
     assert_eq!(kept.len(), 3);
@@ -282,12 +253,6 @@ fn test_merge_keeps_local_rows_visible_and_newest_first() {
     let _ = std::fs::remove_file(&backup_path);
 }
 
-/// Overwrite restore must never LOWER the persisted entry-id watermark.
-///
-/// The shipped code copied the backup's `clipboard_meta` over the local one and
-/// then called `bump_entry_id_watermark`, which is `MAX(value, excluded)` — so
-/// the overwrite won and ids the local favorites still reference could be
-/// re-issued to unrelated new captures.
 #[test]
 fn test_overwrite_restore_never_lowers_entry_id_watermark() {
     let (_src_path, src_conn) = make_temp_db("wm_src");
@@ -299,7 +264,6 @@ fn test_overwrite_restore_never_lowers_entry_id_watermark() {
     let _ = std::fs::remove_file(&backup_path);
     export_backup(&src_conn, &backup_path).unwrap();
 
-    // Destination: a row carrying a very high entry id, and a watermark above it.
     let (_dst_path, mut dst_conn) = make_temp_db("wm_dst");
     let high = 900_000u64;
     let hi = ClipboardEntry::text_entry(high, "local-high-id", 1_780_000_000,
@@ -314,11 +278,6 @@ fn test_overwrite_restore_never_lowers_entry_id_watermark() {
     assert!(after >= high,
         "watermark must not drop below the pre-restore value {high}; got {after}");
 
-    // The concrete hazard: `ffi::init` primes the id counter from
-    // `max(loaded rows' max entry_id, watermark)`, so a watermark below the
-    // pre-restore value is what would let a new capture reuse a favorite's id.
-    // (The process-global counter itself is primed by the FFI layer, not by
-    // this function, so it is not the thing to assert on here.)
     let max_present: u64 = dst_conn
         .query_row("SELECT COALESCE(MAX(entry_id), 0) FROM clipboard_history", [], |r| r.get::<_, i64>(0))
         .unwrap() as u64;
@@ -328,8 +287,6 @@ fn test_overwrite_restore_never_lowers_entry_id_watermark() {
     let _ = std::fs::remove_file(&backup_path);
 }
 
-/// Merge must leave the persisted watermark at or above every id in the DB,
-/// even when no new row was inserted (everything deduplicated).
 #[test]
 fn test_merge_raises_watermark_to_max_present_id() {
     let (_src_path, src_conn) = make_temp_db("mw_src");
@@ -342,7 +299,6 @@ fn test_merge_raises_watermark_to_max_present_id() {
     let _ = std::fs::remove_file(&backup_path);
     export_backup(&src_conn, &backup_path).unwrap();
 
-    // Destination has a low watermark and an empty table.
     let (_dst_path, mut dst_conn) = make_temp_db("mw_dst");
     crate::db::bump_entry_id_watermark(&dst_conn, 10).unwrap();
     assert_eq!(crate::db::entry_id_watermark(&dst_conn), 10);
@@ -360,8 +316,6 @@ fn test_merge_raises_watermark_to_max_present_id() {
     let _ = std::fs::remove_file(&backup_path);
 }
 
-/// A merge that inserts nothing must still raise the watermark over ids the
-/// backup carried but that were deduplicated away.
 #[test]
 fn test_merge_dedup_only_still_covers_backup_ids() {
     let (_src_path, src_conn) = make_temp_db("dd_src");
@@ -388,19 +342,8 @@ fn test_merge_dedup_only_still_covers_backup_ids() {
     let _ = std::fs::remove_file(&backup_path);
 }
 
-/// A backup archive with no `clipboard_meta` table must restore without
-/// silently aborting the meta step.
-///
-/// `backup_db.clipboard_meta` is resolved at PREPARE time, so the previous
-/// `... AND EXISTS (SELECT 1 FROM backup_db.sqlite_master ...)` guard did not
-/// protect it: the statement failed to prepare, `execute_batch` aborted the
-/// whole batch at the first error (so the `CREATE TABLE IF NOT EXISTS
-/// main.clipboard_meta` ahead of it never applied either), and `let _ =` threw
-/// the error away. The destination was left with no meta table at all.
 #[test]
 fn test_overwrite_restore_tolerates_archive_without_meta_table() {
-    // Build a source DB, export it, then strip clipboard_meta to simulate an
-    // archive written by an older build that had no meta table.
     let (_src_path, src_conn) = make_temp_db("nometa_src");
     let e = ClipboardEntry::text_entry(
         new_entry_id(),
@@ -436,12 +379,9 @@ fn test_overwrite_restore_tolerates_archive_without_meta_table() {
         "restore of a meta-less archive must succeed, got {res:?}"
     );
 
-    // The rows must be there.
     let loaded = load_history_from_db(&dst_conn, 100);
     assert_eq!(loaded.len(), 1, "the archived row must be restored");
 
-    // And the destination must have a usable meta table afterwards, not a
-    // missing one (which is what the swallowed batch left behind).
     let has_meta: i64 = dst_conn
         .query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='clipboard_meta'",
@@ -454,12 +394,6 @@ fn test_overwrite_restore_tolerates_archive_without_meta_table() {
     let _ = std::fs::remove_file(&backup_path);
 }
 
-/// Exporting over a path that has a leftover `-wal` must not let the old WAL
-/// leak into the new snapshot.
-///
-/// `VACUUM INTO` writes a fresh database, but SQLite replays a `-wal` that sits
-/// beside a database file. Without purging the sidecar first, a reader of the
-/// exported file saw the OLD WAL's contents layered over the new snapshot.
 #[test]
 fn test_export_over_existing_wal_does_not_leak_old_rows() {
     let (_src_path, src_conn) = make_temp_db("wal_src");
@@ -467,7 +401,6 @@ fn test_export_over_existing_wal_does_not_leak_old_rows() {
     backup_path.push(format!("copyattach-wal-{}.cabackup", std::process::id()));
     let _ = std::fs::remove_file(&backup_path);
 
-    // First export: one row.
     let first = ClipboardEntry::text_entry(
         new_entry_id(),
         "OLD-WAL-CONTENT",
@@ -479,14 +412,11 @@ fn test_export_over_existing_wal_does_not_leak_old_rows() {
     insert_entry_to_db(&src_conn, &first, Some("OLD-WAL-CONTENT"), None, None).unwrap();
     export_backup(&src_conn, &backup_path).unwrap();
 
-    // Forge a stale sidecar beside the target, as a crashed earlier export
-    // would leave behind.
     let mut wal_path = backup_path.as_os_str().to_os_string();
     wal_path.push("-wal");
     let wal_path = PathBuf::from(wal_path);
     std::fs::write(&wal_path, b"stale-wal-bytes").unwrap();
 
-    // Second export with different content.
     let second = ClipboardEntry::text_entry(
         new_entry_id(),
         "NEW-CONTENT",
@@ -504,7 +434,6 @@ fn test_export_over_existing_wal_does_not_leak_old_rows() {
         "the stale -wal sidecar must be purged, else readers replay it"
     );
 
-    // The archive must read back as a clean database with both rows.
     let check = Connection::open(&backup_path).unwrap();
     let n: i64 = check
         .query_row("SELECT COUNT(*) FROM clipboard_history", [], |r| r.get(0))
@@ -514,17 +443,6 @@ fn test_export_over_existing_wal_does_not_leak_old_rows() {
     let _ = std::fs::remove_file(&backup_path);
 }
 
-/// Peak-RSS regression guard for the merge path.
-///
-/// The merge used to collect every backup row into a `Vec<RawBackupRow>` before
-/// inserting any of them, so the whole archive's blobs were resident at once.
-/// Measured on a 570 MB / 10 000-row archive that was +588 MB peak RSS — on a
-/// 16 GB machine, the difference between a restore and a memory event. Rows are
-/// now streamed from the backup cursor one at a time.
-///
-/// Ignored by default: it builds a multi-hundred-MB fixture and is a
-/// measurement, not a fast assertion. Run with:
-///     cargo test --lib -- --ignored --nocapture test_merge_peak_rss
 #[test]
 #[ignore]
 fn test_merge_peak_rss() {
@@ -545,7 +463,6 @@ fn test_merge_peak_rss() {
         String::from_utf8_lossy(&out.stdout).trim().parse().unwrap_or(0)
     }
 
-    // ~570 MB of payload: 10 000 rows, ~57 KB each.
     const ROWS: usize = 10_000;
     const BLOB: usize = 56 * 1024;
 
@@ -600,9 +517,6 @@ fn test_merge_peak_rss() {
     );
 
     assert_eq!(added, ROWS, "every archived row must merge in");
-    // The whole archive can no longer be resident: a streaming merge holds at
-    // most one row's blobs plus SQLite's own caches. Allow generous headroom
-    // (2x the largest single row) but fail loudly if the whole payload lands.
     let delta_mb = (after.saturating_sub(base)) / 1024;
     assert!(
         delta_mb < (archive_mb * 0.5) as u64,
@@ -613,16 +527,6 @@ fn test_merge_peak_rss() {
     let _ = std::fs::remove_file(&backup_path);
 }
 
-/// The FTS index must be searchable after a restore *without* an explicit
-/// `INSERT INTO clipboard_fts(clipboard_fts) VALUES('rebuild')`.
-///
-/// `ensure_history_table` installs AFTER INSERT / AFTER DELETE triggers that
-/// keep the index in sync, and they fire for the restore's own writes too
-/// (`INSERT ... SELECT` fires INSERT triggers; the preceding `DELETE` fires the
-/// delete trigger). The explicit rebuild was therefore redundant work: measured
-/// 69 ms on a 6 000-text-row fixture, paid while holding the DB mutex that the
-/// capture path also needs. This test pins the trigger-only contract so the
-/// rebuild cannot be reintroduced "for safety".
 #[test]
 fn test_search_works_after_restore_without_explicit_rebuild() {
     let (_src_path, src_conn) = make_temp_db("fts_src");
@@ -643,7 +547,6 @@ fn test_search_works_after_restore_without_explicit_rebuild() {
     let _ = std::fs::remove_file(&backup_path);
     export_backup(&src_conn, &backup_path).unwrap();
 
-    // Overwrite path: DELETE + INSERT..SELECT must leave FTS consistent.
     let (_dst_path, mut dst_conn) = make_temp_db("fts_dst");
     restore_backup_overwrite(&mut dst_conn, &backup_path).unwrap();
     let hits = search_history(&dst_conn, needle);
@@ -653,7 +556,6 @@ fn test_search_works_after_restore_without_explicit_rebuild() {
         "overwrite restore must leave the FTS index searchable (triggers, no explicit rebuild)"
     );
 
-    // Merge path: plain INSERTs must leave FTS consistent too.
     let (_m_path, mut merge_conn) = make_temp_db("fts_merge");
     let (added, _f) = restore_backup_merge(&mut merge_conn, &backup_path).unwrap();
     assert_eq!(added, 3, "all three rows must merge in");
@@ -667,13 +569,6 @@ fn test_search_works_after_restore_without_explicit_rebuild() {
     let _ = std::fs::remove_file(&backup_path);
 }
 
-/// An overwrite restore replaces every history row, ids included, so a side row
-/// left in `clipboard_deleted` afterwards points at a DIFFERENT entry: the
-/// restored row goes invisible (its id is still marked deleted) and ⌘Z then
-/// hard-deletes it to revive the pre-restore one.
-///
-/// Reachable on the real path: export a backup, delete an entry, restore that
-/// backup — the archive still contains the deleted row under its original id.
 #[test]
 fn test_overwrite_restore_clears_the_undo_side_table() {
     let (_src_path, mut src_conn) = make_temp_db("restore_undo_src");
@@ -694,7 +589,6 @@ fn test_overwrite_restore_clears_the_undo_side_table() {
     }
     export_backup(&src_conn, &backup_path).unwrap();
 
-    // The user deletes one entry AFTER taking that backup.
     let second_row: i64 = src_conn
         .query_row("SELECT id FROM clipboard_history WHERE text = 'SECOND'", [], |r| r.get(0))
         .unwrap();

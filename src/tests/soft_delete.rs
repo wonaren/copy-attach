@@ -1,11 +1,3 @@
-// Soft-delete undo: the DB-level contract (restart survival, visibility, sweep).
-//
-// These tests run against a plain `Connection` (no global backend singleton) so
-// they can model a restart honestly: a second connection over the same file is
-// exactly what the app does on relaunch. The FFI-level behavior (delete/undo
-// through `clipboard_delete_by_id` / `clipboard_undo_delete`) is covered in
-// `tests/backend.rs`; this file pins what the *database* guarantees.
-
 use rusqlite::Connection;
 
 use crate::db::{ensure_history_table, insert_entry_to_db, load_history_from_db};
@@ -25,13 +17,6 @@ fn file_db(name: &str) -> (std::path::PathBuf, Connection) {
     (path, conn)
 }
 
-/// Insert an image row and return its rowid.
-///
-/// Uses the history table's MAX(id) boundary rather than `last_insert_rowid()`:
-/// `insert_entry_to_db` raises the entry-id watermark with an upsert into
-/// `clipboard_meta`, and an upsert moves `last_insert_rowid()` to the meta row
-/// (measured — it reported a meta rowid, which made the fixture delete the
-/// wrong thing).
 fn insert_image_row(
     conn: &Connection,
     entry: &ClipboardEntry,
@@ -57,15 +42,12 @@ fn insert_body(conn: &Connection, text: &str, ts: u64) -> (u64, i64) {
     (id, conn.last_insert_rowid())
 }
 
-/// A soft-deleted row must be invisible to the list load and to search, and
-/// must stay invisible across a restart (it is not history any more).
 #[test]
 fn test_soft_deleted_row_is_not_loaded_or_searchable() {
     let (path, conn) = file_db("visible");
     let (_id_a, row_a) = insert_body(&conn, "visible-content", 100);
     let (_id_b, row_b) = insert_body(&conn, "deleted-content", 200);
 
-    // Soft-delete the second row.
     let stamp = crate::backend::undo_stamp_now();
     conn.execute(
         "INSERT INTO clipboard_deleted (row_id, entry_id, deleted_at, was_favorite)
@@ -74,26 +56,21 @@ fn test_soft_deleted_row_is_not_loaded_or_searchable() {
     )
     .expect("stamp");
 
-    // The load must contain exactly the live row.
     let loaded = load_history_from_db(&conn, crate::backend::DEFAULT_CLEANUP_THRESHOLD);
     assert_eq!(loaded.len(), 1, "a soft-deleted row must not load into the list");
     assert_eq!(loaded[0].label(), "visible-content");
 
-    // Search must not find it either (both the FTS and metadata paths).
     let hits = crate::db::search_history(&conn, "deleted-content");
     assert!(hits.is_empty(), "search must not surface a soft-deleted row: {hits:?}");
     let hits_live = crate::db::search_history(&conn, "visible-content");
     assert!(!hits_live.is_empty(), "the live row must stay searchable");
 
-    // Restart: a fresh connection over the same file must agree.
     drop(conn);
     let conn = Connection::open(&path).expect("reopen");
     ensure_history_table(&conn).expect("schema idempotent");
     let reloaded = load_history_from_db(&conn, crate::backend::DEFAULT_CLEANUP_THRESHOLD);
     assert_eq!(reloaded.len(), 1, "soft-deleted row must stay invisible after restart");
 
-    // And the deleted row itself is still there with its payload (that is the
-    // undo), while the live row is untouched.
     let (deleted_present, deleted_body): (i64, String) = conn
         .query_row(
             "SELECT COUNT(*), COALESCE(MAX(h.text), '') FROM clipboard_history h
@@ -122,15 +99,11 @@ fn test_soft_deleted_row_is_not_loaded_or_searchable() {
     }
 }
 
-/// Dedup must ignore soft-deleted rows: re-capturing content that is sitting in
-/// the undo stack must not consume the deletion (which would make it
-/// un-undoable) — it inserts a fresh live row alongside the deleted one.
 #[test]
 fn test_dedup_does_not_consume_a_deleted_row() {
     let (path, conn) = file_db("dedup");
     let (id_a, row_a) = insert_body(&conn, "same-content", 100);
 
-    // Delete it…
     conn.execute(
         "INSERT INTO clipboard_deleted (row_id, entry_id, deleted_at, was_favorite)
          SELECT ?2, (SELECT entry_id FROM clipboard_history WHERE id = ?2), ?1, 0",
@@ -138,11 +111,8 @@ fn test_dedup_does_not_consume_a_deleted_row() {
     )
     .expect("stamp");
 
-    // …then capture the same content again.
     let (_id_b, _row_b) = insert_body(&conn, "same-content", 200);
 
-    // The deleted row must survive: `delete_matching_entry` only touches live
-    // rows, so re-capture cannot silently swallow an undo candidate.
     let deleted_rows: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM clipboard_history h
@@ -169,8 +139,6 @@ fn test_dedup_does_not_consume_a_deleted_row() {
     }
 }
 
-/// The trim and the startup bound must count only live rows, so deleted rows
-/// never push live history out of the list.
 #[test]
 fn test_trim_counts_live_rows_only() {
     let (path, conn) = file_db("trim");
@@ -179,7 +147,6 @@ fn test_trim_counts_live_rows_only() {
         let (_id, row) = insert_body(&conn, &format!("trim-content-{i}"), i as u64);
         rows.push(row);
     }
-    // Delete the 5 oldest.
     let stamp = crate::backend::undo_stamp_now();
     for row in rows.iter().take(5) {
         conn.execute(
@@ -190,8 +157,6 @@ fn test_trim_counts_live_rows_only() {
         .unwrap();
     }
 
-    // Threshold 10: there are 10 physical rows but only 5 live ones, so nothing
-    // may be trimmed. Counting physical rows would have deleted all 5 live rows.
     crate::db::trim_db_history(&conn, 10).expect("trim");
     let live: i64 = conn
         .query_row(
@@ -211,26 +176,17 @@ fn test_trim_counts_live_rows_only() {
     }
 }
 
-/// End-to-end regression for the duplicate-row bug the soft-delete design fixes.
-///
-/// Sequence: delete A → re-capture A → undo. The old undo path inserted without
-/// dedup, so the table ended up holding two identical rows and the duplicate
-/// survived a restart (the load path does not dedup). With the insert going
-/// through the dedup+trim path, exactly one row survives, and it survives a
-/// restart as one row.
 #[test]
 fn test_undo_after_recapture_leaves_one_row_across_restart() {
     let (path, conn) = file_db("recapture");
     let (id_a, row_a) = insert_body(&conn, "recaptured-content", 1);
 
-    // Delete A (soft).
     conn.execute(
         "INSERT INTO clipboard_deleted (row_id, entry_id, deleted_at, was_favorite)
          SELECT ?2, (SELECT entry_id FROM clipboard_history WHERE id = ?2), ?1, 0",
         rusqlite::params![crate::backend::undo_stamp_now(), row_a],
     )
     .unwrap();
-    // Re-capture the same content: a new live row, same stable entry_id.
     insert_entry_to_db(
         &conn,
         &ClipboardEntry::text_entry(id_a, "recaptured-content", 2, String::new(), String::new(), 0),
@@ -240,8 +196,6 @@ fn test_undo_after_recapture_leaves_one_row_across_restart() {
     )
     .unwrap();
 
-    // Undo, modeled on `clipboard_undo_delete`: insert the restored row, dedup
-    // against the live set, then drop the deleted row.
     let restored = ClipboardEntry::text_entry(
         id_a, "recaptured-content", 3, String::new(), String::new(), 0,
     );
@@ -251,7 +205,6 @@ fn test_undo_after_recapture_leaves_one_row_across_restart() {
     tx.execute("DELETE FROM clipboard_history WHERE id = ?1", rusqlite::params![row_a]).unwrap();
     tx.commit().unwrap();
 
-    // Exactly one row now — live.
     let (total, live): (i64, i64) = conn
         .query_row(
             "SELECT COUNT(*), SUM(id NOT IN (SELECT row_id FROM clipboard_deleted))
@@ -263,7 +216,6 @@ fn test_undo_after_recapture_leaves_one_row_across_restart() {
     assert_eq!(total, 1, "undo must collapse to a single row");
     assert_eq!(live, 1, "that row must be live");
 
-    // Restart: still one row (the old bug showed two here).
     drop(conn);
     let conn = Connection::open(&path).expect("reopen");
     ensure_history_table(&conn).expect("schema idempotent");
@@ -277,8 +229,6 @@ fn test_undo_after_recapture_leaves_one_row_across_restart() {
     }
 }
 
-/// A hard clear (清空历史) removes the deleted rows too: the confirmation the
-/// user accepted says the action cannot be undone.
 #[test]
 fn test_clear_removes_deleted_rows() {
     let (path, conn) = file_db("clear");
@@ -290,17 +240,12 @@ fn test_clear_removes_deleted_rows() {
     )
     .unwrap();
 
-    // The clear's transaction (see `clipboard_clear_history`). The FFI-level
-    // coverage of the same path is `test_clear_history_also_clears_the_undo_stack`
-    // in `tests/backend.rs`; this one pins the SQL itself.
     let tx = conn.unchecked_transaction().unwrap();
     tx.execute("DELETE FROM clipboard_history", []).unwrap();
     tx.execute("DELETE FROM clipboard_favorites", []).unwrap();
     tx.execute("DELETE FROM clipboard_deleted", []).unwrap();
     tx.commit().unwrap();
 
-    // Both tables: the payload rows alone are not enough — a surviving side row
-    // is an undo entry pointing at a row that no longer exists.
     for table in ["clipboard_history", "clipboard_deleted"] {
         let remaining: i64 = conn
             .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
@@ -314,23 +259,11 @@ fn test_clear_removes_deleted_rows() {
     }
 }
 
-/// The three soft-delete primitives must distinguish a real read failure from
-/// a normal "nothing there" answer.
-///
-/// Each of these used to flatten the distinction, which is exactly the
-/// fallback pattern the repo forbids: a broken read surfaced as a plausible
-/// business state (row absent / nothing to undo / undo depth 0) and the UI
-/// acted on the wrong one. The write failure is produced for real
-/// (`PRAGMA query_only`), not mocked.
-///
-/// Positive control: with `query_only` off, every call succeeds and returns the
-/// real answer — so the assertions below cannot pass by failing everything.
 #[test]
 fn test_soft_delete_primitives_report_read_failures() {
     let (path, conn) = file_db("failures");
     let (_id, row) = insert_body(&conn, "failure-probe", 1);
 
-    // --- Positive control: writable connection, real answers. ---
     assert_eq!(
         crate::db::undo_depth(&conn).expect("live read must succeed"),
         0,
@@ -342,8 +275,6 @@ fn test_soft_delete_primitives_report_read_failures() {
     );
     crate::db::soft_delete_row(&conn, row).expect("delete must succeed on a live row");
 
-    // `soft_delete_row` on an already-deleted row is the "no live row" case and
-    // must still be a clean failure (not a panic, not a silent success).
     assert!(
         crate::db::soft_delete_row(&conn, row).is_err(),
         "deleting the same row twice must fail"
@@ -354,13 +285,9 @@ fn test_soft_delete_primitives_report_read_failures() {
         "the first delete left one undoable row"
     );
 
-    // --- Failure path: every write now fails inside SQLite. ---
     {
         let ro = Connection::open(&path).expect("reopen read-only connection");
         ro.pragma_update(None, "query_only", true).expect("query_only");
-        // `undo_depth` is a pure read and must still work with writes disabled;
-        // this also proves the flag only affects writes, so the failures below
-        // come from the write attempts, not from a broken connection.
         assert_eq!(
             crate::db::undo_depth(&ro).expect("read must work on a query_only connection"),
             1,
@@ -368,14 +295,9 @@ fn test_soft_delete_primitives_report_read_failures() {
         );
     }
 
-    // A read-only connection's DELETE for the orphan cleanup must fail loudly
-    // inside `newest_deleted_row` instead of spinning forever. Manufacture an
-    // orphan side row (payload already gone) so that path is taken.
     {
         let ro = Connection::open(&path).expect("reopen");
         ro.pragma_update(None, "query_only", true).expect("query_only");
-        // The orphan cannot be created on the read-only connection; it is made
-        // on the writable one first, then observed here.
         drop(ro);
         conn.execute(
             "INSERT INTO clipboard_deleted (row_id, entry_id, deleted_at, was_favorite)
@@ -385,15 +307,12 @@ fn test_soft_delete_primitives_report_read_failures() {
         .expect("insert orphan side row");
         let ro = Connection::open(&path).expect("reopen");
         ro.pragma_update(None, "query_only", true).expect("query_only");
-        // The newest deletion is the orphan; dropping it requires a write, which
-        // is refused — the call must return Err, NOT loop or silently skip.
         assert!(
             crate::db::newest_deleted_row(&ro).is_err(),
             "an undeletable orphan must surface as an error, not an infinite loop"
         );
     }
 
-    // Unwind the orphan and confirm the readable state again.
     conn.execute("DELETE FROM clipboard_deleted WHERE row_id = 999999", [])
         .expect("cleanup orphan");
 
@@ -403,28 +322,12 @@ fn test_soft_delete_primitives_report_read_failures() {
     }
 }
 
-/// The eviction preview must predict exactly what the sweep then does.
-///
-/// The preview is what the user is warned with ("继续删除将无法撤销 N 条"),
-/// so a preview that under- or over-counts is a wrong promise. This pins the
-/// two halves together: predict N, delete the row, and the sweep must have
-/// evicted exactly N and left the budget satisfied.
 #[test]
 fn test_eviction_preview_matches_the_real_sweep() {
     let (path, conn) = file_db("eviction");
-    let blob = vec![0xEEu8; 2 * 1024 * 1024]; // 2 MB per deleted image
+    let blob = vec![0xEEu8; 2 * 1024 * 1024];
     let thumb = vec![0x11u8; 1024];
 
-    // Budget: 6 MB — fits three 2 MB deletions, the fourth evicts the oldest.
-    //
-    // The sweep reads the budget from the backend singleton (one number shared
-    // with the delete path), so the test sets it through the same accessor the
-    // app uses and asserts it took effect — otherwise this test would silently
-    // measure the default budget instead of the one it declared.
-    // The budget is passed explicitly to the preview/sweep, so this test owns
-    // its own policy and needs no backend singleton.
-
-    // Three deletions that fit.
     let mut deleted_rows = Vec::new();
     for i in 0..3 {
         let id = crate::backend::new_entry_id();
@@ -451,7 +354,6 @@ fn test_eviction_preview_matches_the_real_sweep() {
         "three deletions fit the 6 MB budget"
     );
 
-    // A fourth deletion of the same size: the preview must name the evictions.
     let id = crate::backend::new_entry_id();
     let entry = ClipboardEntry::Image {
         id,
@@ -478,7 +380,6 @@ fn test_eviction_preview_matches_the_real_sweep() {
         "adding a fourth 2 MB deletion over a 6 MB budget must predict at least one eviction"
     );
 
-    // Now do it for real and compare.
     crate::db::soft_delete_row(&conn, incoming_row).expect("soft delete");
     crate::db::purge_expired_deleted_rows(&conn, 6 * 1024 * 1024).expect("sweep");
 
@@ -502,7 +403,6 @@ fn test_eviction_preview_matches_the_real_sweep() {
         "the sweep must leave the retained payload inside the budget (left {retained})"
     );
 
-    // The oldest deletion is the one that went: the newest must still undo.
     let newest_survives: bool = conn
         .query_row(
             "SELECT COUNT(*) FROM clipboard_deleted WHERE row_id = ?1",
@@ -528,11 +428,9 @@ fn test_eviction_preview_matches_the_real_sweep() {
     }
 }
 
-/// An unlimited budget (0) must never evict, and the preview must say so.
 #[test]
 fn test_unlimited_budget_never_evicts() {
     let (path, conn) = file_db("unlimited");
-    // 0 = unlimited, passed explicitly to the preview/sweep.
     let (_, row) = insert_body(&conn, "unlimited-probe", 1);
     assert_eq!(
         crate::db::pending_undo_evictions(&conn, 10 * 1024 * 1024 * 1024, 0)
@@ -552,54 +450,34 @@ fn test_unlimited_budget_never_evicts() {
     }
 }
 
-/// Undo must not lose a star that the user put on the re-captured copy.
-///
-/// Sequence (all through the primitives the app uses): delete a favorite, copy
-/// the same content again, star the new copy, ⌘Z. The restore re-inserts the
-/// original `entry_id` and dedups the copy away — and because a star lives on an
-/// `entry_id`, dropping the copy would orphan its star, which
-/// `prune_orphan_favorites` removes at the next launch. Verified against the real
-/// startup sweep below, not just the immediate state.
 #[test]
 fn test_undo_keeps_the_star_of_the_recaptured_copy() {
     let (path, conn) = file_db("undo_star");
 
-    // 1. Original row (NOT starred — its `was_favorite` is what undo replays),
-    //    then deleted. This is the undo entry.
     let original_id = crate::backend::new_entry_id();
     let original = ClipboardEntry::text_entry(original_id, "same-content", 100, String::new(), String::new(), 0);
     crate::db::insert_entry_to_db(&conn, &original, Some("same-content"), None, None).unwrap();
     let original_row = conn.last_insert_rowid();
     crate::db::soft_delete_row(&conn, original_row).expect("delete the original");
 
-    // 2. The same content is copied again while it is deleted, and the user stars
-    //    THAT copy (a new entry_id).
     let recaptured_id = crate::backend::new_entry_id();
     let recaptured = ClipboardEntry::text_entry(recaptured_id, "same-content", 200, String::new(), String::new(), 0);
     crate::db::insert_entry_to_db(&conn, &recaptured, Some("same-content"), None, None).unwrap();
     crate::db::set_favorite(&conn, recaptured_id, true).expect("star the recaptured copy");
 
-    // 3. Undo: re-insert under the ORIGINAL id, then dedup the copy away (exactly
-    //    what `clipboard_undo_delete` does), and restore the original star.
     let restored = ClipboardEntry::text_entry(original_id, "same-content", 300, String::new(), String::new(), 0);
     crate::db::insert_entry_to_db(&conn, &restored, Some("same-content"), None, None).unwrap();
     crate::db::delete_matching_entry(&conn, &restored, Some("same-content"));
-    // The old (soft-deleted) row has served its purpose: the undo removes both
-    // its side row and the payload row.
     conn.execute("DELETE FROM clipboard_deleted WHERE row_id = ?1", rusqlite::params![original_row])
         .expect("drop the undo entry");
     conn.execute("DELETE FROM clipboard_history WHERE id = ?1", rusqlite::params![original_row])
         .expect("drop the deleted payload row");
-    // `was_favorite` was 0 for the original, so the undo restores no star here:
-    // the ONLY star in play belongs to the row the dedup just removed.
 
-    // Exactly one row survives, and it is starred.
     let surviving_rows: i64 = conn
         .query_row("SELECT COUNT(*) FROM clipboard_history", [], |r| r.get(0))
         .unwrap();
     assert_eq!(surviving_rows, 1, "the dedup must collapse to one row");
 
-    // The star must survive the real startup prune and reload path.
     crate::db::prune_orphan_favorites(&conn).expect("prune");
     let favorites = crate::db::load_favorites(&conn).expect("load favorites");
     assert_eq!(favorites.len(), 1, "exactly one star must remain: {favorites:?}");

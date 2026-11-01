@@ -1,10 +1,6 @@
-// Text content generation for stress-test data — word-pool-based realistic
-// snippets, code, and markdown-style documents.
-
 use super::splitmix64;
 use super::TextLength;
 
-/// Small word pool for realistic-looking short entries.
 const SHORT_WORDS: &[&str] = &[
     "hello", "world", "test", "note", "todo", "fixme", "idea", "ref", "code",
     "bug", "crash", "log", "error", "warn", "info", "debug", "trace", "config",
@@ -42,9 +38,6 @@ fn pseudo_word<'a>(rng: &mut impl FnMut() -> u64, pool: &'a [&'a str]) -> &'a st
     pool[idx]
 }
 
-/// Build a string of roughly `target_len` bytes using the given word pool and
-/// word spacing pattern.  Returns a string whose byte length is as close to
-/// `target_len` as possible (may overshoot by one word).
 fn build_text(
     target_len: usize,
     rng: &mut impl FnMut() -> u64,
@@ -62,17 +55,14 @@ fn build_text(
     out
 }
 
-/// Build code-like text with indentation and line breaks.
 fn build_code(target_len: usize, rng: &mut impl FnMut() -> u64) -> String {
     let mut out = String::with_capacity(target_len + 64);
     while out.len() < target_len {
-        // Random indentation
         let indent = (rng() % 4) as usize;
         for _ in 0..indent {
             out.push_str("    ");
         }
         out.push_str(pseudo_word(rng, CODE_KEYWORDS));
-        // Random trailing content: parens, angle brackets, semicolon
         match rng() % 4 {
             0 => { out.push_str("()"); }
             1 => { out.push_str("<>"); }
@@ -85,10 +75,8 @@ fn build_code(target_len: usize, rng: &mut impl FnMut() -> u64) -> String {
     out
 }
 
-/// Build structured markdown-like text (headings, paragraphs, lists).
 fn build_doc(target_len: usize, rng: &mut impl FnMut() -> u64) -> String {
     let mut out = String::with_capacity(target_len + 64);
-    // Heading
     out.push_str("# ");
     out.push_str(pseudo_word(rng, LOREM_WORDS));
     out.push(' ');
@@ -97,16 +85,13 @@ fn build_doc(target_len: usize, rng: &mut impl FnMut() -> u64) -> String {
     out.push('\n');
 
     while out.len() < target_len {
-        // Random paragraph or list
         match rng() % 5 {
             0 => {
-                // Subheading
                 out.push_str("## ");
                 out.push_str(pseudo_word(rng, LOREM_WORDS));
                 out.push('\n');
             }
             1 => {
-                // List item
                 out.push_str("- ");
                 let n = 5 + (rng() % 15) as usize;
                 for _ in 0..n {
@@ -116,7 +101,6 @@ fn build_doc(target_len: usize, rng: &mut impl FnMut() -> u64) -> String {
                 out.push('\n');
             }
             _ => {
-                // Paragraph
                 let n = 10 + (rng() % 30) as usize;
                 for i in 0..n {
                     if i > 0 { out.push(' '); }
@@ -130,33 +114,32 @@ fn build_doc(target_len: usize, rng: &mut impl FnMut() -> u64) -> String {
     out
 }
 
-/// Generate a string whose byte length falls in the given range.
 pub(super) fn generate_text_content(category: TextLength, seed: u64) -> String {
     let mut rng = splitmix64(seed);
 
     let (target, style) = match category {
         TextLength::Short  => match seed % 4 {
-            0 => (16 + (rng() % 48) as usize, 0),   // 16–63 B
-            1 => (16 + (rng() % 16) as usize, 1),   // 16–31 B
-            _ => (32 + (rng() % 32) as usize, 2),   // 32–63 B
+            0 => (16 + (rng() % 48) as usize, 0),
+            1 => (16 + (rng() % 16) as usize, 1),
+            _ => (32 + (rng() % 32) as usize, 2),
         },
         TextLength::Medium => match seed % 3 {
-            0 => (256 + (rng() % 768) as usize, 0), // paragraph
-            1 => (512 + (rng() % 512) as usize, 1), // code
-            _ => (400 + (rng() % 624) as usize, 2), // note
+            0 => (256 + (rng() % 768) as usize, 0),
+            1 => (512 + (rng() % 512) as usize, 1),
+            _ => (400 + (rng() % 624) as usize, 2),
         },
         TextLength::MedLong => match seed % 3 {
-            0 => (4096 + (rng() % 12288) as usize, 0), // doc
-            1 => (4096 + (rng() % 4096) as usize, 1),  // code
-            _ => (8192 + (rng() % 8192) as usize, 2),  // mixed
+            0 => (4096 + (rng() % 12288) as usize, 0),
+            1 => (4096 + (rng() % 4096) as usize, 1),
+            _ => (8192 + (rng() % 8192) as usize, 2),
         },
         TextLength::Long   => match seed % 2 {
-            0 => (16384 + (rng() % 16384) as usize, 0), // doc
-            _ => (16384 + (rng() % 8192) as usize, 1),  // code
+            0 => (16384 + (rng() % 16384) as usize, 0),
+            _ => (16384 + (rng() % 8192) as usize, 1),
         },
         TextLength::XLong  => match seed % 2 {
-            0 => (49152 + (rng() % 16384) as usize, 0), // doc
-            _ => (49152 + (rng() % 8192) as usize, 1),  // code+log
+            0 => (49152 + (rng() % 16384) as usize, 0),
+            _ => (49152 + (rng() % 8192) as usize, 1),
         },
     };
 

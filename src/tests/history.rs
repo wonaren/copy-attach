@@ -1,5 +1,3 @@
-// History ordering and dedup tests — `add_to_history` semantics.
-
 use crate::history::{add_to_history, assign_db_id_by_text_hash, remove_deleted_entry};
 use crate::types::ClipboardEntry;
 use super::{make_image, make_test_image_rgba, make_text};
@@ -73,18 +71,8 @@ fn test_in_memory_order_newest_first() {
     assert_eq!(hist[4].label(), "item-0");
 }
 
-/// Regression test for the ghost-entry bug: the monitor's text capture
-/// assigns the freshly inserted SQLite rowid by content hash, NEVER by head
-/// position. A concurrent select-and-paste may have moved another entry to
-/// position 0 between the in-memory insert and the DB write-through; writing
-/// the rowid into that head entry would orphan the captured one (db_id=0 —
-/// unpasteable, undeletable, still listed) and point the head entry at a
-/// row that a later delete would remove from under it.
 #[test]
 fn test_assign_db_id_by_text_hash_ignores_head_position() {
-    // Simulate: captured entry "功能验证文本" sits at index 1 (db_id=0, its
-    // DB write is in flight) while a concurrent paste moved "other" to the
-    // head. The DB insert completed with rowid 42.
     let mut hist = Vec::new();
     let pasted = make_text("other-content", 300);
     let captured = make_text("功能验证文本", 200);
@@ -98,7 +86,6 @@ fn test_assign_db_id_by_text_hash_ignores_head_position() {
 
     assign_db_id_by_text_hash(&mut hist, captured_hash, 42);
 
-    // The captured entry (index 1) gets the rowid; the head entry is untouched.
     match &hist[0] {
         ClipboardEntry::Text { db_id, .. } => assert_eq!(*db_id, 0, "head entry must not receive the rowid"),
         _ => unreachable!(),
@@ -109,8 +96,6 @@ fn test_assign_db_id_by_text_hash_ignores_head_position() {
     }
 }
 
-/// Same as above but the captured entry sits at the head (the common no-race
-/// case) — assignment must still work.
 #[test]
 fn test_assign_db_id_by_text_hash_at_head() {
     let mut hist = Vec::new();
@@ -129,8 +114,6 @@ fn test_assign_db_id_by_text_hash_at_head() {
     }
 }
 
-/// A stale rowid must not be assigned to an unrelated entry (defensive: hash
-/// never matches ⇒ nothing changes).
 #[test]
 fn test_assign_db_id_by_text_hash_no_match_is_noop() {
     let mut hist = Vec::new();
@@ -142,10 +125,6 @@ fn test_assign_db_id_by_text_hash_no_match_is_noop() {
     }
 }
 
-/// Locks the persisted hash algorithm: FNV-1a 64-bit, fixed constants. The
-/// text_hash value is stored in SQLite (the `hash` column) — changing the
-/// algorithm would orphan every persisted hash in user DBs, so these are the
-/// published FNV-1a test vectors as a tripwire, not incidental assertions.
 #[test]
 fn test_text_hash_is_stable_fnv1a() {
     assert_eq!(crate::types::text_hash(""), 0xcbf2_9ce4_8422_2325);
@@ -165,7 +144,6 @@ fn test_add_to_history_preserves_custom_label_on_recapture() {
     assert_eq!(hist[0].custom_label(), "Production API Key");
     assert_eq!(hist[0].entry_id(), original_id);
 
-    // Re-capturing the identical text later (fresh entry, no custom_label initially)
     let entry2 = make_text("api-key-secret-12345", 200);
     let new_id = entry2.entry_id();
     assert_ne!(original_id, new_id);
@@ -176,12 +154,6 @@ fn test_add_to_history_preserves_custom_label_on_recapture() {
     assert_eq!(hist[0].custom_label(), "Production API Key", "preserved custom label across re-capture");
 }
 
-/// Regression for the delete/recapture collision: a capture landing between
-/// the DB delete and the in-memory removal adopts the deleted entry's stable
-/// id (add_to_history preserves it). Removing by entry_id alone would delete
-/// that fresh capture too — it vanishes from the list while its row stays
-/// behind as an orphan. Identity is (entry_id, db_id): the deleted row pins
-/// the entry that was actually deleted, the re-capture points at a new row.
 #[test]
 fn test_remove_deleted_entry_keeps_concurrent_recapture() {
     let mut hist = Vec::new();
@@ -192,8 +164,6 @@ fn test_remove_deleted_entry_keeps_concurrent_recapture() {
     let deleted_id = deleted.entry_id();
     hist = add_to_history(hist, deleted);
 
-    // The delete already removed row 7; the concurrent re-capture preserved
-    // the id but was assigned row 42.
     let mut recaptured = make_text("delete-me", 200);
     if let ClipboardEntry::Text { id, db_id, .. } = &mut recaptured {
         *id = deleted_id;
@@ -208,7 +178,6 @@ fn test_remove_deleted_entry_keeps_concurrent_recapture() {
     assert_eq!(hist[0].db_id(), 42);
 }
 
-/// The plain case: the entry still points at the deleted row, so it is removed.
 #[test]
 fn test_remove_deleted_entry_removes_the_deleted_row() {
     let mut hist = Vec::new();
@@ -224,7 +193,6 @@ fn test_remove_deleted_entry_removes_the_deleted_row() {
     assert!(hist.is_empty(), "the entry pointing at the deleted row goes");
 }
 
-/// A stale call must never touch a neighbouring entry.
 #[test]
 fn test_remove_deleted_entry_no_match_is_noop() {
     let mut hist = Vec::new();
@@ -245,8 +213,6 @@ fn test_remove_deleted_entry_no_match_is_noop() {
 fn test_text_capture_predicate_allows_single_char_and_rejects_pure_whitespace() {
     let rules = crate::ignore::IgnoreRules::default();
 
-    // Helper mirroring monitor.rs capture guard:
-    // !trimmed.is_empty() && !rules.ignores_text(text)
     let should_capture = |text: &str| -> bool {
         let trimmed = text.trim();
         !trimmed.is_empty() && !rules.ignores_text(text)
@@ -261,4 +227,3 @@ fn test_text_capture_predicate_allows_single_char_and_rejects_pure_whitespace() 
     assert!(!should_capture("   "), "whitespace-only text must not be captured");
     assert!(!should_capture("\n\t  \r\n"), "mixed whitespace must not be captured");
 }
-

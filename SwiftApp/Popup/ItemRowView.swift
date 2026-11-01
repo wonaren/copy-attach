@@ -1,8 +1,6 @@
 import AppKit
 import SwiftUI
 
-// MARK: - Item Row View — Native HUD Pill Aesthetic
-
 struct ItemRowView: View {
     let item: ClipboardItem
     let isSelected: Bool
@@ -17,8 +15,6 @@ struct ItemRowView: View {
     let onCancelRemark: () -> Void
     let selectionNamespace: Namespace.ID
     @State private var isHovering = false
-    /// The row's decoded thumbnail once loaded (async, off-main). Also keeps
-    /// the row from re-looking up the cache on every body evaluation.
     @State private var thumbImage: NSImage?
     @Environment(\.appTheme) private var theme
     @Environment(\.colorScheme) private var colorScheme
@@ -29,10 +25,6 @@ struct ItemRowView: View {
         try? NSRegularExpression(pattern: "#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})\\b")
     }()
 
-    /// 10×10 color swatches are drawn once per unique hex color and cached —
-    /// the per-render `lockFocus` path (a fresh graphics context per match)
-    /// was the most expensive thing in this row's body. Bounded so a hostile
-    /// clipboard full of distinct colors cannot grow it without limit.
     private static let swatchCache: NSCache<NSString, NSImage> = {
         let c = NSCache<NSString, NSImage>()
         c.countLimit = 64
@@ -44,35 +36,17 @@ struct ItemRowView: View {
     }
     private var mutedText: Color { theme.popupMutedText }
     private func sourceNameColor(_ isSelected: Bool) -> Color {
-        // White at 95% on the selection fill is 4.8:1 (light) / 5.6:1 (dark).
-        // `theme.popupPrimaryText` is near-black in the light theme, which read
-        // as a stray dark label on the blue pill.
         isSelected ? Color.white.opacity(0.95) : theme.popupSecondaryText
     }
 
-    /// Platform selection fill (a darker shade of the user's accent), not the
-    /// raw accent. Measured: white on `controlAccentColor` (#007AFF) is 4.07:1
-    /// — below AA — and the large saturated pill is what read as glaring.
-    /// `selectedContentBackgroundColor` gives 5.4:1 (light) / 6.3:1 (dark) with
-    /// white, inside the AA–AAA band, and follows the user's accent + contrast
-    /// settings automatically.
     private var selectionFill: Color {
         Color(nsColor: .selectedContentBackgroundColor)
     }
 
-    /// Delete-mode fill. `systemRed` with white text is only 3.5:1; blending
-    /// 22% black raises it to 5.1:1 (light) / 4.9:1 (dark).
     private var deleteSelectionFill: Color {
         Color(nsColor: NSColor.systemRed.blended(withFraction: 0.22, of: .black) ?? .systemRed)
     }
 
-    /// Teal accent for a user-authored remark, or nil on the selected row.
-    ///
-    /// The selected row is already marked by a solid accent-colored pill (or
-    /// red in delete mode); keeping the warm accent there would put it on an
-    /// unknown accent hue and break the contrast the theme values guarantee.
-    /// Text falls back to the selection foreground, exactly like every other
-    /// selected row.
     private var remarkAccent: Color? {
         isSelected ? nil : theme.popupRemarkAccent
     }
@@ -109,9 +83,6 @@ struct ItemRowView: View {
                                 )
                         )
                     } else {
-                        // A remark replaces the preview as the row's content and
-                        // carries the remark accent; ordinary entries keep the
-                        // default readable foreground.
                         textContent(!customLabel.isEmpty ? customLabel : displayPreview,
                                     color: customLabel.isEmpty ? nil : remarkAccent)
                     }
@@ -145,8 +116,6 @@ struct ItemRowView: View {
                                 )
                         )
                     } else if !customLabel.isEmpty {
-                        // Same accent as text remarks: one semantic color for
-                        // "this entry has a note", white when selected.
                         let markColor = remarkAccent ?? textColor(true)
                         HStack(spacing: 5) {
                             Image(systemName: "photo.fill")
@@ -168,9 +137,6 @@ struct ItemRowView: View {
                     .frame(width: 14, alignment: .center)
                     .help("备注: \(item.customLabel)")
                     .symbolEffect(.bounce, value: item.hasCustomLabel)
-                    // Never from scale(0): nothing in the real world appears
-                    // from nothing. 0.9 + opacity reads as the badge growing
-                    // into place rather than materializing.
                     .transition(.scale(scale: 0.9).combined(with: .opacity))
             }
             if isFavorite {
@@ -179,17 +145,12 @@ struct ItemRowView: View {
                     .foregroundColor(Color(nsColor: .systemYellow))
                     .frame(width: 16, alignment: .center)
                     .symbolEffect(.bounce, value: isFavorite)
-                    // Never from scale(0): nothing in the real world appears
-                    // from nothing. 0.9 + opacity reads as the badge growing
-                    // into place rather than materializing.
                     .transition(.scale(scale: 0.9).combined(with: .opacity))
             }
             if let order = queueOrder {
                 let badgeBgColor: Color = isSelected
                     ? Color.white
                     : Color(nsColor: .controlAccentColor)
-                // The selected badge is a white disc: its label must clear 4.5:1
-                // against white, so use the same (darker) fills as the row.
                 let badgeTextColor: Color = isSelected
                     ? (isDeleteModifierPressed ? deleteSelectionFill : selectionFill)
                     : Color.white
@@ -210,9 +171,6 @@ struct ItemRowView: View {
                     .frame(minWidth: 20, alignment: .center)
                     .padding(.trailing, 6)
                     .symbolEffect(.pulse, isActive: isDeleteModifierPressed)
-                    // Never from scale(0): nothing in the real world appears
-                    // from nothing. 0.9 + opacity reads as the badge growing
-                    // into place rather than materializing.
                     .transition(.scale(scale: 0.9).combined(with: .opacity))
             } else if let hint = shortcutHint {
                 Text(hint)
@@ -220,9 +178,6 @@ struct ItemRowView: View {
                     .foregroundColor(isSelected ? sourceNameColor(true) : Color(nsColor: .controlAccentColor))
                     .lineLimit(1)
                     .monospacedDigit()
-                    // Never from scale(0): nothing in the real world appears
-                    // from nothing. 0.9 + opacity reads as the badge growing
-                    // into place rather than materializing.
                     .transition(.scale(scale: 0.9).combined(with: .opacity))
             } else if !item.sourceName.isEmpty {
                 let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -233,24 +188,13 @@ struct ItemRowView: View {
                     .lineLimit(1)
                     .padding(.horizontal, 2)
                     .padding(.vertical, 1.5)
-                    // No capsule on the selected row: the light-theme capsule
-                    // is an opaque near-white block that clashed with the blue
-                    // pill. The label alone carries it there.
                     .background(Capsule().fill(isSelected ? Color.clear : theme.popupTagBackground))
-                    // Never from scale(0): nothing in the real world appears
-                    // from nothing. 0.9 + opacity reads as the badge growing
-                    // into place rather than materializing.
                     .transition(.scale(scale: 0.9).combined(with: .opacity))
             }
         }
         .padding(.horizontal, 2)
         .padding(.vertical, 3)
-        // Content flips its selection color quickly instead of riding the
-        // container's spring — a springing text crossfade reads as slow/floaty.
         .animation(.easeOut(duration: 0.1), value: isSelected)
-        // The star/tag badges insert and remove on these values; without a
-        // transaction their `.transition` never runs and they pop. Scoped to
-        // the value so nothing else on the row animates.
         .animation(.easeOut(duration: 0.15), value: isFavorite)
         .animation(.easeOut(duration: 0.15), value: item.hasCustomLabel)
         .background(selectionBackground)
@@ -259,9 +203,6 @@ struct ItemRowView: View {
         }
     }
 
-    /// Selection/hover backdrop. The selected row hosts a matched-geometry
-    /// RoundedRectangle so the highlight glides to the next row as the
-    /// selection moves (Spotlight-style). Hover stays a static fill.
     @ViewBuilder
     private var selectionBackground: some View {
         if isSelected {
@@ -342,13 +283,9 @@ struct ItemRowView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    /// Build a Text view with inline color swatches for hex color codes and search highlights.
     private func coloredLabel(_ text: String) -> Text {
         let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        // Most clipboard texts contain no '#' at all — skip the regex engine
-        // for them (the regex runs on every body evaluation, i.e. hover,
-        // selection moves, and scroll refreshes of every visible row).
         guard text.contains("#") else {
             guard !query.isEmpty else { return Text(text) }
             return Text(highlightedAttributedString(text, query: query))
@@ -372,7 +309,6 @@ struct ItemRowView: View {
 
         for match in matches {
             guard let range = Range(match.range, in: text) else { continue }
-            // Text before this color code
             if lastEnd < range.lowerBound {
                 let piece = String(text[lastEnd..<range.lowerBound])
                 if query.isEmpty {
@@ -381,7 +317,6 @@ struct ItemRowView: View {
                     result = Text("\(result)\(Text(highlightedAttributedString(piece, query: query)))")
                 }
             }
-            // Color code with swatch
             let code = String(text[range])
             let codeText: Text = query.isEmpty ? Text(code) : Text(highlightedAttributedString(code, query: query))
             if let swatch = Self.swatch(for: code) {
@@ -404,8 +339,6 @@ struct ItemRowView: View {
         return result
     }
 
-    /// Cached swatch image for a hex code (`#RGB` / `#RRGGBB`), nil for
-    /// non-colors. The 10×10 NSImage is drawn once per unique color.
     private static func swatch(for code: String) -> NSImage? {
         if let cached = swatchCache.object(forKey: code as NSString) {
             return cached
@@ -423,7 +356,6 @@ struct ItemRowView: View {
         return image
     }
 
-    /// Parse a hex color string (#RGB or #RRGGBB) into NSColor.
     private static func parseHexColor(_ hex: String) -> NSColor? {
         var h = hex
         if h.hasPrefix("#") { h = String(h.dropFirst()) }
@@ -444,18 +376,12 @@ struct ItemRowView: View {
         }
     }
 
-    /// Display box the row draws an image into, at this screen's scale. Mirrors
-    /// the `.frame(maxHeight: 100)` below and Rust's `THUMB_BOX_*` (which sizes
-    /// the stored blob); the box is one rectangle, so flat and tall images share
-    /// a single source of truth instead of each guessing a longest edge.
     private var thumbnailBox: RowThumbnailBox {
         RowThumbnailBox.current(scale: displayScale)
     }
 
     private func imageContent(dbId: Int, width: Int, height: Int) -> some View {
         HStack(spacing: 8) {
-            // Synchronous cache hit renders instantly (no IO); a miss shows
-            // the shimmer placeholder card while `loadThumbnail` decodes off-main.
             if let nsImage = thumbImage ?? ClipboardBackend.shared.cachedThumbnail(dbId: dbId) {
                 Image(nsImage: nsImage).resizable().aspectRatio(contentMode: .fit)
                     .frame(maxHeight: 100)
@@ -468,11 +394,6 @@ struct ItemRowView: View {
                 ShimmerPlaceholderCard(title: "载入预览中…", iconName: "photo")
             }
         }
-        // Load the thumbnail off the main thread (FFI read + PNG decode).
-        // `id: dbId` restarts the task when Phase 2 completes (dbId 0 → rowid)
-        // and auto-cancels it when the row scrolls out of view. The loader is
-        // concurrency-bounded and cancellation prevents publishing an image
-        // into a row that is no longer visible.
         .task(id: dbId) {
             guard dbId != 0 else { return }
             let img = await ClipboardBackend.shared.loadThumbnail(dbId: dbId, box: thumbnailBox)
@@ -480,8 +401,6 @@ struct ItemRowView: View {
             thumbImage = img
         }
         .onDisappear {
-            // Release the row's strong image reference immediately. NSCache is
-            // intentionally the only owner after a row leaves the viewport.
             thumbImage = nil
         }
     }
@@ -503,8 +422,6 @@ extension ItemRowView: @preconcurrency Equatable {
 }
 
 private extension String {
-    /// Single-line preview: split on newlines, trim each line, drop empties,
-    /// join with ⏎. Applied to bounded head/tail windows in `textContent`.
     func collapsedPreview() -> String {
         components(separatedBy: .newlines)
             .map { $0.trimmingCharacters(in: .whitespaces) }
@@ -512,8 +429,6 @@ private extension String {
             .joined(separator: "⏎")
     }
 }
-
-// MARK: - Inline Remark Editor Field (Native AppKit NSTextField for perfect focus & key containment)
 
 struct InlineRemarkField: NSViewRepresentable {
     @Binding var text: String
@@ -550,8 +465,6 @@ struct InlineRemarkField: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: NSTextField, context: Context) {
-        // Keep the coordinator's copy current: it captures the binding and the
-        // commit/cancel closures, which must reflect the latest render.
         context.coordinator.parent = self
         if nsView.textColor != textColor {
             nsView.textColor = textColor
@@ -569,22 +482,13 @@ struct InlineRemarkField: NSViewRepresentable {
             self.parent = parent
         }
 
-        /// Cap the remark while it is being typed or pasted. Counting scalars
-        /// (not grapheme clusters) keeps this exactly aligned with the Rust
-        /// `MAX_CUSTOM_LABEL_SCALARS` check, which would otherwise reject a
-        /// field the UI considered legal (emoji / combining marks).
         func control(_ control: NSControl,
                      textView: NSTextView,
                      shouldChangeTextIn affectedCharRange: NSRange,
                      replacementString: String?) -> Bool {
             guard let replacement = replacementString else { return true }
-            // AppKit delivers this on the main thread; the SDK's
-            // NSControlTextEditingDelegate is not MainActor-annotated, so the
-            // contract is stated explicitly.
             return MainActor.assumeIsolated {
                 let current = textView.string as NSString
-                // IME composition can report a range past the current string; the
-                // cap is a guard, so let the text system handle anything unexpected.
                 guard affectedCharRange.location != NSNotFound,
                       affectedCharRange.location + affectedCharRange.length <= current.length else {
                     return true
@@ -594,9 +498,6 @@ struct InlineRemarkField: NSViewRepresentable {
             }
         }
 
-        /// Mirror the field's live text back into the binding, so callers that
-        /// commit on a path other than Enter (switching rows / tabs / search)
-        /// have the text the user actually typed.
         func controlTextDidChange(_ obj: Notification) {
             guard let field = obj.object as? NSTextField else { return }
             parent.text = field.stringValue

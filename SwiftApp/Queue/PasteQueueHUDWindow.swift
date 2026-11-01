@@ -10,20 +10,14 @@ final class PasteQueueHostingView: NSHostingView<AnyView> {
 final class PasteQueueHUDWindow: NSPanel {
     static let shared = PasteQueueHUDWindow()
 
-    /// Inner pill dimensions
     static let pillSize = NSSize(width: 330, height: 42)
-    /// Transparent margin inside the window allowing soft SwiftUI drop-shadow without clipping
     static let windowPadding: CGFloat = 16
-    /// Outer window dimensions
     static var windowSize: NSSize {
         NSSize(width: pillSize.width + windowPadding * 2, height: pillSize.height + windowPadding * 2)
     }
 
     private var hostingView: PasteQueueHostingView?
 
-    /// Generation token so a dismiss that is still animating can never tear down
-    /// a HUD that was shown again in the meantime (start → Esc → start within
-    /// 180 ms used to blank the pill and order it out mid-dispensing).
     private var visibilityGeneration: UInt64 = 0
 
     override var canBecomeKey: Bool { false }
@@ -41,16 +35,9 @@ final class PasteQueueHUDWindow: NSPanel {
         level = .floating
         isReleasedWhenClosed = false
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        // WindowServer shadow generates a harsh rectangular box on borderless transparent panels.
-        // Disable OS shadow; SwiftUI renders the authentic pill shadow into the transparent margin.
         hasShadow = false
         isMovableByWindowBackground = false
         animationBehavior = .none
-        // Click-through: the window is 32 pt larger than the pill on both axes for
-        // the drop shadow, and a transparent margin still hit-tests, which turned
-        // the top-centre of the screen into an invisible click sink. The pill is a
-        // status indicator — every action is a keystroke (⌘V / ⇧⌘V / Esc×2), named
-        // in the pill's own hint — so it must never swallow a click.
         ignoresMouseEvents = true
     }
 
@@ -66,9 +53,6 @@ final class PasteQueueHUDWindow: NSPanel {
             hostingView?.rootView = content
         }
 
-        // Only restart the entrance when the HUD is not already on screen: a
-        // re-show while visible must not rewind alpha to 0 (that reads as a
-        // flicker) and must not re-position the pill under the user's eyes.
         if !isVisible {
             positionAtTopCenter()
             alphaValue = 0

@@ -1,7 +1,6 @@
 import AppKit
 import SwiftUI
 
-/// Floating pill HUD that displays current queue progress and item preview.
 struct PasteQueueHUDView: View {
     private var manager: PasteQueueManager { PasteQueueManager.shared }
     @Environment(\.appTheme) private var theme
@@ -35,7 +34,6 @@ struct PasteQueueHUDView: View {
 
     private var activeQueueView: some View {
         HStack(spacing: 8) {
-            // Index Capsule Badge
             HStack(spacing: 1) {
                 Text("\(manager.currentIndex + 1)")
                     .font(.system(size: 11, weight: .bold, design: .rounded))
@@ -53,7 +51,6 @@ struct PasteQueueHUDView: View {
                 Capsule().fill(Color(nsColor: .controlAccentColor))
             )
 
-            // Item content preview
             if let item = manager.currentItem {
                 HStack(spacing: 5) {
                     if item.isImage {
@@ -85,9 +82,6 @@ struct PasteQueueHUDView: View {
                 Spacer()
             }
 
-            // The HUD is click-through (see PasteQueueHUDWindow), so every
-            // affordance must be a key and the pill must name them. A skipped
-            // item's notice temporarily takes the hint's place.
             if let notice = manager.skippedNotice {
                 Text(notice)
                     .font(.system(size: 9.5, weight: .semibold))

@@ -1,5 +1,3 @@
-// Image capture / in-memory / DB storage benchmarks.
-
 use crate::backend::new_entry_id;
 use crate::history::add_to_history;
 use crate::image::{create_thumbnail, create_thumbnail_fast, encode_png, image_hash};
@@ -7,28 +5,23 @@ use crate::types::ClipboardEntry;
 use rusqlite::Connection;
 use super::{create_bench_table, estimate_vec_heap, format_bytes};
 
-/// Generate a RGBA buffer simulating a screenshot with mixed content.
-/// The `variation` param shifts colors to produce a unique hash per image.
 fn make_screenshot_rgba(width: u32, height: u32, variation: u8) -> Vec<u8> {
     let mut data = vec![0u8; (width * height * 4) as usize];
     for y in 0..height {
         for x in 0..width {
             let i = ((y * width + x) * 4) as usize;
-            // Gradient sky (top) to warm (bottom) background
             let grad = y as f64 / height as f64;
             data[i] = (100.0 + grad * 100.0 + (x as f64 / width as f64) * 55.0) as u8;
             data[i + 1] = (80.0 + grad * 80.0) as u8;
             data[i + 2] = (180.0 - grad * 80.0) as u8;
             data[i + 3] = 255;
 
-            // Simulated window blocks (rectangular regions)
             if x % 500 > 20 && x % 500 < 480 && y % 400 > 20 && y % 400 < 380 {
                 data[i] = data[i].wrapping_add(40);
                 data[i + 1] = data[i + 1].wrapping_add(35);
                 data[i + 2] = data[i + 2].wrapping_add(50);
             }
 
-            // Simulated text lines (thin alternating horizontal strips)
             if y % 16 < 2 && x % 300 < 280 {
                 data[i] = 20;
                 data[i + 1] = 20;
@@ -36,18 +29,15 @@ fn make_screenshot_rgba(width: u32, height: u32, variation: u8) -> Vec<u8> {
             }
         }
     }
-    // Tweak one pixel for uniqueness (variation guarantees different hash)
     let last = data.len() - 4;
     data[last] = data[last].wrapping_add(variation);
     data
 }
 
-// A capture sample per resolution: (png, thumb, thumb_w, thumb_h, w, h, hash).
 type EncodedSample = (Vec<u8>, Vec<u8>, u32, u32, u32, u32, u64);
 
 #[test]
 fn benchmark_images() {
-    // 1. IMAGE CAPTURE PROCESSING BENCHMARK
     let resolutions: [(u32, u32, &str); 3] = [
         (800, 600, "800×600 (small crop)"),
         (1920, 1080, "1920×1080 (FHD)"),
@@ -75,7 +65,6 @@ fn benchmark_images() {
         "", "", "", "", "", "", "", ""
     );
 
-    // Store encoded images for DB benchmark (one per resolution)
     let mut encoded_samples: Vec<EncodedSample> = Vec::new();
 
     for &(w, h, label) in &resolutions {
@@ -100,7 +89,7 @@ fn benchmark_images() {
         let cr_time = cr_start.elapsed();
 
         let (thumb_data, _thumb_w, _thumb_h) = thumb_cr;
-        let total_sync = hash_time + cr_time; // sync path = hash + fast thumb
+        let total_sync = hash_time + cr_time;
 
         println!(
             "{:<28} | {:<14} | {:<14} | {:<14?} | {:<14?} | {:<12?} | {:<12?} | {:<12?}",
@@ -117,7 +106,6 @@ fn benchmark_images() {
         encoded_samples.push((png, thumb_data, _thumb_w, _thumb_h, w, h, hash));
     }
 
-    // 2. IN-MEMORY IMAGE HISTORY BENCHMARK
     let thresholds: [usize; 6] = [100, 500, 1000, 2000, 3000, 5000];
     const SS_SAMPLES: usize = 50;
 
@@ -144,7 +132,6 @@ fn benchmark_images() {
         let mut hist: Vec<ClipboardEntry> = Vec::with_capacity(threshold + SS_SAMPLES);
         let mut add_times = Vec::with_capacity(SS_SAMPLES);
 
-        // Fill to threshold: unique hash per entry avoids dedup
         for i in 0..threshold {
             let item = ClipboardEntry::Image {
                 id: new_entry_id(),
@@ -166,7 +153,6 @@ fn benchmark_images() {
         }
         assert_eq!(hist.len(), threshold);
 
-        // Steady-state measurements
         for j in 0..SS_SAMPLES {
             let item = ClipboardEntry::Image {
                 id: new_entry_id(),
@@ -212,12 +198,9 @@ fn benchmark_images() {
         );
     }
 
-    // 3. DB STORAGE WITH IMAGES
-
-    // Use the 1920×1080 and 3840×2160 encoded samples
-    let fhd_png = &encoded_samples[1].0;    // 1920×1080 PNG
+    let fhd_png = &encoded_samples[1].0;
     let fhd_thumb = &encoded_samples[1].1;
-    let uhd_png = &encoded_samples[2].0;   // 3840×2160 (4K) PNG
+    let uhd_png = &encoded_samples[2].0;
     let uhd_thumb = &encoded_samples[2].1;
 
     println!();
@@ -241,7 +224,6 @@ fn benchmark_images() {
     );
 
     for &threshold in &thresholds {
-        // ── FHD DB benchmark ─────────────────────────────────
         let db_dir_fhd = std::env::temp_dir().join(format!("copyattach_img_fhd_{}", threshold));
         let _ = std::fs::create_dir_all(&db_dir_fhd);
         let db_path_fhd = db_dir_fhd.join("history.db");
@@ -299,7 +281,6 @@ fn benchmark_images() {
         let _ = std::fs::remove_file(&db_path_fhd);
         let _ = std::fs::remove_dir(&db_dir_fhd);
 
-        // ── 4K DB benchmark ──────────────────────────────────
         let db_dir_4k = std::env::temp_dir().join(format!("copyattach_img_4k_{}", threshold));
         let _ = std::fs::create_dir_all(&db_dir_4k);
         let db_path_4k = db_dir_4k.join("history.db");

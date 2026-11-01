@@ -1,8 +1,6 @@
 import AppKit
 import SwiftUI
 
-// MARK: - Preview Footer Bar (Native HUD pill showing source app and metadata)
-
 struct PreviewFooterBar: View {
     let item: ClipboardItem
     let prepared: PreparedPreviewText
@@ -40,7 +38,6 @@ struct PreviewFooterBar: View {
 
     var body: some View {
         HStack(alignment: .center, spacing: 8) {
-            // Source app info
             HStack(spacing: 5) {
                 if let icon = appIcon {
                     Image(nsImage: icon)
@@ -58,7 +55,6 @@ struct PreviewFooterBar: View {
 
             Spacer(minLength: 8)
 
-            // Metadata: kind badge + stats
             HStack(spacing: 6) {
                 Text(badgeTitle)
                     .font(.system(size: 10, weight: .semibold, design: .monospaced))

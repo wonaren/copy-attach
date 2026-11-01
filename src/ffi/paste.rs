@@ -11,35 +11,10 @@ use crate::macos;
 use crate::types::ClipboardEntry;
 use super::to_ffi_cstring;
 
-/// Maximum age for a materialized paste PNG. Cmd+V is delivered asynchronously
-/// (`CGEventPostToPid`), so a busy target may read the *previous* paste's file
-/// after the next paste begins; the file must outlive that window. Anything
-/// older than this can no longer be in flight and is safe to purge.
 const PASTE_IMAGE_TTL: Duration = Duration::from_secs(60);
 
-/// Maximum age for a materialized drag PNG.
-///
-/// The drag file is referenced by the pasteboard for the duration of the drag
-/// session, and a drop destination may finish consuming it slightly after the
-/// gesture ends — so it needs the same grace window as a paste, not "until the
-/// next drag". That previous rule was a leak in practice: a user who dragged an
-/// image once and never dragged another left the file in $TMPDIR indefinitely
-/// (measured: a 207 KB PNG from the previous day still present across several
-/// restarts). The TTL plus the startup sweep bounds it the same way `Paste` is
-/// bounded.
 const DRAG_IMAGE_TTL: Duration = Duration::from_secs(60);
 
-
-/// Materialize a clipboard image as a PNG file under the per-user temp
-/// directory, mirroring the drag provider's convention (separate `Paste`
-/// subdir so drag cleanup never races with a paste in flight). The new file
-/// is written first; only once it is safely on disk are files older than
-/// [`PASTE_IMAGE_TTL`] purged — a failed write must never delete the file the
-/// pasteboard still references (the clipboard keeps the previous paste's URL
-/// until this paste's `set_pasteboard_file_url` replaces it). Never delete
-/// everything, since the previous paste's target may still be reading its file.
-///
-/// Returns the absolute file path, or `None` (with a log) on failure.
 fn write_paste_image_file(png_data: &[u8], entry_id: u64) -> Option<String> {
     let mut dir = copyattach_temp_root();
     dir.push("Paste");
@@ -59,30 +34,14 @@ fn write_paste_image_file(png_data: &[u8], entry_id: u64) -> Option<String> {
     Some(path.to_string_lossy().into_owned())
 }
 
-/// Purge materialized paste PNGs older than [`PASTE_IMAGE_TTL`]. Runs after
-/// each successful paste materialization (never before the new file is on
-/// disk — a failed write must not delete the file the pasteboard still
-/// references) and once at backend init: a long stretch without image pastes
-/// would otherwise leave stale files until the OS cleans $TMPDIR. Never
-/// deletes everything, since the previous paste's target may still be
-/// reading its file.
 pub(crate) fn purge_stale_paste_images() {
     purge_age_out(copyattach_temp_root().join("Paste"), PASTE_IMAGE_TTL);
 }
 
-/// Purge materialized drag PNGs older than [`DRAG_IMAGE_TTL`].
-///
-/// Runs at backend init (a long stretch without image drags would otherwise
-/// leave the last drag's file until the OS cleans $TMPDIR) and is exposed to
-/// Swift, which calls it as each new drag materializes its file — the same
-/// write-then-sweep order the paste path uses, so the file the current drag
-/// references is never the one removed.
 pub(crate) fn purge_stale_drag_images() {
     purge_age_out(copyattach_temp_root().join("Drag"), DRAG_IMAGE_TTL);
 }
 
-/// Delete files under `dir` whose mtime is at least `ttl` old. Missing
-/// directory is not an error: it just means nothing was ever materialized.
 pub(crate) fn purge_age_out(dir: std::path::PathBuf, ttl: Duration) {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -100,31 +59,14 @@ pub(crate) fn purge_age_out(dir: std::path::PathBuf, ttl: Duration) {
     }
 }
 
-/// FFI: sweep aged-out drag images. Called by the drag provider right after it
-/// materializes a new file, so the directory is bounded without a timer.
 #[no_mangle]
 pub extern "C" fn clipboard_purge_stale_drag_images() {
     purge_stale_drag_images();
 }
 
-// NOTE: the former single-phase select_and_paste_impl() lived here. It
-// slept 50 ms on the caller thread between writing the pasteboard and posting
-// Cmd+V, on the assumption that the popup would resign key on its own. That
-// assumption is exactly what the two-phase split exists to reject: the popup
-// is a canBecomeKey nonactivating panel and only close() resigns key, so the
-// keystroke could arrive while the panel was still key (measured 7/7; WeChat
-// dropped short pastes). It also blocked the main thread. The popup uses
-// clipboard_prepare_paste_by_id + clipboard_send_paste instead, and nothing
-// else called this, so it was removed rather than left as a trap.
-
-/// What the caller wants `prepare_paste_impl` to do after the pasteboard
-/// write. The distinction is user-visible: `Keystroke` is "insert at the
-/// cursor", `ClipboardOnly` is "copy and let me paste by hand".
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PasteDelivery {
-    /// Write the pasteboard and let the caller post ⌘V. Requires Accessibility.
     Keystroke,
-    /// Write the pasteboard only. No Accessibility, no keystroke.
     ClipboardOnly,
 }
 
@@ -138,22 +80,6 @@ impl PasteDelivery {
     }
 }
 
-/// Loads full image data from DB if needed, writes to the system clipboard,
-/// write-through DB, and moves the item to the top of history — everything a
-/// paste needs except the keystroke itself.
-///
-/// Return contract (the caller has to tell three cases apart):
-///   `> 0` — pasteboard written; deliver ⌘V to this pid (Keystroke mode).
-///   `1`   — pasteboard written; ClipboardOnly mode, do NOT call
-///           `clipboard_send_paste`.
-///   `-1`  — pasteboard written (Keystroke mode) but no target pid is known,
-///           so only the keystroke is impossible. The content is usable by a
-///           manual ⌘V; callers must not report the copy as failed.
-///   `0`   — nothing was pasted (entry missing, load failed, write failed, or
-///           Accessibility missing in Keystroke mode).
-///
-/// When `as_path` is true and the entry is an Image, its temp PNG path is
-/// placed on the clipboard as plain text instead of `public.file-url`.
 fn prepare_paste_impl(mut item: ClipboardEntry, as_path: bool, delivery: PasteDelivery) -> c_int {
     let perf_total = crate::perf::PerfSpan::start("rust", "paste.prepare");
     if let Some(mut span) = perf_total {
@@ -165,22 +91,12 @@ fn prepare_paste_impl(mut item: ClipboardEntry, as_path: bool, delivery: PasteDe
     }
     #[cfg(target_os = "macos")]
     {
-        // Cmd+V simulation needs accessibility permission. Gate BEFORE any
-        // pasteboard write: the write replaces the user's clipboard, so
-        // proceeding without permission would destroy their content on a paste
-        // that can never happen — and the old fall-through still reported
-        // success (1). No permission → explicit failure, clipboard untouched.
-        // ClipboardOnly has no keystroke, so it needs no permission at all:
-        // replacing the clipboard is exactly what the user asked for.
         if delivery == PasteDelivery::Keystroke && !macos::check_permission() {
             crate::error_log!("CopyAttach: accessibility permission not granted — paste aborted, clipboard untouched");
             return 0;
         }
     }
 
-    // The entry is moved to the top of history below. Stamp it with the current
-    // time so the list order (most-recently-used) stays consistent with the
-    // entry's timestamp — the day separator groups rely on this invariant.
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -192,15 +108,6 @@ fn prepare_paste_impl(mut item: ClipboardEntry, as_path: bool, delivery: PasteDe
         }
     }
 
-    // Text paste needs the full body, which lives in SQLite — the in-memory
-    // entry only carries preview/label/hash. A text entry with db_id=0 was
-    // never persisted (DB write failed) and cannot be pasted: explicit
-    // failure, clipboard untouched, mirroring the image load failure below.
-    // The guard marks the body's pages reusable on drop: the text is
-    // transient here (written to the pasteboard and re-persisted from a
-    // slice), so its pages must leave the footprint at scope end on every
-    // return path — release-path symmetry with the claim in
-    // `load_text_by_db_id`.
     let full_text: Option<crate::backend::MarkStringReusableOnDrop> = match &item {
         ClipboardEntry::Text { db_id, .. } => {
             if *db_id == 0 {
@@ -259,11 +166,6 @@ fn prepare_paste_impl(mut item: ClipboardEntry, as_path: bool, delivery: PasteDe
                     if let Some(mut span) = perf_blob {
                         span.val = Some(png.len() as i64);
                     }
-                    // Claim any reusable-marked pages the allocator handed
-                    // back: these blobs are written to the pasteboard, and a
-                    // rejected claim means the pasted payload could be read from
-                    // reclaimable pages. Refuse the paste (callers already treat
-                    // 0 as "nothing pasted").
                     if !crate::backend::claim_pages(png.as_ptr(), png.capacity())
                         || !crate::backend::claim_pages(thumb.as_ptr(), thumb.capacity())
                     {
@@ -281,16 +183,8 @@ fn prepare_paste_impl(mut item: ClipboardEntry, as_path: bool, delivery: PasteDe
         }
     }
 
-    // Text paste needs the arboard clipboard handle; image paste writes the
-    // pasteboard directly via NSPasteboard (set_pasteboard_file_url) and must
-    // not fail on an arboard handle it never uses.
     let Some(b) = try_backend() else { return 0 };
     let _event_guard = b.pasteboard_event_lock.lock().unwrap();
-    // Image paste always uses drag-style file-path mode — the single,
-    // universal convention: the image is materialized as a temp PNG and only
-    // its file URL goes on the pasteboard (Finder "copy file" semantics).
-    // Terminals translate the URL into the path text (TUI agents like Claude
-    // Code consume exactly this form); chat/notes apps attach the file.
     match &item {
         ClipboardEntry::Text { .. } => {
             let text = match &full_text {
@@ -324,11 +218,6 @@ fn prepare_paste_impl(mut item: ClipboardEntry, as_path: bool, delivery: PasteDe
             }
         }
     }
-    // A missing pasteboard is a real (if rare) failure. Without the changeCount
-    // the self-write cannot be suppressed, so the monitor would re-capture our
-    // own paste as a new entry. Refuse the paste instead of panicking: the
-    // pasteboard was written, but no keystroke is sent, so nothing is pasted
-    // and no duplicate is captured. Explicit failure, never a crash.
     let change_count = match macos::pasteboard_change_count() {
         Some(cc) => cc,
         None => {
@@ -341,14 +230,6 @@ fn prepare_paste_impl(mut item: ClipboardEntry, as_path: bool, delivery: PasteDe
     );
     drop(_event_guard);
 
-    // The DB write-through and the in-memory write-through must happen under
-    // ONE DB lock. Releasing it in between lets a concurrent same-content
-    // insert (monitor capture or image Phase 2) dedup the row we just
-    // committed before our memory update lands, leaving the entry pointing at
-    // a deleted row — a ghost the UI can neither preview, paste, nor delete.
-    // Every other DB writer (monitor text capture, Phase 2, undo) already
-    // holds the DB lock across its memory write; this path was the only one
-    // that did not.
     let Some(b) = try_backend() else { return 0 };
     let mut db_guard = match b.db.lock() {
         Ok(c) => c,
@@ -397,19 +278,12 @@ fn prepare_paste_impl(mut item: ClipboardEntry, as_path: bool, delivery: PasteDe
         }
         mark_history_changed();
     }
-    // Release the DB lock before returning so the capture monitor is never
-    // blocked while the caller dismisses the window and sends keystrokes.
     drop(db_guard);
 
-    // ClipboardOnly is complete here: there is no keystroke to target.
     if delivery == PasteDelivery::ClipboardOnly {
         return 1;
     }
 
-    // The caller owns the keystroke: it must not be posted until the popup has
-    // resigned key status (see `clipboard_prepare_paste_by_id`). A missing
-    // target is not a failed copy — return -1 so the caller can tell the user
-    // the content is on the clipboard and only the keystroke was skipped.
     match try_backend()
         .and_then(|b| b.source_app.lock().ok())
         .map(|src| src.pid)
@@ -422,23 +296,6 @@ fn prepare_paste_impl(mut item: ClipboardEntry, as_path: bool, delivery: PasteDe
     }
 }
 
-/// Phase 1 of a two-phase paste: write the entry to the pasteboard and update
-/// history, but do NOT post the paste keystroke yet.
-///
-/// `delivery_mode`: 0 = write + deliver ⌘V (requires Accessibility);
-/// 1 = write only, no keystroke, no Accessibility. Any other value is an
-/// explicit failure (0) — never a silent fallback to one of the real modes.
-///
-/// Returns `> 0` (pid for phase 2), `1` (ClipboardOnly, no phase 2), `-1`
-/// (written, target pid unknown), or `0` (nothing written).
-///
-/// The split exists because the paste keystroke must arrive when the popup is
-/// no longer the key window. Only `close()` resigns key status, and it runs
-/// after the paste call — so a single-phase paste always posted the keystroke
-/// while the panel was still key. Measured via PASTEDIAG (2026-09-12):
-/// `popupKey=true` on every paste, and a target that resolves the paste against
-/// its own key window (WeChat) intermittently dropped short-text pastes.
-/// Callers MUST dismiss the popup between phase 1 and phase 2.
 #[no_mangle]
 pub extern "C" fn clipboard_prepare_paste_by_id(entry_id: u64, as_path: bool, delivery_mode: c_int) -> c_int {
     let Some(delivery) = PasteDelivery::from_ffi(delivery_mode) else {
@@ -459,12 +316,6 @@ pub extern "C" fn clipboard_prepare_paste_by_id(entry_id: u64, as_path: bool, de
     prepare_paste_impl(item, as_path, delivery)
 }
 
-/// Phase 2 of a two-phase paste: post the paste keystroke to `pid` (the value
-/// returned by phase 1). Returns 1 on success, 0 if the event could not be
-/// posted.
-///
-/// A non-positive `pid` needs no guard here: `simulate_cmd_v` already refuses
-/// it, so a failed phase 1 cannot cause a keystroke.
 #[no_mangle]
 pub extern "C" fn clipboard_send_paste(pid: c_int) -> c_int {
     #[cfg(target_os = "macos")]
@@ -483,11 +334,6 @@ pub extern "C" fn clipboard_send_paste(pid: c_int) -> c_int {
     }
 }
 
-/// Load full text by entry ID (for on-demand preview loading). The body lives
-/// in SQLite, so the entry's db_id is resolved in memory, then loaded from DB.
-/// Returns null if `entry_id` is not found, is not a text entry, or the body
-/// is not persisted (db_id=0 — DB write pending/failed).
-/// Caller must free with `clipboard_free_string()`.
 #[no_mangle]
 pub extern "C" fn clipboard_get_text_by_id(entry_id: u64) -> *mut c_char {
     let b = match try_backend() {
@@ -524,8 +370,6 @@ pub extern "C" fn clipboard_get_text_by_id(entry_id: u64) -> *mut c_char {
             return std::ptr::null_mut();
         }
     };
-    // Transient body: mark its pages reusable once the FFI CString is built.
     let guard = crate::backend::MarkStringReusableOnDrop(text);
     to_ffi_cstring(&guard.0)
 }
-

@@ -1,11 +1,6 @@
 import AppKit
 import SwiftUI
 
-// MARK: - Onboarding Guide View
-
-/// The floating tour card: overall progress, the action to perform right now,
-/// and sub-progress for the combined delete/undo step. It observes
-/// `OnboardingGuide` directly — every `record(_:)` re-renders the card.
 struct OnboardingGuideView: View {
     let guide: OnboardingGuide
 
@@ -37,8 +32,6 @@ struct OnboardingGuideView: View {
         )
     }
 
-    // MARK: - Header
-
     private var header: some View {
         HStack(spacing: 8) {
             Image(systemName: "sparkles")
@@ -60,8 +53,6 @@ struct OnboardingGuideView: View {
         }
     }
 
-    // MARK: - Progress
-
     private var progressBar: some View {
         HStack(spacing: 4) {
             ForEach(OnboardingStep.allCases) { step in
@@ -72,8 +63,6 @@ struct OnboardingGuideView: View {
             }
         }
     }
-
-    // MARK: - Current Step
 
     private func stepCard(_ step: OnboardingStep) -> some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -114,7 +103,6 @@ struct OnboardingGuideView: View {
         )
     }
 
-    /// Delete/undo is one step made of two actions; show which half landed.
     private var subActionRow: some View {
         HStack(spacing: 14) {
             subActionFlag(icon: "trash", label: "已删除", done: guide.deleteActionDone)
@@ -123,7 +111,6 @@ struct OnboardingGuideView: View {
         }
     }
 
-    /// Paste queue step tracks three actions to form a complete closed loop.
     private var pasteQueueSubActionRow: some View {
         HStack(spacing: 12) {
             subActionFlag(icon: "list.number", label: "已标记", done: guide.queueEnqueueDone)
@@ -144,15 +131,11 @@ struct OnboardingGuideView: View {
         }
     }
 
-    // MARK: - Footer
-
     private var footer: some View {
         Text("按顺序完成以上操作，即可掌握全部核心功能。")
             .font(.system(size: 10.5))
             .foregroundColor(theme.popupMutedText)
     }
-
-    // MARK: - Helpers
 
     private func stepInstruction(for step: OnboardingStep) -> String {
         switch step {
@@ -169,8 +152,6 @@ struct OnboardingGuideView: View {
         }
     }
 
-    /// The hotkey hint tracks the user's recorded shortcut rather than a
-    /// hard-coded default.
     private func keyHint(for step: OnboardingStep) -> String? {
         if step == .openPopup { return HotkeyManager.shared.config.displayString }
         if step == .pasteQueue {

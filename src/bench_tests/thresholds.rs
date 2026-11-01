@@ -1,15 +1,9 @@
-// History threshold scaling benchmark — per-add DB write + in-memory cost as
-// the history grows across the standard thresholds.
-
 use crate::backend::new_entry_id;
 use crate::history::add_to_history;
 use crate::types::ClipboardEntry;
 use rusqlite::Connection;
 use super::{create_bench_table, estimate_vec_heap, format_bytes};
 
-/// Generate a text entry with realistic content (~60-80 chars) for benchmarking.
-/// Returns the entry (which derives preview/label/hash and holds no full text)
-/// plus the full body separately — the benchmark's raw DB inserts need it.
 fn bench_text(index: u64) -> (ClipboardEntry, String) {
     let text = format!(
         "benchmark-item-{:06}: The quick brown fox jumps over the lazy dog #{}",
@@ -29,9 +23,8 @@ fn bench_text(index: u64) -> (ClipboardEntry, String) {
 #[test]
 fn benchmark_thresholds() {
     let thresholds: [usize; 6] = [100, 500, 1000, 2000, 3000, 5000];
-    const STEADY_STATE_SAMPLES: usize = 50; // additional entries averaged for per-item cost
+    const STEADY_STATE_SAMPLES: usize = 50;
 
-    // ── Header ──────────────────────────────────────────────────────────
     println!();
     println!("══════════════════════════════════════════════════════════════════════════════════════");
     println!("  CopyAttach History Threshold Benchmark");
@@ -63,7 +56,6 @@ fn benchmark_thresholds() {
         let db_path = db_dir.join("history.db");
         let _ = std::fs::remove_file(&db_path);
 
-        // ── Open DB (mirrors db.rs) ─────────────────────────────────────
         let conn = Connection::open(&db_path)
             .expect("bench: failed to open temp DB");
         conn.execute_batch(
@@ -73,17 +65,14 @@ fn benchmark_thresholds() {
         .expect("bench: pragma failed");
         create_bench_table(&conn);
 
-        // ── Fill to threshold ───────────────────────────────────────────
         let mut hist = Vec::with_capacity(threshold + STEADY_STATE_SAMPLES);
         let mut db_write_total = std::time::Duration::new(0, 0);
 
-        // Track db_id for the last inserted entry so we can set it
         let mut last_db_id: i64 = 0;
 
         for i in 0..threshold {
             let (item, text) = bench_text(i as u64);
 
-            // DB write-through (mirrors monitor.rs / ffi.rs):
             let db_start = std::time::Instant::now();
             conn.execute(
                 "INSERT INTO clipboard_history (entry_type, text, timestamp, source_name, source_bundle_id)
@@ -115,7 +104,6 @@ fn benchmark_thresholds() {
 
             last_db_id = conn.last_insert_rowid();
 
-            // In-memory add (mirrors monitor.rs / ffi.rs):
             hist = add_to_history(std::mem::take(&mut hist), item);
             while hist.len() > threshold {
                 hist.pop();
@@ -123,7 +111,6 @@ fn benchmark_thresholds() {
         }
         assert_eq!(hist.len(), threshold);
 
-        // Assign db_id to the head item so it mirrors real app state
         if let Some(head) = hist.get_mut(0) {
             match head {
                 ClipboardEntry::Text { ref mut db_id, .. }
@@ -133,7 +120,6 @@ fn benchmark_thresholds() {
             }
         }
 
-        // ── Steady-state: average per-add cost ──────────────────────────
         let mut add_times = Vec::with_capacity(STEADY_STATE_SAMPLES);
         let mut db_times = Vec::with_capacity(STEADY_STATE_SAMPLES);
 
@@ -169,7 +155,6 @@ fn benchmark_thresholds() {
             .expect("bench: steady DB trim failed");
             db_times.push(db_start.elapsed());
 
-            // In-memory
             let add_start = std::time::Instant::now();
             hist = add_to_history(std::mem::take(&mut hist), item);
             while hist.len() > threshold {
@@ -180,27 +165,22 @@ fn benchmark_thresholds() {
             assert_eq!(hist.len(), threshold);
         }
 
-        // ── Snapshot clone time ─────────────────────────────────────────
         let clone_start = std::time::Instant::now();
         let _snapshot = hist.clone();
         let clone_time = clone_start.elapsed();
         drop(_snapshot);
 
-        // ── Memory estimate ─────────────────────────────────────────────
         let mem_estimate = estimate_vec_heap(&hist);
 
-        // DB file size
         let db_size = std::fs::metadata(&db_path)
             .map(|m| m.len())
             .expect("bench: metadata failed");
 
-        // Compute averages
         let avg_add = add_times.iter().sum::<std::time::Duration>()
             / STEADY_STATE_SAMPLES as u32;
         let avg_db = db_times.iter().sum::<std::time::Duration>()
             / STEADY_STATE_SAMPLES as u32;
 
-        // ── Print row ───────────────────────────────────────────────────
         println!(
             "{:<10} | {:<16} | {:<16} | {:<16} | {:<16?} | {:<16?} | {:<16?}",
             threshold,
@@ -212,7 +192,6 @@ fn benchmark_thresholds() {
             avg_db,
         );
 
-        // Cleanup
         drop(hist);
         drop(conn);
         let _ = std::fs::remove_file(&db_path);

@@ -1,36 +1,18 @@
-// Entry-ID persistence tests — stable IDs across restarts and deletion.
-
 use crate::backend::{new_entry_id, prime_entry_id};
 use crate::db::{ensure_history_table, import_favorites, insert_entry_to_db, load_favorites, load_history_from_db, persist_entry_to_db, seed_first_launch_tips, set_favorite};
 use crate::types::ClipboardEntry;
 use rusqlite::Connection;
 use super::{insert_text, make_image, make_test_image_rgba, test_db};
 
-/// The startup trim bound must come from the user's saved threshold, not a
-/// compile-time default.
-///
-/// Regression: `clipboard_init` trimmed to `DEFAULT_CLEANUP_THRESHOLD` (3000) and
-/// only *then* pushed the saved preference (e.g. 10000) in. Launching with a
-/// 10,000-row database therefore destroyed 7,000 rows on every start while the
-/// settings panel kept displaying the user's 10,000 — measured on a release build
-/// (`select count(*)` went 10000 -> 3000). The stress-test build hid it behind a
-/// hard-coded 10000 load cap, which is why nothing caught it.
-///
-/// Two things are pinned here, and they are the two halves of the fix:
-///   1. loading with the user's threshold keeps their rows (no truncation), and
-///   2. trimming to that same threshold still enforces the cap.
 #[test]
 fn test_startup_bound_honours_user_threshold_above_default() {
     use crate::backend::{DEFAULT_CLEANUP_THRESHOLD, MAX_CLEANUP_THRESHOLD};
 
-    // Compile-time invariant: the ceiling the UI offers must exceed the default,
-    // or this test (and the fix it pins) would be meaningless.
     const { assert!(MAX_CLEANUP_THRESHOLD > DEFAULT_CLEANUP_THRESHOLD) };
 
     let conn = test_db();
-    let user_threshold = 400; // above the default's spirit, below the ceiling
+    let user_threshold = 400;
     let rows_over_default = DEFAULT_CLEANUP_THRESHOLD + 50;
-    // Keep the corpus small: insert `rows_over_default` cheap text rows.
     for i in 0..rows_over_default {
         insert_text(&conn, &format!("startup-bound-{i}"), i as u64);
     }
@@ -39,9 +21,6 @@ fn test_startup_bound_honours_user_threshold_above_default() {
         .expect("count");
     assert_eq!(total as usize, rows_over_default);
 
-    // Launch with a threshold ABOVE the compile-time default: every row must
-    // load. Before the fix the load bound was the default, so this returned
-    // exactly `DEFAULT_CLEANUP_THRESHOLD` rows.
     let loaded = load_history_from_db(&conn, user_threshold.max(rows_over_default));
     assert_eq!(
         loaded.len(),
@@ -49,15 +28,12 @@ fn test_startup_bound_honours_user_threshold_above_default() {
         "startup load must be bounded by the caller's threshold, not by the compile-time default"
     );
 
-    // And trimming to that same threshold still enforces a cap.
     crate::db::trim_db_history(&conn, user_threshold).expect("trim");
     let after: i64 = conn
         .query_row("SELECT COUNT(*) FROM clipboard_history", [], |r| r.get(0))
         .expect("count");
     assert_eq!(after as usize, user_threshold, "trim must enforce the user's threshold");
 
-    // The newest rows survive (trim removes oldest first) — the user keeps the
-    // content they most likely want.
     let loaded = load_history_from_db(&conn, user_threshold);
     assert_eq!(loaded.len(), user_threshold);
     let newest = format!("startup-bound-{}", rows_over_default - 1);
@@ -73,19 +49,14 @@ fn test_first_launch_tips_seed_into_empty_db() {
     assert!(!loaded.is_empty(), "empty DB should be seeded with usage tips");
     assert!(loaded.len() >= 5, "expected several tips, got {}", loaded.len());
 
-    // Every seeded row must be attributed to CopyAttach so the list shows the
-    // app's own icon (Swift resolves source icons by bundle id).
     for e in &loaded {
         assert_eq!(e.source_name(), "CopyAttach", "tip source name");
         assert_eq!(e.source_bundle_id(), "com.example.copyattach", "tip source bundle id");
     }
 
-    // First tip (welcome) is intended to be read first → newest at top.
     assert_eq!(loaded[0].label(), "欢迎使用 CopyAttach !");
     assert!(loaded[0].label().chars().count() <= 60, "label must fit one line");
 
-    // Text rows must carry persisted preview so cold-start load never reads
-    // the `text` column.
     for e in &loaded {
         assert!(!e.preview().is_empty(), "tip must have a persisted preview");
     }
@@ -105,13 +76,11 @@ fn test_first_launch_tips_not_seeded_when_history_exists() {
 
 #[test]
 fn test_entry_id_persistence_and_restore() {
-    // Use a file-backed DB to test cross-session ID stability.
     let db_path = std::env::temp_dir().join(format!(
         "copyattach_test_eid_{}.db", std::process::id()
     ));
     let _ = std::fs::remove_file(&db_path);
 
-    // Simulate first launch: open DB, insert entries, reload and verify IDs.
     let conn = Connection::open(&db_path).expect("failed to open temp DB");
     ensure_history_table(&conn).expect("failed to create table");
     let _a = insert_text(&conn, "alpha", 100);
@@ -132,10 +101,8 @@ fn test_entry_id_persistence_and_restore() {
     assert_ne!(ids[0], ids[1], "entry IDs must be unique");
     assert_ne!(ids[1], ids[2], "entry IDs must be unique");
 
-    // Simulate restart: close conn, open fresh, reload → IDs must match.
     drop(conn);
 
-    // Reopen same DB file (simulates app restart).
     let conn = Connection::open(&db_path).expect("failed to reopen temp DB");
     ensure_history_table(&conn).expect("migration idempotent");
     let reloaded = load_history_from_db(&conn, crate::backend::DEFAULT_CLEANUP_THRESHOLD);
@@ -162,8 +129,6 @@ fn test_entry_id_stable_after_delete() {
         ClipboardEntry::Text { id, .. } | ClipboardEntry::Image { id, .. } => *id,
     }).collect();
 
-    // Delete the middle entry ("b") via its db_id.
-    // (Find db_id by matching text "b".)
     let db_id_b: i64 = {
         let mut stmt = conn.prepare(
             "SELECT id FROM clipboard_history WHERE entry_type = 0 AND text = 'b'"
@@ -180,7 +145,6 @@ fn test_entry_id_stable_after_delete() {
         ClipboardEntry::Text { id, .. } | ClipboardEntry::Image { id, .. } => *id,
     }).collect();
 
-    // "c" (index 0) and "a" (index 1) must retain their original IDs.
     assert_eq!(ids_after[0], ids_before[0], "newest entry ID stable after delete");
     assert_eq!(ids_after[1], ids_before[2], "oldest entry ID stable after delete");
     assert_eq!(after[0].label(), "c", "newest preserved");
@@ -189,23 +153,18 @@ fn test_entry_id_stable_after_delete() {
 
 #[test]
 fn test_entry_id_monotonic_after_reload() {
-    // Simulate full lifecycle: first session inserts, reloads, then inserts
-    // more. New IDs must not collide with restored IDs.
     let conn = test_db();
 
-    // First batch: 3 entries.
     let _a = insert_text(&conn, "first-batch-a", 100);
     let _b = insert_text(&conn, "first-batch-b", 200);
     let _c = insert_text(&conn, "first-batch-c", 300);
 
-    // Simulate restart: reload, then prime the counter.
     let loaded = load_history_from_db(&conn, crate::backend::DEFAULT_CLEANUP_THRESHOLD);
     let max_loaded = loaded.iter().map(|e| match e {
         ClipboardEntry::Text { id, .. } | ClipboardEntry::Image { id, .. } => *id,
     }).max().unwrap();
     prime_entry_id(max_loaded + 1);
 
-    // Insert a new entry after restart — must get a fresh ID above all loaded.
     let new_id = new_entry_id();
     assert!(new_id > max_loaded,
         "new entry_id {} must be > max loaded ID {}", new_id, max_loaded);
@@ -220,7 +179,6 @@ fn test_entry_id_monotonic_after_reload() {
     );
     insert_entry_to_db(&conn, &entry_new, Some("post-restart"), None, None).unwrap();
 
-    // Reload again — all 4 entries must have stable IDs.
     let reloaded = load_history_from_db(&conn, crate::backend::DEFAULT_CLEANUP_THRESHOLD);
     assert_eq!(reloaded.len(), 4, "4 entries total after post-restart insert");
 
@@ -228,7 +186,6 @@ fn test_entry_id_monotonic_after_reload() {
         ClipboardEntry::Text { id, .. } | ClipboardEntry::Image { id, .. } => *id,
     }).collect();
 
-    // The three original entries must retain their original IDs.
     for orig in &loaded {
         let orig_id = match orig {
             ClipboardEntry::Text { id, .. } | ClipboardEntry::Image { id, .. } => *id,
@@ -236,21 +193,10 @@ fn test_entry_id_monotonic_after_reload() {
         assert!(all_ids.contains(&orig_id),
             "original entry_id {} must survive restart", orig_id);
     }
-    // The new entry must have its assigned ID.
     assert!(all_ids.contains(&new_id),
         "post-restart entry_id {} must be present", new_id);
 }
 
-/// Automatic trimming must never evict a favorite, and favorites must stay
-/// visible beyond the row cap.
-///
-/// Regression this pins down: favorites used to live only in Swift's
-/// UserDefaults as a set of entry_ids. `trim_db_history` — the trim that runs
-/// inside every capture's write transaction — deleted the oldest rows without
-/// consulting them, and the next list publish then permanently dropped the
-/// dangling ids (`pruneFavorites`). A starred entry therefore aged out exactly
-/// like an unstarred one, and a "version update" (a restart + startup trim) was
-/// when users noticed. The durable table is now consulted by every trim path.
 #[test]
 fn test_trim_db_history_never_evicts_favorites() {
     let conn = test_db();
@@ -267,13 +213,10 @@ fn test_trim_db_history_never_evicts_favorites() {
         it.map(|r| r.unwrap()).collect()
     };
     assert_eq!(rows.len(), 6);
-    // Favorite the two OLDEST rows.
     for (entry_id, _) in &rows[0..2] {
         crate::db::set_favorite(&conn, *entry_id, true).unwrap();
     }
 
-    // Cap = 3 cleanable rows: 6 rows, 2 favorites => 4 cleanable, so exactly the
-    // oldest cleanable row (fav-trim-2) must go.
     crate::db::trim_db_history(&conn, 3).unwrap();
 
     let loaded = load_history_from_db(&conn, 3);
@@ -293,14 +236,10 @@ fn test_trim_db_history_never_evicts_favorites() {
         !loaded.iter().any(|e| e.label() == "fav-trim-2"),
         "the oldest NON-favorite must be evicted"
     );
-    // The durable favorite set is intact.
     let stored = crate::db::load_favorites(&conn).unwrap();
     assert_eq!(stored.len(), 2);
 }
 
-/// The legacy-favorite migration must only record ids that still have a row,
-/// and must be idempotent (it can run on every launch until the caller drops
-/// its UserDefaults copy).
 #[test]
 fn test_import_favorites_skips_missing_rows_and_is_idempotent() {
     let conn = test_db();
@@ -320,13 +259,10 @@ fn test_import_favorites_skips_missing_rows_and_is_idempotent() {
     assert_eq!(imported, 2, "ids with no row must be skipped");
     assert_eq!(load_favorites(&conn).unwrap().len(), 2);
 
-    // Re-running the migration adds nothing.
     assert_eq!(import_favorites(&conn, &[ids[0]]).unwrap(), 0);
     assert_eq!(load_favorites(&conn).unwrap().len(), 2);
 }
 
-/// Toggling a favorite for an entry that no longer exists must fail loudly, not
-/// leave a dangling id that could later match a re-issued one.
 #[test]
 fn test_set_favorite_rejects_missing_entry() {
     let conn = test_db();
@@ -334,12 +270,6 @@ fn test_set_favorite_rejects_missing_entry() {
     assert!(load_favorites(&conn).unwrap().is_empty());
 }
 
-/// A favorite that sits *inside* the newest N rows must not consume one of the
-/// N cleanable slots: the list is "newest N non-favorites + every favorite".
-///
-/// Live counterexample this pins: 100 non-favorites + 2 favorites, one favorite
-/// re-copied to the top -> the DB held 102 rows but the list rendered 101,
-/// because the newest-100 window contained the favorite.
 #[test]
 fn test_load_includes_all_favorites_even_when_one_is_newest() {
     let conn = test_db();
@@ -353,7 +283,6 @@ fn test_load_includes_all_favorites_even_when_one_is_newest() {
         let it = stmt.query_map([], |r| r.get::<_, i64>(0)).unwrap();
         it.flatten().map(|id| id as u64).collect()
     };
-    // Newest row and oldest row are favorites; 4 cleanable rows, cap 4.
     set_favorite(&conn, ids[5], true).unwrap();
     set_favorite(&conn, ids[0], true).unwrap();
 
@@ -365,20 +294,10 @@ fn test_load_includes_all_favorites_even_when_one_is_newest() {
     }
 }
 
-/// Guards the favorite-identity invariant: entry ids must never be re-issued
-/// for as long as the database exists — not merely within one session.
-///
-/// The failure this pins down: favorites are stored Swift-side as entry_id.
-/// Priming the counter from `MAX(entry_id)` of the LOADED rows restarts at 1
-/// once the history is empty, so after a clear + relaunch the first new
-/// captures walk through the ids the favorites still reference and come up
-/// already starred. The persisted watermark is what makes the ids monotonic
-/// across a clear.
 #[test]
 fn test_entry_id_never_reused_after_clear_and_restart() {
     let conn = test_db();
 
-    // Session 1: capture, favorite-worthy ids get issued.
     for i in 0..5 {
         insert_text(&conn, &format!("session-1-{i}"), i as u64);
     }
@@ -390,8 +309,6 @@ fn test_entry_id_never_reused_after_clear_and_restart() {
         .max()
         .expect("rows were inserted");
 
-    // Session 2: the user clears the history (the table becomes empty but the
-    // database file, and the Favorites list, survive).
     conn.execute("DELETE FROM clipboard_history", []).expect("clear");
     assert_eq!(load_history_from_db(&conn, 3000).len(), 0, "table is empty");
     assert_eq!(
@@ -400,7 +317,6 @@ fn test_entry_id_never_reused_after_clear_and_restart() {
         "the watermark must have survived the clear"
     );
 
-    // Relaunch priming, exactly as clipboard_init computes it.
     let max_loaded = load_history_from_db(&conn, 3000)
         .iter()
         .map(|e| match e {
@@ -420,8 +336,6 @@ fn test_entry_id_never_reused_after_clear_and_restart() {
 
 #[test]
 fn test_entry_id_backfill_old_rows() {
-    // Simulate an old DB that was created before the entry_id column existed.
-    // After ALTER TABLE + backfill, entry_id is set to the SQLite rowid.
     let conn = Connection::open_in_memory().expect("in-memory DB");
     conn.execute_batch(
         "CREATE TABLE clipboard_history (
@@ -440,7 +354,6 @@ fn test_entry_id_backfill_old_rows() {
             source_bundle_id TEXT NOT NULL DEFAULT ''
         );"
     ).unwrap();
-    // Insert rows WITHOUT entry_id column (old schema).
     conn.execute(
         "INSERT INTO clipboard_history (entry_type, text, timestamp)
          VALUES (0, 'legacy-a', 100)",
@@ -452,10 +365,8 @@ fn test_entry_id_backfill_old_rows() {
         [],
     ).unwrap();
 
-    // Now run the migration (add entry_id column + backfill).
     ensure_history_table(&conn).unwrap();
 
-    // Load — both rows must have non-zero entry_ids.
     let loaded = load_history_from_db(&conn, crate::backend::DEFAULT_CLEANUP_THRESHOLD);
     assert_eq!(loaded.len(), 2);
     for e in &loaded {
@@ -465,7 +376,6 @@ fn test_entry_id_backfill_old_rows() {
         assert!(eid > 0, "backfilled entry_id must be non-zero, got {}", eid);
     }
 
-    // Reload (simulate second restart) — IDs must be identical.
     let loaded2 = load_history_from_db(&conn, crate::backend::DEFAULT_CLEANUP_THRESHOLD);
     for (orig, reload) in loaded.iter().zip(loaded2.iter()) {
         let oid = match orig {
@@ -480,10 +390,6 @@ fn test_entry_id_backfill_old_rows() {
 
 #[test]
 fn test_load_skips_unbackfilled_text_rows() {
-    // A text row without persisted preview/label/hash means it was written
-    // before the metadata backfill and never got it. The cold-start load must
-    // skip it loudly (the load never reads the `text` column), not silently
-    // re-read full text — that fallback would reintroduce the cold-start cost.
     let conn = test_db();
     conn.execute(
         "INSERT INTO clipboard_history (entry_type, text, timestamp)
@@ -497,9 +403,6 @@ fn test_load_skips_unbackfilled_text_rows() {
 
 #[test]
 fn test_persist_entry_single_transaction() {
-    // The capture write-through is one transaction: insert + dedup + trim.
-    // A duplicate text capture must leave exactly one row (the newest) and
-    // the returned row id must point at it.
     let mut conn = test_db();
     let entry_a = ClipboardEntry::text_entry(new_entry_id(), "txn-dedup", 100, String::new(), String::new(), 0);
     let entry_b = ClipboardEntry::text_entry(new_entry_id(), "txn-dedup", 200, String::new(), String::new(), 0);
@@ -517,30 +420,23 @@ fn test_persist_entry_single_transaction() {
         .unwrap();
     assert_eq!(old_rows, 0, "the first capture's row must be removed by dedup");
 
-    // The surviving row carries the newest entry id (entry_b) and persisted metadata.
     let loaded = load_history_from_db(&conn, 3000);
     assert_eq!(loaded.len(), 1);
     assert_eq!(loaded[0].entry_id(), entry_b.entry_id());
     assert_eq!(loaded[0].label(), "txn-dedup");
 }
 
-/// The range-delete trim must keep exactly the newest N rows even when
-/// rowids have gaps (deletions), and must be a no-op when the table holds
-/// fewer rows than the threshold (the cutoff subquery yields NULL).
 #[test]
 fn test_trim_range_delete_semantics() {
     let conn = test_db();
     for i in 0..5 {
         insert_text(&conn, &format!("t{i}"), i as u64);
     }
-    // Create a rowid gap by deleting the middle row ("t2", id 3).
     conn.execute("DELETE FROM clipboard_history WHERE id = 3", []).unwrap();
 
-    // Under threshold: no-op.
     crate::db::trim_db_history(&conn, 10).expect("trim below threshold must succeed");
     assert_eq!(load_history_from_db(&conn, 3000).len(), 4);
 
-    // Over threshold: exactly the newest 2 survive, gaps included.
     crate::db::trim_db_history(&conn, 2).expect("trim over threshold must succeed");
     let loaded = load_history_from_db(&conn, 3000);
     assert_eq!(loaded.len(), 2);
@@ -548,9 +444,6 @@ fn test_trim_range_delete_semantics() {
     assert_eq!(loaded[1].label(), "t3");
 }
 
-/// Simulate a DB written by the 0.99.15-dev build (user_version 1 era, where
-/// text hashes were DefaultHasher values): ensure_history_table must recompute
-/// them with the stable FNV-1a algorithm and stamp user_version = 2.
 #[test]
 fn test_metadata_recompute_for_version1_default_hasher() {
     let conn = Connection::open_in_memory().unwrap();
@@ -574,7 +467,6 @@ fn test_metadata_recompute_for_version1_default_hasher() {
             label           TEXT NOT NULL DEFAULT ''
         );"
     ).unwrap();
-    // DefaultHasher-era metadata: bogus hash 12345, placeholder preview/label.
     conn.execute(
         "INSERT INTO clipboard_history (entry_type, text, timestamp, hash, preview, label)
          VALUES (0, 'stable-me', 100, 12345, 'x', 'x')",
@@ -594,13 +486,9 @@ fn test_metadata_recompute_for_version1_default_hasher() {
     assert_eq!(hash, crate::types::text_hash("stable-me"),
         "version-1 DefaultHasher value must be replaced by the stable FNV-1a hash");
 
-    // The generation stamp makes the recompute a no-op from here on.
     crate::db::ensure_history_table(&conn).unwrap();
 }
 
-/// ensure stamps the text-metadata generation (2) synchronously; image hashes
-/// migrate to generation 3 on the background thread driven by
-/// `ffi::init::spawn_image_hash_migration`.
 #[test]
 fn test_metadata_version_stamped_after_text_phase() {
     let conn = test_db();
@@ -609,9 +497,6 @@ fn test_metadata_version_stamped_after_text_phase() {
     assert_eq!(crate::db::METADATA_VERSION, 4);
 }
 
-/// A pre-migration image row carries a DefaultHasher value; the per-row
-/// migration decodes the stored PNG and replaces it with the stable FNV-1a
-/// hash — persisted value and cold-start load both agree.
 #[test]
 fn test_image_hash_migration_recomputes_stable_hash() {
     let conn = test_db();
@@ -628,7 +513,6 @@ fn test_image_hash_migration_recomputes_stable_hash() {
     insert_entry_to_db(&conn, &img, None, Some(&png), Some((&thumb.0, tw, th))).unwrap();
     let db_id = conn.last_insert_rowid();
 
-    // Simulate the pre-migration generation: an arbitrary DefaultHasher value.
     conn.execute("UPDATE clipboard_history SET hash = 12345 WHERE id = ?1", rusqlite::params![db_id]).unwrap();
 
     let new_hash = crate::db::migrate_one_image_row(&conn, db_id).unwrap();
@@ -648,8 +532,6 @@ fn test_image_hash_migration_recomputes_stable_hash() {
     }
 }
 
-/// An undecodable PNG must fail the migration loudly and leave the old hash
-/// untouched — never a silent placeholder.
 #[test]
 fn test_image_hash_migration_undecodable_row_fails_explicitly() {
     let conn = test_db();
@@ -691,24 +573,15 @@ fn test_custom_label_persistence_and_update() {
     assert_eq!(loaded.len(), 1);
     assert_eq!(loaded[0].custom_label(), "My Note");
 
-    // Update custom label
     crate::db::update_entry_custom_label(&conn, entry_id, "Updated Remark").unwrap();
     let reloaded = load_history_from_db(&conn, 3000);
     assert_eq!(reloaded[0].custom_label(), "Updated Remark");
 
-    // Clear custom label
     crate::db::update_entry_custom_label(&conn, entry_id, "").unwrap();
     let cleared = load_history_from_db(&conn, 3000);
     assert_eq!(cleared[0].custom_label(), "");
 }
 
-/// The capture path's DB invariant: re-copying the same text must keep the
-/// remark in SQLite, not just in memory.
-///
-/// `add_to_history` preserves the label on dedup and the monitor persists
-/// `hist[0]` (the merged entry), so the new row carries the old remark and the
-/// superseded row is deleted. This test pins that composition — a memory-only
-/// assertion would pass while the remark silently disappeared on restart.
 #[test]
 fn test_recapture_persists_preserved_custom_label() {
     let mut conn = test_db();
@@ -728,7 +601,6 @@ fn test_recapture_persists_preserved_custom_label() {
     persist_entry_to_db(&mut conn, &first, Some(text), None, None, 3000).unwrap();
     let first_id = first.entry_id();
 
-    // A genuine re-copy: fresh entry, no remark of its own.
     let recaptured = ClipboardEntry::Text {
         id: new_entry_id(),
         preview: text.to_string(),
@@ -757,16 +629,11 @@ fn test_recapture_persists_preserved_custom_label() {
     assert_eq!(loaded[0].entry_id(), first_id);
 }
 
-/// A row captured by an older build holds a thumbnail sized for the old
-/// 300px-longest-edge rule. The list draws flat images ~460pt wide, so that blob
-/// was upscaled ~3x in the row. This pins the re-encode to the display box, and
-/// that a second run is a no-op (idempotent — the migration may be interrupted).
 #[test]
 fn test_thumbnail_migration_reencodes_undersized_blob() {
     let conn = test_db();
     let rgba = make_test_image_rgba(4000, 100, 77);
     let png = crate::image::encode_png(4000, 100, &rgba).unwrap();
-    // The stale 300x8 blob a pre-migration capture would have stored.
     let stale = crate::image::encode_png(300, 8, &make_test_image_rgba(300, 8, 77)).unwrap();
     conn.execute(
         "INSERT INTO clipboard_history
@@ -793,14 +660,9 @@ fn test_thumbnail_migration_reencodes_undersized_blob() {
                "a blob already at the target dims must not be re-encoded");
 }
 
-/// An undecodable PNG must fail the thumbnail migration loudly and leave the row
-/// untouched — never a silent success that stamps the version and strands it.
 #[test]
 fn test_thumbnail_migration_fails_explicitly_on_undecodable_row() {
     let conn = test_db();
-    // Stale thumbnail dims (300x8) relative to the 10x10 source so the
-    // metadata precheck does not short-circuit: this fixture must reach the
-    // decode, which is the failure under test.
     conn.execute(
         "INSERT INTO clipboard_history
          (entry_type, png_data, width, height, thumb_data, thumb_width, thumb_height, hash, timestamp)
@@ -823,8 +685,6 @@ mod db_failure_classification {
     use crate::db::{classify_db_error, DbFailure};
     use rusqlite::Connection;
 
-    /// A read-only file must classify as PermanentEnvironment: retrying can
-    /// never succeed, but the database is intact.
     #[test]
     fn test_readonly_file_is_permanent_environment() {
         let dir = tempdir();
@@ -833,7 +693,6 @@ mod db_failure_classification {
             let c = Connection::open(&path).expect("create");
             crate::db::ensure_history_table(&c).expect("schema");
         }
-        // Clear outstanding WAL so the file is fully materialized before chmod.
         {
             let c = Connection::open(&path).expect("reopen");
             let _: String = c.query_row("PRAGMA journal_mode=DELETE", [], |r| r.get(0)).unwrap();
@@ -845,7 +704,6 @@ mod db_failure_classification {
 
         let err = Connection::open(&path)
             .and_then(|c| {
-                // Force a write so the read-only condition is exercised.
                 c.execute("CREATE TABLE probe (x INTEGER)", [])
             })
             .expect_err("write to a read-only file must fail");
@@ -857,8 +715,6 @@ mod db_failure_classification {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A non-database file must classify as Corrupt, which is what drives the
-    /// back-up-and-rebuild dialog.
     #[test]
     fn test_not_a_database_is_corrupt() {
         let dir = tempdir();

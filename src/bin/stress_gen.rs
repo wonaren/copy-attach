@@ -1,18 +1,3 @@
-//! CLI tool to generate stress-test data in the CopyAttach SQLite database.
-//!
-//! Usage:
-//!   cargo run --bin stress-gen --features stress-test -- [options]
-//!
-//! Options:
-//!   --count N      total entries (default: 10000)
-//!   --text-ratio R text fraction 0.0–1.0 (default: 0.6)
-//!   --seed N       deterministic seed (default: 42)
-//!   --db-path PATH override default DB path
-//!   --threshold N  cleanup threshold (default: 10000)
-//!   --dry-run      print plan and exit without writing
-//!   --report       print a detailed report after generation
-
-/// Simple arg-parser (no dependency needed).
 struct Args {
     count: usize,
     text_ratio: f64,
@@ -85,11 +70,11 @@ fn print_plan(args: &Args) {
     println!();
     println!("  Estimated DB size (rough):");
     let text_bytes =
-        per_category_text * 40     // short: 40 avg
-        + per_category_text * 640    // medium: 640 avg
-        + per_category_text * 10000  // medlong: 10k avg
-        + per_category_text * 24000  // long: 24k avg
-        + (text_count - per_category_text * 4) * 56000; // xlong: 56k avg
+        per_category_text * 40
+        + per_category_text * 640
+        + per_category_text * 10000
+        + per_category_text * 24000
+        + (text_count - per_category_text * 4) * 56000;
     println!("    Text data:  ~{}", format_bytes(text_bytes));
     println!("    Image data: ~{} (simulated)", format_bytes(image_count * 200_000));
     println!();

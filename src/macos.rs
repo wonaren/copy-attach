@@ -1,5 +1,3 @@
-//! macOS-specific pasteboard, paste simulation, and accessibility utilities.
-
 use std::ffi::c_int;
 use std::process::Command;
 use std::sync::OnceLock;
@@ -14,26 +12,20 @@ extern "C" {
     fn kill(pid: c_int, sig: c_int) -> c_int;
 }
 
-/// Check whether the app has accessibility permissions (required for Cmd+V simulation).
 pub(crate) fn check_permission() -> bool {
     let result = unsafe { AXIsProcessTrusted() };
     result != 0
 }
 
-/// Open the Accessibility privacy pane in System Settings.
 pub(crate) fn open_preferences() {
     let _ = Command::new("open")
         .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
         .spawn();
 }
 
-/// Read the first supported image representation in fixed preference order.
 pub(crate) fn pasteboard_image_data() -> Option<Vec<u8>> {
     use objc2::rc::autoreleasepool;
     autoreleasepool(|_| unsafe {
-        // If the pasteboard represents a file copy or carries a file/app icon
-        // preview (e.g. `com.apple.icns` auto-bridged by macOS to `public.tiff`),
-        // reject it: this is an icon representation, not a user image copy.
         if pasteboard_has_files() {
             return None;
         }
@@ -44,8 +36,6 @@ pub(crate) fn pasteboard_image_data() -> Option<Vec<u8>> {
             return None;
         }
         let nsstr_cls = objc2::runtime::AnyClass::get(c"NSString")?;
-        // Fixed priority order, not a size comparison: the first type present
-        // on the pasteboard wins (so PNG wins over a smaller JPEG).
         for uti in [c"public.png", c"public.tiff", c"public.jpeg",
                     c"com.compuserve.gif", c"org.webmproject.webp", c"com.microsoft.bmp"] {
             let ns_uti: *mut objc2::runtime::NSObject =
@@ -67,10 +57,6 @@ pub(crate) fn pasteboard_image_data() -> Option<Vec<u8>> {
             }
             let bytes = std::slice::from_raw_parts(ptr as *const u8, len);
             let owned = bytes.to_vec();
-            // Claim reusable-marked pages before the capture pipeline decodes them.
-            // An unclaimable buffer must not be decoded: the kernel could zero
-            // it mid-decode. Returning None means "no image representation" —
-            // the monitor then falls through to its other capture paths.
             if !crate::backend::claim_pages(owned.as_ptr(), owned.capacity()) {
                 crate::error_log!("CopyAttach: pasteboard image bytes ({len} bytes) could not be claimed — skipped");
                 return None;
@@ -81,14 +67,12 @@ pub(crate) fn pasteboard_image_data() -> Option<Vec<u8>> {
     })
 }
 
-/// Cached `NSPasteboard` class to keep the hot poll path allocation-free.
 static NSPASTEBOARD_CLASS: OnceLock<Option<&'static objc2::runtime::AnyClass>> = OnceLock::new();
 
 fn nspasteboard_class() -> Option<&'static objc2::runtime::AnyClass> {
     *NSPASTEBOARD_CLASS.get_or_init(|| objc2::runtime::AnyClass::get(c"NSPasteboard"))
 }
 
-/// Lightweight pasteboard change count; wrapped in an autorelease pool.
 pub(crate) fn pasteboard_change_count() -> Option<i64> {
     use objc2::rc::autoreleasepool;
     autoreleasepool(|_| unsafe {
@@ -102,13 +86,6 @@ pub(crate) fn pasteboard_change_count() -> Option<i64> {
     })
 }
 
-/// Check whether the pasteboard carries a sensitive-content marker.
-///
-/// Four types are matched, and only these four: the three standard
-/// nspasteboard.org opt-out markers, plus 1Password's own legacy type.
-/// Bitwarden, KeePassXC and Apple Keychain are *not* matched by name — they
-/// are covered only as far as they honour the standard `ConcealedType` /
-/// `TransientType` markers, so an app that bypasses them is captured.
 pub(crate) fn pasteboard_has_sensitive_content() -> bool {
     use objc2::rc::autoreleasepool;
     autoreleasepool(|_| unsafe {
@@ -152,12 +129,6 @@ pub(crate) fn pasteboard_has_sensitive_content() -> bool {
     })
 }
 
-/// Whether the pasteboard represents a file copy or file/app icon preview.
-///
-/// In macOS, copying files (in Finder, WPS, Office, etc.) populates the pasteboard
-/// with file URLs or filename types, and attaches `com.apple.icns` (auto-bridged
-/// to `public.tiff` for legacy compatibility). Checking `types` directly is O(1)
-/// and catches both modern and legacy file representations.
 pub(crate) fn pasteboard_has_files() -> bool {
     use objc2::rc::autoreleasepool;
     autoreleasepool(|_| unsafe {
@@ -202,7 +173,6 @@ pub(crate) fn pasteboard_has_files() -> bool {
     })
 }
 
-/// Read URL string from pasteboard when `public.url` is present and does not represent a local file.
 pub(crate) fn pasteboard_url_string() -> Option<String> {
     use objc2::rc::autoreleasepool;
     autoreleasepool(|_| unsafe {
@@ -236,7 +206,6 @@ pub(crate) fn pasteboard_url_string() -> Option<String> {
     })
 }
 
-/// Extract absolute file paths from pasteboard file URLs; skips unusable ones.
 pub(crate) fn pasteboard_file_paths() -> Vec<String> {
     use objc2::rc::autoreleasepool;
     autoreleasepool(|_| unsafe {
@@ -245,7 +214,6 @@ pub(crate) fn pasteboard_file_paths() -> Vec<String> {
             return vec![];
         }
 
-        // NSURL/NSString should always exist; don't fall back to raw file:// strings.
         let nsurl_cls = if let Some(c) = objc2::runtime::AnyClass::get(c"NSURL") { c } else {
             crate::error_log!("CopyAttach: NSURL class not found in ObjC runtime, cannot convert file URLs");
             return vec![];
@@ -292,7 +260,6 @@ pub(crate) fn pasteboard_file_paths() -> Vec<String> {
     })
 }
 
-/// Internal helper: extract raw `file://` URL strings from pasteboard items.
 unsafe fn pasteboard_file_url_strings() -> Vec<String> {
     let cls = match nspasteboard_class() {
         Some(c) => c,
@@ -349,9 +316,6 @@ unsafe fn pasteboard_file_url_strings() -> Vec<String> {
     results
 }
 
-/// Put a single file URL on the pasteboard for the Finder "copy file" convention.
-///
-/// Clears the pasteboard first; on failure the caller must treat the paste as aborted.
 pub(crate) fn set_pasteboard_file_url(path: &str) -> bool {
     use objc2::rc::autoreleasepool;
     autoreleasepool(|_| unsafe {
@@ -408,7 +372,6 @@ pub(crate) fn set_pasteboard_file_url(path: &str) -> bool {
             return false;
         }
 
-        // NSPasteboardTypeFileURL == "public.file-url"
         let type_bytes = b"public.file-url\0";
         let file_url_type: *mut objc2::runtime::NSObject =
             msg_send![nsstr_cls, stringWithUTF8String: type_bytes.as_ptr().cast::<i8>()];
@@ -426,18 +389,13 @@ pub(crate) fn set_pasteboard_file_url(path: &str) -> bool {
     })
 }
 
-/// Simulate Cmd+V key press via `CGEventPostToPid`.
-/// `pid` must be the frontmost application's process identifier (> 0).
-/// Returns `false` if pid is 0 or event creation fails.
 pub(crate) fn simulate_cmd_v(pid: i32) -> bool {
     if pid <= 0 {
         crate::error_log!("CopyAttach: simulate_cmd_v: no target PID (frontmost app unknown)");
         return false;
     }
-    // Verify target process is still alive before posting synthesized key event
     if unsafe { kill(pid, 0) != 0 } {
         let err = std::io::Error::last_os_error();
-        // ESRCH (3): No such process
         if err.raw_os_error() == Some(3) {
             crate::error_log!("CopyAttach: simulate_cmd_v: target PID {pid} is no longer running");
             return false;
@@ -468,7 +426,6 @@ mod paste_tests {
 
     static PASTEBOARD_TEST_LOCK: Mutex<()> = Mutex::new(());
 
-    /// Roundtrip file-URL pasteboard write/read, restoring the user's clipboard.
     #[test]
     fn test_set_pasteboard_file_url_roundtrip() {
         let _guard = PASTEBOARD_TEST_LOCK.lock().unwrap();

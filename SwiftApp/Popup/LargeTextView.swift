@@ -1,8 +1,6 @@
 import AppKit
 import SwiftUI
 
-// MARK: - Large Text Preview (NSTextView-backed, non-contiguous layout with adaptive typography)
-
 struct LargeTextView: NSViewRepresentable {
     let preparedText: PreparedPreviewText
     let textColor: NSColor
@@ -55,7 +53,6 @@ struct LargeTextView: NSViewRepresentable {
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         guard let textView = scrollView.documentView as? NSTextView else { return }
 
-        // Force text view width to match scroll view's clip view width.
         let clipWidth = scrollView.bounds.width
         if clipWidth > 0 {
             textView.frame.size.width = clipWidth

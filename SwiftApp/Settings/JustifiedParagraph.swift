@@ -1,26 +1,12 @@
 import AppKit
 import SwiftUI
 
-/// A paragraph that is justified on both edges with an indented first line.
-///
-/// SwiftUI's `Text` cannot produce this: `multilineTextAlignment` only offers
-/// leading/center/trailing, and converting an `NSAttributedString` carrying an
-/// `NSParagraphStyle` into an `AttributedString` silently drops the paragraph
-/// style (verified by rendering both paths side by side — the SwiftUI one comes
-/// out ragged and unindented). So this is the AppKit escape hatch: a
-/// non-editable `NSTextField` that lays the paragraph out through CoreText.
-///
-/// Text stays resolution independent — glyphs are rasterised per frame at the
-/// screen's backing scale, exactly like every native control, so Retina and
-/// scaled external displays render crisp (no bitmap is involved anywhere).
 struct JustifiedParagraph: NSViewRepresentable {
     let text: String
     let font: NSFont
     let textColor: NSColor
-    /// Width in points. Fixed on purpose: the caller owns the paragraph's column.
     let width: CGFloat
     let lineSpacing: CGFloat
-    /// First-line indent in points; defaults to two full-width characters.
     let firstLineIndent: CGFloat?
 
     init(
@@ -59,9 +45,6 @@ struct JustifiedParagraph: NSViewRepresentable {
         applyContent(to: field)
     }
 
-    /// Ask the text field itself for the wrapped height so the SwiftUI layout and
-    /// AppKit's line breaking can never disagree (a separately computed height
-    /// would drift by a fraction of a point and clip the last line).
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSTextField, context: Context) -> CGSize? {
         nsView.preferredMaxLayoutWidth = width
         let height = nsView.sizeThatFits(NSSize(width: width, height: .greatestFiniteMagnitude)).height

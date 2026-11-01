@@ -1,14 +1,3 @@
-//! `SQLite` persistence layer — write-through DB for clipboard history.
-//!
-//! Schema: `clipboard_history` with columns for both text and image entries.
-//! All mutations go through write-through: the monitor thread and the
-//! select-and-paste path each insert, deduplicate, and trim on every capture.
-//!
-//! Submodules: `schema` (connection + table/FTS index), `crud` (load/insert/
-//! dedup/trim), `migration` (legacy JSON), `search` (FTS/LIKE + text loading).
-//! The `pub(crate) use` re-exports keep the historical `crate::db::*` paths
-//! stable for the FFI layer, the monitor, and the test suite.
-
 mod schema;
 mod crud;
 mod migration;
@@ -16,9 +5,6 @@ mod search;
 pub(crate) mod backup;
 
 pub(crate) use schema::{classify_db_error, ensure_history_table, open_db, DbFailure};
-// The image-hash migration driver lives in ffi/init.rs and is compiled out of
-// stress-test builds (their DBs are freshly generated with the stable
-// algorithm), so these re-exports follow the same gate; tests keep access.
 #[cfg(any(not(feature = "stress-test"), feature = "demo-data", test))]
 pub(crate) use schema::{METADATA_VERSION, migrate_one_image_row, migrate_one_thumbnail_row};
 pub(crate) use schema::FTS_MAX_INDEXED_TEXT_LEN;
@@ -32,8 +18,6 @@ pub(crate) use crud::{
     purge_expired_deleted_rows, soft_delete_row, undo_depth,
 };
 pub(crate) use migration::migrate_from_json_to_db;
-/// Test-only entry point (temp-dir parameterized); the production lib resolves
-/// the real persist dir inside `migrate_from_json_to_db`.
 #[cfg(all(feature = "migration", test))]
 pub(crate) use migration::migrate_from_json_to_db_at;
 pub(crate) use search::{load_text_by_db_id, search_history};
