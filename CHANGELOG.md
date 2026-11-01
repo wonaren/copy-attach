@@ -7,7 +7,7 @@
 ## [0.110.0] - 2026-11-01
 ### 新增功能
 
-- 新增 Homebrew 安装方式：`brew install --cask wonaren/copyattach/copyattach`。
+- 新增 Homebrew 安装方式：`brew install --cask wonaren/tap/copyattach`。
 - **可连续撤销删除**：`⌘Z` 可连续恢复任意多次（保留 7 天），并一并恢复收藏状态；撤销容量可在设置 → 存储选择 16 MB / 64 MB / 256 MB / 不限制。
 - **撤销栈满时提醒**：删除会挤掉更早的撤销记录时先弹确认，支持「不再提醒」。
 

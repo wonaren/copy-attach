@@ -33,7 +33,7 @@ CopyAttach 是一款专为 macOS 设计的极轻量、高效、自由开源剪�
 ## 安装
 
 ```bash
-brew install --cask wonaren/copyattach/copyattach
+brew install --cask wonaren/tap/copyattach
 ```
 
 也可从 [GitHub Releases](https://github.com/wonaren/copy-attach/releases) 下载 DMG 拖入「应用程序」。仅支持 Apple Silicon（arm64）与 macOS 15.0+。

@@ -80,7 +80,7 @@ vmmap -summary $(pgrep -f 'CopyAttach.app/Contents/MacOS/CopyAttach') | head -16
 
 （历史商业版本的服务端与客户端授权体系已完整归档封存在 `archive/commercial-v0.107` 分支与 `v0.107.10-commercial-final` 标签）。
 
-Homebrew cask 维护在独立仓库 `wonaren/homebrew-copyattach`（安装命令 `brew install --cask wonaren/copyattach/copyattach`）。该仓库的定时 workflow 每 6 小时读取最新 Release，自动更新 `version` 与 `sha256`；本仓库发版后无需手动改 cask。
+Homebrew cask 维护在独立仓库 `wonaren/homebrew-tap`（安装命令 `brew install --cask wonaren/tap/copyattach`）。该仓库每小时读取最新 Release，自动更新 `version` 与 `sha256`；本仓库 Release job 发布后会 dispatch 它立即同步，所以无需手动改 cask。
 
 ## 代码库架构
 

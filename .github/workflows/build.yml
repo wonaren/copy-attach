@@ -312,7 +312,7 @@ jobs:
             --clobber
 
       # 立即触发 Homebrew tap 的 bump workflow。TAP_TOKEN 需为可写
-      # wonaren/homebrew-copyattach 的 fine-grained PAT（Contents: Read and write）。
+      # wonaren/homebrew-tap 的 fine-grained PAT（Contents: Read and write）。
       # 未配置时 tap 仍会在自己的定时任务里自动追平，此处只告警不阻断发布。
       - name: Update Homebrew tap
         env:
@@ -323,5 +323,5 @@ jobs:
             echo "::warning::TAP_TOKEN 未配置，Homebrew tap 将在定时任务中自动更新"
             exit 0
           fi
-          gh api repos/wonaren/homebrew-copyattach/dispatches -f event_type=release
+          gh api repos/wonaren/homebrew-tap/dispatches -f event_type=release
           echo "Homebrew tap update dispatched for v${VERSION}"
