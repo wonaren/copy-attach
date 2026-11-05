@@ -177,6 +177,97 @@ fn sample_catmull_row(row: &[u8], width: u32, center: f32, out: &mut [u8]) {
     }
 }
 
+const RESIZE_RING_ROWS: usize = 8;
+
+pub(crate) fn resize_rgba_into(
+    src: &[u8],
+    width: u32,
+    height: u32,
+    dst_w: u32,
+    dst_h: u32,
+    dst: &mut [u8],
+) -> Option<()> {
+    if width == 0 || height == 0 || dst_w == 0 || dst_h == 0 {
+        return None;
+    }
+    let src_len = (width as usize) * (height as usize) * 4;
+    if src.len() < src_len {
+        return None;
+    }
+    let row_bytes = (dst_w as usize) * 4;
+    let dst_len = row_bytes * (dst_h as usize);
+    if dst.len() < dst_len {
+        return None;
+    }
+    if dst_w >= width && dst_h >= height {
+        dst[..src_len].copy_from_slice(&src[..src_len]);
+        return Some(());
+    }
+
+    let scale_x = width as f32 / dst_w as f32;
+    let scale_y = height as f32 / dst_h as f32;
+
+    let mut ring = vec![0u8; row_bytes * RESIZE_RING_ROWS];
+    if !crate::backend::claim_pages(ring.as_ptr(), ring.capacity()) {
+        crate::error_log!("CopyAttach: resize ring scratch cap={} could not be claimed", ring.capacity());
+        return None;
+    }
+    let mut ring_valid = [-1i64; RESIZE_RING_ROWS];
+
+    for y in 0..dst_h as usize {
+        let center = (y as f32 + 0.5) * scale_y - 0.5;
+        let base = center.floor() as i64;
+        for i in 0..4 {
+            let cy = (base - 1 + i as i64).clamp(0, height as i64 - 1);
+            let slot = (cy as usize) % RESIZE_RING_ROWS;
+            if ring_valid[slot] != cy {
+                let src_row = &src[(cy as usize) * (width as usize) * 4..];
+                let dst_row = &mut ring[slot * row_bytes..(slot + 1) * row_bytes];
+                for x in 0..dst_w as usize {
+                    let cx = (x as f32 + 0.5) * scale_x - 0.5;
+                    sample_catmull_row(src_row, width, cx, &mut dst_row[x * 4..]);
+                }
+                ring_valid[slot] = cy;
+            }
+        }
+        let out_row = &mut dst[y * row_bytes..(y + 1) * row_bytes];
+        for x in 0..dst_w as usize {
+            let mut acc = [0f32; 4];
+            let mut wsum = 0f32;
+            for i in 0..4 {
+                let src_y = base - 1 + i as i64;
+                let wt = catmull_rom(center - src_y as f32);
+                if wt == 0.0 {
+                    continue;
+                }
+                let cy = src_y.clamp(0, height as i64 - 1);
+                let slot = (cy as usize) % RESIZE_RING_ROWS;
+                wsum += wt;
+                let p = &ring[slot * row_bytes + x * 4..];
+                acc[0] += wt * p[0] as f32;
+                acc[1] += wt * p[1] as f32;
+                acc[2] += wt * p[2] as f32;
+                acc[3] += wt * p[3] as f32;
+            }
+            let o = &mut out_row[x * 4..];
+            if wsum > 0.0 {
+                o[0] = (acc[0] / wsum).round().clamp(0.0, 255.0) as u8;
+                o[1] = (acc[1] / wsum).round().clamp(0.0, 255.0) as u8;
+                o[2] = (acc[2] / wsum).round().clamp(0.0, 255.0) as u8;
+                o[3] = (acc[3] / wsum).round().clamp(0.0, 255.0) as u8;
+            } else {
+                let cy = (center.round() as i64).clamp(0, height as i64 - 1) as usize;
+                let slot = cy % RESIZE_RING_ROWS;
+                let p = &ring[slot * row_bytes + x * 4..];
+                o.copy_from_slice(&p[..4]);
+            }
+        }
+    }
+
+    crate::backend::mark_pages_reusable(ring.as_ptr(), ring.capacity());
+    Some(())
+}
+
 pub(crate) fn resize_rgba(
     src: &[u8],
     width: u32,
@@ -194,36 +285,52 @@ pub(crate) fn resize_rgba(
     if dst_w >= width && dst_h >= height {
         return Some(src[..src_len].to_vec());
     }
-
-    let scale_x = width as f32 / dst_w as f32;
-    let scale_y = height as f32 / dst_h as f32;
-
-    let tmp_len = (dst_w as usize) * (height as usize) * 4;
-    let mut tmp = vec![0u8; tmp_len];
-    if !crate::backend::claim_pages(tmp.as_ptr(), tmp.capacity()) {
-        crate::error_log!("CopyAttach: resize horizontal scratch cap={} could not be claimed", tmp.capacity());
-        return None;
-    }
-    for y in 0..height {
-        let src_row = &src[(y as usize) * (width as usize) * 4..];
-        let tmp_row = &mut tmp[(y as usize) * (dst_w as usize) * 4..];
-        for x in 0..dst_w {
-            let center = (x as f32 + 0.5) * scale_x - 0.5;
-            sample_catmull_row(src_row, width, center, &mut tmp_row[(x as usize) * 4..]);
-        }
-    }
-
     let mut out = vec![0u8; (dst_w as usize) * (dst_h as usize) * 4];
     if !crate::backend::claim_pages(out.as_ptr(), out.capacity()) {
         crate::error_log!("CopyAttach: resize output cap={} could not be claimed", out.capacity());
         return None;
     }
+    match resize_rgba_into(src, width, height, dst_w, dst_h, &mut out) {
+        Some(()) => Some(out),
+        None => {
+            crate::backend::mark_pages_reusable(out.as_ptr(), out.capacity());
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn resize_rgba_reference(
+    src: &[u8], width: u32, height: u32, dst_w: u32, dst_h: u32,
+) -> Option<Vec<u8>> {
+    if width == 0 || height == 0 || dst_w == 0 || dst_h == 0 {
+        return None;
+    }
+    let src_len = (width as usize) * (height as usize) * 4;
+    if src.len() < src_len {
+        return None;
+    }
+    if dst_w >= width && dst_h >= height {
+        return Some(src[..src_len].to_vec());
+    }
+    let scale_x = width as f32 / dst_w as f32;
+    let scale_y = height as f32 / dst_h as f32;
     let row_bytes = (dst_w as usize) * 4;
-    for y in 0..dst_h {
+    let mut tmp = vec![0u8; row_bytes * (height as usize)];
+    for y in 0..height as usize {
+        let src_row = &src[y * (width as usize) * 4..];
+        let tmp_row = &mut tmp[y * row_bytes..(y + 1) * row_bytes];
+        for x in 0..dst_w as usize {
+            let center = (x as f32 + 0.5) * scale_x - 0.5;
+            sample_catmull_row(src_row, width, center, &mut tmp_row[x * 4..]);
+        }
+    }
+    let mut out = vec![0u8; row_bytes * (dst_h as usize)];
+    for y in 0..dst_h as usize {
         let center = (y as f32 + 0.5) * scale_y - 0.5;
         let base = center.floor() as i64;
-        let out_row = &mut out[(y as usize) * row_bytes..];
-        for x in 0..dst_w {
+        let out_row = &mut out[y * row_bytes..(y + 1) * row_bytes];
+        for x in 0..dst_w as usize {
             let mut acc = [0f32; 4];
             let mut wsum = 0f32;
             for i in 0..4 {
@@ -234,13 +341,13 @@ pub(crate) fn resize_rgba(
                 }
                 let clamped = src_y.clamp(0, height as i64 - 1) as usize;
                 wsum += wt;
-                let p = &tmp[clamped * row_bytes + (x as usize) * 4..];
+                let p = &tmp[clamped * row_bytes + x * 4..];
                 acc[0] += wt * p[0] as f32;
                 acc[1] += wt * p[1] as f32;
                 acc[2] += wt * p[2] as f32;
                 acc[3] += wt * p[3] as f32;
             }
-            let o = &mut out_row[(x as usize) * 4..];
+            let o = &mut out_row[x * 4..];
             if wsum > 0.0 {
                 o[0] = (acc[0] / wsum).round().clamp(0.0, 255.0) as u8;
                 o[1] = (acc[1] / wsum).round().clamp(0.0, 255.0) as u8;
@@ -248,12 +355,9 @@ pub(crate) fn resize_rgba(
                 o[3] = (acc[3] / wsum).round().clamp(0.0, 255.0) as u8;
             } else {
                 let cy = (center.round() as i64).clamp(0, height as i64 - 1) as usize;
-                let p = &tmp[cy * row_bytes + (x as usize) * 4..];
-                o.copy_from_slice(&p[..4]);
+                o.copy_from_slice(&tmp[cy * row_bytes + x * 4..][..4]);
             }
         }
     }
-
-    crate::backend::mark_pages_reusable(tmp.as_ptr(), tmp.capacity());
     Some(out)
 }

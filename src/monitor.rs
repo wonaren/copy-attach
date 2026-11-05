@@ -52,6 +52,8 @@ fn image_phase2_sender() -> &'static mpsc::SyncSender<ImagePhase2Job> {
 fn persist_image_phase2(job: ImagePhase2Job) {
     let ImagePhase2Job { payload, hash: item_hash, thumb_data: thumb_async,
         thumb_w, thumb_h, history, db, threshold } = job;
+    let thumb_guard = crate::backend::MarkBlobReusableOnDrop(thumb_async);
+    let thumb_async = &thumb_guard.0;
     let _existing_guard;
     let mut scratch_guard;
     let full_png = match payload {
@@ -90,7 +92,7 @@ fn persist_image_phase2(job: ImagePhase2Job) {
             }
         };
         match crate::db::persist_entry_to_db(&mut conn, &db_item, None, Some(full_png),
-                                             Some((&thumb_async, thumb_w, thumb_h)), threshold) {
+                                             Some((thumb_async, thumb_w, thumb_h)), threshold) {
             Ok(row_id) => {
                 let mut hist = history.lock().unwrap();
                 for entry in hist.iter_mut() {
@@ -121,6 +123,9 @@ fn ingest_rgba_image(
     favorites: &Arc<Mutex<HashSet<u64>>>,
 ) {
     if ignore_rules.lock().unwrap().ignores_image() {
+        if let Some(png) = raw_png {
+            crate::backend::mark_pages_reusable(png.as_ptr(), png.capacity());
+        }
         return;
     }
     let hash = image_hash(&rgba, width, height);
@@ -183,6 +188,8 @@ fn ingest_rgba_image(
         };
         image_phase2_sender().send(job)
             .expect("CopyAttach: image Phase 2 worker stopped");
+    } else if let Some(png) = raw_png {
+        crate::backend::mark_pages_reusable(png.as_ptr(), png.capacity());
     }
 }
 
@@ -283,7 +290,7 @@ pub(crate) fn clipboard_monitor(
                         None => {
                             drop(pooled);
                             image::load_from_memory(&img_bytes).map(|img| {
-                                let rgba = img.to_rgba8();
+                                let rgba = img.into_rgba8();
                                 let (w, h) = rgba.dimensions();
                                 (
                                     crate::backend::ImageDecodeBuffer::from_vec(rgba.into_raw()),

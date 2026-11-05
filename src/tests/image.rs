@@ -255,3 +255,27 @@ fn test_resize_rgba_vertical_quality() {
     assert!(bottom > top, "downscaled gradient must keep dark→bright order");
     assert_eq!(out[3], 255, "alpha must survive the vertical pass");
 }
+
+#[test]
+fn test_resize_rgba_into_matches_reference() {
+    let mut seed: u32 = 0x12345678;
+    let mut next = || {
+        seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+        (seed >> 24) as u8
+    };
+    let cases: &[(u32, u32, u32, u32)] = &[
+        (37, 23, 13, 9),
+        (40, 37, 13, 11),
+        (64, 48, 7, 5),
+        (19, 31, 11, 19),
+        (100, 90, 33, 30),
+        (5, 3, 2, 1),
+    ];
+    for &(w, h, dw, dh) in cases {
+        let src: Vec<u8> = (0..(w as usize * h as usize * 4)).map(|_| next()).collect();
+        let expected = crate::image::resize_rgba_reference(&src, w, h, dw, dh).unwrap();
+        let mut actual = vec![0u8; (dw as usize) * (dh as usize) * 4];
+        crate::image::resize_rgba_into(&src, w, h, dw, dh, &mut actual).unwrap();
+        assert_eq!(actual, expected, "resize mismatch for {w}x{h} -> {dw}x{dh}");
+    }
+}

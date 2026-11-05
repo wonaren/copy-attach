@@ -178,15 +178,13 @@ pub extern "C" fn clipboard_decode_preview_by_db_id(
                     unsafe { std::alloc::dealloc(dst, layout_for(byte_len)) };
                     return std::ptr::null_mut();
                 }
-                if (dw, dh) == (w, h) {
-                    unsafe { std::ptr::copy_nonoverlapping(pooled.as_ptr(), dst, byte_len) };
-                } else if let Some(resized) =
-                    crate::image::resize_rgba(&pooled, w, h, dw, dh)
-                {
-                    unsafe { std::ptr::copy_nonoverlapping(resized.as_ptr(), dst, byte_len) };
-                    crate::backend::mark_pages_reusable(resized.as_ptr(), resized.capacity());
-                } else {
+                let dst_slice = unsafe {
+                    std::ptr::write_bytes(dst, 0, byte_len);
+                    std::slice::from_raw_parts_mut(dst, byte_len)
+                };
+                if crate::image::resize_rgba_into(&pooled, w, h, dw, dh, dst_slice).is_none() {
                     crate::debug_log!("CopyAttach: preview resize failed for db_id={db_id}");
+                    crate::backend::mark_pages_reusable(dst, byte_len);
                     unsafe { std::alloc::dealloc(dst, layout_for(byte_len)) };
                     return std::ptr::null_mut();
                 }
@@ -197,7 +195,7 @@ pub extern "C" fn clipboard_decode_preview_by_db_id(
             drop(pooled);
             match image::load_from_memory(png) {
                 Ok(img) => {
-                    let img = img.to_rgba8();
+                    let img = img.into_rgba8();
                     let (w, h) = img.dimensions();
                     let rgba = img.into_raw();
                     let (dw, dh) = crate::image::resize_dims(w, h, max_dim);
@@ -213,13 +211,14 @@ pub extern "C" fn clipboard_decode_preview_by_db_id(
                         unsafe { std::alloc::dealloc(dst, layout_for(byte_len)) };
                         return std::ptr::null_mut();
                     }
-                    if (dw, dh) == (w, h) {
-                        unsafe { std::ptr::copy_nonoverlapping(rgba.as_ptr(), dst, byte_len) };
-                    } else if let Some(resized) = crate::image::resize_rgba(&rgba, w, h, dw, dh) {
-                        unsafe { std::ptr::copy_nonoverlapping(resized.as_ptr(), dst, byte_len) };
-                        crate::backend::mark_pages_reusable(resized.as_ptr(), resized.capacity());
-                    } else {
+                    let dst_slice = unsafe {
+                        std::ptr::write_bytes(dst, 0, byte_len);
+                        std::slice::from_raw_parts_mut(dst, byte_len)
+                    };
+                    if crate::image::resize_rgba_into(&rgba, w, h, dw, dh, dst_slice).is_none() {
                         crate::debug_log!("CopyAttach: preview resize failed for db_id={db_id}");
+                        crate::backend::mark_pages_reusable(rgba.as_ptr(), rgba.capacity());
+                        crate::backend::mark_pages_reusable(dst, byte_len);
                         unsafe { std::alloc::dealloc(dst, layout_for(byte_len)) };
                         return std::ptr::null_mut();
                     }
