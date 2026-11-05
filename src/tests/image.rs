@@ -279,3 +279,34 @@ fn test_resize_rgba_into_matches_reference() {
         assert_eq!(actual, expected, "resize mismatch for {w}x{h} -> {dw}x{dh}");
     }
 }
+
+#[test]
+fn test_streaming_hash_and_thumbnail_match_full_decode() {
+    let mut seed: u32 = 0x1234_5678;
+    let mut next = || {
+        seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+        (seed >> 24) as u8
+    };
+    let cases: &[(u32, u32)] = &[
+        (37, 23),
+        (300, 180),
+        (400, 300),
+        (1024, 768),
+        (1200, 800),
+        (1919, 201),
+        (1920, 1080),
+        (600, 3000),
+    ];
+    for &(w, h) in cases {
+        let rgba: Vec<u8> = (0..(w as usize * h as usize * 4)).map(|_| next()).collect();
+        let png = crate::image::encode_png(w, h, &rgba).unwrap();
+        let streamed = crate::image::hash_and_thumbnail_streaming(&png)
+            .unwrap_or_else(|| panic!("streaming failed for {w}x{h}"));
+        assert_eq!(streamed.width, w);
+        assert_eq!(streamed.height, h);
+        assert_eq!(streamed.hash, crate::image::image_hash(&rgba, w, h), "hash mismatch for {w}x{h}");
+        let (thumb_ref, tw, th) = crate::image::create_thumbnail_fast(w, h, &rgba).unwrap();
+        assert_eq!((streamed.thumb_w, streamed.thumb_h), (tw, th), "thumb dims for {w}x{h}");
+        assert_eq!(streamed.thumb_png, thumb_ref, "thumb bytes for {w}x{h}");
+    }
+}

@@ -299,6 +299,167 @@ pub(crate) fn resize_rgba(
     }
 }
 
+pub(crate) struct StreamedRgba8 {
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) hash: u64,
+    pub(crate) thumb_png: Vec<u8>,
+    pub(crate) thumb_w: u32,
+    pub(crate) thumb_h: u32,
+}
+
+const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+fn hash_row(hash: &mut u64, bytes: &[u8]) {
+    for &b in bytes {
+        *hash ^= u64::from(b);
+        *hash = hash.wrapping_mul(FNV_PRIME);
+    }
+}
+
+pub(crate) fn hash_and_thumbnail_streaming(png: &[u8]) -> Option<StreamedRgba8> {
+    use png::{BitDepth, ColorType, Decoder, Transformations};
+
+    let mut decoder = Decoder::new(std::io::Cursor::new(png));
+    decoder.set_transformations(Transformations::IDENTITY);
+    let mut reader = decoder.read_info().ok()?;
+    let (width, height) = {
+        let info = reader.info();
+        if info.bit_depth != BitDepth::Eight
+            || info.color_type != ColorType::Rgba
+            || info.interlaced
+            || info.width == 0
+            || info.height == 0
+        {
+            return None;
+        }
+        (info.width, info.height)
+    };
+    let line_size = (width as usize) * 4;
+    let mut row = crate::backend::MarkBlobReusableOnDrop(vec![0u8; line_size]);
+    if !crate::backend::claim_pages(row.0.as_ptr(), row.0.capacity()) {
+        crate::error_log!("CopyAttach: streaming row buffer cap={} could not be claimed", row.0.capacity());
+        return None;
+    }
+    let mut hash = FNV_OFFSET_BASIS;
+    hash_row(&mut hash, &width.to_le_bytes());
+    hash_row(&mut hash, &height.to_le_bytes());
+
+    let Some((thumb_w, thumb_h)) = thumbnail_target_dims(width, height) else {
+        let mut full = crate::backend::MarkBlobReusableOnDrop(
+            vec![0u8; line_size.checked_mul(height as usize)?],
+        );
+        if !crate::backend::claim_pages(full.0.as_ptr(), full.0.capacity()) {
+            crate::error_log!("CopyAttach: streaming full buffer cap={} could not be claimed", full.0.capacity());
+            return None;
+        }
+        for y in 0..height as usize {
+            if reader.read_row(&mut row.0).ok()?.is_none() {
+                return None;
+            }
+            hash_row(&mut hash, &row.0);
+            full.0[y * line_size..(y + 1) * line_size].copy_from_slice(&row.0);
+        }
+        let thumb_png = encode_png(width, height, &full.0)?;
+        return Some(StreamedRgba8 {
+            width,
+            height,
+            hash,
+            thumb_png,
+            thumb_w: width,
+            thumb_h: height,
+        });
+    };
+
+    let row_bytes = (thumb_w as usize) * 4;
+    let mut ring = crate::backend::MarkBlobReusableOnDrop(vec![0u8; row_bytes * RESIZE_RING_ROWS]);
+    if !crate::backend::claim_pages(ring.0.as_ptr(), ring.0.capacity()) {
+        crate::error_log!("CopyAttach: streaming ring cap={} could not be claimed", ring.0.capacity());
+        return None;
+    }
+    let mut ring_valid = [-1i64; RESIZE_RING_ROWS];
+    let mut thumb = crate::backend::MarkBlobReusableOnDrop(
+        vec![0u8; row_bytes.checked_mul(thumb_h as usize)?],
+    );
+    if !crate::backend::claim_pages(thumb.0.as_ptr(), thumb.0.capacity()) {
+        crate::error_log!("CopyAttach: streaming thumb buffer cap={} could not be claimed", thumb.0.capacity());
+        return None;
+    }
+    let scale_x = width as f32 / thumb_w as f32;
+    let scale_y = height as f32 / thumb_h as f32;
+    let mut decoded: u32 = 0;
+
+    for y in 0..thumb_h as usize {
+        let center = (y as f32 + 0.5) * scale_y - 0.5;
+        let base = center.floor() as i64;
+        let need_through = (base + 2).clamp(0, height as i64 - 1) as u32;
+        while decoded <= need_through {
+            if reader.read_row(&mut row.0).ok()?.is_none() {
+                return None;
+            }
+            hash_row(&mut hash, &row.0);
+            let slot = (decoded as usize) % RESIZE_RING_ROWS;
+            let ring_row = &mut ring.0[slot * row_bytes..(slot + 1) * row_bytes];
+            for x in 0..thumb_w as usize {
+                let cx = (x as f32 + 0.5) * scale_x - 0.5;
+                sample_catmull_row(&row.0, width, cx, &mut ring_row[x * 4..]);
+            }
+            ring_valid[slot] = decoded as i64;
+            decoded += 1;
+        }
+        let out_row = &mut thumb.0[y * row_bytes..(y + 1) * row_bytes];
+        for x in 0..thumb_w as usize {
+            let mut acc = [0f32; 4];
+            let mut wsum = 0f32;
+            for i in 0..4 {
+                let src_y = base - 1 + i as i64;
+                let wt = catmull_rom(center - src_y as f32);
+                if wt == 0.0 {
+                    continue;
+                }
+                let cy = src_y.clamp(0, height as i64 - 1);
+                let slot = (cy as usize) % RESIZE_RING_ROWS;
+                if ring_valid[slot] != cy {
+                    return None;
+                }
+                wsum += wt;
+                let p = &ring.0[slot * row_bytes + x * 4..];
+                acc[0] += wt * p[0] as f32;
+                acc[1] += wt * p[1] as f32;
+                acc[2] += wt * p[2] as f32;
+                acc[3] += wt * p[3] as f32;
+            }
+            let o = &mut out_row[x * 4..];
+            if wsum > 0.0 {
+                o[0] = (acc[0] / wsum).round().clamp(0.0, 255.0) as u8;
+                o[1] = (acc[1] / wsum).round().clamp(0.0, 255.0) as u8;
+                o[2] = (acc[2] / wsum).round().clamp(0.0, 255.0) as u8;
+                o[3] = (acc[3] / wsum).round().clamp(0.0, 255.0) as u8;
+            } else {
+                let cy = (center.round() as i64).clamp(0, height as i64 - 1) as usize;
+                let slot = cy % RESIZE_RING_ROWS;
+                if ring_valid[slot] != cy as i64 {
+                    return None;
+                }
+                let p = &ring.0[slot * row_bytes + x * 4..];
+                o.copy_from_slice(&p[..4]);
+            }
+        }
+    }
+
+    while decoded < height {
+        if reader.read_row(&mut row.0).ok()?.is_none() {
+            return None;
+        }
+        hash_row(&mut hash, &row.0);
+        decoded += 1;
+    }
+
+    let thumb_png = encode_png(thumb_w, thumb_h, &thumb.0)?;
+    Some(StreamedRgba8 { width, height, hash, thumb_png, thumb_w, thumb_h })
+}
+
 #[cfg(test)]
 pub(crate) fn resize_rgba_reference(
     src: &[u8], width: u32, height: u32, dst_w: u32, dst_h: u32,
