@@ -635,18 +635,18 @@ fn test_restoring_a_raw_history_db_skips_its_soft_deleted_rows() {
         .query_row("SELECT id FROM clipboard_history WHERE text = 'DELETED-RAW'", [], |r| r.get(0))
         .unwrap();
     crate::db::soft_delete_row(&src_conn, deleted_row).unwrap();
-    crate::db::store_undo_budget_bytes(&src_conn, 16 * 1024 * 1024).unwrap();
+    crate::db::store_undo_limit(&src_conn, 16 * 1024 * 1024).unwrap();
     drop(src_conn);
 
     let (_dst_path, mut dst_conn) = make_temp_db("raw_dst");
-    crate::db::store_undo_budget_bytes(&dst_conn, 64 * 1024 * 1024).unwrap();
+    crate::db::store_undo_limit(&dst_conn, 64 * 1024 * 1024).unwrap();
     restore_backup_overwrite(&mut dst_conn, &src_path).unwrap();
 
     let loaded = load_history_from_db(&dst_conn, 3000);
     let labels: Vec<String> = loaded.iter().map(|e| e.label()).collect();
     assert_eq!(labels, vec!["LIVE-RAW"], "soft-deleted rows in a raw DB must not be imported");
     assert_eq!(
-        crate::db::load_undo_budget_bytes(&dst_conn).unwrap(),
+        crate::db::load_undo_limit(&dst_conn).unwrap(),
         64 * 1024 * 1024,
         "restoring a backup must not overwrite the device's undo budget"
     );

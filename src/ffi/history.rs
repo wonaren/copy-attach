@@ -71,7 +71,7 @@ pub extern "C" fn clipboard_undo_eviction_preview(entry_id: u64) -> c_int {
         Ok(v) => v,
         Err(()) => return -1,
     };
-    match crate::db::pending_undo_evictions(&conn, bytes, crate::backend::undo_budget_bytes()) {
+    match crate::db::pending_undo_evictions(&conn, bytes, crate::backend::undo_limit()) {
         Ok(n) => n as c_int,
         Err(()) => -1,
     }
@@ -131,7 +131,7 @@ pub extern "C" fn clipboard_delete_by_id(entry_id: u64) -> c_int {
             Ok(id) => id,
             Err(()) => return 0,
         };
-        if crate::db::purge_expired_deleted_rows(&conn, crate::backend::undo_budget_bytes()).is_err() {
+        if crate::db::purge_expired_deleted_rows(&conn, crate::backend::undo_limit()).is_err() {
             crate::error_log!("CopyAttach: deleted-row sweep failed after delete; retried at next launch");
         }
     }
@@ -557,38 +557,37 @@ pub extern "C" fn clipboard_undo_depth() -> c_int {
 }
 
 #[no_mangle]
-pub extern "C" fn clipboard_get_undo_budget_bytes() -> i64 {
-    crate::backend::undo_budget_bytes()
+pub extern "C" fn clipboard_get_undo_limit() -> i64 {
+    crate::backend::undo_limit()
 }
 
 #[no_mangle]
-pub extern "C" fn clipboard_set_undo_budget_bytes(bytes: i64) -> c_int {
+pub extern "C" fn clipboard_set_undo_limit(limit: i64) -> c_int {
     let b = match try_backend() {
         Some(b) => b,
         None => return 0,
     };
-    let max_bytes = crate::backend::MAX_UNDO_BUDGET_MB * 1024 * 1024;
-    let clamped = if bytes <= crate::backend::UNDO_BUDGET_UNLIMITED {
-        crate::backend::UNDO_BUDGET_UNLIMITED
+    let clamped = if limit < 0 {
+        limit
     } else {
-        bytes.min(max_bytes)
+        limit.min(crate::backend::MAX_UNDO_BUDGET_MB * 1024 * 1024)
     };
     {
         let conn = match b.db.lock() {
             Ok(c) => c,
             Err(e) => {
-                crate::error_log!("CopyAttach: DB mutex poisoned setting the undo budget: {e}");
+                crate::error_log!("CopyAttach: DB mutex poisoned setting the undo limit: {e}");
                 return 0;
             }
         };
-        if crate::db::store_undo_budget_bytes(&conn, clamped).is_err() {
+        if crate::db::store_undo_limit(&conn, clamped).is_err() {
             return 0;
         }
     }
-    b.undo_budget_bytes.store(clamped, Ordering::Relaxed);
+    b.undo_limit.store(clamped, Ordering::Relaxed);
     if let Ok(conn) = b.db.lock() {
         if crate::db::purge_expired_deleted_rows(&conn, clamped).is_err() {
-            crate::error_log!("CopyAttach: sweep after undo-budget change failed; retried after the next delete");
+            crate::error_log!("CopyAttach: sweep after undo-limit change failed; retried after the next delete");
         }
     }
     1

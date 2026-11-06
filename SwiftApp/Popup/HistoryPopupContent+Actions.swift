@@ -96,7 +96,7 @@ extension HistoryPopupContent {
     }
 
     static var undoEvictionWarningDisabled: Bool {
-        get { UserDefaults.standard.bool(forKey: Self.undoEvictionWarningKey) }
+        get { UserDefaults.standard.object(forKey: Self.undoEvictionWarningKey) as? Bool ?? true }
         set { UserDefaults.standard.set(newValue, forKey: Self.undoEvictionWarningKey) }
     }
     static let undoEvictionWarningKey = "UndoEvictionWarningDisabled"

@@ -25,11 +25,13 @@ pub(crate) const POLL_INTERVAL_MS: u64 = 500;
 
 pub(crate) const UNDO_RETENTION_SECS: u64 = 7 * 24 * 60 * 60;
 
-pub(crate) const DEFAULT_UNDO_BUDGET_MB: i64 = 16;
+pub(crate) const UNDO_LIMIT_SINGLE: i64 = -1;
+
+pub(crate) const DEFAULT_UNDO_LIMIT: i64 = UNDO_LIMIT_SINGLE;
 
 pub(crate) const MAX_UNDO_BUDGET_MB: i64 = 512;
 
-pub(crate) const UNDO_BUDGET_UNLIMITED: i64 = 0;
+pub(crate) const UNDO_LIMIT_UNLIMITED: i64 = 0;
 
 pub(crate) fn undo_stamp_now() -> i64 {
     std::time::SystemTime::now()
@@ -38,10 +40,10 @@ pub(crate) fn undo_stamp_now() -> i64 {
         .unwrap_or(0)
 }
 
-pub(crate) fn undo_budget_bytes() -> i64 {
+pub(crate) fn undo_limit() -> i64 {
     match BACKEND.get() {
-        Some(b) => b.undo_budget_bytes.load(Ordering::Relaxed),
-        None => DEFAULT_UNDO_BUDGET_MB * 1024 * 1024,
+        Some(b) => b.undo_limit.load(Ordering::Relaxed),
+        None => DEFAULT_UNDO_LIMIT,
     }
 }
 
@@ -425,7 +427,7 @@ pub(crate) struct Backend {
     pub(crate) db: Arc<Mutex<Connection>>,
     pub(crate) cleanup_threshold: Arc<AtomicUsize>,
     pub(crate) ignore_rules: Arc<Mutex<IgnoreRules>>,
-    pub(crate) undo_budget_bytes: Arc<AtomicI64>,
+    pub(crate) undo_limit: Arc<AtomicI64>,
     pub(crate) last_restored_id: Arc<AtomicU64>,
     pub(crate) favorites: Arc<Mutex<HashSet<u64>>>,
 }

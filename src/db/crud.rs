@@ -439,16 +439,51 @@ pub(crate) fn newest_deleted_row(
 }
 
 pub(crate) fn undo_depth(conn: &Connection) -> Result<usize, ()> {
+    count_deleted_rows(conn, None)
+}
+
+fn count_deleted_rows(conn: &Connection, cutoff_micros: Option<i64>) -> Result<usize, ()> {
+    let floor = cutoff_micros.unwrap_or(i64::MIN);
     conn.query_row(
         "SELECT COUNT(*) FROM clipboard_deleted d
-         WHERE EXISTS (SELECT 1 FROM clipboard_history h WHERE h.id = d.row_id)",
-        [],
+         JOIN clipboard_history h ON h.id = d.row_id
+         WHERE d.deleted_at >= ?1",
+        rusqlite::params![floor],
         |row| row.get::<_, i64>(0),
     )
     .map(|n| n.max(0) as usize)
     .map_err(|e| {
         crate::error_log!("CopyAttach: failed to count undoable deletions: {e}");
     })
+}
+
+fn collect_item_evictions(conn: &Connection, cap: usize) -> Result<Vec<i64>, ()> {
+    let depth = count_deleted_rows(conn, None)?;
+    if depth <= cap {
+        return Ok(Vec::new());
+    }
+    let mut stmt = conn
+        .prepare(
+            "SELECT d.row_id FROM clipboard_deleted d
+             JOIN clipboard_history h ON h.id = d.row_id
+             ORDER BY d.deleted_at ASC, d.row_id ASC
+             LIMIT ?1",
+        )
+        .map_err(|e| {
+            crate::error_log!("CopyAttach: failed to prepare the undo item sweep: {e}");
+        })?;
+    let doomed = stmt
+        .query_map(rusqlite::params![(depth - cap) as i64], |row| {
+            row.get::<_, i64>(0)
+        })
+        .map_err(|e| {
+            crate::error_log!("CopyAttach: failed to read the undo item sweep: {e}");
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| {
+            crate::error_log!("CopyAttach: failed to collect the undo item sweep: {e}");
+        })?;
+    Ok(doomed)
 }
 
 const ROW_PAYLOAD_BYTES: &str =
@@ -518,7 +553,7 @@ fn collect_evictions(
 
 pub(crate) fn purge_expired_deleted_rows(
     conn: &Connection,
-    budget_bytes: i64,
+    limit: i64,
 ) -> Result<usize, ()> {
     let now_micros = crate::backend::undo_stamp_now();
     let cutoff_micros = now_micros - (crate::backend::UNDO_RETENTION_SECS as i64) * 1_000_000;
@@ -534,16 +569,20 @@ pub(crate) fn purge_expired_deleted_rows(
 
     let mut purged = purge_deleted_by(conn, &format!("d.deleted_at < {cutoff_micros}"))?;
 
-    if budget_bytes > crate::backend::UNDO_BUDGET_UNLIMITED {
+    if limit < 0 {
+        let cap = limit.unsigned_abs() as usize;
+        let doomed = collect_item_evictions(conn, cap)?;
+        purged += delete_payload_rows(conn, &doomed)?;
+    } else if limit > crate::backend::UNDO_LIMIT_UNLIMITED {
         let retained = retained_deleted_payload_bytes(conn, None)?;
-        if retained > budget_bytes {
-            let doomed = collect_evictions(conn, retained - budget_bytes, None)?;
+        if retained > limit {
+            let doomed = collect_evictions(conn, retained - limit, None)?;
             purged += delete_payload_rows(conn, &doomed)?;
         }
     }
 
     if purged > 0 {
-        crate::debug_log!("CopyAttach: purged {purged} deleted row(s) (age or byte budget)");
+        crate::debug_log!("CopyAttach: purged {purged} deleted row(s) (age or undo limit)");
     }
     Ok(purged)
 }
@@ -551,17 +590,22 @@ pub(crate) fn purge_expired_deleted_rows(
 pub(crate) fn pending_undo_evictions(
     conn: &Connection,
     incoming_payload_bytes: i64,
-    budget_bytes: i64,
+    limit: i64,
 ) -> Result<usize, ()> {
-    if budget_bytes <= crate::backend::UNDO_BUDGET_UNLIMITED {
-        return Ok(0);
-    }
     let cutoff_micros = crate::backend::undo_stamp_now()
         - (crate::backend::UNDO_RETENTION_SECS as i64) * 1_000_000;
+    if limit < 0 {
+        let cap = limit.unsigned_abs() as usize;
+        let depth = count_deleted_rows(conn, Some(cutoff_micros))?;
+        return Ok((depth + 1).saturating_sub(cap));
+    }
+    if limit == crate::backend::UNDO_LIMIT_UNLIMITED {
+        return Ok(0);
+    }
     let retained = retained_deleted_payload_bytes(conn, Some(cutoff_micros))?;
     let after_insert = retained.saturating_add(incoming_payload_bytes);
-    let older = collect_evictions(conn, after_insert - budget_bytes, Some(cutoff_micros))?.len();
-    let self_evicted = usize::from(incoming_payload_bytes > budget_bytes);
+    let older = collect_evictions(conn, after_insert - limit, Some(cutoff_micros))?.len();
+    let self_evicted = usize::from(incoming_payload_bytes > limit);
     Ok(older + self_evicted)
 }
 

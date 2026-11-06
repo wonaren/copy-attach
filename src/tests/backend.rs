@@ -28,9 +28,7 @@ fn ensure_test_backend() {
             db: Arc::new(Mutex::new(conn)),
             cleanup_threshold: Arc::new(AtomicUsize::new(3000)),
             ignore_rules: Arc::new(Mutex::new(IgnoreRules::default())),
-            undo_budget_bytes: Arc::new(std::sync::atomic::AtomicI64::new(
-                crate::backend::DEFAULT_UNDO_BUDGET_MB * 1024 * 1024,
-            )),
+            undo_limit: Arc::new(std::sync::atomic::AtomicI64::new(16 * 1024 * 1024)),
             last_restored_id: Arc::new(AtomicU64::new(0)),
             favorites: Arc::new(Mutex::new(HashSet::new())),
         };
@@ -168,6 +166,106 @@ fn test_soft_delete_undo_depth_is_not_capped() {
             rusqlite::params![base as i64, (base + n) as i64],
         )
         .expect("cleanup fixture rows");
+    }
+    {
+        let mut hist = b.history.lock().unwrap();
+        hist.retain(|e| !(e.entry_id() >= base && e.entry_id() < base + n));
+    }
+}
+
+#[test]
+fn test_ffi_delete_obeys_the_item_limit() {
+    let _shared = shared_state_guard();
+    ensure_test_backend();
+    let b = crate::backend::try_backend().expect("backend initialized");
+    let previous_limit = b.undo_limit.load(std::sync::atomic::Ordering::Relaxed);
+    b.undo_limit.store(
+        crate::backend::UNDO_LIMIT_SINGLE,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+
+    let base: u64 = 947_000_000;
+    let n: u64 = 3;
+    let mut db_ids: Vec<i64> = Vec::new();
+    {
+        let conn = b.db.lock().unwrap();
+        for i in 0..n {
+            conn.execute(
+                "INSERT INTO clipboard_history
+                    (entry_type, text, hash, timestamp, source_name, source_bundle_id, entry_id,
+                     preview, label)
+                 VALUES (0, ?1, ?2, 0, 'ItemLimitFFI', 'com.example.itemlimitffi', ?3, ?1, ?1)",
+                rusqlite::params![
+                    format!("item-limit-ffi-{i}"),
+                    (base + i) as i64,
+                    (base + i) as i64,
+                ],
+            )
+            .expect("insert item-limit fixture row");
+            db_ids.push(conn.last_insert_rowid());
+        }
+    }
+    {
+        let mut hist = b.history.lock().unwrap();
+        for (i, db_id) in db_ids.iter().enumerate() {
+            hist.push(ClipboardEntry::Text {
+                id: base + i as u64,
+                preview: format!("item-limit-ffi-{i}"),
+                label: format!("item-limit-ffi-{i}"),
+                custom_label: String::new(),
+                text_hash: base + i as u64,
+                timestamp: (i + 1) as u64,
+                source_name: "ItemLimitFFI".to_string(),
+                source_bundle_id: "com.example.itemlimitffi".to_string(),
+                db_id: *db_id,
+            });
+        }
+    }
+
+    for i in 0..n {
+        let depth_before = crate::ffi::clipboard_undo_depth();
+        assert_eq!(
+            crate::ffi::clipboard_undo_eviction_preview(base + i),
+            depth_before,
+            "delete {i} must report every retained undo step as evicted"
+        );
+        assert_eq!(
+            clipboard_delete_by_id(base + i),
+            1,
+            "deleting fixture entry {i} must succeed"
+        );
+        assert_eq!(
+            crate::ffi::clipboard_undo_depth(),
+            1,
+            "the one-item limit must keep the depth at 1 after delete {i}"
+        );
+    }
+
+    assert_eq!(clipboard_undo_delete(), 1, "the newest deletion must undo");
+    assert_eq!(
+        b.last_restored_id.load(std::sync::atomic::Ordering::SeqCst),
+        base + 2,
+        "undo must restore the newest deletion"
+    );
+    assert_eq!(
+        crate::ffi::clipboard_undo_depth(),
+        0,
+        "the single retained undo step was consumed"
+    );
+
+    b.undo_limit.store(previous_limit, std::sync::atomic::Ordering::Relaxed);
+    {
+        let conn = b.db.lock().unwrap();
+        conn.execute(
+            "DELETE FROM clipboard_history WHERE entry_id >= ?1 AND entry_id < ?2",
+            rusqlite::params![base as i64, (base + n) as i64],
+        )
+        .expect("cleanup fixture rows");
+        conn.execute(
+            "DELETE FROM clipboard_deleted WHERE entry_id >= ?1 AND entry_id < ?2",
+            rusqlite::params![base as i64, (base + n) as i64],
+        )
+        .expect("cleanup undo fixture rows");
     }
     {
         let mut hist = b.history.lock().unwrap();
@@ -553,7 +651,7 @@ fn test_deleted_rows_are_swept_by_age_and_byte_budget() {
     }
     let purged = {
         let conn = b.db.lock().unwrap();
-        crate::db::purge_expired_deleted_rows(&conn, crate::backend::undo_budget_bytes())
+        crate::db::purge_expired_deleted_rows(&conn, crate::backend::undo_limit())
             .expect("age sweep must succeed")
     };
     let survivors: i64 = {
@@ -595,7 +693,7 @@ fn test_deleted_rows_are_swept_by_age_and_byte_budget() {
     }
     let budget_purged = {
         let conn = b.db.lock().unwrap();
-        crate::db::purge_expired_deleted_rows(&conn, crate::backend::undo_budget_bytes())
+        crate::db::purge_expired_deleted_rows(&conn, crate::backend::undo_limit())
             .expect("byte sweep must succeed")
     };
     let remaining_bytes: i64 = {
@@ -626,8 +724,89 @@ fn test_deleted_rows_are_swept_by_age_and_byte_budget() {
     assert_eq!(survivors, 1, "the row inside the retention window must survive");
     assert!(budget_purged >= 1, "the byte budget must shed the oldest deletion");
     assert!(
-        remaining_bytes <= crate::backend::undo_budget_bytes(),
+        remaining_bytes <= crate::backend::undo_limit(),
         "retained deleted payload must fit the budget (left {remaining_bytes} bytes)"
+    );
+}
+
+#[test]
+fn test_undo_item_limit_keeps_only_the_newest_deletion() {
+    let _shared = shared_state_guard();
+    ensure_test_backend();
+    let b = crate::backend::try_backend().expect("backend initialized");
+
+    let base: u64 = 946_000_000;
+    let baseline = {
+        let conn = b.db.lock().unwrap();
+        crate::db::undo_depth(&conn).unwrap()
+    };
+    {
+        let conn = b.db.lock().unwrap();
+        for i in 0..3u64 {
+            conn.execute(
+                "INSERT INTO clipboard_history
+                    (entry_type, text, hash, timestamp, source_name, source_bundle_id, entry_id,
+                     preview, label)
+                 VALUES (0, ?1, ?2, 0, 'ItemLimit', 'com.example.itemlimit', ?3, ?1, ?1)",
+                rusqlite::params![
+                    format!("item-limit-{i}"),
+                    (base + i) as i64,
+                    (base + i) as i64,
+                ],
+            )
+            .unwrap();
+            crate::db::soft_delete_row(&conn, conn.last_insert_rowid()).unwrap();
+        }
+    }
+
+    let (preview, purged) = {
+        let conn = b.db.lock().unwrap();
+        (
+            crate::db::pending_undo_evictions(&conn, 0, crate::backend::UNDO_LIMIT_SINGLE).unwrap(),
+            crate::db::purge_expired_deleted_rows(&conn, crate::backend::UNDO_LIMIT_SINGLE).unwrap(),
+        )
+    };
+    let (depth, surviving_entry) = {
+        let conn = b.db.lock().unwrap();
+        (
+            crate::db::undo_depth(&conn).unwrap(),
+            conn.query_row(
+                "SELECT d.entry_id FROM clipboard_deleted d
+                 JOIN clipboard_history h ON h.id = d.row_id
+                 WHERE h.entry_id >= ?1 AND h.entry_id < ?2",
+                rusqlite::params![base as i64, (base + 3) as i64],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap(),
+        )
+    };
+
+    {
+        let conn = b.db.lock().unwrap();
+        let _ = conn.execute(
+            "DELETE FROM clipboard_history WHERE entry_id >= ?1 AND entry_id < ?2",
+            rusqlite::params![base as i64, (base + 3) as i64],
+        );
+        let _ = conn.execute(
+            "DELETE FROM clipboard_deleted WHERE entry_id >= ?1 AND entry_id < ?2",
+            rusqlite::params![base as i64, (base + 3) as i64],
+        );
+    }
+
+    assert_eq!(
+        preview,
+        baseline + 3,
+        "every older deletion must be reported as evicted"
+    );
+    assert!(
+        purged >= baseline + 2,
+        "the item sweep must drop all but the newest deletion (purged {purged})"
+    );
+    assert_eq!(depth, 1, "a one-item limit keeps exactly one undo step");
+    assert_eq!(
+        surviving_entry,
+        (base + 2) as i64,
+        "the newest deletion must survive the item sweep"
     );
 }
 

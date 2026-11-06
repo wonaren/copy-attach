@@ -24,9 +24,9 @@ struct InlineSettingsView: View {
     @State var pendingThreshold: Int? = nil
     @State var thresholdBeforeEdit: Double = 3000
     @State var undoBudgetChoiceCache: UndoBudgetChoice = UndoBudgetChoice.nearest(
-        to: ClipboardBackend.shared.undoBudgetBytes()
+        to: ClipboardBackend.shared.undoLimit()
     )
-    @AppStorage(HistoryPopupContent.undoEvictionWarningKey) var undoEvictionWarningDisabled = false
+    @AppStorage(HistoryPopupContent.undoEvictionWarningKey) var undoEvictionWarningDisabled = true
     @State var continuousDrag = HistoryPopupWindow.continuousDragEnabled
     @State var richTextDragApps = ClipboardBackend.richTextDragAppBundleIDs
     @State var isDraggingOverRichTextCard = false

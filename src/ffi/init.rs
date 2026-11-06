@@ -180,15 +180,15 @@ fn clipboard_init_inner(threshold: Option<c_int>, legacy_favorites: &[u64]) -> c
         }
     }
 
-    let undo_budget = match crate::db::load_undo_budget_bytes(&conn) {
+    let undo_limit = match crate::db::load_undo_limit(&conn) {
         Ok(v) => v,
         Err(()) => {
-            crate::error_log!("CopyAttach: undo budget unreadable; init retryable instead of guessing");
+            crate::error_log!("CopyAttach: undo limit unreadable; init retryable instead of guessing");
             return INIT_RETRYABLE;
         }
     };
 
-    if crate::db::purge_expired_deleted_rows(&conn, undo_budget).is_err() {
+    if crate::db::purge_expired_deleted_rows(&conn, undo_limit).is_err() {
         crate::error_log!("CopyAttach: startup deleted-row sweep failed; retried after the next delete");
     }
 
@@ -198,7 +198,7 @@ fn clipboard_init_inner(threshold: Option<c_int>, legacy_favorites: &[u64]) -> c
     let pasteboard_event_lock = Arc::new(Mutex::new(()));
     let pending_self_write = Arc::new(Mutex::new(None));
     let db = Arc::new(Mutex::new(conn));
-    let undo_budget_bytes = Arc::new(AtomicI64::new(undo_budget));
+    let undo_limit = Arc::new(AtomicI64::new(undo_limit));
     let cleanup_threshold = Arc::new(AtomicUsize::new(startup_threshold));
     let ignore_rules = Arc::new(Mutex::new(IgnoreRules::default()));
     let last_restored_id = Arc::new(AtomicU64::new(0));
@@ -214,7 +214,7 @@ fn clipboard_init_inner(threshold: Option<c_int>, legacy_favorites: &[u64]) -> c
         db: Arc::clone(&db),
         cleanup_threshold: Arc::clone(&cleanup_threshold),
         ignore_rules: Arc::clone(&ignore_rules),
-        undo_budget_bytes: Arc::clone(&undo_budget_bytes),
+        undo_limit: Arc::clone(&undo_limit),
         last_restored_id: Arc::clone(&last_restored_id),
         favorites: Arc::clone(&favorites),
     };

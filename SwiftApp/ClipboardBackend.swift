@@ -719,13 +719,13 @@ class ClipboardBackend {
         return n < 0 ? nil : n
     }
 
-    func undoBudgetBytes() -> Int64 {
-        clipboard_get_undo_budget_bytes()
+    func undoLimit() -> Int64 {
+        clipboard_get_undo_limit()
     }
 
     @discardableResult
-    func setUndoBudgetBytes(_ bytes: Int64) -> Bool {
-        clipboard_set_undo_budget_bytes(bytes) != 0
+    func setUndoLimit(_ limit: Int64) -> Bool {
+        clipboard_set_undo_limit(limit) != 0
     }
 
     func checkPermission() -> Bool {

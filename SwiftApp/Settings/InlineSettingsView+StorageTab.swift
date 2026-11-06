@@ -4,12 +4,13 @@ import UniformTypeIdentifiers
 
 extension InlineSettingsView {
     enum UndoBudgetChoice: CaseIterable, Identifiable {
-        case small, medium, large, unlimited
+        case single, small, medium, large, unlimited
 
         var id: Self { self }
 
-        var bytes: Int64 {
+        var limit: Int64 {
             switch self {
+            case .single: return -1
             case .small: return 16 * 1024 * 1024
             case .medium: return 64 * 1024 * 1024
             case .large: return 256 * 1024 * 1024
@@ -19,6 +20,7 @@ extension InlineSettingsView {
 
         var title: String {
             switch self {
+            case .single: return "1 条"
             case .small: return "16 MB"
             case .medium: return "64 MB"
             case .large: return "256 MB"
@@ -26,18 +28,20 @@ extension InlineSettingsView {
             }
         }
 
-        static func nearest(to bytes: Int64) -> UndoBudgetChoice {
-            if bytes <= 0 { return .unlimited }
-            return allCases.min(by: { abs($0.bytes - bytes) < abs($1.bytes - bytes) }) ?? .small
+        static func nearest(to limit: Int64) -> UndoBudgetChoice {
+            if limit < 0 { return .single }
+            if limit == 0 { return .unlimited }
+            let byteChoices = allCases.filter { $0.limit > 0 }
+            return byteChoices.min(by: { abs($0.limit - limit) < abs($1.limit - limit) }) ?? .small
         }
     }
 
     var undoBudgetChoice: UndoBudgetChoice {
         get { undoBudgetChoiceCache }
         nonmutating set {
-            guard backend.setUndoBudgetBytes(newValue.bytes) else {
-                errorLog("undoBudget: backend rejected \(newValue.bytes) bytes — re-reading the stored budget")
-                undoBudgetChoiceCache = UndoBudgetChoice.nearest(to: backend.undoBudgetBytes())
+            guard backend.setUndoLimit(newValue.limit) else {
+                errorLog("undoLimit: backend rejected \(newValue.limit) — re-reading the stored limit")
+                undoBudgetChoiceCache = UndoBudgetChoice.nearest(to: backend.undoLimit())
                 return
             }
             undoBudgetChoiceCache = newValue
@@ -175,7 +179,7 @@ extension InlineSettingsView {
             VStack(alignment: .leading, spacing: 10) {
                 cardTitle(icon: "arrow.uturn.backward.circle", text: "撤销栈大小")
                 HStack(spacing: 10) {
-                    Picker("保留空间", selection: Binding(
+                    Picker("保留上限", selection: Binding(
                         get: { undoBudgetChoice },
                         set: { undoBudgetChoice = $0 }
                     )) {
@@ -186,7 +190,7 @@ extension InlineSettingsView {
                     .labelsHidden()
                     .pickerStyle(.menu)
                     .fixedSize()
-                    Text("删除后保留7天，溢出淘汰最早记录")
+                    Text("删除后保留 7 天，超限淘汰最早记录")
                         .font(.system(size: 11))
                         .foregroundColor(theme.secondaryText)
                         .fixedSize(horizontal: false, vertical: true)

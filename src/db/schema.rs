@@ -199,34 +199,32 @@ pub(crate) fn ensure_history_table(conn: &Connection) -> Result<(), rusqlite::Er
 
 pub(crate) const ENTRY_ID_WATERMARK_KEY: &str = "entry_id_watermark";
 
-pub(crate) const UNDO_BUDGET_KEY: &str = "undo_budget_bytes";
+pub(crate) const UNDO_LIMIT_KEY: &str = "undo_budget_bytes";
 
-pub(crate) fn load_undo_budget_bytes(conn: &Connection) -> Result<i64, ()> {
+pub(crate) fn load_undo_limit(conn: &Connection) -> Result<i64, ()> {
     match conn.query_row(
         "SELECT value FROM clipboard_meta WHERE key = ?1",
-        rusqlite::params![UNDO_BUDGET_KEY],
+        rusqlite::params![UNDO_LIMIT_KEY],
         |row| row.get::<_, i64>(0),
     ) {
-        Ok(v) => Ok(v.max(0)),
-        Err(rusqlite::Error::QueryReturnedNoRows) => {
-            Ok(crate::backend::DEFAULT_UNDO_BUDGET_MB * 1024 * 1024)
-        }
+        Ok(v) => Ok(v),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(crate::backend::DEFAULT_UNDO_LIMIT),
         Err(e) => {
-            crate::error_log!("CopyAttach: failed to read the undo budget: {e}");
+            crate::error_log!("CopyAttach: failed to read the undo limit: {e}");
             Err(())
         }
     }
 }
 
-pub(crate) fn store_undo_budget_bytes(conn: &Connection, bytes: i64) -> Result<(), ()> {
+pub(crate) fn store_undo_limit(conn: &Connection, limit: i64) -> Result<(), ()> {
     conn.execute(
         "INSERT INTO clipboard_meta (key, value) VALUES (?1, ?2)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        rusqlite::params![UNDO_BUDGET_KEY, bytes.max(0)],
+        rusqlite::params![UNDO_LIMIT_KEY, limit],
     )
     .map(|_| ())
     .map_err(|e| {
-        crate::error_log!("CopyAttach: failed to record the undo budget {bytes}: {e}");
+        crate::error_log!("CopyAttach: failed to record the undo limit {limit}: {e}");
     })
 }
 
