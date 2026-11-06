@@ -391,11 +391,6 @@ pub(crate) fn clipboard_monitor(
             continue;
         }
 
-        if macos::pasteboard_has_files() {
-            crate::debug_log!("CopyAttach: ignored file/icon clipboard content");
-            continue;
-        }
-
         let image_allowed = !ignore_rules.lock().unwrap().ignores_image();
         let mut captured = false;
 
@@ -417,6 +412,10 @@ pub(crate) fn clipboard_monitor(
         }
 
         if !captured {
+            if macos::pasteboard_has_files() {
+                crate::debug_log!("CopyAttach: ignored file/icon clipboard content");
+                continue;
+            }
             let text_opt = cb.get_text().ok().or_else(macos::pasteboard_url_string);
             if let Some(raw_text) = text_opt {
                 let text_guard = crate::backend::MarkStringReusableOnDrop(raw_text);

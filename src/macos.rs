@@ -26,7 +26,7 @@ pub(crate) fn open_preferences() {
 pub(crate) fn pasteboard_image_data() -> Option<Vec<u8>> {
     use objc2::rc::autoreleasepool;
     autoreleasepool(|_| unsafe {
-        if pasteboard_has_files() {
+        if pasteboard_contains_type(c"com.apple.icns") || pasteboard_contains_type(c"com.apple.finder.noderef") {
             return None;
         }
 
@@ -126,6 +126,28 @@ pub(crate) fn pasteboard_has_sensitive_content() -> bool {
             }
         }
         false
+    })
+}
+
+fn pasteboard_contains_type(uti: &core::ffi::CStr) -> bool {
+    use objc2::rc::autoreleasepool;
+    autoreleasepool(|_| unsafe {
+        let Some(cls) = nspasteboard_class() else { return false };
+        let pasteboard: *mut objc2::runtime::NSObject = msg_send![cls, generalPasteboard];
+        if pasteboard.is_null() {
+            return false;
+        }
+        let types: *mut objc2::runtime::NSObject = msg_send![pasteboard, types];
+        if types.is_null() {
+            return false;
+        }
+        let Some(nsstr_cls) = objc2::runtime::AnyClass::get(c"NSString") else { return false };
+        let ns_uti: *mut objc2::runtime::NSObject =
+            msg_send![nsstr_cls, stringWithUTF8String: uti.as_ptr()];
+        if ns_uti.is_null() {
+            return false;
+        }
+        msg_send![types, containsObject: ns_uti]
     })
 }
 
@@ -464,6 +486,47 @@ mod paste_tests {
 
         assert!(pasteboard_has_files(), "pasteboard_has_files must detect file URL");
         assert!(pasteboard_image_data().is_none(), "pasteboard_image_data must reject file URL pasteboard");
+
+        if let Some(img) = saved_image {
+            cb.set_image(img).unwrap();
+        } else if let Some(text) = saved_text {
+            cb.set_text(text).unwrap();
+        }
+    }
+
+    #[test]
+    fn test_pasteboard_image_data_accepts_png_alongside_file_url() {
+        use objc2::rc::autoreleasepool;
+        let _guard = PASTEBOARD_TEST_LOCK.lock().unwrap();
+        let mut cb = Clipboard::new().unwrap();
+        let saved_text = cb.get_text().ok();
+        let saved_image = cb.get_image().ok();
+
+        let png = crate::image::encode_png(1, 1, &[255, 0, 0, 255]).unwrap();
+        autoreleasepool(|_| unsafe {
+            let cls = nspasteboard_class().unwrap();
+            let pb: *mut objc2::runtime::NSObject = msg_send![cls, generalPasteboard];
+            let _: isize = msg_send![pb, clearContents];
+            let nsstr_cls = objc2::runtime::AnyClass::get(c"NSString").unwrap();
+            let png_type: *mut objc2::runtime::NSObject =
+                msg_send![nsstr_cls, stringWithUTF8String: c"public.png".as_ptr()];
+            let nsdata_cls = objc2::runtime::AnyClass::get(c"NSData").unwrap();
+            let data: *mut objc2::runtime::NSObject =
+                msg_send![nsdata_cls, dataWithBytes: png.as_ptr().cast::<core::ffi::c_void>(), length: png.len()];
+            let _: bool = msg_send![pb, setData: data, forType: png_type];
+            let file_type: *mut objc2::runtime::NSObject =
+                msg_send![nsstr_cls, stringWithUTF8String: c"public.file-url".as_ptr()];
+            let file_val: *mut objc2::runtime::NSObject =
+                msg_send![nsstr_cls, stringWithUTF8String: c"file:///tmp/copyattach-cleanshot.png".as_ptr()];
+            let _: bool = msg_send![pb, setString: file_val, forType: file_type];
+        });
+
+        assert!(pasteboard_has_files(), "pasteboard_has_files must still detect the file URL");
+        assert_eq!(
+            pasteboard_image_data().as_deref(),
+            Some(png.as_slice()),
+            "an image representation must be captured even when a file URL is present"
+        );
 
         if let Some(img) = saved_image {
             cb.set_image(img).unwrap();
