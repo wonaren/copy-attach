@@ -12,7 +12,7 @@ struct RowThumbnailBox: Sendable, Equatable {
     static func current(scale: CGFloat) -> RowThumbnailBox {
         let s = max(scale, 1)
         return RowThumbnailBox(widthPx: Int((460 * s).rounded()),
-                               heightPx: Int((100 * s).rounded()))
+                               heightPx: Int((46 * s).rounded()))
     }
 
     func makeThumbnail(from source: CGImageSource) -> CGImage? {

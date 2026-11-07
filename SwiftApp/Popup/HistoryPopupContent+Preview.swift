@@ -31,6 +31,7 @@ extension HistoryPopupContent {
     func openPreview(item: ClipboardItem) {
         let perfPreview = PerfSpan.start("swift", "preview.open")
         guard let popup = popupWindow else { return }
+        closeHoverPreview()
         let popupCenter = NSPoint(x: popup.frame.midX, y: popup.frame.midY)
         guard let previewItem = fullTextItem(item) else { return }
         let preview = PreviewWindow(item: previewItem, centerAt: popupCenter)
@@ -46,11 +47,20 @@ extension HistoryPopupContent {
     }
 
     func closePreview() {
-        guard showPreview else { return }
-        showPreview = false
-        popupWindow?.previewPanel?.fadeOutAndClose()
-        popupWindow?.previewPanel = nil
-        OnboardingGuide.shared.refreshSpotlight()
+        var changed = false
+        if showPreview {
+            showPreview = false
+            popupWindow?.previewPanel?.fadeOutAndClose()
+            popupWindow?.previewPanel = nil
+            changed = true
+        }
+        if popupWindow?.hoverPreviewPanel != nil {
+            closeHoverPreview()
+            changed = true
+        }
+        if changed {
+            OnboardingGuide.shared.refreshSpotlight()
+        }
     }
 
     func updatePreviewContent(item: ClipboardItem) {
@@ -62,7 +72,7 @@ extension HistoryPopupContent {
         preview.updateContent(item: previewItem)
     }
 
-    private func fullTextItem(_ item: ClipboardItem) -> ClipboardItem? {
+    func fullTextItem(_ item: ClipboardItem) -> ClipboardItem? {
         switch item {
         case .text(let entryId, let timestamp, let customLabel, let label, let sourceName, let sourceBundleId, _, let displayPreview):
             let perfText = PerfSpan.start("swift", "preview.load_full_text")

@@ -28,7 +28,7 @@
 
 Phase 1 同步 hash + 缩略图（fit 进显示框 920×200px = 460×100pt @2×）→ 更新内存。Phase 2 异步完整 PNG 编码 → DB write-through → 更新 db_id。
 
-- **缩略图尺寸 = 行显示框（0.105.1 修复扁长图模糊）**：旧规则是「最长边压到 300、短边托底 max_dim/5、长边再 cap 900」，但 Swift 显示端又无条件按最长边 160px 重采样，把托底彻底抹掉。扁图（如 3000×100）被解成 160×5 后按 ~460pt 行宽绘制，放大 ~5.75× ——这就是「越扁越糊」。现改为两端共用同一**矩形框** `THUMB_BOX_W×THUMB_BOX_H`(920×200)：Rust `thumbnail_target_dims` 按框做等比 fit 生成存储 blob，Swift `RowThumbnailBox` 按当前 screen scale 计算框并把 fit 换算成 ImageIO 的唯一 long-edge 参数（`bound(for:)`）。**轴是宽/高，不是长/短边**：按长/短边匹配会让竖图被 920 那一侧兜底而纵向溢出（实测 1362×1774 → 200×260 超出 200 高）。实测（真库副本 137 行）：3000×100 由放大 5.75× → 1.00×，1920×1080 由 2.22× → 1.00×。存储端常量与 Swift 端必须同步修改。
+- **缩略图尺寸 = 行显示框（0.105.1 修复扁长图模糊）**：旧规则是「最长边压到 300、短边托底 max_dim/5、长边再 cap 900」，但 Swift 显示端又无条件按最长边 160px 重采样，把托底彻底抹掉。扁图（如 3000×100）被解成 160×5 后按 ~460pt 行宽绘制，放大 ~5.75× ——这就是「越扁越糊」。现改为两端共用同一**矩形框** `THUMB_BOX_W×THUMB_BOX_H`(920×200)：Rust `thumbnail_target_dims` 按框做等比 fit 生成存储 blob，Swift `RowThumbnailBox` 按当前 screen scale 计算框并把 fit 换算成 ImageIO 的唯一 long-edge 参数（`bound(for:)`）。**轴是宽/高，不是长/短边**：按长/短边匹配会让竖图被 920 那一侧兜底而纵向溢出（实测 1362×1774 → 200×260 超出 200 高）。实测（真库副本 137 行）：3000×100 由放大 5.75× → 1.00×，1920×1080 由 2.22× → 1.00×。存储端常量与 Swift 端必须同步修改。**0.110.6 起**行内显示框随图片行收紧为 460×46pt（Swift `RowThumbnailBox` 解码上界 920×92px @2×）；存储 blob 仍是 920×200px，仅作为上界、无需迁移。悬停气泡另走 `previewImageAsync` 的 800px 预算，与行缩略图缓存相互独立。
 
 - **缩略图迁移的内存纪律（0.105.1，踩坑记录）**：user_version 3→4 会把历史缩略图按新显示框重编码。首版实现有三个内存错误，均实测定位（真库副本 137 行，release，`/usr/bin/time -l` 峰值 RSS）：
   1. 用普通 `decode_png`（`load_from_memory` + `to_rgba8` 拷贝）解码全分辨率 PNG，绕过了本仓库对大缓冲的 madvise 契约（claim / mark reusable / 池化）——峰值 **323MB**，而该 pass 为 no-op 时仅 19MB。
@@ -117,6 +117,8 @@ Phase 1 同步 hash + 缩略图（fit 进显示框 920×200px = 460×100pt @2×�
 - **派发目标不能用 `source_app.pid`**：那是唤起弹窗前的应用，用户可能拖到另一个应用。`clipboard_send_paste(pid)` 本就接受任意 pid，批量路径把落点应用的 pid 显式传下去，**FFI 零改动**。
 
 ## 弹窗 UI
+
+- **文本悬停气泡（0.110.6）**：mini 文本直接渲染快照里的 `preview`（≤256 标量），不读 DB；点开大预览时才 `fullTextItem` 读一次全文（与 Space 同一条路径）。mini 高度用 `NSString.boundingRect` 在 12pt 下测量后 cap 到 6 行，宽度固定 320pt。大预览的 `NSTextView` 子类 `PreviewTextView` 只在 `onTap` 非空（气泡路径）时 `isSelectable=false` 并在 mouseUp 关闭；键盘 Space 打开的预览 `onTap == nil`，保持原有可选词行为，避免回归。
 
 - **开启（对齐 Spotlight）**：窗口 alpha 淡入 0.2s easeOut，`show()` 在 `orderFrontRegardless()` 后同步执行——刻意不放进 `DispatchQueue.main.async`（async 实测排在 SwiftUI 首帧渲染之后，启动死区 ~40-90ms）；内容侧 `scaleEffect` 1.10→1.0，`spring(response: 0.2, dampingFraction: 0.85)`。**淡入看门狗**：若窗口首帧事务未提交时动画被静默丢弃，弹窗会以 alpha 0 常驻屏幕（可稳定复现）——`show()` 在 `fadeInDuration + 0.1s` 后校验 `isVisible && closeGuaranteeTimer == nil && alphaValue < 0.5`，命中则 snap 到可见；焦点延迟 `openDuration + 0.05`。
 - **关闭**：普通失焦/点击外部走 `closeWithAnimation()`（popup 0.12s fade 与 preview 0.1s fade 独立并行，另有 `.common` + `.eventTracking` 双模式 Timer 0.4s 保证关闭必然执行——CA completion 在事件跟踪模式下不可靠）；拖拽后自动关闭走直接 `close()`。

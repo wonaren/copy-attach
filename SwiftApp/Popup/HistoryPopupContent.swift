@@ -62,6 +62,12 @@ struct HistoryPopupContent: View {
     var backend: ClipboardBackend { ClipboardBackend.shared }
     @State var selectedIndex: Int = 0
     @State var showPreview: Bool = false
+    @State var hoverPreviewEntryId: Int?
+    @State var hoverPreviewItem: ClipboardItem?
+    @State var hoverPreviewPendingItem: ClipboardItem?
+    @State var hoverPreviewPendingRect: NSRect?
+    @State var hoverPreviewShowTask: Task<Void, Never>?
+    @State var hoverPreviewHideTask: Task<Void, Never>?
     @State private var isControlPressed: Bool = false
     @State private var isCommandPressed: Bool = false
     @Environment(\.appTheme) var theme
@@ -82,7 +88,7 @@ struct HistoryPopupContent: View {
     @Namespace private var filterTabNamespace
 
     @State private var openingScale: CGFloat = 1.06
-    @State private var isDismissing: Bool = false
+    @State var isDismissing: Bool = false
 
     @State var toastMessage: String? = nil
     @State var toastIcon: String = "checkmark.circle.fill"
@@ -424,9 +430,16 @@ struct HistoryPopupContent: View {
             toastMessage = nil
         }
         .onReceive(NotificationCenter.default.publisher(for: popupWillDismissNotification)) { _ in
+            closeHoverPreview()
             withAnimation(.easeOut(duration: 0.15)) {
                 isDismissing = true
             }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: popupDidScrollNotification)) { _ in
+            closeHoverPreview()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSMenu.didBeginTrackingNotification)) { _ in
+            closeHoverPreview()
         }
         .onReceive(NotificationCenter.default.publisher(for: popupCancelDismissNotification)) { _ in
             withAnimation(.easeOut(duration: 0.15)) {
@@ -829,6 +842,10 @@ struct HistoryPopupContent: View {
                             },
                             onCancelRemark: {
                                 cancelInlineEditing()
+                            },
+                            onHoverChange: { hovering, rect, moved in
+                                handleRowHover(item: item, hovering: hovering,
+                                               screenRect: rect, moved: moved)
                             },
                             selectionNamespace: selectionNamespace
                         )

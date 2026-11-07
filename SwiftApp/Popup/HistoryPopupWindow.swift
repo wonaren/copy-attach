@@ -9,9 +9,14 @@ class HistoryPopupWindow: NSPanel {
     }
 
     weak var previewPanel: PreviewWindow?
+    weak var hoverPreviewPanel: PreviewWindow?
 
     private var itemDragInProgress = false
     private var awaitingPostDragInteraction = false
+
+    var isItemDragInProgress: Bool {
+        itemDragInProgress || awaitingPostDragInteraction
+    }
 
     var isPresentingModalPanel = false
     private var mouseUpWatcher: Timer?
@@ -228,6 +233,9 @@ class HistoryPopupWindow: NSPanel {
 
         NotificationCenter.default.post(name: popupCancelDismissNotification, object: nil)
 
+        hoverPreviewPanel?.close()
+        hoverPreviewPanel = nil
+
         if let pv = previewPanel {
             NSAnimationContext.runAnimationGroup { ctx in
                 ctx.duration = 0.1
@@ -395,6 +403,13 @@ class HistoryPopupWindow: NSPanel {
             }
         }
 
+        if let hp = hoverPreviewPanel {
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.1
+                hp.animator().alphaValue = 0
+            }
+        }
+
         closeGuaranteeTimer?.invalidate()
         let guarantee = Timer(timeInterval: 0.4, repeats: false) { [weak self] _ in
             guard let self = self else { return }
@@ -432,6 +447,8 @@ class HistoryPopupWindow: NSPanel {
         closeGuaranteeTimer = nil
         previewPanel?.close()
         previewPanel = nil
+        hoverPreviewPanel?.close()
+        hoverPreviewPanel = nil
 
         self.makeFirstResponder(nil)
 

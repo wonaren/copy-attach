@@ -17,6 +17,7 @@ let popupSwipeNotification = Notification.Name("PopupSwipe")
 let popupWillDismissNotification = Notification.Name("PopupWillDismiss")
 let popupCancelDismissNotification = Notification.Name("PopupCancelDismiss")
 let queueToggleNotification = Notification.Name("PopupQueueTogglePressed")
+let popupDidScrollNotification = Notification.Name("PopupDidScroll")
 
 struct PopupContextMenuRequest {
     let entryId: Int?
@@ -165,6 +166,10 @@ class PopupHostingView: NSHostingView<AnyView> {
     private func handleScrollWheel(_ event: NSEvent) -> NSEvent? {
         guard event.window === self.window else {
             return event
+        }
+
+        if event.phase == .began || event.momentumPhase == .began || event.phase == [] {
+            NotificationCenter.default.post(name: popupDidScrollNotification, object: nil)
         }
 
         guard event.phase != [] else {

@@ -19,6 +19,7 @@ extension HistoryPopupContent {
     }
 
     func dragProvider(item: ClipboardItem, batch: BatchDragPlan?) -> NSItemProvider {
+        closeHoverPreview()
         popupWindow?.beginItemDrag()
         let richText = backend.sourceAppNeedsRichTextDrag
         if let batch {
@@ -57,6 +58,7 @@ extension HistoryPopupContent {
             editingText = ""
         }
         if popupWindow?.previewPanel?.itemId == item.id { closePreview() }
+        if popupWindow?.hoverPreviewPanel?.itemId == item.id { closeHoverPreview() }
         let deleted = backend.deleteEntry(at: backendIdx)
         if deleted, !effectiveSearchText.isEmpty {
             searchResults.removeAll { $0.id == item.id }

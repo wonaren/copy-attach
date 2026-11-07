@@ -1,23 +1,55 @@
 import AppKit
+import Observation
 import SwiftUI
+
+@Observable
+final class PreviewDismissState {
+    var isDismissing = false
+}
 
 struct PreviewContent: View {
     let item: ClipboardItem
+    private let maxPixelOverride: Int?
+    private let onTapWhenUnzoomed: (() -> Void)?
+    private let showsZoomHint: Bool
+    private let dismissState: PreviewDismissState?
 
     @State private var image: NSImage?
     @State private var hasFailed = false
+    @State private var isHoveringBubble = false
+    @State private var hasAppeared = false
     @Environment(\.appTheme) private var theme
     @Environment(\.colorScheme) private var colorScheme
 
-    init(item: ClipboardItem) {
+    init(item: ClipboardItem,
+         initialImage: NSImage? = nil,
+         maxPixelOverride: Int? = nil,
+         onTapWhenUnzoomed: (() -> Void)? = nil,
+         showsZoomHint: Bool = false,
+         dismissState: PreviewDismissState? = nil) {
         self.item = item
-        let initialImage: NSImage?
-        if case .image(_, let dbId, _, _, _, _, _, _, _) = item {
-            initialImage = ClipboardBackend.shared.cachedThumbnail(dbId: dbId)
+        self.maxPixelOverride = maxPixelOverride
+        self.onTapWhenUnzoomed = onTapWhenUnzoomed
+        self.showsZoomHint = showsZoomHint
+        self.dismissState = dismissState
+        let seeded: NSImage?
+        if let initialImage {
+            seeded = initialImage
+        } else if case .image(_, let dbId, _, _, _, _, _, _, _) = item {
+            seeded = ClipboardBackend.shared.cachedThumbnail(dbId: dbId)
         } else {
-            initialImage = nil
+            seeded = nil
         }
-        self._image = State(initialValue: initialImage)
+        self._image = State(initialValue: seeded)
+    }
+
+    private struct ImageLoadKey: Hashable {
+        let dbId: Int
+        let maxPixel: Int?
+    }
+
+    private var imageLoadKey: ImageLoadKey {
+        ImageLoadKey(dbId: currentDbId, maxPixel: maxPixelOverride)
     }
 
     private var currentDbId: Int {
@@ -42,8 +74,8 @@ struct PreviewContent: View {
 
     var body: some View {
         ZStack {
-            theme.previewBackground
-                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            theme.popupBackground
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
 
             switch item {
             case .text:
@@ -52,36 +84,89 @@ struct PreviewContent: View {
                 imageContent(dbId: currentDbId)
             }
         }
+        .scaleEffect(showsZoomHint && !hasAppeared ? 0.97 : 1.0)
+        .scaleEffect(dismissState?.isDismissing == true ? 1.04 : 1.0, anchor: .center)
+        .blur(radius: dismissState?.isDismissing == true ? 16.0 : 0.0)
+        .opacity(dismissState?.isDismissing == true ? 0.0 : 1.0)
+        .animation(.easeOut(duration: 0.15), value: dismissState?.isDismissing)
+        .onAppear {
+            guard showsZoomHint else { return }
+            withAnimation(.spring(response: 0.18, dampingFraction: 0.86)) {
+                hasAppeared = true
+            }
+        }
+        .onHover { hovering in
+            guard showsZoomHint else { return }
+            withAnimation(.easeOut(duration: 0.12)) {
+                isHoveringBubble = hovering
+            }
+        }
     }
 
+    @ViewBuilder
     private var textContent: some View {
         let prepared = PreviewTextLayout.prepare(item.preview)
         let isDark = colorScheme == .dark
-        return VStack(spacing: 0) {
-            LargeTextView(
-                preparedText: prepared,
-                textColor: previewTextNSColor,
-                isDark: isDark
-            )
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        if showsZoomHint {
+            miniTextContent(prepared)
+        } else {
+            VStack(spacing: 0) {
+                LargeTextView(
+                    preparedText: prepared,
+                    textColor: previewTextNSColor,
+                    isDark: isDark,
+                    onTap: onTapWhenUnzoomed
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-            Divider()
-                .opacity(isDark ? 0.12 : 0.08)
+                Divider()
+                    .opacity(isDark ? 0.12 : 0.08)
 
-            PreviewFooterBar(
-                item: item,
-                prepared: prepared
-            )
+                PreviewFooterBar(
+                    item: item,
+                    prepared: prepared
+                )
+                .contentShape(Rectangle())
+                .onTapGesture { onTapWhenUnzoomed?() }
+            }
         }
+    }
+
+    private func miniTextContent(_ prepared: PreparedPreviewText) -> some View {
+        VStack(spacing: 0) {
+            Text(prepared.displayText)
+                .font(miniTextFont(prepared.kind))
+                .foregroundColor(theme.previewPrimaryText)
+                .lineLimit(6)
+                .truncationMode(.tail)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .padding(.horizontal, 12)
+                .padding(.top, 12)
+                .padding(.bottom, 8)
+
+            HStack {
+                zoomHint
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 10)
+            .frame(height: 30)
+            .background(colorScheme == .dark ? Color.black.opacity(0.18) : Color.black.opacity(0.03))
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { onTapWhenUnzoomed?() }
+    }
+
+    private func miniTextFont(_ kind: TextContentKind) -> Font {
+        kind == .prose ? .system(size: 12) : .system(size: 12, design: .monospaced)
     }
 
     @ViewBuilder
     private func imageContent(dbId: Int) -> some View {
         Group {
             if let img = image {
-                ZoomableImageView(image: img, dbId: dbId)
+                ZoomableImageView(image: img, dbId: dbId, onTapWhenUnzoomed: onTapWhenUnzoomed)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .padding(12)
+                    .padding(6)
             } else if hasFailed {
                 Image(systemName: "photo.badge.exclamationmark")
                     .font(.system(size: 24))
@@ -104,15 +189,40 @@ struct PreviewContent: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .padding(24)
                 .linearShimmer(isActive: true, duration: 1.3)
+                .contentShape(Rectangle())
+                .onTapGesture { onTapWhenUnzoomed?() }
             }
         }
-        .task(id: dbId, priority: .userInitiated) {
+        .overlay(alignment: .bottomLeading) {
+            if showsZoomHint {
+                zoomHint
+                    .padding(10)
+                    .allowsHitTesting(false)
+            }
+        }
+        .task(id: imageLoadKey, priority: .userInitiated) {
             await loadImage(dbId: dbId)
         }
         .onDisappear {
             image = nil
             hasFailed = false
         }
+    }
+
+    private var zoomHint: some View {
+        HStack(spacing: 4) {
+            Image(systemName: "arrow.up.left.and.arrow.down.right")
+                .font(.system(size: 9, weight: .semibold))
+            Text(item.isImage ? "单击图片放大" : "单击查看全文")
+                .font(.system(size: 10, weight: .medium))
+        }
+        .foregroundColor(theme.popupPrimaryText)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(Capsule().fill(theme.popupTagBackground))
+        .overlay(Capsule().strokeBorder(theme.popupRowBorder, lineWidth: 1))
+        .opacity(isHoveringBubble ? 1.0 : 0.9)
+        .scaleEffect(isHoveringBubble ? 1.04 : 1.0)
     }
 
     private func loadImage(dbId: Int) async {
@@ -125,8 +235,9 @@ struct PreviewContent: View {
         let screenSize = NSScreen.main?.visibleFrame.size ?? NSSize(width: 1440, height: 900)
         let scale = NSScreen.main?.backingScaleFactor ?? 2
         let size = imagePixelSize
-        let maxPixel = ImageDecode.previewBudget(width: size.w, height: size.h,
-                                                 screenSize: screenSize, scale: scale)
+        let maxPixel = maxPixelOverride
+            ?? ImageDecode.previewBudget(width: size.w, height: size.h,
+                                         screenSize: screenSize, scale: scale)
         let decoded = await ImageDecode.previewImageAsync(dbId: dbId, maxPixel: maxPixel)
 
         guard currentDbId == dbId, !Task.isCancelled else { return }

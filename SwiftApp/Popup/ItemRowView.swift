@@ -15,6 +15,7 @@ struct ItemRowView: View {
     let onToggleQueue: () -> Void
     let onCommitRemark: (String) -> Void
     let onCancelRemark: () -> Void
+    let onHoverChange: ((Bool, NSRect, Bool) -> Void)?
     let selectionNamespace: Namespace.ID
     @State private var isHovering = false
     @State private var isQueueToggleHovered = false
@@ -128,7 +129,7 @@ struct ItemRowView: View {
                             textContent(customLabel, color: markColor)
                         }
                     } else {
-                        imageContent(dbId: dbId, width: width, height: height)
+                        imageContent(dbId: dbId)
                     }
                 }
             }
@@ -185,8 +186,9 @@ struct ItemRowView: View {
         .animation(.easeOut(duration: 0.15), value: isFavorite)
         .animation(.easeOut(duration: 0.15), value: item.hasCustomLabel)
         .background(selectionBackground)
-        .background(RowHoverDetector { hovering in
+        .background(RowHoverDetector { hovering, screenRect, moved in
             isHovering = hovering
+            onHoverChange?(hovering, screenRect, moved)
         })
     }
 
@@ -228,7 +230,7 @@ struct ItemRowView: View {
             }
             .buttonStyle(.plain)
             .allowsHitTesting(queueOrder != nil || isHovering)
-            .background(RowHoverDetector { hovering in
+            .background(RowHoverDetector { hovering, _, _ in
                 withAnimation(.easeOut(duration: 0.12)) {
                     isQueueToggleHovered = hovering
                 }
@@ -418,18 +420,18 @@ struct ItemRowView: View {
         RowThumbnailBox.current(scale: displayScale)
     }
 
-    private func imageContent(dbId: Int, width: Int, height: Int) -> some View {
+    private func imageContent(dbId: Int) -> some View {
         HStack(spacing: 8) {
             if let nsImage = thumbImage ?? ClipboardBackend.shared.cachedThumbnail(dbId: dbId) {
                 Image(nsImage: nsImage).resizable().aspectRatio(contentMode: .fit)
-                    .frame(maxHeight: 100)
-                    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .frame(maxHeight: 46)
+                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous)
                         .stroke(theme.popupRowBorder, lineWidth: 0.5))
             } else if dbId == 0 {
-                ShimmerPlaceholderCard(title: "图片编码中…", iconName: "photo")
+                ShimmerPlaceholderCard(title: "图片编码中…", iconName: "photo", maxHeight: 46)
             } else {
-                ShimmerPlaceholderCard(title: "载入预览中…", iconName: "photo")
+                ShimmerPlaceholderCard(title: "载入预览中…", iconName: "photo", maxHeight: 46)
             }
         }
         .task(id: dbId) {
@@ -470,7 +472,7 @@ private extension String {
 }
 
 private struct RowHoverDetector: NSViewRepresentable {
-    let onChange: (Bool) -> Void
+    let onChange: (Bool, NSRect, Bool) -> Void
 
     func makeNSView(context: Context) -> TrackingView {
         let view = TrackingView()
@@ -483,15 +485,19 @@ private struct RowHoverDetector: NSViewRepresentable {
     }
 
     final class TrackingView: NSView {
-        var onChange: ((Bool) -> Void)?
+        var onChange: ((Bool, NSRect, Bool) -> Void)?
         private var lastValue: Bool?
+        private var sawMouseMove = false
+        private var lastScreenLocation: NSPoint?
         private var installedArea: NSTrackingArea?
 
         override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
-            DispatchQueue.main.async { [weak self] in self?.refresh() }
+            sawMouseMove = false
+            lastScreenLocation = NSEvent.mouseLocation
+            DispatchQueue.main.async { [weak self] in self?.refresh(force: false) }
         }
 
         override func updateTrackingAreas() {
@@ -506,23 +512,35 @@ private struct RowHoverDetector: NSViewRepresentable {
                 addTrackingArea(area)
                 installedArea = area
             }
-            refresh()
+            refresh(force: false)
         }
 
-        override func mouseEntered(with event: NSEvent) { refresh() }
-        override func mouseMoved(with event: NSEvent) { refresh() }
-        override func mouseExited(with event: NSEvent) { refresh() }
+        override func mouseEntered(with event: NSEvent) { refresh(force: false) }
+        override func mouseMoved(with event: NSEvent) { refresh(force: false) }
 
-        private func refresh() {
+        override func mouseExited(with event: NSEvent) {
+            sawMouseMove = false
+            lastScreenLocation = NSEvent.mouseLocation
+            refresh(force: true)
+        }
+
+        private func refresh(force: Bool) {
             guard let window else { return }
             let point = convert(window.mouseLocationOutsideOfEventStream, from: nil)
-            emit(bounds.contains(point))
+            let movedNow = noteLocation(NSEvent.mouseLocation)
+            let wasMoved = sawMouseMove
+            if movedNow { sawMouseMove = true }
+            let inside = bounds.contains(point)
+            guard force || lastValue != inside || (sawMouseMove && !wasMoved) else { return }
+            lastValue = inside
+            let screenRect = window.convertToScreen(convert(bounds, to: nil))
+            onChange?(inside, screenRect, sawMouseMove && inside)
         }
 
-        private func emit(_ value: Bool) {
-            guard lastValue != value else { return }
-            lastValue = value
-            onChange?(value)
+        private func noteLocation(_ point: NSPoint) -> Bool {
+            defer { lastScreenLocation = point }
+            guard let last = lastScreenLocation else { return true }
+            return hypot(point.x - last.x, point.y - last.y) > 1
         }
     }
 }

@@ -160,11 +160,34 @@ final class ZoomableImageNSView: NSView {
         }
     }
 
+    var onTapWhenUnzoomed: (() -> Void)?
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard !isHidden, alphaValue > 0 else { return nil }
+        return frame.contains(point) ? self : nil
+    }
+
+    private var mouseDownAtRest = false
+
     override func mouseDown(with event: NSEvent) {
-        if event.clickCount == 2 {
-            resetZoom()
+        mouseDownAtRest = false
+        if scale > 1.01 {
+            if event.clickCount == 2 {
+                resetZoom()
+            } else {
+                super.mouseDown(with: event)
+            }
         } else {
-            super.mouseDown(with: event)
+            mouseDownAtRest = true
+        }
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        if mouseDownAtRest {
+            mouseDownAtRest = false
+            onTapWhenUnzoomed?()
+        } else {
+            super.mouseUp(with: event)
         }
     }
 
@@ -289,14 +312,17 @@ extension CGFloat {
 struct ZoomableImageView: NSViewRepresentable {
     let image: NSImage?
     var dbId: Int = 0
+    var onTapWhenUnzoomed: (() -> Void)?
 
     func makeNSView(context: Context) -> ZoomableImageNSView {
         let view = ZoomableImageNSView()
         view.setImage(image, dbId: dbId)
+        view.onTapWhenUnzoomed = onTapWhenUnzoomed
         return view
     }
 
     func updateNSView(_ nsView: ZoomableImageNSView, context: Context) {
+        nsView.onTapWhenUnzoomed = onTapWhenUnzoomed
         nsView.setImage(image, dbId: dbId)
     }
 }

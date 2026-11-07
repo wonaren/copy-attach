@@ -1,21 +1,51 @@
 import AppKit
 import SwiftUI
 
+private final class PreviewTextView: NSTextView {
+    var onTap: (() -> Void)?
+    private var mouseDownAtRest = false
+
+    override func mouseDown(with event: NSEvent) {
+        guard onTap != nil else {
+            super.mouseDown(with: event)
+            return
+        }
+        mouseDownAtRest = true
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard onTap == nil else { return }
+        super.mouseDragged(with: event)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        guard mouseDownAtRest else {
+            super.mouseUp(with: event)
+            return
+        }
+        mouseDownAtRest = false
+        onTap?()
+    }
+}
+
 struct LargeTextView: NSViewRepresentable {
     let preparedText: PreparedPreviewText
     let textColor: NSColor
     let isDark: Bool
+    var onTap: (() -> Void)?
 
-    init(preparedText: PreparedPreviewText, textColor: NSColor, isDark: Bool = true) {
+    init(preparedText: PreparedPreviewText, textColor: NSColor, isDark: Bool = true, onTap: (() -> Void)? = nil) {
         self.preparedText = preparedText
         self.textColor = textColor
         self.isDark = isDark
+        self.onTap = onTap
     }
 
-    init(text: String, textColor: NSColor, isDark: Bool = true) {
+    init(text: String, textColor: NSColor, isDark: Bool = true, onTap: (() -> Void)? = nil) {
         self.preparedText = PreviewTextLayout.prepare(text)
         self.textColor = textColor
         self.isDark = isDark
+        self.onTap = onTap
     }
 
     func makeNSView(context: Context) -> NSScrollView {
@@ -28,10 +58,11 @@ struct LargeTextView: NSViewRepresentable {
         scrollView.backgroundColor = .clear
         scrollView.drawsBackground = false
 
-        let textView = NSTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 100))
+        let textView = PreviewTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 100))
         textView.autoresizingMask = [.width]
         textView.isEditable = false
-        textView.isSelectable = true
+        textView.isSelectable = onTap == nil
+        textView.onTap = onTap
         textView.drawsBackground = false
         textView.backgroundColor = .clear
         textView.textContainerInset = NSSize(width: 16, height: 14)
@@ -51,7 +82,9 @@ struct LargeTextView: NSViewRepresentable {
     }
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
-        guard let textView = scrollView.documentView as? NSTextView else { return }
+        guard let textView = scrollView.documentView as? PreviewTextView else { return }
+        textView.onTap = onTap
+        textView.isSelectable = onTap == nil
 
         let clipWidth = scrollView.bounds.width
         if clipWidth > 0 {
