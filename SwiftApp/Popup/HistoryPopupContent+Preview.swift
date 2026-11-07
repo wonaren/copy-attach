@@ -22,14 +22,15 @@ extension HistoryPopupContent {
     }
 
     func togglePreview() {
-        if showPreview { closePreview() } else { openPreview() }
+        if showPreview { closePreview(); return }
+        let itemIndex = selectedIndex - 1
+        guard itemIndex >= 0, itemIndex < displayItems.count else { return }
+        openPreview(item: displayItems[itemIndex])
     }
 
-    func openPreview() {
+    func openPreview(item: ClipboardItem) {
         let perfPreview = PerfSpan.start("swift", "preview.open")
-        let itemIndex = selectedIndex - 1
-        guard itemIndex < displayItems.count, let popup = popupWindow else { return }
-        let item = displayItems[itemIndex]
+        guard let popup = popupWindow else { return }
         let popupCenter = NSPoint(x: popup.frame.midX, y: popup.frame.midY)
         guard let previewItem = fullTextItem(item) else { return }
         let preview = PreviewWindow(item: previewItem, centerAt: popupCenter)
@@ -52,11 +53,9 @@ extension HistoryPopupContent {
         OnboardingGuide.shared.refreshSpotlight()
     }
 
-    func updatePreviewContent() {
-        let itemIndex = selectedIndex - 1
-        guard showPreview, itemIndex >= 0, itemIndex < displayItems.count,
-              let preview = popupWindow?.previewPanel else { return }
-        guard let previewItem = fullTextItem(displayItems[itemIndex]) else {
+    func updatePreviewContent(item: ClipboardItem) {
+        guard showPreview, let preview = popupWindow?.previewPanel else { return }
+        guard let previewItem = fullTextItem(item) else {
             closePreview()
             return
         }

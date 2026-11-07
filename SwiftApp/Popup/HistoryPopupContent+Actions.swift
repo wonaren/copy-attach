@@ -18,8 +18,7 @@ extension HistoryPopupContent {
         return BatchDragPlan(payload: payload, items: queue.queueItems)
     }
 
-    func dragProvider(forRow index: Int, item: ClipboardItem, batch: BatchDragPlan?) -> NSItemProvider {
-        selectedIndex = index + 1
+    func dragProvider(item: ClipboardItem, batch: BatchDragPlan?) -> NSItemProvider {
         popupWindow?.beginItemDrag()
         let richText = backend.sourceAppNeedsRichTextDrag
         if let batch {
@@ -30,17 +29,34 @@ extension HistoryPopupContent {
         return ClipboardDragProvider.provider(for: item, richText: richText)
     }
 
+    var selectedItemId: Int? {
+        guard selectedIndex > 0 else { return nil }
+        let index = selectedIndex - 1
+        guard index < displayItems.count else { return nil }
+        return displayItems[index].id
+    }
+
+    func restoreSelection(_ id: Int?) {
+        guard let id else { return }
+        if let index = displayItems.firstIndex(where: { $0.id == id }) {
+            selectedIndex = index + 1
+        } else if selectedIndex > maxIndex {
+            selectedIndex = max(0, maxIndex)
+        }
+    }
+
     func deleteItem(at index: Int) {
         let items = displayItems
         guard index < items.count else { return }
         let item = items[index]
+        let anchorId = selectedItemId
         guard confirmUndoEvictionIfNeeded(for: item) else { return }
         guard let backendIdx = backend.items.firstIndex(where: { $0.id == item.id }) else { return }
         if editingItemId == item.id {
             editingItemId = nil
             editingText = ""
         }
-        closePreview()
+        if popupWindow?.previewPanel?.itemId == item.id { closePreview() }
         let deleted = backend.deleteEntry(at: backendIdx)
         if deleted, !effectiveSearchText.isEmpty {
             searchResults.removeAll { $0.id == item.id }
@@ -50,8 +66,10 @@ extension HistoryPopupContent {
         if backend.items.isEmpty {
             selectedIndex = 0
             searchText = ""
-        } else if selectedIndex > maxIndex {
-            selectedIndex = max(0, maxIndex)
+        } else if anchorId == item.id {
+            selectedIndex = min(index + 1, maxIndex)
+        } else {
+            restoreSelection(anchorId)
         }
     }
 

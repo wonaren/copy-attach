@@ -23,23 +23,21 @@ extension HistoryPopupContent {
         guard let entryId = request.entryId,
               let index = currentIndex(of: entryId) else { return }
         let item = displayItems[index]
-        selectedIndex = min(index + 1, maxIndex)
 
         let menu = NSMenu()
         menu.autoenablesItems = false
 
         addContextMenuItem(to: menu, title: "插入", symbol: "arrow.down.to.line") {
             guard let idx = self.currentIndex(of: item.id) else { return }
-            self.selectedIndex = idx + 1
             self.selectItem(at: idx)
         }
         addContextMenuItem(to: menu, title: "预览", symbol: "eye") {
             guard let idx = self.currentIndex(of: item.id) else { return }
-            self.selectedIndex = idx + 1
+            let target = self.displayItems[idx]
             if self.showPreview {
-                self.updatePreviewContent()
+                self.updatePreviewContent(item: target)
             } else {
-                self.openPreview()
+                self.openPreview(item: target)
             }
         }
         menu.addItem(.separator())
@@ -54,6 +52,10 @@ extension HistoryPopupContent {
         addContextMenuItem(to: menu,
                            title: inQueue ? "移出粘贴队列" : "加入粘贴队列",
                            symbol: "list.number") {
+            guard PasteDeliveryMode.current == .keystroke else {
+                self.showToast("当前为「仅复制到剪贴板」模式，无需粘贴队列", icon: "doc.on.clipboard")
+                return
+            }
             withAnimation(AppleMotion.snappy) {
                 PasteQueueManager.shared.toggle(item)
             }
@@ -69,22 +71,20 @@ extension HistoryPopupContent {
         addContextMenuItem(to: menu,
                            title: isFavorite ? "取消收藏" : "收藏",
                            symbol: isFavorite ? "star.slash" : "star") {
+            let anchorId = self.selectedItemId
             if self.backend.toggleFavorite(item.id) {
                 self.showToast(!isFavorite ? "已加入收藏" : "已取消收藏", icon: !isFavorite ? "star.fill" : "star.slash.fill")
             } else {
                 self.showToast("收藏失败，请重试", icon: "exclamationmark.triangle.fill")
             }
-            if self.selectedIndex > self.maxIndex {
-                self.selectedIndex = max(0, self.maxIndex)
-            }
+            self.restoreSelection(anchorId)
         }
         let hasRemark = item.hasCustomLabel
         addContextMenuItem(to: menu,
                            title: hasRemark ? "编辑备注…" : "添加备注…",
                            symbol: "pencil.line") {
             guard let idx = self.currentIndex(of: item.id) else { return }
-            self.selectedIndex = idx + 1
-            self.startInlineEditing(for: item)
+            self.startInlineEditing(for: self.displayItems[idx])
         }
         addContextMenuItem(to: menu, title: "删除", symbol: "trash", destructive: true) {
             guard let idx = self.currentIndex(of: item.id) else { return }

@@ -164,6 +164,7 @@ class HistoryPopupWindow: NSPanel {
         centerOnScreen()
 
         self.level = .floating
+        self.acceptsMouseMovedEvents = true
 
         self.orderFrontRegardless()
         self.makeKey()

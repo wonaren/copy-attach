@@ -7,14 +7,17 @@ struct ItemRowView: View {
     let isDeleteModifierPressed: Bool
     let shortcutHint: String?
     let queueOrder: Int?
+    let canToggleQueue: Bool
     let isFavorite: Bool
     let isEditingRemark: Bool
     @Binding var editingText: String
     let searchQuery: String
+    let onToggleQueue: () -> Void
     let onCommitRemark: (String) -> Void
     let onCancelRemark: () -> Void
     let selectionNamespace: Namespace.ID
     @State private var isHovering = false
+    @State private var isQueueToggleHovered = false
     @State private var thumbImage: NSImage?
     @Environment(\.appTheme) private var theme
     @Environment(\.colorScheme) private var colorScheme
@@ -147,23 +150,7 @@ struct ItemRowView: View {
                     .symbolEffect(.bounce, value: isFavorite)
                     .transition(.scale(scale: 0.9).combined(with: .opacity))
             }
-            if let order = queueOrder {
-                let badgeBgColor: Color = isSelected
-                    ? Color.white
-                    : Color(nsColor: .controlAccentColor)
-                let badgeTextColor: Color = isSelected
-                    ? (isDeleteModifierPressed ? deleteSelectionFill : selectionFill)
-                    : Color.white
-
-                Text("\(order)")
-                    .font(.system(size: 9.5, weight: .bold, design: .rounded))
-                    .foregroundColor(badgeTextColor)
-                    .frame(width: 16, height: 16)
-                    .background(
-                        Circle().fill(badgeBgColor)
-                    )
-                    .transition(.scale(scale: 0.85).combined(with: .opacity))
-            }
+            queueToggleControl
             if isSelected && isDeleteModifierPressed {
                 Image(systemName: "delete.left.fill")
                     .font(.system(size: 13))
@@ -198,9 +185,60 @@ struct ItemRowView: View {
         .animation(.easeOut(duration: 0.15), value: isFavorite)
         .animation(.easeOut(duration: 0.15), value: item.hasCustomLabel)
         .background(selectionBackground)
-        .onHover { hovering in
+        .background(RowHoverDetector { hovering in
             isHovering = hovering
+        })
+    }
+
+    @ViewBuilder
+    private var queueToggleControl: some View {
+        if canToggleQueue {
+            Button(action: onToggleQueue) {
+                ZStack {
+                    if let order = queueOrder {
+                        Text("\(order)")
+                            .font(.system(size: 9.5, weight: .bold, design: .rounded))
+                            .foregroundColor(isSelected ? (isDeleteModifierPressed ? deleteSelectionFill : selectionFill) : Color.white)
+                            .frame(width: 16, height: 16)
+                            .background(
+                                Circle().fill(isSelected ? Color.white : Color(nsColor: .controlAccentColor))
+                            )
+                            .transition(.scale(scale: 0.85).combined(with: .opacity))
+                    } else if isHovering {
+                        Circle()
+                            .fill(isSelected ? Color.white.opacity(0.14) : Color(nsColor: .controlAccentColor).opacity(0.12))
+                            .overlay(
+                                Circle().strokeBorder(
+                                    isSelected ? Color.white.opacity(0.95) : Color(nsColor: .controlAccentColor),
+                                    lineWidth: 1.8
+                                )
+                            )
+                            .frame(width: 16, height: 16)
+                            .transition(.scale(scale: 0.85).combined(with: .opacity))
+                    }
+                }
+                .scaleEffect(isQueueToggleHovered ? 1.12 : 1.0)
+                .frame(width: 18, height: 18)
+                .background(
+                    Circle()
+                        .fill(isQueueToggleHovered ? queueToggleHoverFill : Color.clear)
+                        .frame(width: 24, height: 24)
+                )
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .allowsHitTesting(queueOrder != nil || isHovering)
+            .background(RowHoverDetector { hovering in
+                withAnimation(.easeOut(duration: 0.12)) {
+                    isQueueToggleHovered = hovering
+                }
+            })
+            .help(queueOrder == nil ? "加入粘贴队列" : "移出粘贴队列")
         }
+    }
+
+    private var queueToggleHoverFill: Color {
+        isSelected ? Color.white.opacity(0.22) : Color(nsColor: .controlAccentColor).opacity(0.20)
     }
 
     @ViewBuilder
@@ -414,6 +452,7 @@ extension ItemRowView: @preconcurrency Equatable {
         lhs.isDeleteModifierPressed == rhs.isDeleteModifierPressed &&
         lhs.shortcutHint == rhs.shortcutHint &&
         lhs.queueOrder == rhs.queueOrder &&
+        lhs.canToggleQueue == rhs.canToggleQueue &&
         lhs.isFavorite == rhs.isFavorite &&
         lhs.isEditingRemark == rhs.isEditingRemark &&
         (!lhs.isEditingRemark || lhs.editingText == rhs.editingText) &&
@@ -427,6 +466,64 @@ private extension String {
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
             .joined(separator: "⏎")
+    }
+}
+
+private struct RowHoverDetector: NSViewRepresentable {
+    let onChange: (Bool) -> Void
+
+    func makeNSView(context: Context) -> TrackingView {
+        let view = TrackingView()
+        view.onChange = onChange
+        return view
+    }
+
+    func updateNSView(_ nsView: TrackingView, context: Context) {
+        nsView.onChange = onChange
+    }
+
+    final class TrackingView: NSView {
+        var onChange: ((Bool) -> Void)?
+        private var lastValue: Bool?
+        private var installedArea: NSTrackingArea?
+
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            DispatchQueue.main.async { [weak self] in self?.refresh() }
+        }
+
+        override func updateTrackingAreas() {
+            super.updateTrackingAreas()
+            if installedArea == nil {
+                let area = NSTrackingArea(
+                    rect: .zero,
+                    options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect],
+                    owner: self,
+                    userInfo: nil
+                )
+                addTrackingArea(area)
+                installedArea = area
+            }
+            refresh()
+        }
+
+        override func mouseEntered(with event: NSEvent) { refresh() }
+        override func mouseMoved(with event: NSEvent) { refresh() }
+        override func mouseExited(with event: NSEvent) { refresh() }
+
+        private func refresh() {
+            guard let window else { return }
+            let point = convert(window.mouseLocationOutsideOfEventStream, from: nil)
+            emit(bounds.contains(point))
+        }
+
+        private func emit(_ value: Bool) {
+            guard lastValue != value else { return }
+            lastValue = value
+            onChange?(value)
+        }
     }
 }
 

@@ -226,12 +226,13 @@ struct HistoryPopupContent: View {
     }
 
     private func restoreContainerFocus() {
-        isSearchFocused = false
-        isContainerFocused = true
+        let container = selectedIndex > 0
+        isSearchFocused = !container
+        isContainerFocused = container
         DispatchQueue.main.async {
-            self.isSearchFocused = false
-            self.isContainerFocused = true
-            if let window = self.popupWindow, let contentView = window.contentView {
+            self.isSearchFocused = !container
+            self.isContainerFocused = container
+            if container, let window = self.popupWindow, let contentView = window.contentView {
                 window.makeFirstResponder(contentView)
             }
         }
@@ -523,6 +524,7 @@ struct HistoryPopupContent: View {
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: favoriteToggleNotification)) { _ in
+            let anchorId = selectedItemId
             if selectedIndex > 0 {
                 let itemIdx = selectedIndex - 1
                 if itemIdx < displayItems.count {
@@ -535,9 +537,7 @@ struct HistoryPopupContent: View {
                     }
                 }
             }
-            if selectedIndex > maxIndex {
-                selectedIndex = max(0, maxIndex)
-            }
+            restoreSelection(anchorId)
         }
         .onReceive(NotificationCenter.default.publisher(for: arrowKeyFromSearchNotification)) { note in
             guard let direction = note.object as? String else { return }
@@ -776,8 +776,8 @@ struct HistoryPopupContent: View {
                 let itemIndex = newValue - 1
                 if itemIndex < displayItems.count {
                     scrollTarget = scrollTargetForItem(at: itemIndex)
+                    updatePreviewContent(item: displayItems[itemIndex])
                 }
-                updatePreviewContent()
             }
             .reportSpotlightFrame(.list, hasSelectedRow: selectedIndex > 0)
     }
@@ -794,6 +794,7 @@ struct HistoryPopupContent: View {
                     .id(listTopAnchorID)
                 LazyVStack(spacing: 3) {
                 let queueOrderByID = PasteQueueManager.shared.orderMap
+                let canToggleQueue = PasteDeliveryMode.current == .keystroke
                 ForEach(popupRows, id: \.id) { row in
                     switch row {
                     case .separator(let timestamp, let isFirst):
@@ -811,10 +812,18 @@ struct HistoryPopupContent: View {
                             isDeleteModifierPressed: isControlPressed,
                             shortcutHint: shortcut,
                             queueOrder: queueOrderByID[item.id],
+                            canToggleQueue: canToggleQueue,
                             isFavorite: backend.favoriteIds.contains(item.id),
                             isEditingRemark: editingItemId == item.id,
                             editingText: $editingText,
                             searchQuery: effectiveSearchText,
+                            onToggleQueue: {
+                                withAnimation(AppleMotion.snappy) {
+                                    PasteQueueManager.shared.toggle(item)
+                                }
+                                NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .default)
+                                OnboardingGuide.shared.record(.queueToggled)
+                            },
                             onCommitRemark: { newText in
                                 commitInlineEditing(entryId: item.id, newText: newText)
                             },
@@ -825,7 +834,7 @@ struct HistoryPopupContent: View {
                         )
                         .equatable()
                         .onDrag({
-                            dragProvider(forRow: index, item: item, batch: batchDragPlan(for: item))
+                            dragProvider(item: item, batch: batchDragPlan(for: item))
                         }, preview: {
                             let plan = batchDragPlan(for: item)
                             DragChip(item: plan?.payload ?? item, count: plan?.count ?? 1)
@@ -833,13 +842,20 @@ struct HistoryPopupContent: View {
                         .contentShape(Rectangle())
                         .onTapGesture {
                             if editingItemId == item.id { return }
-                            let itemIdx = index + 1
-                            if selectedIndex == itemIdx {
-                                selectItem(at: index)
-                            } else {
+                            if editingItemId != nil {
                                 commitPendingInlineEdit()
-                                selectedIndex = itemIdx
+                                return
                             }
+                            if PasteQueueManager.shared.hasItems {
+                                guard PasteDeliveryMode.current == .keystroke else { return }
+                                withAnimation(AppleMotion.snappy) {
+                                    PasteQueueManager.shared.toggle(item)
+                                }
+                                NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .default)
+                                OnboardingGuide.shared.record(.queueToggled)
+                                return
+                            }
+                            selectItem(at: index)
                         }
                         .background {
                             if contextMenuArmed || spotlightRowArmed {
@@ -920,7 +936,7 @@ struct HistoryPopupContent: View {
                 Text("·")
                     .foregroundColor(theme.popupMutedText)
             }
-            Text("继续按 ⌘C 标记")
+            Text("勾选或按 ⌘C 标记")
                 .font(.system(size: 9.5))
                 .foregroundColor(theme.popupMutedText)
             Text("·")

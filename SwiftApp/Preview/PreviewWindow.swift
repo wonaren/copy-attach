@@ -11,6 +11,8 @@ class PreviewWindow: NSPanel {
 
     override var canBecomeKey: Bool { false }
 
+    var itemId: Int { currentItemId }
+
     init(item: ClipboardItem, centerAt screenCenter: NSPoint) {
         let targetScreen = NSScreen.screens.first(where: { NSPointInRect(screenCenter, $0.frame) }) ?? NSScreen.main
         let screenFrame = targetScreen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 800, height: 600)
