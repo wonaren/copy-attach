@@ -108,6 +108,28 @@ fn test_quick_slot_toggle_moves_and_unbinds() {
 }
 
 #[test]
+fn test_quick_slot_toggle_swaps_occupied_target() {
+    let conn = test_db();
+    let row_a = insert_text(&conn, "phrase a", 1);
+    let row_b = insert_text(&conn, "phrase b", 2);
+    let id_a = entry_id_of(&conn, row_a);
+    let id_b = entry_id_of(&conn, row_b);
+
+    toggle_quick_slot(&conn, id_a, 1).expect("a -> 1");
+    toggle_quick_slot(&conn, id_b, 2).expect("b -> 2");
+    toggle_quick_slot(&conn, id_b, 1).expect("b -> 1 swaps with a");
+    let slots = load_quick_slots(&conn).unwrap();
+    assert_eq!(slots[0], id_b);
+    assert_eq!(slots[1], id_a, "the displaced occupant must take the mover's old slot");
+    assert_eq!(slots.iter().filter(|&&s| s != 0).count(), 2);
+
+    toggle_quick_slot(&conn, id_a, 1).expect("a -> 1 swaps back");
+    let slots = load_quick_slots(&conn).unwrap();
+    assert_eq!(slots[0], id_a);
+    assert_eq!(slots[1], id_b);
+}
+
+#[test]
 fn test_quick_slot_released_on_delete_and_pruned_on_clear() {
     let conn = test_db();
     let row = insert_text(&conn, "deletable phrase", 1);

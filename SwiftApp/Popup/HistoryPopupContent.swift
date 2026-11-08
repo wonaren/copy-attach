@@ -3,10 +3,10 @@ import SwiftUI
 
 enum FilterMode: String, CaseIterable {
     case favorites
+    case remarks
     case all
     case image
     case text
-    case remarks
     case slots
 
     var icon: String {

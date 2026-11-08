@@ -400,16 +400,51 @@ pub(crate) fn toggle_quick_slot(conn: &Connection, entry_id: u64, slot: u8) -> R
             rusqlite::params![entry_id as i64],
         )
     } else {
-        tx.execute(
-            "DELETE FROM clipboard_quick_slots WHERE slot = ?1 OR entry_id = ?2",
-            rusqlite::params![slot as i64, entry_id as i64],
-        )
-        .and_then(|_| {
+        let occupant = match tx.query_row(
+            "SELECT entry_id FROM clipboard_quick_slots WHERE slot = ?1",
+            rusqlite::params![slot as i64],
+            |row| row.get::<_, i64>(0),
+        ) {
+            Ok(v) => Some(v),
+            Err(rusqlite::Error::QueryReturnedNoRows) => None,
+            Err(e) => {
+                crate::error_log!("CopyAttach: failed to read quick-slot occupant: {e}");
+                return Err(());
+            }
+        };
+        let swap = match (current, occupant) {
+            (Some(old_slot), Some(other)) => Some((old_slot, other)),
+            _ => None,
+        };
+        if let Some((old_slot, other)) = swap {
             tx.execute(
-                "INSERT INTO clipboard_quick_slots (slot, entry_id) VALUES (?1, ?2)",
+                "DELETE FROM clipboard_quick_slots WHERE entry_id = ?1",
+                rusqlite::params![entry_id as i64],
+            )
+            .and_then(|_| {
+                tx.execute(
+                    "UPDATE clipboard_quick_slots SET slot = ?1 WHERE entry_id = ?2",
+                    rusqlite::params![old_slot, other],
+                )
+            })
+            .and_then(|_| {
+                tx.execute(
+                    "INSERT INTO clipboard_quick_slots (slot, entry_id) VALUES (?1, ?2)",
+                    rusqlite::params![slot as i64, entry_id as i64],
+                )
+            })
+        } else {
+            tx.execute(
+                "DELETE FROM clipboard_quick_slots WHERE slot = ?1 OR entry_id = ?2",
                 rusqlite::params![slot as i64, entry_id as i64],
             )
-        })
+            .and_then(|_| {
+                tx.execute(
+                    "INSERT INTO clipboard_quick_slots (slot, entry_id) VALUES (?1, ?2)",
+                    rusqlite::params![slot as i64, entry_id as i64],
+                )
+            })
+        }
     };
     if let Err(e) = result {
         crate::error_log!("CopyAttach: failed to toggle quick slot {slot} for entry {entry_id}: {e}");
