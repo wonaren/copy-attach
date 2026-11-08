@@ -23,6 +23,7 @@ pub extern "C" fn clipboard_clear_history() -> c_int {
         let tx = conn.unchecked_transaction()?;
         tx.execute("DELETE FROM clipboard_history", [])?;
         tx.execute("DELETE FROM clipboard_favorites", [])?;
+        tx.execute("DELETE FROM clipboard_quick_slots", [])?;
         tx.execute("DELETE FROM clipboard_deleted", [])?;
         tx.commit()
     })();
@@ -34,6 +35,9 @@ pub extern "C" fn clipboard_clear_history() -> c_int {
 
     if let Ok(mut favorites) = b.favorites.lock() {
         favorites.clear();
+    }
+    if let Ok(mut slots) = b.quick_slots.lock() {
+        *slots = [0u64; crate::db::QUICK_SLOT_COUNT];
     }
     let mut hist = b.history.lock().unwrap();
     hist.clear();
@@ -138,6 +142,13 @@ pub extern "C" fn clipboard_delete_by_id(entry_id: u64) -> c_int {
 
     if let Ok(mut favorites) = b.favorites.lock() {
         favorites.remove(&row_entry_id);
+    }
+    if let Ok(mut slots) = b.quick_slots.lock() {
+        for slot in slots.iter_mut() {
+            if *slot == row_entry_id {
+                *slot = 0;
+            }
+        }
     }
     {
         let mut hist = b.history.lock().unwrap();
@@ -380,7 +391,7 @@ pub extern "C" fn clipboard_undo_delete() -> c_int {
         None => return 0,
     };
 
-    let restored: Option<(u64, i64, HashSet<u64>)> = {
+    let restored: Option<(u64, i64, HashSet<u64>, [u64; crate::db::QUICK_SLOT_COUNT])> = {
         let conn = match b.db.lock() {
             Ok(c) => c,
             Err(e) => {
@@ -388,7 +399,7 @@ pub extern "C" fn clipboard_undo_delete() -> c_int {
                 return 0;
             }
         };
-        let (old_row_id, entry_id, was_favorite) =
+        let (old_row_id, entry_id, was_favorite, was_slot) =
             match crate::db::newest_deleted_row(&conn) {
                 Ok(Some(t)) => t,
                 Ok(None) => {
@@ -473,10 +484,26 @@ pub extern "C" fn clipboard_undo_delete() -> c_int {
                 return 0;
             }
         }
+        if was_slot != 0 {
+            if let Err(e) = tx.execute(
+                "INSERT OR IGNORE INTO clipboard_quick_slots (slot, entry_id) VALUES (?1, ?2)",
+                rusqlite::params![was_slot as i64, entry_id as i64],
+            ) {
+                crate::error_log!("CopyAttach: undo could not restore quick slot for entry {entry_id}: {e}");
+                return 0;
+            }
+        }
         let favorites_after = match crate::db::load_favorites(&tx) {
             Ok(set) => set,
             Err(()) => {
                 crate::error_log!("CopyAttach: undo could not read back favorites for entry {entry_id}; rolling back");
+                return 0;
+            }
+        };
+        let slots_after = match crate::db::load_quick_slots(&tx) {
+            Ok(set) => set,
+            Err(()) => {
+                crate::error_log!("CopyAttach: undo could not read back quick slots for entry {entry_id}; rolling back");
                 return 0;
             }
         };
@@ -487,11 +514,14 @@ pub extern "C" fn clipboard_undo_delete() -> c_int {
         if let Ok(mut mirror) = b.favorites.lock() {
             *mirror = favorites_after.clone();
         }
+        if let Ok(mut mirror) = b.quick_slots.lock() {
+            *mirror = slots_after;
+        }
         drop(source);
-        Some((entry_id, new_row_id, favorites_after))
+        Some((entry_id, new_row_id, favorites_after, slots_after))
     };
 
-    let (entry_id, new_row_id, favorites_after) = match restored {
+    let (entry_id, new_row_id, favorites_after, _slots_after) = match restored {
         Some(v) => v,
         None => return 0,
     };
@@ -702,6 +732,71 @@ pub extern "C" fn clipboard_set_favorite(entry_id: u64, favorite: c_int) -> c_in
 }
 
 #[no_mangle]
+pub extern "C" fn clipboard_toggle_quick_slot(entry_id: u64, slot: c_int) -> c_int {
+    if slot < 0 || slot as usize > crate::db::QUICK_SLOT_COUNT {
+        crate::error_log!("CopyAttach: toggle_quick_slot: slot {slot} out of range");
+        return 0;
+    }
+    let b = match try_backend() {
+        Some(b) => b,
+        None => return 0,
+    };
+    let slots_after = {
+        let conn = match b.db.lock() {
+            Ok(c) => c,
+            Err(e) => {
+                crate::error_log!("CopyAttach: DB mutex poisoned toggling quick slot for {entry_id}: {e}");
+                return 0;
+            }
+        };
+        if crate::db::toggle_quick_slot(&conn, entry_id, slot as u8).is_err() {
+            return 0;
+        }
+        match crate::db::load_quick_slots(&conn) {
+            Ok(s) => s,
+            Err(()) => return 0,
+        }
+    };
+    {
+        let mut mirror = match b.quick_slots.lock() {
+            Ok(s) => s,
+            Err(e) => {
+                crate::error_log!("CopyAttach: quick-slots mutex poisoned toggling {entry_id}: {e}");
+                return 0;
+            }
+        };
+        *mirror = slots_after;
+    }
+    crate::backend::mark_history_changed();
+    1
+}
+
+#[no_mangle]
+pub extern "C" fn clipboard_clear_quick_slots() -> c_int {
+    let b = match try_backend() {
+        Some(b) => b,
+        None => return 0,
+    };
+    {
+        let conn = match b.db.lock() {
+            Ok(c) => c,
+            Err(e) => {
+                crate::error_log!("CopyAttach: DB mutex poisoned clearing quick slots: {e}");
+                return 0;
+            }
+        };
+        if crate::db::clear_quick_slots(&conn).is_err() {
+            return 0;
+        }
+    }
+    if let Ok(mut mirror) = b.quick_slots.lock() {
+        *mirror = [0u64; crate::db::QUICK_SLOT_COUNT];
+    }
+    crate::backend::mark_history_changed();
+    1
+}
+
+#[no_mangle]
 pub extern "C" fn clipboard_trim_oldest_percent(percent: i32) -> c_int {
     let b = match try_backend() {
         Some(b) => b,
@@ -719,12 +814,21 @@ pub extern "C" fn clipboard_trim_oldest_percent(percent: i32) -> c_int {
             return 0;
         }
     };
+    let quick_slots = match b.quick_slots.lock() {
+        Ok(s) => *s,
+        Err(e) => {
+            crate::error_log!("CopyAttach: quick-slots mutex poisoned in trim_oldest_percent: {e}");
+            return 0;
+        }
+    };
 
     let count = {
         let hist = b.history.lock().unwrap();
         let cleanable_total = hist
             .iter()
-            .filter(|e| !favorites.contains(&e.entry_id()))
+            .filter(|e| {
+                !favorites.contains(&e.entry_id()) && !quick_slots.contains(&e.entry_id())
+            })
             .count();
         if cleanable_total == 0 {
             return 0;
@@ -743,6 +847,7 @@ pub extern "C" fn clipboard_trim_oldest_percent(percent: i32) -> c_int {
                 "SELECT id, entry_id FROM clipboard_history
                  WHERE id NOT IN (SELECT row_id FROM clipboard_deleted)
                    AND entry_id NOT IN (SELECT entry_id FROM clipboard_favorites)
+                   AND entry_id NOT IN (SELECT entry_id FROM clipboard_quick_slots)
                  ORDER BY timestamp ASC, id ASC",
             ) {
                 Ok(s) => s,

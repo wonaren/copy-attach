@@ -28,6 +28,7 @@ extension HistoryPopupContent {
         switch mode {
         case .all: true
         case .favorites: backend.favoriteIds.contains(item.id)
+        case .slots: backend.slotByEntryId[item.id] != nil
         case .image: item.isImage
         case .text: item.isText
         case .remarks: item.hasCustomLabel

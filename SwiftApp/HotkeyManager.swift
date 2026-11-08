@@ -243,6 +243,7 @@ class HotkeyManager {
 
     func startRecording() {
         isRecording = true
+        QuickSlotEventTap.shared.isRecording = true
 
         localEventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             self?.captureKeyEvent(event)
@@ -252,6 +253,7 @@ class HotkeyManager {
 
     func stopRecording() {
         isRecording = false
+        QuickSlotEventTap.shared.isRecording = false
         removeLocalMonitor()
     }
 

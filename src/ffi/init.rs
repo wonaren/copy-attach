@@ -155,6 +155,16 @@ fn clipboard_init_inner(threshold: Option<c_int>, legacy_favorites: &[u64]) -> c
     if let Err(()) = crate::db::prune_orphan_favorites(&conn) {
         crate::error_log!("CopyAttach: orphan-favorite cleanup failed; stale ids may linger");
     }
+    if let Err(()) = crate::db::prune_orphan_quick_slots(&conn) {
+        crate::error_log!("CopyAttach: orphan quick-slot cleanup failed; stale ids may linger");
+    }
+    let quick_slots_set = match crate::db::load_quick_slots(&conn) {
+        Ok(set) => set,
+        Err(()) => {
+            crate::error_log!("CopyAttach: quick slots unreadable; init retryable");
+            return INIT_RETRYABLE;
+        }
+    };
     let favorites_set = match crate::db::load_favorites(&conn) {
         Ok(set) => set,
         Err(()) => {
@@ -203,6 +213,7 @@ fn clipboard_init_inner(threshold: Option<c_int>, legacy_favorites: &[u64]) -> c
     let ignore_rules = Arc::new(Mutex::new(IgnoreRules::default()));
     let last_restored_id = Arc::new(AtomicU64::new(0));
     let favorites = Arc::new(Mutex::new(favorites_set));
+    let quick_slots = Arc::new(Mutex::new(quick_slots_set));
 
     let backend = Backend {
         history: Arc::clone(&history),
@@ -217,6 +228,7 @@ fn clipboard_init_inner(threshold: Option<c_int>, legacy_favorites: &[u64]) -> c
         undo_limit: Arc::clone(&undo_limit),
         last_restored_id: Arc::clone(&last_restored_id),
         favorites: Arc::clone(&favorites),
+        quick_slots: Arc::clone(&quick_slots),
     };
 
     if set_backend(backend).is_err() {

@@ -78,6 +78,18 @@ void clipboard_free_bytes(uint8_t* data, int32_t len);
 int32_t clipboard_prepare_paste_by_id(uint64_t entry_id, bool as_path, int32_t delivery_mode);
 int32_t clipboard_send_paste(int32_t pid);
 
+// ─── Quick Slots (Right ⌘ + 1~9) ───
+// Toggle a slot: if entry_id already owns `slot` the binding is removed;
+// otherwise the slot and the entry are both reassigned atomically.
+// `slot` must be 1..9. 1 = ok, 0 = rejected (unknown entry / DB failure).
+int32_t clipboard_toggle_quick_slot(uint64_t entry_id, int32_t slot);
+int32_t clipboard_clear_quick_slots(void);
+// Background paste: writes the slot payload to the pasteboard without
+// touching the history order or rewriting SQLite. Returns the target pid
+// (as clipboard_prepare_paste_by_id does), or 0/-1 on failure.
+int32_t clipboard_prepare_quick_paste_by_id(uint64_t entry_id);
+int32_t clipboard_prepare_quick_paste_by_slot(int32_t slot);
+
 // ─── Lazy Text Loading (on-demand full text by entry ID) ───
 char* clipboard_get_text_by_id(uint64_t entry_id);
 

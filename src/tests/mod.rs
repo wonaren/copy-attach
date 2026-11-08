@@ -15,6 +15,7 @@ mod backend;
 mod backup;
 mod soft_delete;
 mod soft_delete_real;
+mod quick_slots;
 
 fn make_text(text: &str, ts: u64) -> ClipboardEntry {
     ClipboardEntry::text_entry(

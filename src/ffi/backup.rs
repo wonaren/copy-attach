@@ -111,6 +111,16 @@ pub extern "C" fn clipboard_restore_backup_overwrite(
             if let Ok(mut favorites) = b.favorites.lock() {
                 *favorites = fav_ids.iter().copied().collect();
             }
+            let slots = match crate::db::load_quick_slots(&conn) {
+                Ok(s) => s,
+                Err(()) => {
+                    crate::error_log!("CopyAttach: restore overwrite succeeded but quick slots are unreadable");
+                    return -2;
+                }
+            };
+            if let Ok(mut mirror) = b.quick_slots.lock() {
+                *mirror = slots;
+            }
 
             let max_loaded = hist.iter().map(|e| e.entry_id()).max().unwrap_or(0);
             let watermark = entry_id_watermark(&conn);
@@ -179,6 +189,16 @@ pub extern "C" fn clipboard_restore_backup_merge(
             *hist = load_history_from_db(&conn, threshold);
             if let Ok(mut favorites) = b.favorites.lock() {
                 *favorites = merged_fav_ids.iter().copied().collect();
+            }
+            let slots = match crate::db::load_quick_slots(&conn) {
+                Ok(s) => s,
+                Err(()) => {
+                    crate::error_log!("CopyAttach: restore merge succeeded but quick slots are unreadable");
+                    return -2;
+                }
+            };
+            if let Ok(mut mirror) = b.quick_slots.lock() {
+                *mirror = slots;
             }
 
             let max_loaded = hist.iter().map(|e| e.entry_id()).max().unwrap_or(0);

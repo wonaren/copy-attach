@@ -9,6 +9,7 @@ struct ItemRowView: View {
     let queueOrder: Int?
     let canToggleQueue: Bool
     let isFavorite: Bool
+    let quickSlot: Int?
     let isEditingRemark: Bool
     @Binding var editingText: String
     let searchQuery: String
@@ -151,6 +152,9 @@ struct ItemRowView: View {
                     .symbolEffect(.bounce, value: isFavorite)
                     .transition(.scale(scale: 0.9).combined(with: .opacity))
             }
+            if let slot = quickSlot, shortcutHint == nil {
+                quickSlotBadge(slot)
+            }
             queueToggleControl
             if isSelected && isDeleteModifierPressed {
                 Image(systemName: "delete.left.fill")
@@ -184,12 +188,37 @@ struct ItemRowView: View {
         .padding(.vertical, 3)
         .animation(.easeOut(duration: 0.1), value: isSelected)
         .animation(.easeOut(duration: 0.15), value: isFavorite)
+        .animation(.easeOut(duration: 0.15), value: quickSlot)
         .animation(.easeOut(duration: 0.15), value: item.hasCustomLabel)
         .background(selectionBackground)
         .background(RowHoverDetector { hovering, screenRect, moved in
             isHovering = hovering
             onHoverChange?(hovering, screenRect, moved)
         })
+    }
+
+    private func quickSlotBadge(_ slot: Int) -> some View {
+        Text("右⌘\(slot)")
+            .font(.system(size: 9.5, weight: .semibold))
+            .monospacedDigit()
+            .foregroundColor(isSelected ? Color.white : Color(nsColor: .controlAccentColor))
+            .lineLimit(1)
+            .padding(.horizontal, 4.5)
+            .padding(.vertical, 1.5)
+            .background(
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .fill(isSelected
+                          ? Color.white.opacity(0.22)
+                          : Color(nsColor: .controlAccentColor).opacity(0.12))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .strokeBorder(isSelected
+                                  ? Color.white.opacity(0.45)
+                                  : Color(nsColor: .controlAccentColor).opacity(0.35),
+                                  lineWidth: 0.5)
+            )
+            .transition(.scale(scale: 0.85).combined(with: .opacity))
     }
 
     @ViewBuilder
@@ -456,6 +485,7 @@ extension ItemRowView: @preconcurrency Equatable {
         lhs.queueOrder == rhs.queueOrder &&
         lhs.canToggleQueue == rhs.canToggleQueue &&
         lhs.isFavorite == rhs.isFavorite &&
+        lhs.quickSlot == rhs.quickSlot &&
         lhs.isEditingRemark == rhs.isEditingRemark &&
         (!lhs.isEditingRemark || lhs.editingText == rhs.editingText) &&
         lhs.searchQuery == rhs.searchQuery

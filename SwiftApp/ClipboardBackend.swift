@@ -71,6 +71,9 @@ class ClipboardBackend {
         return c
     }()
     var favoriteIds: Set<Int> = []
+    var slotByEntryId: [Int: Int] = [:]
+    private var pendingQuickSlots: [Int] = []
+    private var quickSlotDrainScheduled = false
 
     private let legacyFavoritesKey = "FavoriteIds"
 
@@ -148,6 +151,7 @@ class ClipboardBackend {
 
         refreshPermission()
         refresh()
+        syncQuickSlotTap()
 
         return .started
     }
@@ -164,6 +168,7 @@ class ClipboardBackend {
 
     @MainActor
     func setPopupVisible(_ visible: Bool) {
+        QuickSlotEventTap.shared.popupOpen = visible
         if visible {
             let perfOpen = PerfSpan.start("swift", "popup.visible_setup")
             popupOpenPerfUs = Perf.nowUs()
@@ -285,6 +290,12 @@ class ClipboardBackend {
     }
 
     private func updateSourceApp() {
+        if !permissionGranted {
+            refreshPermission()
+        }
+        QuickSlotEventTap.shared.appIsFrontmost =
+            NSWorkspace.shared.frontmostApplication?.processIdentifier
+            == ProcessInfo.processInfo.processIdentifier
         recordFrontmostApp()
     }
 
@@ -328,6 +339,67 @@ class ClipboardBackend {
             HotkeyManager.shared.reregisterHotkeys()
             AppDelegate.shared?.focusSettingsWindow()
         }
+        syncQuickSlotTap()
+    }
+
+    func syncQuickSlotTap() {
+        QuickSlotEventTap.shared.sync(boundSlots: Set(slotByEntryId.values),
+                                      permissionGranted: permissionGranted)
+    }
+
+    @discardableResult
+    func toggleQuickSlot(entryId: Int, slot: Int) -> Bool {
+        guard clipboard_toggle_quick_slot(UInt64(entryId), Int32(slot)) != 0 else {
+            errorLog("toggleQuickSlot: backend rejected slot \(slot) for entry \(entryId) — see Rust log")
+            return false
+        }
+        reloadItems()
+        return true
+    }
+
+    @discardableResult
+    func clearQuickSlots() -> Bool {
+        guard clipboard_clear_quick_slots() != 0 else {
+            errorLog("clearQuickSlots: backend rejected the clear — see Rust log")
+            return false
+        }
+        reloadItems()
+        return true
+    }
+
+    func pasteQuickSlot(_ slot: Int) {
+        pendingQuickSlots.append(slot)
+        guard !quickSlotDrainScheduled else { return }
+        quickSlotDrainScheduled = true
+        drainQuickSlotQueue()
+    }
+
+    private func drainQuickSlotQueue() {
+        guard !pendingQuickSlots.isEmpty else {
+            quickSlotDrainScheduled = false
+            return
+        }
+        performQuickPaste(pendingQuickSlots.removeFirst())
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(150)) { [weak self] in
+            self?.drainQuickSlotQueue()
+        }
+    }
+
+    private func performQuickPaste(_ slot: Int) {
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier
+                != ProcessInfo.processInfo.processIdentifier else {
+            debugLog("performQuickPaste: suppressed while CopyAttach is frontmost")
+            return
+        }
+        recordFrontmostApp()
+        let pid = clipboard_prepare_quick_paste_by_slot(Int32(slot))
+        guard pid > 0 else {
+            errorLog("performQuickPaste: slot \(slot) could not be prepared (unbound, missing payload, or no Accessibility permission)")
+            return
+        }
+        if clipboard_send_paste(pid) == 0 {
+            errorLog("performQuickPaste: ⌘V delivery failed for slot \(slot) (pid \(pid))")
+        }
     }
 
     func reloadItems() {
@@ -350,7 +422,7 @@ class ClipboardBackend {
             defer { clipboard_free_bytes(packed, packedLength) }
 
             let perfDecode = PerfSpan.start("swift", "snapshot.decode")
-            guard let (newItems, favorites) = PackedSnapshot.decodeItems(
+            guard let (newItems, favorites, slots) = PackedSnapshot.decodeItems(
                 from: UnsafeRawPointer(packed),
                 length: Int(packedLength)
             ) else {
@@ -368,6 +440,8 @@ class ClipboardBackend {
                     guard gen == self.reloadGeneration.withLock({ $0 }) else { return }
                     self.items = newItems
                     self.favoriteIds = favorites
+                    self.slotByEntryId = slots
+                    self.syncQuickSlotTap()
                     self.itemsGeneration &+= 1
                     Perf.instant("swift", "list.published")
                     if let span = perfReload {
@@ -527,6 +601,9 @@ class ClipboardBackend {
         let result = clipboard_delete_by_id(UInt64(entryId)) != 0
         if result {
             favoriteIds.remove(entryId)
+            if slotByEntryId.removeValue(forKey: entryId) != nil {
+                syncQuickSlotTap()
+            }
             PasteQueueManager.shared.remove(id: entryId)
             items.remove(at: index)
             count = items.count
@@ -628,7 +705,7 @@ class ClipboardBackend {
         }
         defer { clipboard_free_bytes(packed, packedLength) }
 
-        guard let (newItems, favorites) = PackedSnapshot.decodeItems(
+        guard let (newItems, favorites, slots) = PackedSnapshot.decodeItems(
             from: UnsafeRawPointer(packed),
             length: Int(packedLength)
         ) else {
@@ -643,9 +720,11 @@ class ClipboardBackend {
 
         items = newItems
         favoriteIds = favorites
+        slotByEntryId = slots
         count = newItems.count
         itemsGeneration &+= 1
         reloadGeneration.withLock { $0 &+= 1 }
+        syncQuickSlotTap()
         return true
     }
 
@@ -757,6 +836,8 @@ class ClipboardBackend {
         count = 0
         items = []
         favoriteIds = []
+        slotByEntryId = [:]
+        syncQuickSlotTap()
         itemsGeneration &+= 1
         PasteQueueManager.shared.clear()
     }

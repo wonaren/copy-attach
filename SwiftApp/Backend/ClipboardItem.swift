@@ -22,6 +22,12 @@ enum ClipboardItem: Identifiable, Equatable {
         !customLabel.isEmpty
     }
 
+    var slotDisplayName: String {
+        if hasCustomLabel { return customLabel }
+        if isImage { return label }
+        return displayPreview
+    }
+
     var label: String {
         switch self {
         case .text(_, _, _, let label, _, _, _, _): return label

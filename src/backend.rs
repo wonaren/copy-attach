@@ -430,6 +430,7 @@ pub(crate) struct Backend {
     pub(crate) undo_limit: Arc<AtomicI64>,
     pub(crate) last_restored_id: Arc<AtomicU64>,
     pub(crate) favorites: Arc<Mutex<HashSet<u64>>>,
+    pub(crate) quick_slots: Arc<Mutex<[u64; crate::db::QUICK_SLOT_COUNT]>>,
 }
 
 static BACKEND: OnceLock<Backend> = OnceLock::new();
@@ -447,10 +448,11 @@ pub(crate) fn trim_history_memory(
     threshold: usize,
     favorites: &HashSet<u64>,
 ) {
-    let cleanable = hist
-        .iter()
-        .filter(|e| !favorites.contains(&e.entry_id()))
-        .count();
+    let quick_slots = try_backend()
+        .map(|b| *b.quick_slots.lock().unwrap_or_else(|e| e.into_inner()))
+        .unwrap_or([0u64; crate::db::QUICK_SLOT_COUNT]);
+    let protected = |id: u64| favorites.contains(&id) || quick_slots.contains(&id);
+    let cleanable = hist.iter().filter(|e| !protected(e.entry_id())).count();
     if cleanable <= threshold {
         return;
     }
@@ -460,7 +462,7 @@ pub(crate) fn trim_history_memory(
         if excess == 0 {
             break;
         }
-        if !favorites.contains(&entry.entry_id()) {
+        if !protected(entry.entry_id()) {
             doomed.insert(entry.entry_id());
             excess -= 1;
         }
@@ -472,6 +474,13 @@ pub(crate) fn reload_history_from_db(b: &Backend) -> usize {
     let conn = b.db.lock().unwrap();
     let threshold = b.cleanup_threshold.load(std::sync::atomic::Ordering::Relaxed);
     let loaded = crate::db::load_history_from_db(&conn, threshold);
+    let slots = match crate::db::load_quick_slots(&conn) {
+        Ok(s) => s,
+        Err(()) => {
+            crate::error_log!("CopyAttach: reload_history_from_db could not read quick slots");
+            return 0;
+        }
+    };
     drop(conn);
 
     let mut hist = b.history.lock().unwrap();
@@ -480,6 +489,7 @@ pub(crate) fn reload_history_from_db(b: &Backend) -> usize {
         *hist = loaded;
         trim_history_memory(&mut hist, threshold, &favorites);
     }
+    *b.quick_slots.lock().unwrap() = slots;
     let count = hist.len();
     mark_history_changed();
 

@@ -12,6 +12,10 @@ pub(crate) use schema::{
 pub(crate) use schema::{METADATA_VERSION, migrate_one_image_row, migrate_one_thumbnail_row};
 pub(crate) use schema::FTS_MAX_INDEXED_TEXT_LEN;
 pub(crate) use schema::{bump_entry_id_watermark, entry_id_watermark, import_favorites, load_favorites, prune_orphan_favorites, set_favorite};
+pub(crate) use schema::{
+    clear_quick_slots, load_quick_slots, prune_orphan_quick_slots, toggle_quick_slot,
+    QUICK_SLOT_COUNT,
+};
 pub(crate) use schema::{load_undo_limit, store_undo_limit};
 #[cfg(feature = "migration")]
 pub(crate) use schema::get_persist_dir;

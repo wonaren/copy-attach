@@ -80,7 +80,12 @@ impl PasteDelivery {
     }
 }
 
-fn prepare_paste_impl(mut item: ClipboardEntry, as_path: bool, delivery: PasteDelivery) -> c_int {
+fn prepare_paste_impl(
+    mut item: ClipboardEntry,
+    as_path: bool,
+    delivery: PasteDelivery,
+    touch_history: bool,
+) -> c_int {
     let perf_total = crate::perf::PerfSpan::start("rust", "paste.prepare");
     if let Some(mut span) = perf_total {
         span.data = Some(match (delivery, as_path) {
@@ -101,10 +106,12 @@ fn prepare_paste_impl(mut item: ClipboardEntry, as_path: bool, delivery: PasteDe
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    match &mut item {
-        ClipboardEntry::Text { ref mut timestamp, .. }
-        | ClipboardEntry::Image { ref mut timestamp, .. } => {
-            *timestamp = now;
+    if touch_history {
+        match &mut item {
+            ClipboardEntry::Text { ref mut timestamp, .. }
+            | ClipboardEntry::Image { ref mut timestamp, .. } => {
+                *timestamp = now;
+            }
         }
     }
 
@@ -230,6 +237,22 @@ fn prepare_paste_impl(mut item: ClipboardEntry, as_path: bool, delivery: PasteDe
     );
     drop(_event_guard);
 
+    if !touch_history {
+        if delivery == PasteDelivery::ClipboardOnly {
+            return 1;
+        }
+        return match try_backend()
+            .and_then(|b| b.source_app.lock().ok())
+            .map(|src| src.pid)
+        {
+            Some(pid) if pid > 0 => pid,
+            _ => {
+                crate::error_log!("CopyAttach: quick-slot paste written but no target pid — keystroke skipped");
+                -1
+            }
+        };
+    }
+
     let Some(b) = try_backend() else { return 0 };
     let mut db_guard = match b.db.lock() {
         Ok(c) => c,
@@ -296,24 +319,54 @@ fn prepare_paste_impl(mut item: ClipboardEntry, as_path: bool, delivery: PasteDe
     }
 }
 
+fn lookup_entry(entry_id: u64) -> Option<ClipboardEntry> {
+    let b = try_backend()?;
+    let hist = b.history.lock().unwrap();
+    hist.iter().find(|e| e.entry_id() == entry_id).cloned()
+}
+
 #[no_mangle]
 pub extern "C" fn clipboard_prepare_paste_by_id(entry_id: u64, as_path: bool, delivery_mode: c_int) -> c_int {
     let Some(delivery) = PasteDelivery::from_ffi(delivery_mode) else {
         crate::error_log!("CopyAttach: clipboard_prepare_paste_by_id: unknown delivery_mode {delivery_mode} — aborted");
         return 0;
     };
-    let item = {
-        let Some(b) = try_backend() else { return 0 };
-        let hist = b.history.lock().unwrap();
-        match hist.iter().find(|e| match e {
-            ClipboardEntry::Text { id, .. } => *id == entry_id,
-            ClipboardEntry::Image { id, .. } => *id == entry_id,
-        }).cloned() {
-            Some(i) => i,
-            None => return 0,
-        }
+    let item = match lookup_entry(entry_id) {
+        Some(i) => i,
+        None => return 0,
     };
-    prepare_paste_impl(item, as_path, delivery)
+    prepare_paste_impl(item, as_path, delivery, true)
+}
+
+#[no_mangle]
+pub extern "C" fn clipboard_prepare_quick_paste_by_id(entry_id: u64) -> c_int {
+    let item = match lookup_entry(entry_id) {
+        Some(i) => i,
+        None => return 0,
+    };
+    prepare_paste_impl(item, false, PasteDelivery::Keystroke, false)
+}
+
+#[no_mangle]
+pub extern "C" fn clipboard_prepare_quick_paste_by_slot(slot: c_int) -> c_int {
+    if slot < 1 || slot as usize > crate::db::QUICK_SLOT_COUNT {
+        return 0;
+    }
+    let entry_id = {
+        let Some(b) = try_backend() else { return 0 };
+        let slots = match b.quick_slots.lock() {
+            Ok(s) => *s,
+            Err(e) => {
+                crate::error_log!("CopyAttach: quick-slots mutex poisoned while pasting: {e}");
+                return 0;
+            }
+        };
+        slots[(slot - 1) as usize]
+    };
+    if entry_id == 0 {
+        return 0;
+    }
+    clipboard_prepare_quick_paste_by_id(entry_id)
 }
 
 #[no_mangle]

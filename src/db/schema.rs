@@ -147,6 +147,13 @@ pub(crate) fn ensure_history_table(conn: &Connection) -> Result<(), rusqlite::Er
     )?;
 
     conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS clipboard_quick_slots (
+             slot     INTEGER PRIMARY KEY CHECK (slot BETWEEN 1 AND 9),
+             entry_id INTEGER NOT NULL UNIQUE
+         );"
+    )?;
+
+    conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_history_type_hash
          ON clipboard_history(entry_type, hash);"
     )?;
@@ -161,11 +168,23 @@ pub(crate) fn ensure_history_table(conn: &Connection) -> Result<(), rusqlite::Er
              row_id      INTEGER PRIMARY KEY,
              entry_id    INTEGER NOT NULL,
              deleted_at  INTEGER NOT NULL,
-             was_favorite INTEGER NOT NULL DEFAULT 0
+             was_favorite INTEGER NOT NULL DEFAULT 0,
+             was_slot    INTEGER NOT NULL DEFAULT 0
          );
          CREATE INDEX IF NOT EXISTS idx_deleted_stamp
              ON clipboard_deleted(deleted_at DESC);"
     )?;
+    if let Err(e) = conn.execute_batch(
+        "ALTER TABLE clipboard_deleted ADD COLUMN was_slot INTEGER NOT NULL DEFAULT 0;"
+    ) {
+        let has_column: bool = conn
+            .prepare("SELECT was_slot FROM clipboard_deleted LIMIT 0")
+            .is_ok();
+        if !has_column {
+            crate::error_log!("CopyAttach: failed to add was_slot column: {e}");
+            return Err(e);
+        }
+    }
 
     let fts_sql = format!(
         "CREATE VIRTUAL TABLE IF NOT EXISTS clipboard_fts USING fts5(
@@ -303,6 +322,109 @@ pub(crate) fn set_favorite(conn: &Connection, entry_id: u64, favorite: bool) -> 
         .map(|_| ())
         .map_err(|e| {
             crate::error_log!("CopyAttach: failed to persist favorite state for entry {entry_id}: {e}");
+        })
+}
+
+pub(crate) const QUICK_SLOT_COUNT: usize = 9;
+
+pub(crate) fn load_quick_slots(conn: &Connection) -> Result<[u64; QUICK_SLOT_COUNT], ()> {
+    let mut slots = [0u64; QUICK_SLOT_COUNT];
+    let mut stmt = conn
+        .prepare("SELECT slot, entry_id FROM clipboard_quick_slots")
+        .map_err(|e| {
+            crate::error_log!("CopyAttach: failed to prepare quick-slot load: {e}");
+        })?;
+    let rows = stmt
+        .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))
+        .map_err(|e| {
+            crate::error_log!("CopyAttach: failed to query quick slots: {e}");
+        })?;
+    for (slot, entry_id) in rows.flatten() {
+        if (1..=QUICK_SLOT_COUNT as i64).contains(&slot) && entry_id > 0 {
+            slots[(slot - 1) as usize] = entry_id as u64;
+        }
+    }
+    Ok(slots)
+}
+
+pub(crate) fn prune_orphan_quick_slots(conn: &Connection) -> Result<usize, ()> {
+    conn.execute(
+        "DELETE FROM clipboard_quick_slots
+         WHERE entry_id NOT IN (SELECT entry_id FROM clipboard_history
+                                WHERE id NOT IN (SELECT row_id FROM clipboard_deleted))",
+        [],
+    )
+    .map_err(|e| {
+        crate::error_log!("CopyAttach: failed to prune orphan quick slots: {e}");
+    })
+}
+
+pub(crate) fn toggle_quick_slot(conn: &Connection, entry_id: u64, slot: u8) -> Result<(), ()> {
+    if slot == 0 || slot as usize > QUICK_SLOT_COUNT {
+        crate::error_log!("CopyAttach: quick-slot toggle rejected: slot {slot} out of range");
+        return Err(());
+    }
+    let exists: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM clipboard_history
+             WHERE entry_id = ?1
+               AND id NOT IN (SELECT row_id FROM clipboard_deleted)",
+            rusqlite::params![entry_id as i64],
+            |row| row.get(0),
+        )
+        .map_err(|e| {
+            crate::error_log!("CopyAttach: failed to look up entry {entry_id} for quick slot: {e}");
+        })?;
+    if exists == 0 {
+        crate::error_log!("CopyAttach: quick-slot toggle for unknown entry {entry_id}");
+        return Err(());
+    }
+    let tx = conn.unchecked_transaction().map_err(|e| {
+        crate::error_log!("CopyAttach: failed to begin quick-slot transaction: {e}");
+    })?;
+    let current = match tx.query_row(
+        "SELECT slot FROM clipboard_quick_slots WHERE entry_id = ?1",
+        rusqlite::params![entry_id as i64],
+        |row| row.get::<_, i64>(0),
+    ) {
+        Ok(v) => Some(v),
+        Err(rusqlite::Error::QueryReturnedNoRows) => None,
+        Err(e) => {
+            crate::error_log!("CopyAttach: failed to read the current quick slot for {entry_id}: {e}");
+            return Err(());
+        }
+    };
+    let result = if current == Some(slot as i64) {
+        tx.execute(
+            "DELETE FROM clipboard_quick_slots WHERE entry_id = ?1",
+            rusqlite::params![entry_id as i64],
+        )
+    } else {
+        tx.execute(
+            "DELETE FROM clipboard_quick_slots WHERE slot = ?1 OR entry_id = ?2",
+            rusqlite::params![slot as i64, entry_id as i64],
+        )
+        .and_then(|_| {
+            tx.execute(
+                "INSERT INTO clipboard_quick_slots (slot, entry_id) VALUES (?1, ?2)",
+                rusqlite::params![slot as i64, entry_id as i64],
+            )
+        })
+    };
+    if let Err(e) = result {
+        crate::error_log!("CopyAttach: failed to toggle quick slot {slot} for entry {entry_id}: {e}");
+        return Err(());
+    }
+    tx.commit().map_err(|e| {
+        crate::error_log!("CopyAttach: failed to commit quick-slot toggle: {e}");
+    })
+}
+
+pub(crate) fn clear_quick_slots(conn: &Connection) -> Result<(), ()> {
+    conn.execute("DELETE FROM clipboard_quick_slots", [])
+        .map(|_| ())
+        .map_err(|e| {
+            crate::error_log!("CopyAttach: failed to clear quick slots: {e}");
         })
 }
 

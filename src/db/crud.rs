@@ -92,8 +92,10 @@ pub(crate) fn load_history_from_db(conn: &Connection, threshold: usize) -> Vec<C
                AND (id IN (SELECT id FROM clipboard_history
                            WHERE id NOT IN (SELECT row_id FROM clipboard_deleted)
                              AND entry_id NOT IN (SELECT entry_id FROM clipboard_favorites)
+                             AND entry_id NOT IN (SELECT entry_id FROM clipboard_quick_slots)
                            {ORDER_NEWEST_FIRST} LIMIT ?1)
-                   OR entry_id IN (SELECT entry_id FROM clipboard_favorites))
+                   OR entry_id IN (SELECT entry_id FROM clipboard_favorites)
+                   OR entry_id IN (SELECT entry_id FROM clipboard_quick_slots))
              {ORDER_NEWEST_FIRST}"
         )
     ) {
@@ -309,22 +311,35 @@ fn keep_newest_row(conn: &Connection, rows: &[(i64, i64)]) -> Result<(), rusqlit
         return Ok(());
     };
     for &(row_id, entry_id) in &rows[1..] {
-        if entry_id != survivor_entry_id
-            && conn.query_row(
+        if entry_id != survivor_entry_id {
+            if conn.query_row(
                 "SELECT COUNT(*) FROM clipboard_favorites WHERE entry_id = ?1",
                 rusqlite::params![entry_id],
                 |r| r.get::<_, i64>(0),
-            )?
-                > 0
-        {
-            conn.execute(
-                "INSERT OR IGNORE INTO clipboard_favorites (entry_id) VALUES (?1)",
-                rusqlite::params![survivor_entry_id],
-            )?;
-            conn.execute(
-                "DELETE FROM clipboard_favorites WHERE entry_id = ?1",
+            )? > 0 {
+                conn.execute(
+                    "INSERT OR IGNORE INTO clipboard_favorites (entry_id) VALUES (?1)",
+                    rusqlite::params![survivor_entry_id],
+                )?;
+                conn.execute(
+                    "DELETE FROM clipboard_favorites WHERE entry_id = ?1",
+                    rusqlite::params![entry_id],
+                )?;
+            }
+            if conn.query_row(
+                "SELECT COUNT(*) FROM clipboard_quick_slots WHERE entry_id = ?1",
                 rusqlite::params![entry_id],
-            )?;
+                |r| r.get::<_, i64>(0),
+            )? > 0 {
+                conn.execute(
+                    "UPDATE OR IGNORE clipboard_quick_slots SET entry_id = ?1 WHERE entry_id = ?2",
+                    rusqlite::params![survivor_entry_id, entry_id],
+                )?;
+                conn.execute(
+                    "DELETE FROM clipboard_quick_slots WHERE entry_id = ?1",
+                    rusqlite::params![entry_id],
+                )?;
+            }
         }
         conn.execute(
             "DELETE FROM clipboard_history WHERE id = ?1",
@@ -339,11 +354,13 @@ pub(crate) fn trim_db_history(conn: &Connection, threshold: usize) -> Result<(),
                WHERE id IN (SELECT id FROM clipboard_history
                             WHERE id NOT IN (SELECT row_id FROM clipboard_deleted)
                               AND entry_id NOT IN (SELECT entry_id FROM clipboard_favorites)
+                              AND entry_id NOT IN (SELECT entry_id FROM clipboard_quick_slots)
                             ORDER BY timestamp ASC, id ASC
                             LIMIT (SELECT MAX(0,
                                      (SELECT COUNT(*) FROM clipboard_history
-                                       WHERE id NOT IN (SELECT row_id FROM clipboard_deleted))
-                                     - (SELECT COUNT(*) FROM clipboard_favorites)
+                                       WHERE id NOT IN (SELECT row_id FROM clipboard_deleted)
+                                         AND entry_id NOT IN (SELECT entry_id FROM clipboard_favorites)
+                                         AND entry_id NOT IN (SELECT entry_id FROM clipboard_quick_slots))
                                      - ?1)))";
     if let Err(e) = conn.execute(sql, rusqlite::params![threshold as i64]) {
         crate::error_log!("CopyAttach: failed to trim DB history: {e}");
@@ -354,14 +371,15 @@ pub(crate) fn trim_db_history(conn: &Connection, threshold: usize) -> Result<(),
 
 pub(crate) fn soft_delete_row(conn: &Connection, db_id: i64) -> Result<u64, ()> {
     let stamp = crate::backend::undo_stamp_now();
-    let (entry_id, was_favorite) = match conn.query_row(
+    let (entry_id, was_favorite, was_slot) = match conn.query_row(
         "SELECT h.entry_id,
-                (SELECT COUNT(*) FROM clipboard_favorites f WHERE f.entry_id = h.entry_id)
+                (SELECT COUNT(*) FROM clipboard_favorites f WHERE f.entry_id = h.entry_id),
+                COALESCE((SELECT q.slot FROM clipboard_quick_slots q WHERE q.entry_id = h.entry_id), 0)
          FROM clipboard_history h
          WHERE h.id = ?1
            AND NOT EXISTS (SELECT 1 FROM clipboard_deleted d WHERE d.row_id = h.id)",
         rusqlite::params![db_id],
-        |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+        |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?)),
     ) {
         Ok(v) => v,
         Err(rusqlite::Error::QueryReturnedNoRows) => {
@@ -374,22 +392,29 @@ pub(crate) fn soft_delete_row(conn: &Connection, db_id: i64) -> Result<u64, ()> 
         }
     };
     conn.execute(
-        "INSERT INTO clipboard_deleted (row_id, entry_id, deleted_at, was_favorite)
-         VALUES (?1, ?2, ?3, ?4)",
-        rusqlite::params![db_id, entry_id, stamp, was_favorite],
+        "INSERT INTO clipboard_deleted (row_id, entry_id, deleted_at, was_favorite, was_slot)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![db_id, entry_id, stamp, was_favorite, was_slot],
     )
     .map_err(|e| {
         crate::error_log!("CopyAttach: failed to record deletion of row {db_id}: {e}");
+    })?;
+    conn.execute(
+        "DELETE FROM clipboard_quick_slots WHERE entry_id = ?1",
+        rusqlite::params![entry_id],
+    )
+    .map_err(|e| {
+        crate::error_log!("CopyAttach: failed to release the quick slot of deleted entry {entry_id}: {e}");
     })?;
     Ok(entry_id as u64)
 }
 
 pub(crate) fn newest_deleted_row(
     conn: &Connection,
-) -> Result<Option<(i64, u64, bool)>, ()> {
+) -> Result<Option<(i64, u64, bool, u8)>, ()> {
     loop {
         let candidate = match conn.query_row(
-            "SELECT row_id, entry_id, was_favorite
+            "SELECT row_id, entry_id, was_favorite, was_slot
              FROM clipboard_deleted
              ORDER BY deleted_at DESC, row_id DESC
              LIMIT 1",
@@ -399,6 +424,7 @@ pub(crate) fn newest_deleted_row(
                     row.get::<_, i64>(0)?,
                     row.get::<_, i64>(1)?,
                     row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
                 ))
             },
         ) {
@@ -409,7 +435,7 @@ pub(crate) fn newest_deleted_row(
                 return Err(());
             }
         };
-        let (row_id, entry_id, was_favorite) = match candidate {
+        let (row_id, entry_id, was_favorite, was_slot) = match candidate {
             Some(v) => v,
             None => return Ok(None),
         };
@@ -423,7 +449,12 @@ pub(crate) fn newest_deleted_row(
                 crate::error_log!("CopyAttach: undo could not check payload for row {row_id}: {e}");
             })?;
         if payload_exists > 0 {
-            return Ok(Some((row_id, entry_id as u64, was_favorite != 0)));
+            return Ok(Some((
+                row_id,
+                entry_id as u64,
+                was_favorite != 0,
+                was_slot.clamp(0, crate::db::QUICK_SLOT_COUNT as i64) as u8,
+            )));
         }
         crate::debug_log!("CopyAttach: dropping orphan undo entry for missing row {row_id}");
         conn.execute(

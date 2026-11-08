@@ -6,8 +6,10 @@ enum PackedSnapshot {
     fileprivate static let headerLength = 16
     fileprivate static let rowHeaderLength = 60
     fileprivate static let rowFlagFavorite: UInt32 = 1
+    fileprivate static let rowQuickSlotShift: UInt32 = 1
+    fileprivate static let rowQuickSlotMask: UInt32 = 0x0F
 
-    static func decodeItems(from ptr: UnsafeRawPointer, length: Int) -> ([ClipboardItem], Set<Int>)? {
+    static func decodeItems(from ptr: UnsafeRawPointer, length: Int) -> ([ClipboardItem], Set<Int>, [Int: Int])? {
         guard length >= headerLength else { return nil }
         for (index, byte) in magic.enumerated() {
             guard ptr.load(fromByteOffset: index, as: UInt8.self) == byte else { return nil }
@@ -19,6 +21,7 @@ enum PackedSnapshot {
         var items: [ClipboardItem] = []
         items.reserveCapacity(count)
         var favoriteIds: Set<Int> = []
+        var slotByEntryId: [Int: Int] = [:]
         var offset = headerLength
 
         let profiling = Perf.isEnabled
@@ -42,6 +45,10 @@ enum PackedSnapshot {
             let flags = readUInt32(ptr, at: offset + 56)
             if flags & rowFlagFavorite != 0 {
                 favoriteIds.insert(id)
+            }
+            let quickSlot = Int((flags >> rowQuickSlotShift) & rowQuickSlotMask)
+            if quickSlot >= 1, quickSlot <= 9 {
+                slotByEntryId[id] = quickSlot
             }
 
             let stringBytes = customLabelLength + labelLength + sourceNameLength + sourceBundleIdLength + previewLength
@@ -97,7 +104,7 @@ enum PackedSnapshot {
             Perf.emitSpan("swift", "snapshot.decode.strings", durNs: stringNs, val: Int64(count))
             Perf.emitSpan("swift", "snapshot.decode.format_preview", durNs: formatNs, val: Int64(count))
         }
-        return (items, favoriteIds)
+        return (items, favoriteIds, slotByEntryId)
     }
 
     fileprivate static func readUInt32(_ ptr: UnsafeRawPointer, at offset: Int) -> UInt32 {

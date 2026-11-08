@@ -1,5 +1,5 @@
 use rusqlite::{Connection, OpenFlags};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -67,6 +67,13 @@ pub(crate) fn export_backup(
         backup_conn
             .execute("DELETE FROM clipboard_deleted", [])
             .map_err(|e| format!("清理备份中的删除标记失败: {e}"))?;
+        backup_conn
+            .execute(
+                "DELETE FROM clipboard_quick_slots
+                 WHERE entry_id NOT IN (SELECT entry_id FROM clipboard_history)",
+                [],
+            )
+            .map_err(|e| format!("清理备份中的孤立快捷槽位失败: {e}"))?;
 
         let count: i64 = backup_conn
             .query_row("SELECT COUNT(*) FROM clipboard_history", [], |r| r.get(0))
@@ -223,6 +230,8 @@ pub(crate) fn restore_backup_overwrite(
 
         tx.execute("DELETE FROM main.clipboard_deleted", [])
             .map_err(|e| format!("清空撤销记录失败: {e}"))?;
+        tx.execute("DELETE FROM main.clipboard_quick_slots", [])
+            .map_err(|e| format!("清空当前快捷槽位失败: {e}"))?;
 
         tx.execute_batch(
             "INSERT INTO main.clipboard_history (
@@ -301,6 +310,25 @@ pub(crate) fn restore_backup_overwrite(
                 [],
             )
             .map_err(|e| format!("恢复收藏表失败: {e}"))?;
+        }
+        let backup_has_slots: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM backup_db.sqlite_master
+                 WHERE type = 'table' AND name = 'clipboard_quick_slots'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|e| format!("检查备份快捷槽位表失败: {e}"))?;
+        if backup_has_slots > 0 {
+            tx.execute(
+                "INSERT OR IGNORE INTO main.clipboard_quick_slots (slot, entry_id)
+                 SELECT s.slot, s.entry_id
+                 FROM backup_db.clipboard_quick_slots s
+                 JOIN main.clipboard_history h ON h.entry_id = s.entry_id
+                 WHERE s.slot BETWEEN 1 AND 9",
+                [],
+            )
+            .map_err(|e| format!("恢复快捷槽位失败: {e}"))?;
         }
         let restored_favorites: Vec<u64> = {
             let mut stmt = tx
@@ -424,6 +452,7 @@ pub(crate) fn restore_backup_merge(
         }
 
         let mut newly_added = 0usize;
+        let mut slot_remap: HashMap<u64, u64> = HashMap::new();
 
         struct RawBackupRow {
             entry_id: i64,
@@ -527,6 +556,9 @@ pub(crate) fn restore_backup_merge(
                     if is_fav && curr_entry_id > 0 {
                         merged_fav_set.insert(curr_entry_id as u64);
                     }
+                    if item.entry_id > 0 && curr_entry_id > 0 {
+                        slot_remap.insert(item.entry_id as u64, curr_entry_id as u64);
+                    }
                 } else {
                     let mut final_eid = item.entry_id as u64;
                     if final_eid == 0 || used_entry_ids.contains(&final_eid) {
@@ -553,6 +585,9 @@ pub(crate) fn restore_backup_merge(
                         newly_added += 1;
                         if is_fav {
                             merged_fav_set.insert(final_eid);
+                        }
+                        if item.entry_id > 0 {
+                            slot_remap.insert(item.entry_id as u64, final_eid);
                         }
                     }
                 }
@@ -585,6 +620,9 @@ pub(crate) fn restore_backup_merge(
                     }
                     if is_fav && curr_entry_id > 0 {
                         merged_fav_set.insert(curr_entry_id as u64);
+                    }
+                    if item.entry_id > 0 && curr_entry_id > 0 {
+                        slot_remap.insert(item.entry_id as u64, curr_entry_id as u64);
                     }
                 } else {
                     let mut final_eid = item.entry_id as u64;
@@ -622,6 +660,9 @@ pub(crate) fn restore_backup_merge(
                         if is_fav {
                             merged_fav_set.insert(final_eid);
                         }
+                        if item.entry_id > 0 {
+                            slot_remap.insert(item.entry_id as u64, final_eid);
+                        }
                     }
                 }
             }
@@ -640,6 +681,38 @@ pub(crate) fn restore_backup_merge(
                 fav_stmt
                     .execute([*id as i64])
                     .map_err(|e| format!("写入合并收藏失败: {e}"))?;
+            }
+        }
+
+        let backup_has_slots: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM backup_db.sqlite_master
+                 WHERE type = 'table' AND name = 'clipboard_quick_slots'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|e| format!("检查备份快捷槽位表失败: {e}"))?;
+        if backup_has_slots > 0 {
+            let mut slot_stmt = tx
+                .prepare(
+                    "INSERT OR IGNORE INTO main.clipboard_quick_slots (slot, entry_id)
+                     VALUES (?1, ?2)",
+                )
+                .map_err(|e| format!("准备写入合并快捷槽位失败: {e}"))?;
+            let mut read_stmt = tx
+                .prepare(
+                    "SELECT slot, entry_id FROM backup_db.clipboard_quick_slots
+                     WHERE slot BETWEEN 1 AND 9",
+                )
+                .map_err(|e| format!("读取备份快捷槽位失败: {e}"))?;
+            let rows = read_stmt
+                .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))
+                .map_err(|e| format!("遍历备份快捷槽位失败: {e}"))?;
+            for (slot, entry_id) in rows.flatten() {
+                let Some(mapped) = slot_remap.get(&(entry_id as u64)) else { continue };
+                slot_stmt
+                    .execute(rusqlite::params![slot, *mapped as i64])
+                    .map_err(|e| format!("写入合并快捷槽位失败: {e}"))?;
             }
         }
 

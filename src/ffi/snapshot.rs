@@ -74,13 +74,22 @@ pub(crate) const PACKED_SNAPSHOT_VERSION: u32 = 3;
 pub(crate) const PACKED_ROW_HEADER_LEN: usize = 60;
 
 pub(crate) const PACKED_ROW_FLAG_FAVORITE: u32 = 1;
+pub(crate) const PACKED_ROW_FLAG_QUICK_SLOT_SHIFT: u32 = 1;
+pub(crate) const PACKED_ROW_QUICK_SLOT_MASK: u32 = 0x0F;
 
-fn row_flags(entry: &ClipboardEntry, favorites: &HashSet<u64>) -> u32 {
+fn row_flags(
+    entry: &ClipboardEntry,
+    favorites: &HashSet<u64>,
+    quick_slots: &[u64; crate::db::QUICK_SLOT_COUNT],
+) -> u32 {
+    let mut flags = 0u32;
     if favorites.contains(&entry.entry_id()) {
-        PACKED_ROW_FLAG_FAVORITE
-    } else {
-        0
+        flags |= PACKED_ROW_FLAG_FAVORITE;
     }
+    if let Some(index) = quick_slots.iter().position(|id| *id == entry.entry_id()) {
+        flags |= ((index as u32 + 1) & PACKED_ROW_QUICK_SLOT_MASK) << PACKED_ROW_FLAG_QUICK_SLOT_SHIFT;
+    }
+    flags
 }
 
 fn push_u32(out: &mut Vec<u8>, value: u32) {
@@ -130,7 +139,11 @@ fn push_image_label(out: &mut Vec<u8>, width: u32, height: u32) {
     out.extend_from_slice(b")");
 }
 
-pub(crate) fn encode_snapshot_packed(hist: &[ClipboardEntry], favorites: &HashSet<u64>) -> Vec<u8> {
+pub(crate) fn encode_snapshot_packed(
+    hist: &[ClipboardEntry],
+    favorites: &HashSet<u64>,
+    quick_slots: &[u64; crate::db::QUICK_SLOT_COUNT],
+) -> Vec<u8> {
     let mut total = 16usize;
     for entry in hist {
         total += PACKED_ROW_HEADER_LEN;
@@ -188,7 +201,7 @@ pub(crate) fn encode_snapshot_packed(hist: &[ClipboardEntry], favorites: &HashSe
                 push_u32(&mut out, source_name.len() as u32);
                 push_u32(&mut out, source_bundle_id.len() as u32);
                 push_u32(&mut out, preview.len() as u32);
-                push_u32(&mut out, row_flags(entry, favorites));
+                push_u32(&mut out, row_flags(entry, favorites, quick_slots));
                 out.extend_from_slice(custom_label.as_bytes());
                 out.extend_from_slice(label.as_bytes());
                 out.extend_from_slice(source_name.as_bytes());
@@ -218,7 +231,7 @@ pub(crate) fn encode_snapshot_packed(hist: &[ClipboardEntry], favorites: &HashSe
                 push_u32(&mut out, source_name.len() as u32);
                 push_u32(&mut out, source_bundle_id.len() as u32);
                 push_u32(&mut out, 0);
-                push_u32(&mut out, row_flags(entry, favorites));
+                push_u32(&mut out, row_flags(entry, favorites, quick_slots));
                 out.extend_from_slice(custom_label.as_bytes());
                 push_image_label(&mut out, *width, *height);
                 out.extend_from_slice(source_name.as_bytes());
@@ -246,7 +259,14 @@ pub extern "C" fn clipboard_snapshot_packed_acquire(out_len: *mut c_int) -> *mut
             return std::ptr::null_mut();
         }
     };
-    let packed = encode_snapshot_packed(&hist, &favorites);
+    let quick_slots = match b.quick_slots.lock() {
+        Ok(s) => *s,
+        Err(e) => {
+            crate::error_log!("CopyAttach: quick-slots mutex poisoned in snapshot: {e}");
+            return std::ptr::null_mut();
+        }
+    };
+    let packed = encode_snapshot_packed(&hist, &favorites, &quick_slots);
     let rows = hist.len();
     if let Some(mut span) = perf {
         span.val = Some(rows as i64);
@@ -476,7 +496,9 @@ mod tests {
             },
         ];
         let favorites: HashSet<u64> = [9u64].into_iter().collect();
-        let packed = encode_snapshot_packed(&hist, &favorites);
+        let mut quick_slots = [0u64; crate::db::QUICK_SLOT_COUNT];
+        quick_slots[2] = 7;
+        let packed = encode_snapshot_packed(&hist, &favorites, &quick_slots);
 
         assert_eq!(&packed[0..4], b"CSNP");
         assert_eq!(read_u32(&packed, 4), PACKED_SNAPSHOT_VERSION);
@@ -492,7 +514,7 @@ mod tests {
         let source_len = read_u32(&packed, at + 44) as usize;
         let bundle_len = read_u32(&packed, at + 48) as usize;
         let preview_len = read_u32(&packed, at + 52) as usize;
-        assert_eq!(read_u32(&packed, at + 56), 0, "text row is not favorited");
+        assert_eq!(read_u32(&packed, at + 56), 3 << 1, "text row carries quick slot 3");
         let mut span = at + PACKED_ROW_HEADER_LEN;
         assert_eq!(&packed[span..span + custom_label_len], "备注 text".as_bytes());
         span += custom_label_len;
@@ -534,7 +556,7 @@ mod tests {
 
     #[test]
     fn packed_snapshot_empty_history_has_only_header() {
-        let packed = encode_snapshot_packed(&[], &HashSet::new());
+        let packed = encode_snapshot_packed(&[], &HashSet::new(), &[0u64; crate::db::QUICK_SLOT_COUNT]);
         assert_eq!(packed.len(), 16);
         assert_eq!(&packed[0..4], b"CSNP");
         assert_eq!(read_u32(&packed, 8), 0);
@@ -567,13 +589,13 @@ mod tests {
 
         let start = std::time::Instant::now();
         for _ in 0..iterations {
-            std::hint::black_box(encode_snapshot_packed(&hist, &HashSet::new()));
+            std::hint::black_box(encode_snapshot_packed(&hist, &HashSet::new(), &[0u64; crate::db::QUICK_SLOT_COUNT]));
         }
         let packed_avg_us = start.elapsed().as_nanos() as f64 / iterations as f64 / 1000.0;
 
         println!(
             "snapshot build: old per-row {old_avg_us:.1} us vs packed {packed_avg_us:.1} us, packed bytes {}",
-            encode_snapshot_packed(&hist, &HashSet::new()).len()
+            encode_snapshot_packed(&hist, &HashSet::new(), &[0u64; crate::db::QUICK_SLOT_COUNT]).len()
         );
     }
 }

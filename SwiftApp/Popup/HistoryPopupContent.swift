@@ -7,10 +7,12 @@ enum FilterMode: String, CaseIterable {
     case image
     case text
     case remarks
+    case slots
 
     var icon: String {
         switch self {
         case .favorites: return "star.fill"
+        case .slots: return "command.square"
         case .all: return "line.3.horizontal"
         case .image: return "photo"
         case .text: return "doc.text"
@@ -21,6 +23,7 @@ enum FilterMode: String, CaseIterable {
     var title: String {
         switch self {
         case .favorites: return "收藏"
+        case .slots: return "槽位"
         case .all: return "全部"
         case .image: return "图片"
         case .text: return "文本"
@@ -50,6 +53,14 @@ private struct RowFramePreferenceKey: PreferenceKey {
     }
 }
 
+private struct QuickSlotDialAnchorPreferenceKey: PreferenceKey {
+    static let defaultValue: CGRect = .null
+    static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
+        let next = nextValue()
+        if !next.isNull { value = next }
+    }
+}
+
 final class ContextMenuItemTarget: NSObject {
     private let action: () -> Void
     init(_ action: @escaping () -> Void) { self.action = action }
@@ -70,6 +81,8 @@ struct HistoryPopupContent: View {
     @State var hoverPreviewHideTask: Task<Void, Never>?
     @State private var isControlPressed: Bool = false
     @State private var isCommandPressed: Bool = false
+    @State private var isRightCommandPressed: Bool = false
+    @State private var dialAnchor: CGRect = .null
     @Environment(\.appTheme) var theme
     @State var searchText: String = ""
     @State var effectiveSearchText: String = ""
@@ -150,18 +163,28 @@ struct HistoryPopupContent: View {
             return memo
         }
         let base = effectiveSearchText.isEmpty ? backend.items : searchResults
-        let sorted: [ClipboardItem]
+        let filtered: [ClipboardItem]
         if filterMode == .all {
-            sorted = base
+            filtered = base
         } else {
-            sorted = base.filter { matches($0, filterMode: filterMode) }
+            filtered = base.filter { matches($0, filterMode: filterMode) }
+        }
+        let sorted: [ClipboardItem]
+        if filterMode == .slots {
+            sorted = filtered.sorted {
+                (backend.slotByEntryId[$0.id] ?? Int.max)
+                    < (backend.slotByEntryId[$1.id] ?? Int.max)
+            }
+        } else {
+            sorted = filtered
         }
         var rows: [PopupRow] = []
         rows.reserveCapacity(sorted.count * 2)
         var prevDay: UInt64?
         var textCount = 0
         for (index, item) in sorted.enumerated() {
-            let needsSeparator = prevDay.map { !DayGroup.isSameDay($0, item.timestamp) } ?? true
+            let needsSeparator = filterMode != .slots
+                && (prevDay.map { !DayGroup.isSameDay($0, item.timestamp) } ?? true)
             if needsSeparator {
                 rows.append(.separator(timestamp: item.timestamp, isFirst: prevDay == nil))
             }
@@ -183,6 +206,21 @@ struct HistoryPopupContent: View {
     }
 
     var displayItems: [ClipboardItem] { currentDisplayMemo.items }
+
+    private func refreshQuickSlotDial() {
+        guard isRightCommandPressed, !dialAnchor.isNull,
+              let popup = popupWindow, popup.isVisible,
+              let contentView = popup.contentView else {
+            QuickSlotDialWindow.shared.hide()
+            return
+        }
+        let localCenter = NSPoint(x: dialAnchor.midX, y: dialAnchor.midY)
+        let windowPoint = contentView.convert(localCenter, to: nil)
+        let screenPoint = popup.convertPoint(toScreen: windowPoint)
+        QuickSlotDialWindow.shared.show(boundSlots: Set(backend.slotByEntryId.values),
+                                        popupFrame: popup.frame,
+                                        anchorY: screenPoint.y)
+    }
 
     var maxIndex: Int { displayItems.count }
 
@@ -378,7 +416,11 @@ struct HistoryPopupContent: View {
             toastDismissTask = nil
             toastMessage = nil
             isControlPressed = NSEvent.modifierFlags.contains(.control)
-            isCommandPressed = NSEvent.modifierFlags.contains(.command)
+            let commandSides = QuickSlotKeyMap.commandSides(
+                rawFlags: CGEventSource.flagsState(.combinedSessionState).rawValue
+            )
+            isCommandPressed = commandSides.left
+            isRightCommandPressed = commandSides.right
 
             let openDuration = 0.2
             withAnimation(.spring(response: openDuration,
@@ -399,6 +441,7 @@ struct HistoryPopupContent: View {
             }
         }
         .onDisappear {
+            QuickSlotDialWindow.shared.hide()
             isSearchFocused = false
             isContainerFocused = false
             closePreview()
@@ -408,6 +451,7 @@ struct HistoryPopupContent: View {
             toastMessage = nil
         }
         .onReceive(NotificationCenter.default.publisher(for: popupWillDismissNotification)) { _ in
+            QuickSlotDialWindow.shared.hide()
             closeHoverPreview()
             withAnimation(.easeOut(duration: 0.15)) {
                 isDismissing = true
@@ -459,6 +503,33 @@ struct HistoryPopupContent: View {
                     isCommandPressed = pressed
                 }
             }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: rightCommandKeyNotification)) { note in
+            let pressed = (note.object as? Bool) ?? false
+            if pressed != isRightCommandPressed {
+                withAnimation(.easeInOut(duration: 0.15)) {
+                    isRightCommandPressed = pressed
+                }
+            }
+            refreshQuickSlotDial()
+        }
+        .onChange(of: backend.slotByEntryId) { _, _ in
+            refreshQuickSlotDial()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: rightCommandNumberNotification)) { note in
+            guard !isDismissing, editingItemId == nil, !showPreview,
+                  let slot = note.object as? Int, slot >= 1, slot <= 9 else { return }
+            let itemIndex: Int
+            if selectedIndex > 0 {
+                itemIndex = selectedIndex - 1
+            } else if !displayItems.isEmpty {
+                itemIndex = 0
+                selectedIndex = 1
+            } else {
+                return
+            }
+            guard itemIndex < displayItems.count else { return }
+            applyQuickSlotToggle(item: displayItems[itemIndex], slot: slot)
         }
         .onReceive(NotificationCenter.default.publisher(for: commandNumberNotification)) { note in
             guard editingItemId == nil,
@@ -740,6 +811,8 @@ struct HistoryPopupContent: View {
             emptyMessageView(icon: "magnifyingglass", title: "无匹配结果")
         } else if displayItems.isEmpty && filterMode == .favorites {
             emptyMessageView(icon: "star.slash", title: "暂无收藏")
+        } else if displayItems.isEmpty && filterMode == .slots {
+            emptyMessageView(icon: "command.square", title: "暂无快捷槽位")
         } else if displayItems.isEmpty && filterMode == .image {
             emptyMessageView(icon: "photo", title: "暂无图片")
         } else if displayItems.isEmpty && filterMode == .text {
@@ -798,6 +871,7 @@ struct HistoryPopupContent: View {
                     case .item(let index, let item):
                         let shortcut: String? = isCommandPressed && index < 9 ? "⌘\(index + 1)" : nil
                         let spotlightRowArmed = OnboardingGuide.shared.isActive && selectedIndex == index + 1
+                        let dialRowArmed = isRightCommandPressed && selectedIndex == index + 1
                         ItemRowView(
                             item: item,
                             isSelected: selectedIndex == index + 1,
@@ -806,6 +880,7 @@ struct HistoryPopupContent: View {
                             queueOrder: queueOrderByID[item.id],
                             canToggleQueue: canToggleQueue,
                             isFavorite: backend.favoriteIds.contains(item.id),
+                            quickSlot: backend.slotByEntryId[item.id],
                             isEditingRemark: editingItemId == item.id,
                             editingText: $editingText,
                             searchQuery: effectiveSearchText,
@@ -856,7 +931,7 @@ struct HistoryPopupContent: View {
                             selectItem(at: index)
                         }
                         .background {
-                            if contextMenuArmed || spotlightRowArmed {
+                            if contextMenuArmed || spotlightRowArmed || dialRowArmed {
                                 GeometryReader { geo in
                                     let frame = geo.frame(in: .global)
                                     Color.clear
@@ -869,6 +944,10 @@ struct HistoryPopupContent: View {
                                             value: spotlightRowArmed
                                                 ? SpotlightGeometry(frames: [.selectedRow: frame])
                                                 : SpotlightGeometry()
+                                        )
+                                        .preference(
+                                            key: QuickSlotDialAnchorPreferenceKey.self,
+                                            value: dialRowArmed ? frame : .null
                                         )
                                 }
                             }
@@ -894,6 +973,13 @@ struct HistoryPopupContent: View {
             pendingContextMenuRequest = nil
             resolveContextMenu(frames: frames, request: request)
         }
+        .onPreferenceChange(QuickSlotDialAnchorPreferenceKey.self) { frame in
+            let next = frame.isNull ? CGRect.null : frame
+            if next != dialAnchor {
+                dialAnchor = next
+            }
+            refreshQuickSlotDial()
+        }
         .background(theme.popupRowDefault)
         .overlay(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
@@ -907,6 +993,7 @@ struct HistoryPopupContent: View {
     func scrollTargetForItem(at itemIndex: Int) -> Int? {
         let items = displayItems
         guard itemIndex >= 0, itemIndex < items.count else { return nil }
+        if filterMode == .slots { return items[itemIndex].id }
         let hasSeparator = itemIndex == 0
             || !DayGroup.isSameDay(items[itemIndex - 1].timestamp, items[itemIndex].timestamp)
         if hasSeparator {
@@ -1029,7 +1116,9 @@ struct HistoryPopupContent: View {
 
             Spacer()
 
-            if isCommandPressed {
+            if isRightCommandPressed {
+                shortcutHint(key: "右⌘1~9", label: "绑定/解绑槽位")
+            } else if isCommandPressed {
                 if PasteDeliveryMode.current == .keystroke {
                     shortcutHint(key: "⌘C", label: "批量入队/发送")
                 }
@@ -1040,8 +1129,8 @@ struct HistoryPopupContent: View {
                 shortcutHint(key: "Space", label: "预览")
                 shortcutHint(key: "⌃⌫", label: "删除")
                 shortcutHint(key: "⌘Z", label: "撤销")
-                shortcutHint(key: "⌘1~9", label: "快速选择")
-                shortcutHint(key: "右键", label: "菜单")
+                shortcutHint(key: "左⌘1~9", label: "快速选择")
+                shortcutHint(key: "右⌘1~9", label: "槽位")
             }
         }
         .padding(.horizontal, 6)

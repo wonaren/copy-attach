@@ -86,6 +86,47 @@ extension HistoryPopupContent {
             guard let idx = self.currentIndex(of: item.id) else { return }
             self.startInlineEditing(for: self.displayItems[idx])
         }
+        let boundSlot = backend.slotByEntryId[item.id]
+        let slotMenu = NSMenu()
+        slotMenu.autoenablesItems = false
+        for slot in 1...9 {
+            let handler = ContextMenuItemTarget { [self] in
+                applyQuickSlotToggle(item: item, slot: slot)
+            }
+            let title: String
+            if let owner = backend.slotByEntryId.first(where: { $0.value == slot })?.key,
+               owner != item.id,
+               let ownerItem = backend.items.first(where: { $0.id == owner }) {
+                title = "右⌘\(slot) · \(String(ownerItem.slotDisplayName.prefix(10)))"
+            } else {
+                title = "右⌘\(slot)"
+            }
+            let entry = NSMenuItem(title: title,
+                                   action: #selector(ContextMenuItemTarget.invoke(_:)),
+                                   keyEquivalent: "")
+            entry.target = handler
+            entry.representedObject = handler
+            if boundSlot == slot { entry.state = .on }
+            slotMenu.addItem(entry)
+        }
+        if let boundSlot {
+            slotMenu.addItem(.separator())
+            let handler = ContextMenuItemTarget { [self] in
+                applyQuickSlotToggle(item: item, slot: boundSlot)
+            }
+            let entry = NSMenuItem(title: "取消快捷槽位",
+                                   action: #selector(ContextMenuItemTarget.invoke(_:)),
+                                   keyEquivalent: "")
+            entry.target = handler
+            entry.representedObject = handler
+            slotMenu.addItem(entry)
+        }
+        let slotParent = NSMenuItem(title: boundSlot.map { "快捷槽位 (右⌘\($0))" } ?? "快捷槽位 (右⌘)",
+                                    action: nil,
+                                    keyEquivalent: "")
+        slotParent.image = NSImage(systemSymbolName: "command.square", accessibilityDescription: "快捷槽位")
+        slotParent.submenu = slotMenu
+        menu.addItem(slotParent)
         addContextMenuItem(to: menu, title: "删除", symbol: "trash", destructive: true) {
             guard let idx = self.currentIndex(of: item.id) else { return }
             self.deleteItem(at: idx)
@@ -94,6 +135,18 @@ extension HistoryPopupContent {
         guard let popup = popupWindow, let contentView = popup.contentView else { return }
         let point = contentView.convert(request.windowPoint, from: nil)
         menu.popUp(positioning: nil, at: point, in: contentView)
+    }
+
+    func applyQuickSlotToggle(item: ClipboardItem, slot: Int) {
+        let anchorId = selectedItemId
+        let wasBound = backend.slotByEntryId[item.id] == slot
+        if backend.toggleQuickSlot(entryId: item.id, slot: slot) {
+            showToast(wasBound ? "已解除 右⌘\(slot) 绑定" : "已绑定到 右⌘\(slot)",
+                      icon: wasBound ? "xmark.circle.fill" : "bolt.fill")
+        } else {
+            showToast("绑定失败，请重试", icon: "exclamationmark.triangle.fill")
+        }
+        restoreSelection(anchorId)
     }
 
     private func addContextMenuItem(to menu: NSMenu, title: String, symbol: String,

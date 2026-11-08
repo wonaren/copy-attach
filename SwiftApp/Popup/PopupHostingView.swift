@@ -4,7 +4,9 @@ import SwiftUI
 let deleteKeyNotification = Notification.Name("PopupDeleteKeyPressed")
 let controlKeyNotification = Notification.Name("PopupControlKeyChanged")
 let commandKeyNotification = Notification.Name("PopupCommandKeyChanged")
+let rightCommandKeyNotification = Notification.Name("PopupRightCommandKeyChanged")
 let commandNumberNotification = Notification.Name("PopupCommandNumberPressed")
+let rightCommandNumberNotification = Notification.Name("PopupRightCommandNumberPressed")
 let focusSearchNotification = Notification.Name("PopupFocusSearch")
 let undoKeyNotification = Notification.Name("PopupUndoKeyPressed")
 let favoriteToggleNotification = Notification.Name("PopupFavoriteToggle")
@@ -45,6 +47,8 @@ class PopupHostingView: NSHostingView<AnyView> {
 
     private var isMenuTracking = false
     private var menuTrackingObservers: [NSObjectProtocol] = []
+    private var leftCommandDown = false
+    private var rightCommandDown = false
 
     private var swipeMonitor: Any?
     private var swipeAccumX: CGFloat = 0
@@ -58,6 +62,7 @@ class PopupHostingView: NSHostingView<AnyView> {
         super.viewDidMoveToWindow()
         if window != nil {
             window?.makeFirstResponder(self)
+            refreshCommandSidesFromSession()
             installArrowMonitor()
             installEscapeMonitor()
             installMenuTrackingObservers()
@@ -251,9 +256,35 @@ class PopupHostingView: NSHostingView<AnyView> {
         }
     }
 
+    private func refreshCommandSidesFromSession() {
+        let sides = QuickSlotKeyMap.commandSides(
+            rawFlags: CGEventSource.flagsState(.combinedSessionState).rawValue
+        )
+        leftCommandDown = sides.left
+        rightCommandDown = sides.right
+    }
+
+    private func commandSides(for event: NSEvent) -> (left: Bool, right: Bool) {
+        let sides = QuickSlotKeyMap.commandSides(rawFlags: event.modifierFlags.rawValue)
+        if sides.left || sides.right { return sides }
+        guard event.modifierFlags.contains(.command) else { return (false, false) }
+        return (leftCommandDown && !rightCommandDown, rightCommandDown && !leftCommandDown)
+    }
+
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         if isMenuTracking {
             return super.performKeyEquivalent(with: event)
+        }
+        if let slot = QuickSlotKeyMap.slot(forKeyCode: event.keyCode) {
+            let sides = commandSides(for: event)
+            if sides.right || sides.left {
+                if event.isARepeat { return true }
+                NotificationCenter.default.post(
+                    name: sides.right ? rightCommandNumberNotification : commandNumberNotification,
+                    object: slot
+                )
+                return true
+            }
         }
         if let textView = window?.firstResponder as? NSTextView, textView.isEditable {
             return super.performKeyEquivalent(with: event)
@@ -304,20 +335,14 @@ class PopupHostingView: NSHostingView<AnyView> {
             return
         }
 
-        if event.modifierFlags.contains(.command) {
-            let keyCodeToNumber: [UInt16: Int] = [
-                18: 1,
-                19: 2,
-                20: 3,
-                21: 4,
-                23: 5,
-                22: 6,
-                26: 7,
-                28: 8,
-                25: 9,
-            ]
-            if let number = keyCodeToNumber[event.keyCode] {
-                NotificationCenter.default.post(name: commandNumberNotification, object: number)
+        if let slot = QuickSlotKeyMap.slot(forKeyCode: event.keyCode) {
+            let sides = commandSides(for: event)
+            if sides.right || sides.left {
+                if event.isARepeat { return }
+                NotificationCenter.default.post(
+                    name: sides.right ? rightCommandNumberNotification : commandNumberNotification,
+                    object: slot
+                )
                 return
             }
         }
@@ -385,8 +410,11 @@ class PopupHostingView: NSHostingView<AnyView> {
         let controlPressed = event.modifierFlags.contains(.control)
         NotificationCenter.default.post(name: controlKeyNotification, object: controlPressed)
 
-        let commandPressed = event.modifierFlags.contains(.command)
-        NotificationCenter.default.post(name: commandKeyNotification, object: commandPressed)
+        let sides = QuickSlotKeyMap.commandSides(rawFlags: event.modifierFlags.rawValue)
+        leftCommandDown = sides.left
+        rightCommandDown = sides.right
+        NotificationCenter.default.post(name: commandKeyNotification, object: sides.left)
+        NotificationCenter.default.post(name: rightCommandKeyNotification, object: sides.right)
 
         super.flagsChanged(with: event)
     }

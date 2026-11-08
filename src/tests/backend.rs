@@ -31,6 +31,7 @@ fn ensure_test_backend() {
             undo_limit: Arc::new(std::sync::atomic::AtomicI64::new(16 * 1024 * 1024)),
             last_restored_id: Arc::new(AtomicU64::new(0)),
             favorites: Arc::new(Mutex::new(HashSet::new())),
+            quick_slots: Arc::new(Mutex::new([0u64; crate::db::QUICK_SLOT_COUNT])),
         };
         set_backend(backend)
             .expect("Backend singleton must not be set before this test");
@@ -1465,6 +1466,93 @@ fn test_set_cleanup_threshold_leaves_memory_intact_when_db_delete_fails() {
         after, before,
         "memory must stay intact when DB trim fails (was {before}, now {after})"
     );
+}
+
+#[test]
+fn test_quick_slot_toggle_delete_undo_roundtrip() {
+    let _shared = shared_state_guard();
+    ensure_test_backend();
+    let b = crate::backend::try_backend().expect("backend initialized");
+    let previous_limit = b.undo_limit.swap(
+        crate::backend::UNDO_LIMIT_UNLIMITED,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+
+    let base: u64 = 949_000_000;
+    let row_id = {
+        let conn = b.db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO clipboard_history
+                (entry_type, text, hash, timestamp, source_name, source_bundle_id, entry_id,
+                 preview, label)
+             VALUES (0, 'quick-slot-ffi', 1, 0, 'QuickSlotFFI', 'com.example.quickslotffi', ?1,
+                     'quick-slot-ffi', 'quick-slot-ffi')",
+            rusqlite::params![base as i64],
+        )
+        .expect("insert quick-slot fixture row");
+        conn.last_insert_rowid()
+    };
+    {
+        let mut hist = b.history.lock().unwrap();
+        hist.push(ClipboardEntry::Text {
+            id: base,
+            preview: "quick-slot-ffi".to_string(),
+            label: "quick-slot-ffi".to_string(),
+            custom_label: String::new(),
+            text_hash: 1,
+            timestamp: 1,
+            source_name: "QuickSlotFFI".to_string(),
+            source_bundle_id: "com.example.quickslotffi".to_string(),
+            db_id: row_id,
+        });
+    }
+
+    assert_eq!(
+        crate::ffi::clipboard_toggle_quick_slot(base, 2),
+        1,
+        "binding a slot must succeed"
+    );
+    assert_eq!(b.quick_slots.lock().unwrap()[1], base);
+
+    assert_eq!(clipboard_delete_by_id(base), 1, "delete must succeed");
+    assert_eq!(
+        b.quick_slots.lock().unwrap()[1],
+        0,
+        "soft delete must release the slot"
+    );
+
+    assert_eq!(clipboard_undo_delete(), 1, "undo must succeed");
+    assert_eq!(
+        b.quick_slots.lock().unwrap()[1],
+        base,
+        "undo must restore the slot binding"
+    );
+
+    assert_eq!(crate::ffi::clipboard_clear_quick_slots(), 1);
+    assert_eq!(
+        *b.quick_slots.lock().unwrap(),
+        [0u64; crate::db::QUICK_SLOT_COUNT],
+        "clear must empty the mirror"
+    );
+
+    {
+        let mut hist = b.history.lock().unwrap();
+        hist.retain(|e| e.entry_id() != base);
+    }
+    let conn = b.db.lock().unwrap();
+    conn.execute(
+        "DELETE FROM clipboard_history WHERE entry_id = ?1",
+        rusqlite::params![base as i64],
+    )
+    .expect("cleanup fixture row");
+    conn.execute(
+        "DELETE FROM clipboard_deleted WHERE entry_id = ?1",
+        rusqlite::params![base as i64],
+    )
+    .expect("cleanup undo row");
+    drop(conn);
+
+    b.undo_limit.store(previous_limit, std::sync::atomic::Ordering::Relaxed);
 }
 
 #[test]
