@@ -274,6 +274,7 @@ class HistoryPopupWindow: NSPanel {
     @objc private func didBecomeKey(_ notification: Notification) {
         awaitingPostDragInteraction = false
         removePostDragClickMonitor()
+        popupHostingView?.resyncCommandSides()
     }
 
     @objc private func didResignKey(_ notification: Notification) {

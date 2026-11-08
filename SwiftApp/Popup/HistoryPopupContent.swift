@@ -83,6 +83,7 @@ struct HistoryPopupContent: View {
     @State private var isCommandPressed: Bool = false
     @State private var isRightCommandPressed: Bool = false
     @State private var dialAnchor: CGRect = .null
+    @State var pendingQuickSlotAnchor: Int?
     @Environment(\.appTheme) var theme
     @State var searchText: String = ""
     @State var effectiveSearchText: String = ""
@@ -208,7 +209,8 @@ struct HistoryPopupContent: View {
     var displayItems: [ClipboardItem] { currentDisplayMemo.items }
 
     private func refreshQuickSlotDial() {
-        guard isRightCommandPressed, !dialAnchor.isNull,
+        guard isRightCommandPressed, !isDismissing, !showPreview, editingItemId == nil,
+              !dialAnchor.isNull,
               let popup = popupWindow, popup.isVisible,
               let contentView = popup.contentView else {
             QuickSlotDialWindow.shared.hide()
@@ -406,6 +408,7 @@ struct HistoryPopupContent: View {
             scrollTarget = nil
             contextMenuArmed = false
             pendingContextMenuRequest = nil
+            pendingQuickSlotAnchor = nil
             displayMemoBox.memo = nil
             editingItemId = nil
             editingText = ""
@@ -514,6 +517,15 @@ struct HistoryPopupContent: View {
             refreshQuickSlotDial()
         }
         .onChange(of: backend.slotByEntryId) { _, _ in
+            refreshQuickSlotDial()
+            guard let anchor = pendingQuickSlotAnchor else { return }
+            pendingQuickSlotAnchor = nil
+            restoreSelection(anchor)
+        }
+        .onChange(of: showPreview) { _, _ in
+            refreshQuickSlotDial()
+        }
+        .onChange(of: editingItemId) { _, _ in
             refreshQuickSlotDial()
         }
         .onReceive(NotificationCenter.default.publisher(for: rightCommandNumberNotification)) { note in

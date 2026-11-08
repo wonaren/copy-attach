@@ -85,10 +85,11 @@ int32_t clipboard_send_paste(int32_t pid);
 int32_t clipboard_toggle_quick_slot(uint64_t entry_id, int32_t slot);
 int32_t clipboard_clear_quick_slots(void);
 // Background paste: writes the slot payload to the pasteboard without
-// touching the history order or rewriting SQLite. Returns the target pid
-// (as clipboard_prepare_paste_by_id does), or 0/-1 on failure.
-int32_t clipboard_prepare_quick_paste_by_id(uint64_t entry_id);
-int32_t clipboard_prepare_quick_paste_by_slot(int32_t slot);
+// touching the history order or rewriting SQLite. `delivery_mode` follows
+// clipboard_prepare_paste_by_id: keystroke returns the target pid (0/-1 on
+// failure), clipboard-only returns 1 and needs no keystroke.
+int32_t clipboard_prepare_quick_paste_by_id(uint64_t entry_id, int32_t delivery_mode);
+int32_t clipboard_prepare_quick_paste_by_slot(int32_t slot, int32_t delivery_mode);
 
 // ─── Lazy Text Loading (on-demand full text by entry ID) ───
 char* clipboard_get_text_by_id(uint64_t entry_id);

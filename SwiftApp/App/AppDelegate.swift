@@ -248,6 +248,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         guard let window = notification.object as? NSWindow else { return }
         guard window === settingsWindow else { return }
+        HotkeyManager.shared.stopRecording()
         settingsWindow = nil
 
         let runInBackground = UserDefaults.standard.object(forKey: "RunInBackground") as? Bool ?? true

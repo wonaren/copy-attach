@@ -392,13 +392,22 @@ class ClipboardBackend {
             return
         }
         recordFrontmostApp()
-        let pid = clipboard_prepare_quick_paste_by_slot(Int32(slot))
-        guard pid > 0 else {
+        let mode = PasteDeliveryMode.current
+        let prepared = clipboard_prepare_quick_paste_by_slot(Int32(slot), Int32(mode.rawValue))
+        guard prepared != 0 else {
             errorLog("performQuickPaste: slot \(slot) could not be prepared (unbound, missing payload, or no Accessibility permission)")
             return
         }
-        if clipboard_send_paste(pid) == 0 {
-            errorLog("performQuickPaste: ⌘V delivery failed for slot \(slot) (pid \(pid))")
+        if mode == .clipboardOnly {
+            debugLog("performQuickPaste: slot \(slot) copied to the pasteboard (clipboard-only mode)")
+            return
+        }
+        guard prepared > 0 else {
+            errorLog("performQuickPaste: slot \(slot) written but no target pid — keystroke skipped")
+            return
+        }
+        if clipboard_send_paste(prepared) == 0 {
+            errorLog("performQuickPaste: ⌘V delivery failed for slot \(slot) (pid \(prepared))")
         }
     }
 

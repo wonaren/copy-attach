@@ -358,9 +358,11 @@ pub(crate) fn trim_db_history(conn: &Connection, threshold: usize) -> Result<(),
                             ORDER BY timestamp ASC, id ASC
                             LIMIT (SELECT MAX(0,
                                      (SELECT COUNT(*) FROM clipboard_history
-                                       WHERE id NOT IN (SELECT row_id FROM clipboard_deleted)
-                                         AND entry_id NOT IN (SELECT entry_id FROM clipboard_favorites)
-                                         AND entry_id NOT IN (SELECT entry_id FROM clipboard_quick_slots))
+                                       WHERE id NOT IN (SELECT row_id FROM clipboard_deleted))
+                                     - (SELECT COUNT(*) FROM clipboard_favorites)
+                                     - (SELECT COUNT(*) FROM clipboard_quick_slots q
+                                        WHERE NOT EXISTS (SELECT 1 FROM clipboard_favorites f
+                                                          WHERE f.entry_id = q.entry_id))
                                      - ?1)))";
     if let Err(e) = conn.execute(sql, rusqlite::params![threshold as i64]) {
         crate::error_log!("CopyAttach: failed to trim DB history: {e}");

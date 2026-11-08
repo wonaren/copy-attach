@@ -17,17 +17,29 @@ enum QuickSlotKeyMap {
         topRow[keyCode] ?? keypad[keyCode]
     }
 
-    static func commandSides(rawFlags: UInt64) -> (left: Bool, right: Bool) {
+    static func commandSides(rawFlags: UInt64, allowingShift: Bool = false) -> (left: Bool, right: Bool) {
         let command = rawFlags & 0x0010_0000 != 0
-        let otherModifiers = rawFlags & 0x008E_0000 != 0
-        guard command, !otherModifiers else { return (false, false) }
+        let blockedModifiers: UInt64 = allowingShift ? 0x008C_0000 : 0x008E_0000
+        guard command, rawFlags & blockedModifiers == 0 else { return (false, false) }
         let left = rawFlags & 0x0000_0008 != 0
         let right = rawFlags & 0x0000_0010 != 0
         return (left && !right, right && !left)
     }
 
-    static func commandSides(rawFlags: UInt) -> (left: Bool, right: Bool) {
-        commandSides(rawFlags: UInt64(rawFlags))
+    static func commandSides(rawFlags: UInt, allowingShift: Bool = false) -> (left: Bool, right: Bool) {
+        commandSides(rawFlags: UInt64(rawFlags), allowingShift: allowingShift)
+    }
+
+    static func shiftYieldsDigit(_ event: CGEvent) -> Bool {
+        guard let event = NSEvent(cgEvent: event) else { return false }
+        return shiftYieldsDigit(event)
+    }
+
+    static func shiftYieldsDigit(_ event: NSEvent) -> Bool {
+        guard let characters = event.charactersIgnoringModifiers,
+              characters.count == 1,
+              let scalar = characters.unicodeScalars.first else { return false }
+        return CharacterSet.decimalDigits.contains(scalar)
     }
 }
 
@@ -87,13 +99,6 @@ final class QuickSlotEventTap: @unchecked Sendable {
             }
 
             let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
-            guard let slot = QuickSlotKeyMap.slot(forKeyCode: keyCode) else {
-                return Unmanaged.passUnretained(event)
-            }
-            let sides = QuickSlotKeyMap.commandSides(rawFlags: event.flags.rawValue)
-            guard sides.right else {
-                return Unmanaged.passUnretained(event)
-            }
 
             if type == .keyUp {
                 if tapInstance.swallowedKeyCodes.remove(keyCode) != nil {
@@ -102,23 +107,31 @@ final class QuickSlotEventTap: @unchecked Sendable {
                 return Unmanaged.passUnretained(event)
             }
 
-            if event.getIntegerValueField(.keyboardEventAutorepeat) != 0 {
-                return nil
+            guard let slot = QuickSlotKeyMap.slot(forKeyCode: keyCode) else {
+                return Unmanaged.passUnretained(event)
+            }
+            let shiftHeld = event.flags.contains(.maskShift)
+            if shiftHeld, !QuickSlotKeyMap.shiftYieldsDigit(event) {
+                return Unmanaged.passUnretained(event)
+            }
+            let sides = QuickSlotKeyMap.commandSides(rawFlags: event.flags.rawValue, allowingShift: shiftHeld)
+            guard sides.right else {
+                return Unmanaged.passUnretained(event)
             }
             if tapInstance.popupOpen || tapInstance.isRecording || tapInstance.appIsFrontmost {
                 return Unmanaged.passUnretained(event)
             }
+            guard tapInstance.boundSlots.contains(slot) else {
+                return Unmanaged.passUnretained(event)
+            }
 
             tapInstance.swallowedKeyCodes.insert(keyCode)
-            if tapInstance.boundSlots.contains(slot) {
-                DispatchQueue.main.async {
-                    MainActor.assumeIsolated {
-                        ClipboardBackend.shared.pasteQuickSlot(slot)
-                    }
-                }
-            } else {
-                DispatchQueue.main.async {
-                    NSSound.beep()
+            if event.getIntegerValueField(.keyboardEventAutorepeat) != 0 {
+                return nil
+            }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    ClipboardBackend.shared.pasteQuickSlot(slot)
                 }
             }
             return nil

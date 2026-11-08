@@ -339,16 +339,20 @@ pub extern "C" fn clipboard_prepare_paste_by_id(entry_id: u64, as_path: bool, de
 }
 
 #[no_mangle]
-pub extern "C" fn clipboard_prepare_quick_paste_by_id(entry_id: u64) -> c_int {
+pub extern "C" fn clipboard_prepare_quick_paste_by_id(entry_id: u64, delivery_mode: c_int) -> c_int {
+    let Some(delivery) = PasteDelivery::from_ffi(delivery_mode) else {
+        crate::error_log!("CopyAttach: clipboard_prepare_quick_paste_by_id: unknown delivery_mode {delivery_mode} — aborted");
+        return 0;
+    };
     let item = match lookup_entry(entry_id) {
         Some(i) => i,
         None => return 0,
     };
-    prepare_paste_impl(item, false, PasteDelivery::Keystroke, false)
+    prepare_paste_impl(item, false, delivery, false)
 }
 
 #[no_mangle]
-pub extern "C" fn clipboard_prepare_quick_paste_by_slot(slot: c_int) -> c_int {
+pub extern "C" fn clipboard_prepare_quick_paste_by_slot(slot: c_int, delivery_mode: c_int) -> c_int {
     if slot < 1 || slot as usize > crate::db::QUICK_SLOT_COUNT {
         return 0;
     }
@@ -366,7 +370,7 @@ pub extern "C" fn clipboard_prepare_quick_paste_by_slot(slot: c_int) -> c_int {
     if entry_id == 0 {
         return 0;
     }
-    clipboard_prepare_quick_paste_by_id(entry_id)
+    clipboard_prepare_quick_paste_by_id(entry_id, delivery_mode)
 }
 
 #[no_mangle]

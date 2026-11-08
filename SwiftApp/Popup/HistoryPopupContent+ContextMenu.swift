@@ -140,13 +140,13 @@ extension HistoryPopupContent {
     func applyQuickSlotToggle(item: ClipboardItem, slot: Int) {
         let anchorId = selectedItemId
         let wasBound = backend.slotByEntryId[item.id] == slot
-        if backend.toggleQuickSlot(entryId: item.id, slot: slot) {
-            showToast(wasBound ? "已解除 右⌘\(slot) 绑定" : "已绑定到 右⌘\(slot)",
-                      icon: wasBound ? "xmark.circle.fill" : "bolt.fill")
-        } else {
+        guard backend.toggleQuickSlot(entryId: item.id, slot: slot) else {
             showToast("绑定失败，请重试", icon: "exclamationmark.triangle.fill")
+            return
         }
-        restoreSelection(anchorId)
+        pendingQuickSlotAnchor = anchorId
+        showToast(wasBound ? "已解除 右⌘\(slot) 绑定" : "已绑定到 右⌘\(slot)",
+                  icon: wasBound ? "xmark.circle.fill" : "bolt.fill")
     }
 
     private func addContextMenuItem(to menu: NSMenu, title: String, symbol: String,

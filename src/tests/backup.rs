@@ -4,7 +4,10 @@ use rusqlite::Connection;
 
 use crate::backend::new_entry_id;
 use crate::db::backup::{export_backup, inspect_backup, restore_backup_merge, restore_backup_overwrite};
-use crate::db::{ensure_history_table, insert_entry_to_db, load_history_from_db, search_history};
+use crate::db::{
+    ensure_history_table, insert_entry_to_db, load_history_from_db, load_quick_slots,
+    search_history, toggle_quick_slot,
+};
 use crate::image::image_hash;
 use crate::types::ClipboardEntry;
 
@@ -71,6 +74,7 @@ fn test_backup_export_inspect_and_overwrite() {
     ).unwrap();
 
     crate::db::set_favorite(&src_conn, e1_id, true).expect("favorite e1");
+    toggle_quick_slot(&src_conn, e1_id, 3).expect("bind e1 to slot 3");
 
     let mut backup_path = std::env::temp_dir();
     backup_path.push(format!("copyattach-export-{}.cabackup", std::process::id()));
@@ -92,6 +96,11 @@ fn test_backup_export_inspect_and_overwrite() {
 
     assert_eq!(restored_count, 2);
     assert_eq!(restored_favs, vec![e1_id]);
+    assert_eq!(
+        load_quick_slots(&dst_conn).unwrap()[2],
+        e1_id,
+        "slot binding must survive overwrite restore"
+    );
 
     let loaded = load_history_from_db(&dst_conn, 100);
     assert_eq!(loaded.len(), 2);
@@ -156,6 +165,8 @@ fn test_backup_restore_merge_behavior() {
 
     crate::db::set_favorite(&src_conn, item_a_id, true).unwrap();
     crate::db::set_favorite(&src_conn, item_b_id, true).unwrap();
+    toggle_quick_slot(&src_conn, item_a_id, 1).unwrap();
+    toggle_quick_slot(&src_conn, item_b_id, 2).unwrap();
     export_backup(&src_conn, &backup_path).unwrap();
 
     let (_dst_path, mut dst_conn) = make_temp_db("merge_dst");
@@ -180,6 +191,14 @@ fn test_backup_restore_merge_behavior() {
 
     let loaded = load_history_from_db(&dst_conn, 100);
     assert_eq!(loaded.len(), 2);
+
+    let slots = load_quick_slots(&dst_conn).unwrap();
+    assert_eq!(slots[0], dst_item_a_id, "merged slot must follow the surviving entry id");
+    let merged_b = loaded.iter().find(|e| match e {
+        ClipboardEntry::Text { preview, .. } => preview.contains("条目 B"),
+        _ => false,
+    }).unwrap();
+    assert_eq!(slots[1], merged_b.entry_id(), "new entry must keep its backed-up slot");
 
     let updated_a = loaded.iter().find(|e| match e {
         ClipboardEntry::Text { preview, .. } => preview.contains("条目 A"),

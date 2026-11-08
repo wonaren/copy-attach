@@ -11,6 +11,9 @@ extension InlineSettingsView {
             }
             .padding(20)
         }
+        .onDisappear {
+            hotkeyManager.stopRecording()
+        }
     }
 
     private var shortcutConfigCard: some View {

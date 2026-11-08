@@ -201,14 +201,14 @@ struct ItemRowView: View {
         Text("右⌘\(slot)")
             .font(.system(size: 9.5, weight: .semibold))
             .monospacedDigit()
-            .foregroundColor(isSelected ? Color.white : Color(nsColor: .controlAccentColor))
+            .foregroundColor(isSelected ? Color.white : theme.popupPrimaryText)
             .lineLimit(1)
             .padding(.horizontal, 4.5)
             .padding(.vertical, 1.5)
             .background(
                 RoundedRectangle(cornerRadius: 4, style: .continuous)
                     .fill(isSelected
-                          ? Color.white.opacity(0.22)
+                          ? Color.black.opacity(0.28)
                           : Color(nsColor: .controlAccentColor).opacity(0.12))
             )
             .overlay(

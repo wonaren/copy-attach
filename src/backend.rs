@@ -451,6 +451,15 @@ pub(crate) fn trim_history_memory(
     let quick_slots = try_backend()
         .map(|b| *b.quick_slots.lock().unwrap_or_else(|e| e.into_inner()))
         .unwrap_or([0u64; crate::db::QUICK_SLOT_COUNT]);
+    trim_history_with_slots(hist, threshold, favorites, &quick_slots);
+}
+
+fn trim_history_with_slots(
+    hist: &mut Vec<ClipboardEntry>,
+    threshold: usize,
+    favorites: &HashSet<u64>,
+    quick_slots: &[u64; crate::db::QUICK_SLOT_COUNT],
+) {
     let protected = |id: u64| favorites.contains(&id) || quick_slots.contains(&id);
     let cleanable = hist.iter().filter(|e| !protected(e.entry_id())).count();
     if cleanable <= threshold {
@@ -525,6 +534,30 @@ mod history_event_tests {
             elapsed >= Duration::from_millis(60),
             "returned before the timeout: {elapsed:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod trim_memory_tests {
+    use super::*;
+
+    #[test]
+    fn test_memory_trim_protects_favorites_and_quick_slots() {
+        let mut hist = vec![
+            ClipboardEntry::text_entry(5, "newest", 50, String::new(), String::new(), 5),
+            ClipboardEntry::text_entry(4, "filler newest", 40, String::new(), String::new(), 4),
+            ClipboardEntry::text_entry(3, "filler middle", 30, String::new(), String::new(), 3),
+            ClipboardEntry::text_entry(2, "slot protected", 20, String::new(), String::new(), 2),
+            ClipboardEntry::text_entry(1, "favorite protected", 10, String::new(), String::new(), 1),
+        ];
+        let favorites: HashSet<u64> = [1u64].into_iter().collect();
+        let mut quick_slots = [0u64; crate::db::QUICK_SLOT_COUNT];
+        quick_slots[0] = 2;
+
+        trim_history_with_slots(&mut hist, 2, &favorites, &quick_slots);
+
+        let ids: Vec<u64> = hist.iter().map(|e| e.entry_id()).collect();
+        assert_eq!(ids, [5, 4, 2, 1]);
     }
 }
 

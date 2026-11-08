@@ -164,6 +164,11 @@ pub(crate) fn ensure_history_table(conn: &Connection) -> Result<(), rusqlite::Er
     )?;
 
     conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_history_entry_id
+         ON clipboard_history(entry_id);"
+    )?;
+
+    conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS clipboard_deleted (
              row_id      INTEGER PRIMARY KEY,
              entry_id    INTEGER NOT NULL,
@@ -456,11 +461,17 @@ pub(crate) fn toggle_quick_slot(conn: &Connection, entry_id: u64, slot: u8) -> R
 }
 
 pub(crate) fn clear_quick_slots(conn: &Connection) -> Result<(), ()> {
-    conn.execute("DELETE FROM clipboard_quick_slots", [])
-        .map(|_| ())
+    let tx = conn.unchecked_transaction().map_err(|e| {
+        crate::error_log!("CopyAttach: failed to begin quick-slot clear transaction: {e}");
+    })?;
+    tx.execute("DELETE FROM clipboard_quick_slots", [])
+        .and_then(|_| tx.execute("UPDATE clipboard_deleted SET was_slot = 0", []))
         .map_err(|e| {
             crate::error_log!("CopyAttach: failed to clear quick slots: {e}");
-        })
+        })?;
+    tx.commit().map_err(|e| {
+        crate::error_log!("CopyAttach: failed to commit quick-slot clear: {e}");
+    })
 }
 
 pub(crate) fn import_favorites(conn: &Connection, ids: &[u64]) -> Result<usize, ()> {

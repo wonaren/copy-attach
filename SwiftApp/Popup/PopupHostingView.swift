@@ -258,14 +258,29 @@ class PopupHostingView: NSHostingView<AnyView> {
 
     private func refreshCommandSidesFromSession() {
         let sides = QuickSlotKeyMap.commandSides(
-            rawFlags: CGEventSource.flagsState(.combinedSessionState).rawValue
+            rawFlags: CGEventSource.flagsState(.combinedSessionState).rawValue,
+            allowingShift: true
         )
         leftCommandDown = sides.left
         rightCommandDown = sides.right
     }
 
+    func resyncCommandSides() {
+        refreshCommandSidesFromSession()
+        let visible = QuickSlotKeyMap.commandSides(
+            rawFlags: CGEventSource.flagsState(.combinedSessionState).rawValue
+        )
+        NotificationCenter.default.post(name: commandKeyNotification, object: visible.left)
+        NotificationCenter.default.post(name: rightCommandKeyNotification, object: visible.right)
+    }
+
     private func commandSides(for event: NSEvent) -> (left: Bool, right: Bool) {
-        let sides = QuickSlotKeyMap.commandSides(rawFlags: event.modifierFlags.rawValue)
+        let shiftHeld = event.modifierFlags.contains(.shift)
+        if shiftHeld, !QuickSlotKeyMap.shiftYieldsDigit(event) {
+            return (false, false)
+        }
+        let sides = QuickSlotKeyMap.commandSides(rawFlags: event.modifierFlags.rawValue,
+                                                allowingShift: shiftHeld)
         if sides.left || sides.right { return sides }
         guard event.modifierFlags.contains(.command) else { return (false, false) }
         return (leftCommandDown && !rightCommandDown, rightCommandDown && !leftCommandDown)
@@ -410,9 +425,11 @@ class PopupHostingView: NSHostingView<AnyView> {
         let controlPressed = event.modifierFlags.contains(.control)
         NotificationCenter.default.post(name: controlKeyNotification, object: controlPressed)
 
+        let physical = QuickSlotKeyMap.commandSides(rawFlags: event.modifierFlags.rawValue,
+                                                   allowingShift: true)
+        leftCommandDown = physical.left
+        rightCommandDown = physical.right
         let sides = QuickSlotKeyMap.commandSides(rawFlags: event.modifierFlags.rawValue)
-        leftCommandDown = sides.left
-        rightCommandDown = sides.right
         NotificationCenter.default.post(name: commandKeyNotification, object: sides.left)
         NotificationCenter.default.post(name: rightCommandKeyNotification, object: sides.right)
 

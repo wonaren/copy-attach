@@ -33,6 +33,14 @@ fn test_schema_adds_was_slot_to_existing_deleted_table() {
         .expect("was_slot column must exist after migration");
     conn.prepare("SELECT slot, entry_id FROM clipboard_quick_slots LIMIT 0")
         .expect("quick-slot table must exist after migration");
+    let entry_id_index: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_history_entry_id'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(entry_id_index, 1, "entry_id lookups must be indexed");
     ensure_history_table(&conn).expect("schema setup must stay idempotent");
 }
 
@@ -61,6 +69,25 @@ fn test_quick_slot_protects_entry_from_trim_and_loads_without_it() {
 
     let slots = load_quick_slots(&conn).unwrap();
     assert_eq!(slots[0], pinned_id);
+}
+
+#[test]
+fn test_trim_counts_favorite_slot_overlap_once() {
+    let conn = test_db();
+    let protected_row = insert_text(&conn, "doubly protected phrase", 1);
+    let protected_id = entry_id_of(&conn, protected_row);
+    toggle_quick_slot(&conn, protected_id, 1).expect("bind quick slot");
+    crate::db::set_favorite(&conn, protected_id, true).expect("favorite");
+    for i in 0..6 {
+        insert_text(&conn, &format!("overlap-filler-{i}"), 10 + i);
+    }
+
+    trim_db_history(&conn, 3).expect("trim");
+
+    let live: i64 = conn
+        .query_row("SELECT COUNT(*) FROM clipboard_history", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(live, 4, "the doubly protected row must be subtracted only once");
 }
 
 #[test]
@@ -143,8 +170,9 @@ fn test_quick_slot_released_on_delete_and_pruned_on_clear() {
     let deleted = crate::db::newest_deleted_row(&conn).unwrap().expect("undo row");
     assert_eq!(deleted.3, 3, "undo record must remember the slot");
 
-    let tx = conn.unchecked_transaction().unwrap();
-    tx.execute("DELETE FROM clipboard_quick_slots", []).unwrap();
-    tx.commit().unwrap();
+    crate::db::clear_quick_slots(&conn).expect("clear quick slots");
     assert_eq!(load_quick_slots(&conn).unwrap(), [0u64; QUICK_SLOT_COUNT]);
+
+    let cleared = crate::db::newest_deleted_row(&conn).unwrap().expect("undo row survives clear");
+    assert_eq!(cleared.3, 0, "clearing slots must forget the pending undo slot intent");
 }
