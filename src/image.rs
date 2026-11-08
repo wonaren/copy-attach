@@ -355,9 +355,7 @@ pub(crate) fn hash_and_thumbnail_streaming(png: &[u8]) -> Option<StreamedRgba8> 
             return None;
         }
         for y in 0..height as usize {
-            if reader.read_row(&mut row.0).ok()?.is_none() {
-                return None;
-            }
+            reader.read_row(&mut row.0).ok()??;
             hash_row(&mut hash, &row.0);
             full.0[y * line_size..(y + 1) * line_size].copy_from_slice(&row.0);
         }
@@ -395,9 +393,7 @@ pub(crate) fn hash_and_thumbnail_streaming(png: &[u8]) -> Option<StreamedRgba8> 
         let base = center.floor() as i64;
         let need_through = (base + 2).clamp(0, height as i64 - 1) as u32;
         while decoded <= need_through {
-            if reader.read_row(&mut row.0).ok()?.is_none() {
-                return None;
-            }
+            reader.read_row(&mut row.0).ok()??;
             hash_row(&mut hash, &row.0);
             let slot = (decoded as usize) % RESIZE_RING_ROWS;
             let ring_row = &mut ring.0[slot * row_bytes..(slot + 1) * row_bytes];
@@ -449,9 +445,7 @@ pub(crate) fn hash_and_thumbnail_streaming(png: &[u8]) -> Option<StreamedRgba8> 
     }
 
     while decoded < height {
-        if reader.read_row(&mut row.0).ok()?.is_none() {
-            return None;
-        }
+        reader.read_row(&mut row.0).ok()??;
         hash_row(&mut hash, &row.0);
         decoded += 1;
     }
