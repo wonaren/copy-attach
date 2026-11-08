@@ -137,7 +137,7 @@ struct PreviewContent: View {
 
                 PreviewFooterBar(
                     item: item,
-                    prepared: prepared,
+                    details: .text(prepared),
                     onPaste: onPaste,
                     onClose: onClose
                 )
@@ -166,51 +166,25 @@ struct PreviewContent: View {
     @ViewBuilder
     private func imageContent(dbId: Int) -> some View {
         Group {
-            if let img = image {
-                if showsZoomHint {
-                    Image(nsImage: img)
-                        .resizable()
-                        .interpolation(.high)
-                        .aspectRatio(contentMode: .fit)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .padding(6)
-                        .contentShape(Rectangle())
-                        .onTapGesture { onTapWhenUnzoomed?() }
-                } else {
-                    ZoomableImageView(image: img, dbId: dbId, onTapWhenUnzoomed: onTapWhenUnzoomed)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .padding(6)
-                }
-            } else if hasFailed {
-                Image(systemName: "photo.badge.exclamationmark")
-                    .font(.system(size: 24))
-                    .foregroundColor(theme.previewSecondaryText)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            if showsZoomHint {
+                miniImageContent
             } else {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(theme.previewBackground)
-                    VStack(spacing: 12) {
-                        Image(systemName: "photo")
-                            .font(.system(size: 32))
-                            .foregroundColor(theme.previewSecondaryText)
-                            .symbolEffect(.pulse)
-                        Text("载入预览中…")
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundColor(theme.previewSecondaryText)
-                    }
+                VStack(spacing: 0) {
+                    largeImageBody(dbId: dbId)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .padding(.horizontal, 6)
+                        .padding(.top, 6)
+
+                    Divider()
+                        .opacity(colorScheme == .dark ? 0.12 : 0.08)
+
+                    PreviewFooterBar(
+                        item: item,
+                        details: .image(width: imagePixelSize.w, height: imagePixelSize.h),
+                        onPaste: onPaste,
+                        onClose: onClose
+                    )
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .padding(24)
-                .linearShimmer(isActive: true, duration: 1.3)
-                .contentShape(Rectangle())
-                .onTapGesture { onTapWhenUnzoomed?() }
-            }
-        }
-        .overlay(alignment: .bottomTrailing) {
-            if !showsZoomHint, onPaste != nil || onClose != nil {
-                largeActionButtons
-                    .padding(12)
             }
         }
         .task(id: imageLoadKey, priority: .userInitiated) {
@@ -220,6 +194,62 @@ struct PreviewContent: View {
             image = nil
             hasFailed = false
         }
+    }
+
+    @ViewBuilder
+    private var miniImageContent: some View {
+        if let img = image {
+            Image(nsImage: img)
+                .resizable()
+                .interpolation(.high)
+                .aspectRatio(contentMode: .fit)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .padding(6)
+                .contentShape(Rectangle())
+                .onTapGesture { onTapWhenUnzoomed?() }
+        } else if hasFailed {
+            Image(systemName: "photo.badge.exclamationmark")
+                .font(.system(size: 24))
+                .foregroundColor(theme.previewSecondaryText)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            imageLoadingPlaceholder
+        }
+    }
+
+    @ViewBuilder
+    private func largeImageBody(dbId: Int) -> some View {
+        if let img = image {
+            ZoomableImageView(image: img, dbId: dbId, onTapWhenUnzoomed: onTapWhenUnzoomed)
+        } else if hasFailed {
+            Image(systemName: "photo.badge.exclamationmark")
+                .font(.system(size: 24))
+                .foregroundColor(theme.previewSecondaryText)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            imageLoadingPlaceholder
+        }
+    }
+
+    private var imageLoadingPlaceholder: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(theme.previewBackground)
+            VStack(spacing: 12) {
+                Image(systemName: "photo")
+                    .font(.system(size: 32))
+                    .foregroundColor(theme.previewSecondaryText)
+                    .symbolEffect(.pulse)
+                Text("载入预览中…")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(theme.previewSecondaryText)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(24)
+        .linearShimmer(isActive: true, duration: 1.3)
+        .contentShape(Rectangle())
+        .onTapGesture { onTapWhenUnzoomed?() }
     }
 
     private var miniHoverHint: some View {
@@ -252,24 +282,6 @@ struct PreviewContent: View {
                         style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
         }
         .frame(width: 20, height: 20)
-    }
-
-    @ViewBuilder
-    private var largeActionButtons: some View {
-        HStack(spacing: 6) {
-            if let onPaste {
-                PreviewActionButton(title: "粘贴",
-                                    icon: "arrow.down.to.line",
-                                    style: .overlay,
-                                    action: { onPaste(item.id) })
-            }
-            if let onClose {
-                PreviewActionButton(title: "关闭",
-                                    icon: "xmark",
-                                    style: .overlay,
-                                    action: onClose)
-            }
-        }
     }
 
     private func applyImage(_ newImage: NSImage) {

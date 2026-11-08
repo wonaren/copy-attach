@@ -405,15 +405,17 @@ class PreviewWindow: NSPanel {
 
         case .image(_, _, let w, let h, _, _, _, _, _):
             guard w > 0, h > 0 else {
-                return NSSize(width: 320, height: 240)
+                return NSSize(width: 360, height: 160)
             }
-            let pad: CGFloat = 12
-            let maxContentW = maxW - pad
-            let maxContentH = min(maxH - pad, 720)
+            let padX: CGFloat = 12
+            let chrome: CGFloat = 6 + 1 + PreviewFooterBar.height
+            let maxContentW = maxW - padX
+            let maxContentH = max(min(maxH - chrome, 720), 50)
             let scale = min(1, maxContentW / CGFloat(w), maxContentH / CGFloat(h))
             let displayW = CGFloat(w) * scale
             let displayH = CGFloat(h) * scale
-            return NSSize(width: max(displayW + pad, 100), height: max(displayH + pad, 100))
+            return NSSize(width: min(max(displayW + padX, 360), maxW),
+                          height: max(displayH + chrome, 110))
         }
     }
 
