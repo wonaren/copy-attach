@@ -315,29 +315,7 @@ struct HistoryPopupContent: View {
         .onKeyPress(keys: [.return], phases: .down) { press in
             guard !isDismissing, editingItemId == nil else { return .ignored }
             if PasteQueueManager.shared.hasItems {
-                guard PasteDeliveryMode.current == .keystroke else {
-                    showToast("当前为「仅复制到剪贴板」模式，无法顺序粘贴",
-                              icon: "doc.on.clipboard")
-                    return .handled
-                }
-                let outcome = PasteQueueManager.shared.startDispensing {
-                    closePreview()
-                    onClose()
-                    backend.restorePasteTargetFocus(force: true)
-                }
-                switch outcome {
-                case .started:
-                    OnboardingGuide.shared.record(.queueStarted)
-                    break
-                case .eventTapUnavailable:
-                    showToast("无法接管 ⌘V，请检查辅助功能权限",
-                              icon: "exclamationmark.triangle.fill")
-                case .emptyQueue:
-                    showToast("粘贴队列已空", icon: "exclamationmark.triangle.fill")
-                case .allEntriesStale:
-                    showToast("所选条目已失效，队列已清空",
-                              icon: "exclamationmark.triangle.fill")
-                }
+                startPasteQueue()
                 return .handled
             }
             if selectedIndex > 0 {
@@ -501,6 +479,7 @@ struct HistoryPopupContent: View {
             let itemIndex = selectedIndex - 1
             guard itemIndex < displayItems.count else { return }
             let item = displayItems[itemIndex]
+            closeHoverPreview()
             withAnimation(AppleMotion.snappy) {
                 PasteQueueManager.shared.toggle(item)
             }
@@ -831,6 +810,7 @@ struct HistoryPopupContent: View {
                             editingText: $editingText,
                             searchQuery: effectiveSearchText,
                             onToggleQueue: {
+                                closeHoverPreview()
                                 withAnimation(AppleMotion.snappy) {
                                     PasteQueueManager.shared.toggle(item)
                                 }
@@ -864,6 +844,7 @@ struct HistoryPopupContent: View {
                                 return
                             }
                             if PasteQueueManager.shared.hasItems {
+                                closeHoverPreview()
                                 guard PasteDeliveryMode.current == .keystroke else { return }
                                 withAnimation(AppleMotion.snappy) {
                                     PasteQueueManager.shared.toggle(item)
@@ -953,19 +934,23 @@ struct HistoryPopupContent: View {
                 Text("·")
                     .foregroundColor(theme.popupMutedText)
             }
-            Text("勾选或按 ⌘C 标记")
+            Text("单击行或 ⌘C 勾选")
                 .font(.system(size: 9.5))
                 .foregroundColor(theme.popupMutedText)
-            Text("·")
-                .foregroundColor(theme.popupMutedText)
-            Text("⏎ 开始顺序粘贴")
-                .font(.system(size: 9.5, weight: .medium))
-                .foregroundColor(theme.popupPrimaryText)
-            Text("·")
-                .foregroundColor(theme.popupMutedText)
-            Text("⎋ 清空")
-                .font(.system(size: 9.5))
-                .foregroundColor(theme.popupSecondaryText)
+            queueBarButton(title: "开始",
+                           icon: "play.fill",
+                           primary: true,
+                           help: "开始顺序粘贴（⏎）") {
+                startPasteQueue()
+            }
+            queueBarButton(title: "清空",
+                           icon: "xmark",
+                           primary: false,
+                           help: "清空粘贴队列（⎋）") {
+                withAnimation(AppleMotion.snappy) {
+                    PasteQueueManager.shared.cancel()
+                }
+            }
         }
         .padding(.horizontal, 6)
         .padding(.vertical, 3)
@@ -973,6 +958,36 @@ struct HistoryPopupContent: View {
             RoundedRectangle(cornerRadius: 6, style: .continuous)
                 .fill(Color(nsColor: .controlAccentColor).opacity(0.12))
         )
+    }
+
+    private func queueBarButton(title: String,
+                                icon: String,
+                                primary: Bool,
+                                help: String,
+                                action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 3) {
+                Image(systemName: icon)
+                    .font(.system(size: 8, weight: .bold))
+                Text(title)
+                    .font(.system(size: 9.5, weight: .semibold))
+            }
+            .foregroundColor(primary ? Color.white : theme.popupPrimaryText)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 2.5)
+            .background(
+                Capsule().fill(primary
+                               ? Color(nsColor: .controlAccentColor)
+                               : theme.popupTagBackground)
+            )
+            .overlay(
+                Capsule().strokeBorder(primary ? Color.clear : theme.popupRowBorder,
+                                       lineWidth: 1)
+            )
+            .contentShape(Capsule())
+        }
+        .buttonStyle(AppleTactileButtonStyle(scale: 0.92))
+        .help(help)
     }
 
     private var bottomBar: some View {

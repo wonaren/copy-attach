@@ -1,5 +1,11 @@
 import AppKit
+import Observation
 import SwiftUI
+
+@Observable
+final class PreviewHoverState {
+    var isHovering = false
+}
 
 final class PreviewHostingView: NSHostingView<AnyView> {
     var onHoverChange: ((Bool) -> Void)?
@@ -53,11 +59,15 @@ class PreviewWindow: NSPanel {
     private var centerAnchor: NSPoint
     private var hostingView: PreviewHostingView?
     private var currentItemId: Int = 0
+    private var miniImage: NSImage?
     private let dismissState = PreviewDismissState()
+    private let hoverState = PreviewHoverState()
 
     var onExpand: (() -> Void)?
     var onDismiss: (() -> Void)?
     var onHoverChange: ((Bool) -> Void)?
+    var onPaste: ((Int) -> Void)?
+    var onClose: (() -> Void)?
 
     private static var textHeightCache: [Int: CGFloat] = [:]
     private static let textHeightCacheMaxEntries = 512
@@ -66,11 +76,16 @@ class PreviewWindow: NSPanel {
 
     var itemId: Int { currentItemId }
 
-    init(item: ClipboardItem, centerAt screenCenter: NSPoint) {
+    init(item: ClipboardItem,
+         centerAt screenCenter: NSPoint,
+         onPaste: ((Int) -> Void)? = nil,
+         onClose: (() -> Void)? = nil) {
         let targetScreen = NSScreen.screens.first(where: { NSPointInRect(screenCenter, $0.frame) }) ?? NSScreen.main
         let screenFrame = targetScreen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 800, height: 600)
         let size = Self.contentSize(for: item, screenFrame: screenFrame)
 
+        self.onPaste = onPaste
+        self.onClose = onClose
         self.presentation = .large
         self.currentItem = item
         self.currentItemId = item.id
@@ -129,6 +144,7 @@ class PreviewWindow: NSPanel {
         hosting.autoresizingMask = [.width, .height]
         hosting.usesPointingHand = presentation == .mini
         hosting.onHoverChange = { [weak self] inside in
+            self?.hoverState.isHovering = inside
             self?.onHoverChange?(inside)
         }
 
@@ -145,7 +161,12 @@ class PreviewWindow: NSPanel {
                 initialImage: initialImage,
                 maxPixelOverride: Self.miniMaxPixel,
                 onTapWhenUnzoomed: { [weak self] in self?.onExpand?() },
+                onImageLoaded: { [weak self] image in
+                    guard let self, self.currentItemId == item.id else { return }
+                    self.miniImage = image
+                },
                 showsZoomHint: true,
+                hoverState: hoverState,
                 dismissState: dismissState
             )
         case .large:
@@ -157,6 +178,8 @@ class PreviewWindow: NSPanel {
                 initialImage: initialImage,
                 maxPixelOverride: nil,
                 onTapWhenUnzoomed: dismiss,
+                onPaste: onPaste,
+                onClose: onClose ?? dismiss,
                 dismissState: dismissState
             )
         }
@@ -201,24 +224,24 @@ class PreviewWindow: NSPanel {
         if currentItemId != item.id {
             currentItemId = item.id
             currentItem = item
+            miniImage = nil
             hostingView?.rootView = makeContent(item: item, initialImage: nil)
         }
         animateFrame(frame, duration: 0.15)
     }
 
-    func expandToLarge(item: ClipboardItem, centerAt point: NSPoint) {
+    func expandToLarge(item: ClipboardItem, centerAt point: NSPoint, completion: (@MainActor () -> Void)? = nil) {
         guard presentation == .mini else { return }
         currentItem = item
         currentItemId = item.id
         presentation = .large
         centerAnchor = point
         isMovableByWindowBackground = true
+        hoverState.isHovering = false
         hostingView?.usesPointingHand = false
         if let hosting = hostingView {
             invalidateCursorRects(for: hosting)
         }
-
-        hostingView?.rootView = makeContent(item: currentItem, initialImage: nil)
 
         let targetScreen = NSScreen.screens.first(where: { NSPointInRect(point, $0.frame) }) ?? NSScreen.main
         let screenFrame = targetScreen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 800, height: 600)
@@ -227,7 +250,13 @@ class PreviewWindow: NSPanel {
                             y: point.y - size.height / 2,
                             width: size.width,
                             height: size.height)
-        animateFrame(target, duration: 0.24)
+        animateFrame(target,
+                     duration: 0.24,
+                     timing: CAMediaTimingFunction(name: .easeInEaseOut)) { [weak self] in
+            guard let self, self.isVisible, let hosting = self.hostingView else { return }
+            hosting.rootView = self.makeContent(item: self.currentItem, initialImage: self.miniImage)
+            completion?()
+        }
     }
 
     func updateContent(item: ClipboardItem) {
@@ -240,13 +269,23 @@ class PreviewWindow: NSPanel {
         resizeToFitContent(for: item)
     }
 
-    private func animateFrame(_ target: NSRect, duration: TimeInterval) {
-        guard target.size != frame.size || target.origin != frame.origin else { return }
-        NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = duration
-            ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
-            self.animator().setFrame(target, display: true)
+    private func animateFrame(_ target: NSRect,
+                              duration: TimeInterval,
+                              timing: CAMediaTimingFunction = CAMediaTimingFunction(name: .easeOut),
+                              completion: (@MainActor () -> Void)? = nil) {
+        guard target.size != frame.size || target.origin != frame.origin else {
+            completion?()
+            return
         }
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = duration
+            ctx.timingFunction = timing
+            self.animator().setFrame(target, display: true)
+        }, completionHandler: {
+            MainActor.assumeIsolated {
+                completion?()
+            }
+        })
     }
 
     override func close() {
@@ -325,7 +364,7 @@ class PreviewWindow: NSPanel {
             attributes: [.font: font]
         )
         let contentHeight = min(ceil(rect.height), 96)
-        return NSSize(width: width, height: contentHeight + 50)
+        return NSSize(width: width, height: contentHeight + 20)
     }
 
     private static func contentSize(for item: ClipboardItem, screenFrame: NSRect) -> NSSize {
@@ -368,14 +407,13 @@ class PreviewWindow: NSPanel {
             guard w > 0, h > 0 else {
                 return NSSize(width: 320, height: 240)
             }
-            let capH: CGFloat = 720
-            let displayH = CGFloat(h) < capH ? CGFloat(h) : capH
-            let aspect = CGFloat(w) / CGFloat(h)
-            let displayW = displayH * aspect
             let pad: CGFloat = 12
-            let finalW = min(displayW + pad, maxW)
-            let finalH = min(displayH + pad, maxH)
-            return NSSize(width: max(finalW, 100), height: max(finalH, 100))
+            let maxContentW = maxW - pad
+            let maxContentH = min(maxH - pad, 720)
+            let scale = min(1, maxContentW / CGFloat(w), maxContentH / CGFloat(h))
+            let displayW = CGFloat(w) * scale
+            let displayH = CGFloat(h) * scale
+            return NSSize(width: max(displayW + pad, 100), height: max(displayH + pad, 100))
         }
     }
 

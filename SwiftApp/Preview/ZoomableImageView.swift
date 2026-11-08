@@ -168,9 +168,11 @@ final class ZoomableImageNSView: NSView {
     }
 
     private var mouseDownAtRest = false
+    private var mouseDownLocation: NSPoint?
 
     override func mouseDown(with event: NSEvent) {
         mouseDownAtRest = false
+        mouseDownLocation = nil
         if scale > 1.01 {
             if event.clickCount == 2 {
                 resetZoom()
@@ -179,12 +181,20 @@ final class ZoomableImageNSView: NSView {
             }
         } else {
             mouseDownAtRest = true
+            mouseDownLocation = event.locationInWindow
         }
     }
 
     override func mouseUp(with event: NSEvent) {
         if mouseDownAtRest {
             mouseDownAtRest = false
+            let down = mouseDownLocation
+            mouseDownLocation = nil
+            if let down,
+               hypot(event.locationInWindow.x - down.x,
+                     event.locationInWindow.y - down.y) > 3 {
+                return
+            }
             onTapWhenUnzoomed?()
         } else {
             super.mouseUp(with: event)

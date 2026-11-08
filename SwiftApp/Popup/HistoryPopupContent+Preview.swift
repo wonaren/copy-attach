@@ -31,10 +31,20 @@ extension HistoryPopupContent {
     func openPreview(item: ClipboardItem) {
         let perfPreview = PerfSpan.start("swift", "preview.open")
         guard let popup = popupWindow else { return }
+        if case .image(_, 0, _, _, _, _, _, _, _) = item {
+            perfPreview?.end()
+            showToast("图片仍在编码，请稍后再试", icon: "photo")
+            return
+        }
         closeHoverPreview()
         let popupCenter = NSPoint(x: popup.frame.midX, y: popup.frame.midY)
         guard let previewItem = fullTextItem(item) else { return }
-        let preview = PreviewWindow(item: previewItem, centerAt: popupCenter)
+        let preview = PreviewWindow(
+            item: previewItem,
+            centerAt: popupCenter,
+            onPaste: { self.pasteItem(id: $0) },
+            onClose: { self.closePreview() }
+        )
         popup.previewPanel = preview
         preview.alphaValue = 0
         preview.orderFront(nil)
@@ -65,6 +75,10 @@ extension HistoryPopupContent {
 
     func updatePreviewContent(item: ClipboardItem) {
         guard showPreview, let preview = popupWindow?.previewPanel else { return }
+        if case .image(_, 0, _, _, _, _, _, _, _) = item {
+            closePreview()
+            return
+        }
         guard let previewItem = fullTextItem(item) else {
             closePreview()
             return

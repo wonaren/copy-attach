@@ -87,6 +87,45 @@ extension HistoryPopupContent {
         backend.restorePasteTargetFocus(force: true)
     }
 
+    func pasteItem(id: Int) {
+        guard let index = displayItems.firstIndex(where: { $0.id == id }) else {
+            closePreview()
+            showToast("内容已失效", icon: "exclamationmark.triangle.fill")
+            return
+        }
+        selectItem(at: index)
+    }
+
+    func startPasteQueue() {
+        guard !isDismissing, editingItemId == nil else { return }
+        guard PasteQueueManager.shared.hasItems else {
+            showToast("粘贴队列已空", icon: "exclamationmark.triangle.fill")
+            return
+        }
+        guard PasteDeliveryMode.current == .keystroke else {
+            showToast("当前为「仅复制到剪贴板」模式，无法顺序粘贴",
+                      icon: "doc.on.clipboard")
+            return
+        }
+        let outcome = PasteQueueManager.shared.startDispensing {
+            closePreview()
+            onClose()
+            backend.restorePasteTargetFocus(force: true)
+        }
+        switch outcome {
+        case .started:
+            OnboardingGuide.shared.record(.queueStarted)
+        case .eventTapUnavailable:
+            showToast("无法接管 ⌘V，请检查辅助功能权限",
+                      icon: "exclamationmark.triangle.fill")
+        case .emptyQueue:
+            showToast("粘贴队列已空", icon: "exclamationmark.triangle.fill")
+        case .allEntriesStale:
+            showToast("所选条目已失效，队列已清空",
+                      icon: "exclamationmark.triangle.fill")
+        }
+    }
+
     func confirmUndoEvictionIfNeeded(for item: ClipboardItem) -> Bool {
         guard !Self.undoEvictionWarningDisabled else { return true }
         guard let evicted = backend.undoEvictionPreview(entryId: item.id), evicted > 0 else {

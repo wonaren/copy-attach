@@ -4,6 +4,7 @@ import SwiftUI
 private final class PreviewTextView: NSTextView {
     var onTap: (() -> Void)?
     private var mouseDownAtRest = false
+    private var mouseDownLocation: NSPoint?
 
     override func mouseDown(with event: NSEvent) {
         guard onTap != nil else {
@@ -11,6 +12,7 @@ private final class PreviewTextView: NSTextView {
             return
         }
         mouseDownAtRest = true
+        mouseDownLocation = event.locationInWindow
     }
 
     override func mouseDragged(with event: NSEvent) {
@@ -24,6 +26,13 @@ private final class PreviewTextView: NSTextView {
             return
         }
         mouseDownAtRest = false
+        let down = mouseDownLocation
+        mouseDownLocation = nil
+        if let down,
+           hypot(event.locationInWindow.x - down.x,
+                 event.locationInWindow.y - down.y) > 3 {
+            return
+        }
         onTap?()
     }
 }

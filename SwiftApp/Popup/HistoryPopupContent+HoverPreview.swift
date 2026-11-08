@@ -9,15 +9,14 @@ extension HistoryPopupContent {
         isDismissing
             || editingItemId != nil
             || showPreview
-            || PasteQueueManager.shared.hasItems
             || popupWindow?.isItemDragInProgress == true
             || popupWindow?.isOpenOrOpening != true
     }
 
     private func canHoverPreview(_ item: ClipboardItem) -> Bool {
         switch item {
-        case .image:
-            return true
+        case .image(_, let dbId, _, _, _, _, _, _, _):
+            return dbId != 0
         case .text(_, _, _, _, _, _, let preview, _):
             return !preview.isEmpty
         }
@@ -73,31 +72,46 @@ extension HistoryPopupContent {
             return
         }
         if let existing = popup.hoverPreviewPanel {
-            existing.updateMini(item: item, frame: frame)
-        } else {
-            let mini = PreviewWindow(miniItem: item, frame: frame)
-            mini.onExpand = {
-                expandHoverPreview()
+            hoverPreviewEntryId = item.id
+            hoverPreviewItem = item
+            DispatchQueue.main.async {
+                guard !hoverPreviewSuppressed,
+                      popup.hoverPreviewPanel === existing,
+                      hoverPreviewEntryId == item.id else { return }
+                existing.updateMini(item: item, frame: frame)
             }
-            mini.onHoverChange = { inside in
-                handleMiniHoverChange(inside)
-            }
-            popup.hoverPreviewPanel = mini
-            mini.orderFront(nil)
-            mini.fadeIn(duration: 0.12)
+            return
         }
+        let mini = PreviewWindow(miniItem: item, frame: frame)
+        mini.onExpand = {
+            expandHoverPreview()
+        }
+        mini.onHoverChange = { inside in
+            handleMiniHoverChange(inside)
+        }
+        popup.hoverPreviewPanel = mini
+        mini.orderFront(nil)
+        mini.fadeIn(duration: 0.12)
         hoverPreviewEntryId = item.id
         hoverPreviewItem = item
     }
 
     func expandHoverPreview() {
+        guard !hoverPreviewSuppressed else {
+            closeHoverPreview()
+            return
+        }
         guard let popup = popupWindow,
               let mini = popup.hoverPreviewPanel,
               let item = hoverPreviewItem else { return }
         let expanded: ClipboardItem
         switch item {
         case .text:
-            guard let full = fullTextItem(item) else { return }
+            guard let full = fullTextItem(item) else {
+                closeHoverPreview()
+                showToast("内容加载失败，请重试", icon: "exclamationmark.triangle.fill")
+                return
+            }
             expanded = full
         case .image:
             expanded = item
@@ -109,13 +123,14 @@ extension HistoryPopupContent {
         popup.previewPanel = mini
         showPreview = true
         mini.onExpand = nil
-        mini.onDismiss = {
-            closePreview()
+        mini.onPaste = { self.pasteItem(id: $0) }
+        mini.onClose = { self.closePreview() }
+        mini.onDismiss = { self.closePreview() }
+        mini.expandToLarge(item: expanded, centerAt: NSPoint(x: popup.frame.midX, y: popup.frame.midY)) {
+            NSApp.activate(ignoringOtherApps: true)
+            OnboardingGuide.shared.record(.previewed)
+            OnboardingGuide.shared.refreshSpotlight()
         }
-        mini.expandToLarge(item: expanded, centerAt: NSPoint(x: popup.frame.midX, y: popup.frame.midY))
-        NSApp.activate(ignoringOtherApps: true)
-        OnboardingGuide.shared.record(.previewed)
-        OnboardingGuide.shared.refreshSpotlight()
     }
 
     func handleMiniHoverChange(_ inside: Bool) {

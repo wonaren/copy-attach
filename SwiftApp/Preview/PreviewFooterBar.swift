@@ -4,8 +4,20 @@ import SwiftUI
 struct PreviewFooterBar: View {
     let item: ClipboardItem
     let prepared: PreparedPreviewText
+    let onPaste: ((Int) -> Void)?
+    let onClose: (() -> Void)?
     @Environment(\.appTheme) private var theme
     @Environment(\.colorScheme) private var colorScheme
+
+    init(item: ClipboardItem,
+         prepared: PreparedPreviewText,
+         onPaste: ((Int) -> Void)? = nil,
+         onClose: (() -> Void)? = nil) {
+        self.item = item
+        self.prepared = prepared
+        self.onPaste = onPaste
+        self.onClose = onClose
+    }
 
     private var appIcon: NSImage? {
         if !item.sourceBundleId.isEmpty {
@@ -71,6 +83,23 @@ struct PreviewFooterBar: View {
                     .foregroundColor(theme.previewSecondaryText)
                     .lineLimit(1)
             }
+
+            if onPaste != nil || onClose != nil {
+                HStack(spacing: 6) {
+                    if let onPaste {
+                        PreviewActionButton(title: "粘贴",
+                                            icon: "arrow.down.to.line",
+                                            style: .footer,
+                                            action: { onPaste(item.id) })
+                    }
+                    if let onClose {
+                        PreviewActionButton(title: "关闭",
+                                            icon: "xmark",
+                                            style: .footer,
+                                            action: onClose)
+                    }
+                }
+            }
         }
         .padding(.horizontal, 14)
         .frame(height: 28)
@@ -101,5 +130,50 @@ struct PreviewFooterBar: View {
             let mb = Double(bytes) / (1024.0 * 1024.0)
             return String(format: "%.1f MB", mb)
         }
+    }
+}
+
+struct PreviewActionButton: View {
+    enum Style: Equatable {
+        case footer
+        case overlay
+    }
+
+    let title: String
+    let icon: String
+    let style: Style
+    let action: () -> Void
+
+    @Environment(\.appTheme) private var theme
+
+    private var foreground: Color {
+        style == .overlay ? .white : theme.popupPrimaryText
+    }
+
+    private var background: Color {
+        style == .overlay ? Color.black.opacity(0.62) : theme.popupTagBackground
+    }
+
+    private var border: Color {
+        style == .overlay ? Color.white.opacity(0.18) : theme.popupRowBorder
+    }
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 3) {
+                Image(systemName: icon)
+                    .font(.system(size: 9, weight: .semibold))
+                Text(title)
+                    .font(.system(size: 10, weight: .semibold))
+            }
+            .foregroundColor(foreground)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .background(Capsule().fill(background))
+            .overlay(Capsule().strokeBorder(border, lineWidth: 1))
+            .contentShape(Capsule())
+        }
+        .buttonStyle(AppleTactileButtonStyle(scale: 0.92))
+        .fixedSize()
     }
 }
