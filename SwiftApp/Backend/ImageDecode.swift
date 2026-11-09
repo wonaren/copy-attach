@@ -1,8 +1,12 @@
 import AppKit
 import CoreGraphics
 
-struct DecodedImage: @unchecked Sendable {
+final class DecodedImage: @unchecked Sendable {
     let image: NSImage
+
+    init(image: NSImage) {
+        self.image = image
+    }
 }
 
 private final class PreviewBufferBox: @unchecked Sendable {
@@ -37,13 +41,28 @@ enum ImageDecode {
 
     private static let decodeGate = PreviewDecodeGate(limit: 2)
 
+    nonisolated(unsafe) private static let previewCache: NSCache<NSString, DecodedImage> = {
+        let cache = NSCache<NSString, DecodedImage>()
+        cache.countLimit = 8
+        cache.totalCostLimit = 24 * 1024 * 1024
+        return cache
+    }()
+
     static func previewImageAsync(dbId: Int, maxPixel: Int) async -> DecodedImage? {
+        let key = "\(dbId):\(maxPixel)" as NSString
+        if let cached = previewCache.object(forKey: key) { return cached }
         guard let ticket = await decodeGate.acquire() else { return nil }
         defer { ticket.release() }
         guard !Task.isCancelled else { return nil }
-        return await Task.detached(priority: .userInitiated) { () -> DecodedImage? in
+        if let cached = previewCache.object(forKey: key) { return cached }
+        let decoded = await Task.detached(priority: .userInitiated) { () -> DecodedImage? in
             previewImage(dbId: dbId, maxPixel: maxPixel)
         }.value
+        if let decoded {
+            let cost = Int(decoded.image.size.width * decoded.image.size.height * 4)
+            previewCache.setObject(decoded, forKey: key, cost: cost)
+        }
+        return decoded
     }
 
     private static func previewImage(dbId: Int, maxPixel: Int) -> DecodedImage? {

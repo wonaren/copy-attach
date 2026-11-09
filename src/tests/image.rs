@@ -310,3 +310,52 @@ fn test_streaming_hash_and_thumbnail_match_full_decode() {
         assert_eq!(streamed.thumb_png, thumb_ref, "thumb bytes for {w}x{h}");
     }
 }
+
+#[test]
+fn test_streaming_matches_full_decode_for_other_8bit_pngs() {
+    fn encode<P>(img: image::ImageBuffer<P, Vec<u8>>) -> Vec<u8>
+    where
+        P: image::Pixel<Subpixel = u8> + image::PixelWithColorType + 'static,
+    {
+        let mut bytes = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
+            .expect("encode png");
+        bytes
+    }
+
+    let rgb = image::ImageBuffer::<image::Rgb<u8>, Vec<u8>>::from_fn(37, 23, |x, y| {
+        image::Rgb([(x.wrapping_mul(7)) as u8, (y.wrapping_mul(11)) as u8, 200])
+    });
+    let gray = image::ImageBuffer::<image::Luma<u8>, Vec<u8>>::from_fn(31, 19, |x, y| {
+        image::Luma([(x.wrapping_add(y).wrapping_mul(13)) as u8])
+    });
+    let gray_alpha = image::ImageBuffer::<image::LumaA<u8>, Vec<u8>>::from_fn(29, 17, |x, y| {
+        image::LumaA([(x.wrapping_mul(5)) as u8, (y.wrapping_mul(9)) as u8])
+    });
+
+    for png in [encode(rgb), encode(gray), encode(gray_alpha)] {
+        let (rgba, w, h) = crate::image::decode_png(&png).expect("full decode");
+        let streamed = crate::image::hash_and_thumbnail_streaming(&png)
+            .expect("8-bit PNG must stream");
+        assert_eq!((streamed.width, streamed.height), (w, h));
+        assert_eq!(streamed.hash, crate::image::image_hash(&rgba, w, h));
+        let (thumb, tw, th) = crate::image::create_thumbnail_fast(w, h, &rgba).unwrap();
+        assert_eq!((streamed.thumb_w, streamed.thumb_h), (tw, th));
+        assert_eq!(streamed.thumb_png, thumb);
+    }
+}
+
+#[test]
+fn test_streaming_still_falls_back_for_sixteen_bit_png() {
+    let img = image::ImageBuffer::<image::LumaA<u16>, Vec<u16>>::from_fn(8, 8, |x, y| {
+        image::LumaA([(x.wrapping_mul(9000)) as u16, (y.wrapping_mul(7000)) as u16])
+    });
+    let mut bytes = Vec::new();
+    image::DynamicImage::ImageLumaA16(img)
+        .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
+        .expect("encode 16-bit png");
+    assert!(
+        crate::image::hash_and_thumbnail_streaming(&bytes).is_none(),
+        "16-bit PNG must stay on the full-decode fallback"
+    );
+}

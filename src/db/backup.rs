@@ -75,6 +75,10 @@ pub(crate) fn export_backup(
             )
             .map_err(|e| format!("清理备份中的孤立快捷槽位失败: {e}"))?;
 
+        backup_conn
+            .execute_batch("VACUUM;")
+            .map_err(|e| format!("压缩备份文件失败: {e}"))?;
+
         let count: i64 = backup_conn
             .query_row("SELECT COUNT(*) FROM clipboard_history", [], |r| r.get(0))
             .unwrap_or(0);

@@ -322,25 +322,49 @@ pub(crate) fn hash_and_thumbnail_streaming(png: &[u8]) -> Option<StreamedRgba8> 
     use png::{BitDepth, ColorType, Decoder, Transformations};
 
     let mut decoder = Decoder::new(std::io::Cursor::new(png));
-    decoder.set_transformations(Transformations::IDENTITY);
+    decoder.set_transformations(Transformations::EXPAND | Transformations::ALPHA);
     let mut reader = decoder.read_info().ok()?;
-    let (width, height) = {
+    let (width, height, gray_alpha) = {
         let info = reader.info();
-        if info.bit_depth != BitDepth::Eight
-            || info.color_type != ColorType::Rgba
-            || info.interlaced
-            || info.width == 0
-            || info.height == 0
-        {
+        if info.interlaced || info.width == 0 || info.height == 0 {
             return None;
         }
-        (info.width, info.height)
+        match reader.output_color_type() {
+            (ColorType::Rgba, BitDepth::Eight) => (info.width, info.height, false),
+            (ColorType::GrayscaleAlpha, BitDepth::Eight) => (info.width, info.height, true),
+            _ => return None,
+        }
     };
     let line_size = (width as usize) * 4;
     let mut row = crate::backend::MarkBlobReusableOnDrop(vec![0u8; line_size]);
     if !crate::backend::claim_pages(row.0.as_ptr(), row.0.capacity()) {
         crate::error_log!("CopyAttach: streaming row buffer cap={} could not be claimed", row.0.capacity());
         return None;
+    }
+    let mut gray_row = if gray_alpha {
+        let r = crate::backend::MarkBlobReusableOnDrop(vec![0u8; (width as usize) * 2]);
+        if !crate::backend::claim_pages(r.0.as_ptr(), r.0.capacity()) {
+            crate::error_log!("CopyAttach: streaming gray row cap={} could not be claimed", r.0.capacity());
+            return None;
+        }
+        Some(r)
+    } else {
+        None
+    };
+    macro_rules! read_next_row {
+        () => {{
+            if let Some(g) = gray_row.as_mut() {
+                reader.read_row(&mut g.0).ok()??;
+                for (px, out) in g.0.chunks_exact(2).zip(row.0.chunks_exact_mut(4)) {
+                    out[0] = px[0];
+                    out[1] = px[0];
+                    out[2] = px[0];
+                    out[3] = px[1];
+                }
+            } else {
+                reader.read_row(&mut row.0).ok()??;
+            }
+        }};
     }
     let mut hash = FNV_OFFSET_BASIS;
     hash_row(&mut hash, &width.to_le_bytes());
@@ -355,7 +379,7 @@ pub(crate) fn hash_and_thumbnail_streaming(png: &[u8]) -> Option<StreamedRgba8> 
             return None;
         }
         for y in 0..height as usize {
-            reader.read_row(&mut row.0).ok()??;
+            read_next_row!();
             hash_row(&mut hash, &row.0);
             full.0[y * line_size..(y + 1) * line_size].copy_from_slice(&row.0);
         }
@@ -393,7 +417,7 @@ pub(crate) fn hash_and_thumbnail_streaming(png: &[u8]) -> Option<StreamedRgba8> 
         let base = center.floor() as i64;
         let need_through = (base + 2).clamp(0, height as i64 - 1) as u32;
         while decoded <= need_through {
-            reader.read_row(&mut row.0).ok()??;
+            read_next_row!();
             hash_row(&mut hash, &row.0);
             let slot = (decoded as usize) % RESIZE_RING_ROWS;
             let ring_row = &mut ring.0[slot * row_bytes..(slot + 1) * row_bytes];

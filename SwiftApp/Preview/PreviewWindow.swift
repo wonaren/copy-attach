@@ -69,7 +69,13 @@ class PreviewWindow: NSPanel {
     var onPaste: ((Int) -> Void)?
     var onClose: (() -> Void)?
 
-    private static var textHeightCache: [Int: CGFloat] = [:]
+    private struct TextHeightCacheKey: Hashable {
+        let entryId: Int
+        let width: Int
+        let maxHeight: Int
+    }
+
+    private static var textHeightCache: [TextHeightCacheKey: CGFloat] = [:]
     private static let textHeightCacheMaxEntries = 512
 
     override var canBecomeKey: Bool { false }
@@ -289,7 +295,6 @@ class PreviewWindow: NSPanel {
     }
 
     override func close() {
-        Self.textHeightCache.removeAll()
         dismissState.isDismissing = false
 
         hostingView?.rootView = AnyView(EmptyView())
@@ -426,13 +431,16 @@ class PreviewWindow: NSPanel {
         entryId: Int,
         maxHeight: CGFloat
     ) -> CGFloat {
-        if let cached = textHeightCache[entryId] { return cached }
+        let key = TextHeightCacheKey(entryId: entryId,
+                                     width: Int(width.rounded()),
+                                     maxHeight: Int(maxHeight.rounded()))
+        if let cached = textHeightCache[key] { return cached }
         let height = PreviewTextLayout.measureHeight(text, kind: kind, width: width, maxHeight: maxHeight)
         if textHeightCache.count >= textHeightCacheMaxEntries,
-           let key = textHeightCache.keys.first {
-            textHeightCache.removeValue(forKey: key)
+           let oldest = textHeightCache.keys.first {
+            textHeightCache.removeValue(forKey: oldest)
         }
-        textHeightCache[entryId] = height
+        textHeightCache[key] = height
         return height
     }
 }

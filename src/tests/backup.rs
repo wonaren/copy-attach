@@ -685,3 +685,39 @@ fn test_restoring_a_raw_history_db_skips_its_soft_deleted_rows() {
 
     let _ = std::fs::remove_file(&src_path);
 }
+
+#[test]
+fn test_backup_export_compacts_deleted_payload() {
+    let (_src_path, src_conn) = make_temp_db("compact");
+    let now = 1700000000u64;
+    let mut row_ids = Vec::new();
+    for i in 0..6 {
+        let text = format!("row {i} {}", "y".repeat(200_000));
+        let e = ClipboardEntry::text_entry(
+            new_entry_id(), &text, now + i, String::new(), String::new(), 0,
+        );
+        insert_entry_to_db(&src_conn, &e, Some(&text), None, None).unwrap();
+        row_ids.push(src_conn.last_insert_rowid());
+    }
+    for &row in &row_ids[..3] {
+        crate::db::soft_delete_row(&src_conn, row).unwrap();
+    }
+
+    let mut backup_path = std::env::temp_dir();
+    backup_path.push(format!("copyattach-compact-{}.cabackup", std::process::id()));
+    let _ = std::fs::remove_file(&backup_path);
+    let count = export_backup(&src_conn, &backup_path).expect("export_backup must succeed");
+    assert_eq!(count, 3);
+
+    let backup_conn = Connection::open(&backup_path).unwrap();
+    let freelist: i64 = backup_conn
+        .query_row("PRAGMA freelist_count", [], |r| r.get(0))
+        .unwrap();
+    let retained: i64 = backup_conn
+        .query_row("SELECT COUNT(*) FROM clipboard_history", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(freelist, 0, "export must vacuum away soft-deleted payload pages");
+    assert_eq!(retained, 3);
+    drop(backup_conn);
+    let _ = std::fs::remove_file(&backup_path);
+}

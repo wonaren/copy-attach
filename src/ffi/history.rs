@@ -391,7 +391,7 @@ pub extern "C" fn clipboard_undo_delete() -> c_int {
         None => return 0,
     };
 
-    let restored: Option<(u64, i64, HashSet<u64>, [u64; crate::db::QUICK_SLOT_COUNT])> = {
+    let restored: Option<(u64, ClipboardEntry, HashSet<u64>, [u64; crate::db::QUICK_SLOT_COUNT])> = {
         let conn = match b.db.lock() {
             Ok(c) => c,
             Err(e) => {
@@ -507,6 +507,13 @@ pub extern "C" fn clipboard_undo_delete() -> c_int {
                 return 0;
             }
         };
+        let restored_entry = match load_live_entry_by_row(&tx, new_row_id) {
+            Some(e) => e,
+            None => {
+                crate::error_log!("CopyAttach: undo could not read back restored row {new_row_id}; rolling back");
+                return 0;
+            }
+        };
         if let Err(e) = tx.commit() {
             crate::error_log!("CopyAttach: failed to commit undo of entry {entry_id}: {e}");
             return 0;
@@ -518,32 +525,16 @@ pub extern "C" fn clipboard_undo_delete() -> c_int {
             *mirror = slots_after;
         }
         drop(source);
-        Some((entry_id, new_row_id, favorites_after, slots_after))
+        Some((entry_id, restored_entry, favorites_after, slots_after))
     };
 
-    let (entry_id, new_row_id, favorites_after, _slots_after) = match restored {
+    let (entry_id, entry, favorites_after, _slots_after) = match restored {
         Some(v) => v,
         None => return 0,
     };
 
-    let entry = {
-        let conn = match b.db.lock() {
-            Ok(c) => c,
-            Err(e) => {
-                crate::error_log!("CopyAttach: DB mutex poisoned publishing undo of entry {entry_id}: {e}");
-                return 0;
-            }
-        };
-        match load_live_entry_by_row(&conn, new_row_id) {
-            Some(e) => e,
-            None => {
-                crate::error_log!("CopyAttach: undo restored row {new_row_id} but could not read it back");
-                return 0;
-            }
-        }
-    };
-
     let restored_favorite = favorites_after.contains(&entry_id);
+    let restored_row_id = entry.db_id();
     let restored_id = {
         let mut hist = b.history.lock().unwrap();
         *hist = crate::history::insert_restored(std::mem::take(&mut *hist), entry);
@@ -562,7 +553,7 @@ pub extern "C" fn clipboard_undo_delete() -> c_int {
 
     b.last_restored_id.store(restored_id, Ordering::SeqCst);
     crate::debug_log!(
-        "CopyAttach: undo restored entry {entry_id} as row {new_row_id} (favorite={restored_favorite})"
+        "CopyAttach: undo restored entry {entry_id} as row {restored_row_id} (favorite={restored_favorite})"
     );
     1
 }
