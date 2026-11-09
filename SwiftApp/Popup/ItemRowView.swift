@@ -199,26 +199,12 @@ struct ItemRowView: View {
 
     private func quickSlotBadge(_ slot: Int) -> some View {
         Text("右⌘\(slot)")
-            .font(.system(size: 9.5, weight: .semibold))
+            .font(.system(size: 12, weight: .medium))
             .monospacedDigit()
-            .foregroundColor(isSelected ? Color.white : theme.popupPrimaryText)
+            .foregroundColor(isSelected ? sourceNameColor(true) : Color(nsColor: .controlAccentColor))
             .lineLimit(1)
-            .padding(.horizontal, 4.5)
-            .padding(.vertical, 1.5)
-            .background(
-                RoundedRectangle(cornerRadius: 4, style: .continuous)
-                    .fill(isSelected
-                          ? Color.black.opacity(0.28)
-                          : Color(nsColor: .controlAccentColor).opacity(0.12))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 4, style: .continuous)
-                    .strokeBorder(isSelected
-                                  ? Color.white.opacity(0.45)
-                                  : Color(nsColor: .controlAccentColor).opacity(0.35),
-                                  lineWidth: 0.5)
-            )
-            .transition(.scale(scale: 0.85).combined(with: .opacity))
+            .padding(.horizontal, 2)
+            .transition(.scale(scale: 0.9).combined(with: .opacity))
     }
 
     @ViewBuilder
@@ -228,32 +214,32 @@ struct ItemRowView: View {
                 ZStack {
                     if let order = queueOrder {
                         Text("\(order)")
-                            .font(.system(size: 9.5, weight: .bold, design: .rounded))
+                            .font(.system(size: 9, weight: .bold, design: .rounded))
                             .foregroundColor(isSelected ? (isDeleteModifierPressed ? deleteSelectionFill : selectionFill) : Color.white)
-                            .frame(width: 16, height: 16)
+                            .frame(width: 14.5, height: 14.5)
                             .background(
                                 Circle().fill(isSelected ? Color.white : Color(nsColor: .controlAccentColor))
                             )
                             .transition(.scale(scale: 0.85).combined(with: .opacity))
                     } else if isHovering {
                         Circle()
-                            .fill(isSelected ? Color.white.opacity(0.14) : Color(nsColor: .controlAccentColor).opacity(0.12))
+                            .fill(queueToggleCircleFill)
                             .overlay(
                                 Circle().strokeBorder(
-                                    isSelected ? Color.white.opacity(0.95) : Color(nsColor: .controlAccentColor),
-                                    lineWidth: 1.8
+                                    queueToggleCircleStroke,
+                                    lineWidth: 1.15
                                 )
                             )
-                            .frame(width: 16, height: 16)
+                            .frame(width: 13.5, height: 13.5)
                             .transition(.scale(scale: 0.85).combined(with: .opacity))
                     }
                 }
-                .scaleEffect(isQueueToggleHovered ? 1.12 : 1.0)
+                .scaleEffect(isQueueToggleHovered ? 1.08 : 1.0)
                 .frame(width: 18, height: 18)
                 .background(
                     Circle()
                         .fill(isQueueToggleHovered ? queueToggleHoverFill : Color.clear)
-                        .frame(width: 24, height: 24)
+                        .frame(width: 22, height: 22)
                 )
                 .contentShape(Rectangle())
             }
@@ -268,8 +254,21 @@ struct ItemRowView: View {
         }
     }
 
+    private var queueToggleCircleStroke: Color {
+        if isSelected {
+            return isQueueToggleHovered ? Color.white : Color.white.opacity(0.55)
+        } else {
+            return isQueueToggleHovered ? Color(nsColor: .controlAccentColor) : theme.popupSecondaryText.opacity(0.65)
+        }
+    }
+
+    private var queueToggleCircleFill: Color {
+        guard isQueueToggleHovered else { return Color.clear }
+        return isSelected ? Color.white.opacity(0.18) : Color(nsColor: .controlAccentColor).opacity(0.12)
+    }
+
     private var queueToggleHoverFill: Color {
-        isSelected ? Color.white.opacity(0.22) : Color(nsColor: .controlAccentColor).opacity(0.20)
+        isSelected ? Color.white.opacity(0.20) : Color(nsColor: .controlAccentColor).opacity(0.15)
     }
 
     @ViewBuilder

@@ -140,6 +140,7 @@ class PreviewWindow: NSPanel {
 
     private func installContent(item: ClipboardItem, initialImage: NSImage?) {
         let hosting = PreviewHostingView(rootView: makeContent(item: item, initialImage: initialImage))
+        hosting.sizingOptions = []
         let contentRect = self.contentRect(forFrameRect: self.frame)
         hosting.frame = contentRect
 
