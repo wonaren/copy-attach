@@ -74,7 +74,7 @@ struct LargeTextView: NSViewRepresentable {
         textView.onTap = onTap
         textView.drawsBackground = false
         textView.backgroundColor = .clear
-        textView.textContainerInset = NSSize(width: 16, height: 14)
+        textView.textContainerInset = NSSize(width: 13, height: 11)
         textView.layoutManager?.allowsNonContiguousLayout = true
         textView.isHorizontallyResizable = false
         guard let textContainer = textView.textContainer else {

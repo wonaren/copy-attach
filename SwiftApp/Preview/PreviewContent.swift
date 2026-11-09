@@ -94,7 +94,8 @@ struct PreviewContent: View {
             case .image:
                 imageContent(dbId: currentDbId)
             }
-
+        }
+        .overlay {
             if showsZoomHint {
                 miniHoverHint
             }
@@ -131,6 +132,12 @@ struct PreviewContent: View {
                     onTap: onTapWhenUnzoomed
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(
+                    RoundedRectangle(cornerRadius: 11, style: .continuous)
+                        .fill(theme.previewBackground)
+                )
+                .padding(.horizontal, 3)
+                .padding(.top, 3)
 
                 Divider()
                     .opacity(isDark ? 0.12 : 0.08)
@@ -152,9 +159,12 @@ struct PreviewContent: View {
             .lineLimit(6)
             .truncationMode(.tail)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .padding(.horizontal, 12)
-            .padding(.top, 12)
-            .padding(.bottom, 8)
+            .padding(9)
+            .background(
+                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                    .fill(theme.previewBackground)
+            )
+            .padding(3)
             .contentShape(Rectangle())
             .onTapGesture { onTapWhenUnzoomed?() }
     }
@@ -172,8 +182,9 @@ struct PreviewContent: View {
                 VStack(spacing: 0) {
                     largeImageBody(dbId: dbId)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .padding(.horizontal, 6)
-                        .padding(.top, 6)
+                        .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+                        .padding(.horizontal, 3)
+                        .padding(.top, 3)
 
                     Divider()
                         .opacity(colorScheme == .dark ? 0.12 : 0.08)
@@ -204,7 +215,8 @@ struct PreviewContent: View {
                 .interpolation(.high)
                 .aspectRatio(contentMode: .fit)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .padding(6)
+                .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+                .padding(3)
                 .contentShape(Rectangle())
                 .onTapGesture { onTapWhenUnzoomed?() }
         } else if hasFailed {
@@ -233,7 +245,7 @@ struct PreviewContent: View {
 
     private var imageLoadingPlaceholder: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
                 .fill(theme.previewBackground)
             VStack(spacing: 12) {
                 Image(systemName: "photo")
@@ -253,19 +265,15 @@ struct PreviewContent: View {
     }
 
     private var miniHoverHint: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 0) {
-                cornerMark
-                Spacer(minLength: 0)
-            }
-            Spacer(minLength: 0)
-            HStack(spacing: 0) {
-                Spacer(minLength: 0)
-                cornerMark
-                    .rotationEffect(.degrees(180))
-            }
+        ZStack {
+            cornerMark
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .padding(8)
+            cornerMark
+                .rotationEffect(.degrees(180))
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                .padding(8)
         }
-        .padding(8)
         .opacity(isHoveringBubble ? 1 : 0)
         .scaleEffect(isHoveringBubble ? 1 : 0.94)
         .animation(.easeOut(duration: 0.12), value: isHoveringBubble)

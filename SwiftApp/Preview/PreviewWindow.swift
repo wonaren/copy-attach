@@ -49,7 +49,7 @@ class PreviewWindow: NSPanel {
 
     private static let miniMaxWidth: CGFloat = 300
     private static let miniMaxHeight: CGFloat = 280
-    private static let miniPadding: CGFloat = 12
+    private static let miniPadding: CGFloat = 6
     private static let miniMaxPixel: Int = 800
     private static let miniGap: CGFloat = 10
     private static let miniMinSideSpace: CGFloat = 120
@@ -370,7 +370,7 @@ class PreviewWindow: NSPanel {
             attributes: [.font: font]
         )
         let contentHeight = min(ceil(rect.height), 96)
-        return NSSize(width: width, height: contentHeight + 20)
+        return NSSize(width: width, height: contentHeight + 24)
     }
 
     private static func contentSize(for item: ClipboardItem, screenFrame: NSRect) -> NSSize {
@@ -397,7 +397,7 @@ class PreviewWindow: NSPanel {
             let textWidth = min(max(longestLineWidth + pad, minW), effectiveMaxW)
             let containerW = textWidth - pad
 
-            let verticalOverhead: CGFloat = 57
+            let verticalOverhead: CGFloat = 54
             let maxTextH = max(maxH - verticalOverhead, 50)
             let textH = calculateTextHeight(
                 prepared.displayText,
@@ -413,8 +413,8 @@ class PreviewWindow: NSPanel {
             guard w > 0, h > 0 else {
                 return NSSize(width: 360, height: 160)
             }
-            let padX: CGFloat = 12
-            let chrome: CGFloat = 6 + 1 + PreviewFooterBar.height
+            let padX: CGFloat = 6
+            let chrome: CGFloat = 3 + 1 + PreviewFooterBar.height
             let maxContentW = maxW - padX
             let maxContentH = max(min(maxH - chrome, 720), 50)
             let scale = min(1, maxContentW / CGFloat(w), maxContentH / CGFloat(h))
