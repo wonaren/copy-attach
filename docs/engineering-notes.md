@@ -147,6 +147,16 @@ Phase 1 同步 hash + 缩略图（fit 进显示框 920×200px = 460×100pt @2×�
 
 未实测：真实触控板双指横滑切标签（合成事件不进手势路径）；引导聚光灯 / 快捷槽位盘在原生行上的几何表现。旧 SwiftUI 列表代码（`ItemRowView`、`RowFramePreferenceKey`、`popupContextMenuNotification` 解析、`DateSeparatorView`）已于 0.111.8 删除，`DayGroup` 拆到独立文件。
 
+### 弹窗开合缩放不能走 SwiftUI `scaleEffect`（0.111.9）
+
+`scaleEffect` 会让 SwiftUI 在整个开合动画期间**按每个中间缩放比例重新栅格化整棵内容树**。列表里有自绘 `NSTableCellView` 文本时，每帧每个新比例都会在 CoreGraphics 生成一批新的字形位图（`CGGlyphBitmapCreate` / `CGGlyphBuilderLockBitmaps`），且这些位图**永久留在进程里**。实测：每次开合 +约 1500 个位图 / +1MB，20 轮 `written` 从 48M 涨到 92M 并持续上涨；老版 SwiftUI 列表同样受影响（8 轮 2.1MB），原生列表把它放大 8 倍。
+
+修法是把缩放从 SwiftUI 移到宿主 `CALayer`：`HistoryPopupWindow.setContentScale` / `animateContentScale` 直接设 `layer.transform = CATransform3DMakeScale`，并显式设 `anchorPoint = (0.5,0.5)` + `position = bounds 中心`（**两者都不能省**：只设 transform 时每轮仍 +60 个位图，因为默认锚点在图层原点，缩放会把内容推出边界触发重绘）。内容只按 1.0 栅格化一次，动画只缩放已渲染的位图。实测 30 轮开合 `footprint` 恒定 44.6–45.8M、`written` 57.5M 不再上涨；Animation Hitches 三次运行共 2 个 hitch，与改造前持平。
+
+**`drawingGroup()` 不是替代方案**：它会把整块列表渲染成黄色错误占位图——SwiftUI 无法栅格化 `NSViewRepresentable` 承载的 AppKit 内容。
+
+**测量注意**：`MallocStackLogging=1` 会显著改变内存行为（给每次分配附加栈记录、妨碍复用），MSL 下同一构建仍显示位图增长。判断稳态必须用无 MSL 的 `vmmap -summary`。
+
 ### 日期栏吸顶（0.111.3，SwiftUI 时期；0.111.4 起见上节）
 
 列表按天分组为 `PopupSection`，`LazyVStack(pinnedViews: [.sectionHeaders])` 让当前日期栏吸附在顶部，跨天时由下一天顶替。**头部不能用背景色遮挡**：弹窗底色本身是半透明的（浅色 0.88 / 深色 0.82 alpha），任何叠加的底色都会与周围列表形成色带，浅色主题下尤其明显（初版用两层 `popupBackground`，被判定「没有一体感」）。现改为 `destinationOut` 擦除：头部背景铺 `Rectangle().fill(.black).blendMode(.destinationOut)`，把滚到头下的行在合成组内擦掉，露出与列表完全相同的底层；`compositingGroup()`（加在滚动内容 VStack 上）是必需配套，否则会连弹窗底色一起擦穿。**两者必须成对存在**，删掉 `compositingGroup` 或换回普通背景都会退化成色带。**滚动定位不能依赖系统默认**：`scrollPosition` 是最小滚动——目标已在视口内则不动，目标在视口上方时把它顶到内容顶部，而内容顶部恒被 pinned header 压住约一行。因此方向键上移若直接以选中行为目标，选中行会缩进日期栏下（用户实测截图复现）。修法：上移时（`scrollTargetForItem(at:movingUp:)` 的 `movingUp` 分支）改以**上一行**为滚动目标——上一行被头部遮住无所谓，选中行紧随其后、必然完整落在头部下方；上一行恰是当天首行时目标换成该天的日期栏 id（日期栏顶到内容顶部即成为吸顶头，首行在其下方）。下移不变，仍以选中行为目标，最小滚动落在视口底部。实测（真机 cua-driver 方向键 + 窗口截图）：同日上移、单行上移、跨天上移（含目标行恰为上一自然日末行）的落点均为选中行完整可见；「跨天移入次日第 2 行、目标为日期栏 id 且需滚动」的分支未构造出滚动帧，仅按同一机制推导。Tab 切换沿用「先滚到顶、再切 filter」，pinned 状态在每次切换前必然解除；槽位模式 `showsHeader=false`。CPU 粗测：密集滚轮 1.5s 内本进程消耗 0.42s CPU（约单核 28%），未做 Perf 门禁 A/B。

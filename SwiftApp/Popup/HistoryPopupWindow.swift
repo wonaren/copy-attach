@@ -373,6 +373,31 @@ class HistoryPopupWindow: NSPanel {
         }
     }
 
+    func setContentScale(_ scale: CGFloat) {
+        guard let host = popupHostingView, let layer = host.layer else { return }
+        layer.removeAnimation(forKey: "contentScale")
+        applyContentScale(scale, to: host, layer: layer)
+    }
+
+    func animateContentScale(to scale: CGFloat, duration: TimeInterval) {
+        guard let host = popupHostingView, let layer = host.layer else { return }
+        let animation = CABasicAnimation(keyPath: "transform.scale")
+        animation.fromValue = layer.presentation()?.value(forKeyPath: "transform.scale")
+            ?? (layer.value(forKeyPath: "transform.scale") as? CGFloat ?? 1)
+        animation.toValue = scale
+        animation.duration = duration
+        animation.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        layer.removeAnimation(forKey: "contentScale")
+        layer.add(animation, forKey: "contentScale")
+        applyContentScale(scale, to: host, layer: layer)
+    }
+
+    private func applyContentScale(_ scale: CGFloat, to host: NSView, layer: CALayer) {
+        layer.transform = CATransform3DMakeScale(scale, scale, 1)
+        layer.anchorPoint = CGPoint(x: 0.5, y: 0.5)
+        layer.position = CGPoint(x: host.bounds.midX, y: host.bounds.midY)
+    }
+
     func closeWithAnimation() {
         guard lifecycleState != .closing && lifecycleState != .closed else { return }
         lifecycleState = .closing

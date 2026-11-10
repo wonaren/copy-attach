@@ -91,7 +91,6 @@ struct HistoryPopupContent: View {
 
     @Namespace private var filterTabNamespace
 
-    @State private var openingScale: CGFloat = 1.06
     @State var isDismissing: Bool = false
 
     @State var toastMessage: String? = nil
@@ -333,7 +332,6 @@ struct HistoryPopupContent: View {
                 .zIndex(999)
             }
         }
-        .scaleEffect(isDismissing ? 1.04 : openingScale, anchor: .center)
         .blur(radius: isDismissing ? 16.0 : 0.0)
         .opacity(isDismissing ? 0.0 : 1.0)
         .frame(width: popupWidth, height: popupHeight)
@@ -419,7 +417,7 @@ struct HistoryPopupContent: View {
             editingItemId = nil
             editingText = ""
             rowsReadyForAnimation = false
-            openingScale = 1.06
+            popupWindow?.setContentScale(1.06)
             isDismissing = false
             toastDismissTask?.cancel()
             toastDismissTask = nil
@@ -432,11 +430,7 @@ struct HistoryPopupContent: View {
             isRightCommandPressed = commandSides.right
 
             let openDuration = 0.2
-            withAnimation(.spring(response: openDuration,
-                                  dampingFraction: 0.85,
-                                  blendDuration: 0)) {
-                openingScale = 1.0
-            }
+            popupWindow?.animateContentScale(to: 1.0, duration: openDuration)
 
             DispatchQueue.main.asyncAfter(deadline: .now() + openDuration + 0.05) {
                 self.rowsReadyForAnimation = true
@@ -462,6 +456,7 @@ struct HistoryPopupContent: View {
         .onReceive(NotificationCenter.default.publisher(for: popupWillDismissNotification)) { _ in
             QuickSlotDialWindow.shared.hide()
             closeHoverPreview()
+            popupWindow?.animateContentScale(to: 1.04, duration: 0.15)
             withAnimation(.easeOut(duration: 0.15)) {
                 isDismissing = true
             }
