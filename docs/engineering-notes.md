@@ -22,7 +22,7 @@
 - 全文搜索走 SQLite FTS5 trigram 索引（`db::search_history`：≥3 字符用 `MATCH` 子串匹配 + 对超出索引上限的超大文本行做 LIKE 兜底；<3 字符退回 LIKE 全表扫描，`clipboard_search_ids` 返回匹配 entry_id）。全文只存在 DB，内存历史 Vec 不持正文（Text 条目只带 preview/label/text_hash，粘贴/预览/拖拽按 `db_id` 从 DB 按需载入，与图片同约定）。
 - **LIKE 回退是有意保留的语义承诺**：1-2 字符查询必须命中长文中段（曾提议改扫内存 preview 换取无磁盘读，因静默丢失长文中段匹配被否——`test_search_short_query_matches_full_text_middle` 是语义绊线）；已知代价是首两次击键的全表扫描与 LIKE 仅 ASCII 大小写折叠。
 - 元数据字段匹配（label、custom_label、source_name）统一在 Rust/SQLite 侧由 LIKE 子串检索完成（图片条目 label 列恒为 NULL 不落库，不支持按尺寸检索，图片按备注与来源应用匹配），Swift 侧仅需按 matchIds 筛选并辅以动态日期分组（DayGroup 是 UI 派生文本）。FTS 索引同步用 SQLite 触发器（AFTER INSERT/DELETE on `clipboard_history`，触发器 DROP+CREATE 以替换旧版无上限触发器，backfill 只跑一次且含上限条件，启动时清理存量超大行）。
-- 行渲染：`ItemRowView` 无 `#` 的文本跳过正则、hex 色票 NSImage 按色值缓存（`swatchCache`，countLimit 64）——不再每帧 lockFocus 现画。搜索栏固定 index 0，项目从 index 1 开始。
+- 行渲染（0.111.8 起由 `NativeHistoryListView` 自绘取代旧 `ItemRowView`）：无 `#` 的文本跳过正则、hex 色票 NSImage 按色值缓存（`swatchCache`，countLimit 64）——不再每帧 lockFocus 现画。搜索栏固定 index 0，项目从 index 1 开始。
 
 ## 两阶段图片捕获与内存治理
 
@@ -145,7 +145,7 @@ Phase 1 同步 hash + 缩略图（fit 进显示框 920×200px = 460×100pt @2×�
 - **搜索高亮**：命中片段在自绘文本里加 attributed background；`#rrggbb` / `#rgb` 用 10×10 `NSTextAttachment` 色块代替文字。
 - **无障碍**：行暴露 `AXCell` + `AXDescription`（同屏文本）、`AXPress`（粘贴）、`AXSelected` 与自定义动作「加入粘贴队列」。
 
-未实测：真实触控板双指横滑切标签（合成事件不进手势路径）；引导聚光灯 / 快捷槽位盘在原生行上的几何表现。旧 SwiftUI 列表代码（`ItemRowView`、`RowFramePreferenceKey`、`popupContextMenuNotification` 解析）暂留未删。
+未实测：真实触控板双指横滑切标签（合成事件不进手势路径）；引导聚光灯 / 快捷槽位盘在原生行上的几何表现。旧 SwiftUI 列表代码（`ItemRowView`、`RowFramePreferenceKey`、`popupContextMenuNotification` 解析、`DateSeparatorView`）已于 0.111.8 删除，`DayGroup` 拆到独立文件。
 
 ### 日期栏吸顶（0.111.3，SwiftUI 时期；0.111.4 起见上节）
 
@@ -161,9 +161,11 @@ PopupHostingView 的 `.scrollWheel` local monitor 在 ScrollView 消费事件之
 
 **切换 = 先滚到顶、再切 filter**（单一主流程）：先把 `scrollTarget` 指向列表顶部锚点（`listTopAnchorID`，LazyVStack 上方恒 0 高普通视图——始终被布局，不依赖未物化行的行高估算），再在下一个 runloop turn 切换 `filterMode`。原因：滚动与内容变化同事务时，scrollPosition 与 LazyVStack 行高估算和 ScrollView 偏移保持竞速——实测滚动完全丢失或反复振荡（offset 1261→0→541→0→289），按住 ↓ 深滚后立刻切换可稳定复现。切标签后 `onChange(of: filterMode)`：关预览；`selectedIndex != 0` 时重置为新列表第一条，空列表落回搜索栏；搜索框聚焦时不预滚。滚动靠 `.scrollPosition(id: $scrollTarget)`，无 ScrollViewReader/`scrollTo`。
 
-### 右键上下文菜单（SwiftUI 时期；0.111.4 起原生列表走 `menu(for:)`，见「原生列表」）
+### 右键上下文菜单
 
-`PopupHostingView.rightMouseDown` 只发 `popupContextMenuNotification`（`.global` 坐标；NSHostingView `isFlipped=true`，`convert(_:from:nil)` 与 `.global` 同坐标系）→ 置 `contextMenuArmed`，行 frame 按需一次性快照（`RowFramePreferenceKey`：仅武装期间行才挂 GeometryReader）——滚动全程无每行几何上报开销，菜单延迟仅一帧；`resolveContextMenu` 在下一 runloop 回合 `showContextMenu`（`NSMenu.popUp` 不能在 SwiftUI 布局中途开始）。菜单项 handler 用 `ContextMenuItemTarget`（`NSMenuItem.target` 是 weak，靠 `representedObject` 强持有）；动作一律 `currentIndex(of:)` 按稳定 entry_id 重新解析行。菜单 tracking 期间（`isMenuTracking`）Esc/←/→/⌘Z 全让位。图片行含「另存为…」（NSSavePanel 写 PNG）：保存面板是本应用的模态窗口，必然从非激活弹窗夺走 key——弹窗靠 `isPresentingModalPanel` 屏蔽这次 resign-key 的关闭（弹窗留在面板后方继续显示），`runModal()` 返回后 `makeKey()` 交还 key 状态。**不得在调起面板前 `close()`/`onClose()` 收起弹窗**（0.100.10 曾如此，实为把弹窗在保存过程中异步销毁）。
+0.111.8 起由 `NativeHistoryTableView.menu(for:)` 直接弹出（`HistoryPopupContent.showContextMenu` 组装菜单）。以下为 SwiftUI 时期的实现，仅存档：`PopupHostingView.rightMouseDown` 发 `popupContextMenuNotification` → 置 `contextMenuArmed`，行 frame 按需快照（`RowFramePreferenceKey`），`resolveContextMenu` 在下一 runloop 回合 `showContextMenu`（`NSMenu.popUp` 不能在 SwiftUI 布局中途开始）。
+
+菜单项 handler 用 `ContextMenuItemTarget`（`NSMenuItem.target` 是 weak，靠 `representedObject` 强持有）；动作一律 `currentIndex(of:)` 按稳定 entry_id 重新解析行。菜单 tracking 期间（`isMenuTracking`）Esc/←/→/⌘Z 全让位。图片行含「另存为…」（NSSavePanel 写 PNG）：保存面板是本应用的模态窗口，必然从非激活弹窗夺走 key——弹窗靠 `isPresentingModalPanel` 屏蔽这次 resign-key 的关闭（弹窗留在面板后方继续显示），`runModal()` 返回后 `makeKey()` 交还 key 状态。**不得在调起面板前 `close()`/`onClose()` 收起弹窗**（0.100.10 曾如此，实为把弹窗在保存过程中异步销毁）。
 
 ## 许可证体系
 
