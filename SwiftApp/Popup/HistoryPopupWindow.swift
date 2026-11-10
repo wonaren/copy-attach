@@ -165,6 +165,8 @@ class HistoryPopupWindow: NSPanel {
 
         self.contentView = hosting
 
+        applyContentScale(1.06, to: hosting, layer: hosting.layer!)
+
         resetDragParking()
         centerOnScreen()
 
@@ -379,23 +381,37 @@ class HistoryPopupWindow: NSPanel {
         applyContentScale(scale, to: host, layer: layer)
     }
 
-    func animateContentScale(to scale: CGFloat, duration: TimeInterval) {
+    func animateContentScale(to scale: CGFloat, response: TimeInterval, damping: CGFloat) {
         guard let host = popupHostingView, let layer = host.layer else { return }
-        let animation = CABasicAnimation(keyPath: "transform.scale")
-        animation.fromValue = layer.presentation()?.value(forKeyPath: "transform.scale")
-            ?? (layer.value(forKeyPath: "transform.scale") as? CGFloat ?? 1)
-        animation.toValue = scale
-        animation.duration = duration
-        animation.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        let size = host.bounds.size
+        let animation = CASpringAnimation(keyPath: "transform")
+        animation.fromValue = centerAnchoredTransform(scale: currentContentScale(of: layer), size: size)
+        animation.toValue = centerAnchoredTransform(scale: scale, size: size)
+        animation.mass = 1
+        animation.stiffness = pow(2 * .pi / response, 2)
+        animation.damping = 2 * damping * sqrt(animation.stiffness)
+        animation.initialVelocity = 0
+        animation.duration = animation.settlingDuration
         layer.removeAnimation(forKey: "contentScale")
+        layer.transform = centerAnchoredTransform(scale: scale, size: size)
         layer.add(animation, forKey: "contentScale")
-        applyContentScale(scale, to: host, layer: layer)
+    }
+
+    private func centerAnchoredTransform(scale: CGFloat, size: CGSize) -> CATransform3D {
+        let cx = size.width / 2
+        let cy = size.height / 2
+        var t = CATransform3DMakeTranslation(cx, cy, 0)
+        t = CATransform3DScale(t, scale, scale, 1)
+        return CATransform3DTranslate(t, -cx, -cy, 0)
+    }
+
+    private func currentContentScale(of layer: CALayer) -> CGFloat {
+        let transform = layer.presentation()?.transform ?? layer.transform
+        return CGFloat(sqrt(transform.m11 * transform.m11 + transform.m12 * transform.m12))
     }
 
     private func applyContentScale(_ scale: CGFloat, to host: NSView, layer: CALayer) {
-        layer.transform = CATransform3DMakeScale(scale, scale, 1)
-        layer.anchorPoint = CGPoint(x: 0.5, y: 0.5)
-        layer.position = CGPoint(x: host.bounds.midX, y: host.bounds.midY)
+        layer.transform = centerAnchoredTransform(scale: scale, size: host.bounds.size)
     }
 
     func closeWithAnimation() {

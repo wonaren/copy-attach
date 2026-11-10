@@ -430,7 +430,7 @@ struct HistoryPopupContent: View {
             isRightCommandPressed = commandSides.right
 
             let openDuration = 0.2
-            popupWindow?.animateContentScale(to: 1.0, duration: openDuration)
+            popupWindow?.animateContentScale(to: 1.0, response: openDuration, damping: 0.85)
 
             DispatchQueue.main.asyncAfter(deadline: .now() + openDuration + 0.05) {
                 self.rowsReadyForAnimation = true
@@ -456,7 +456,7 @@ struct HistoryPopupContent: View {
         .onReceive(NotificationCenter.default.publisher(for: popupWillDismissNotification)) { _ in
             QuickSlotDialWindow.shared.hide()
             closeHoverPreview()
-            popupWindow?.animateContentScale(to: 1.04, duration: 0.15)
+            popupWindow?.animateContentScale(to: 1.04, response: 0.15, damping: 1)
             withAnimation(.easeOut(duration: 0.15)) {
                 isDismissing = true
             }
@@ -468,6 +468,7 @@ struct HistoryPopupContent: View {
             closeHoverPreview()
         }
         .onReceive(NotificationCenter.default.publisher(for: popupCancelDismissNotification)) { _ in
+            popupWindow?.animateContentScale(to: 1.0, response: 0.15, damping: 1)
             withAnimation(.easeOut(duration: 0.15)) {
                 isDismissing = false
             }
