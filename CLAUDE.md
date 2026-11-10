@@ -126,7 +126,7 @@ SwiftApp/
   │                                       + GeneralTab / ShortcutsTab / StorageTab / IgnoreTab / AboutTab / SheetDismissHelper
   ├── Onboarding/                      ← 核心操作引导（5 文件：引导模型/浮窗卡片/聚光灯遮罩）
   ├── Queue/                           ← 粘贴队列（6 文件：状态管理/HUD窗口/HUD视图/CGEventTap拦截器/批量派发/批量HUD）
-  ├── Popup/                           ← 主弹窗（17 文件：内容/窗口/事件/原生列表/行/拖拽/批量拖拽/右键菜单/标签过滤/预览/动作）
+  ├── Popup/                           ← 主弹窗（17 文件：内容/窗口/事件/原生列表/日期分组/拖拽/批量拖拽/右键菜单/标签过滤/预览/动作）
   ├── Preview/                         ← 预览窗口（4 文件：窗口/内容/布局/缩放）
   ├── Backend/                         ← ClipboardItem / ImageDecode / AppIcon 缓存 / PackedSnapshot / PreviewDecodeGate
   ├── Stress/                          ← 压力测试面板与视图模型（依赖 STRESS=1 构建）

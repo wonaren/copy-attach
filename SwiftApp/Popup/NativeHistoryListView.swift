@@ -478,7 +478,7 @@ final class NativeHistoryListContainerView: NSView {
             object: scrollView.contentView,
             queue: .main
         ) { [weak self] _ in
-            self?.boundsChanged()
+            MainActor.assumeIsolated { self?.boundsChanged() }
         }
     }
 
