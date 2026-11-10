@@ -151,7 +151,11 @@ Phase 1 同步 hash + 缩略图（fit 进显示框 920×200px = 460×100pt @2×�
 
 `scaleEffect` 会让 SwiftUI 在整个开合动画期间**按每个中间缩放比例重新栅格化整棵内容树**。列表里有自绘 `NSTableCellView` 文本时，每帧每个新比例都会在 CoreGraphics 生成一批新的字形位图（`CGGlyphBitmapCreate` / `CGGlyphBuilderLockBitmaps`），且这些位图**永久留在进程里**。实测：每次开合 +约 1500 个位图 / +1MB，20 轮 `written` 从 48M 涨到 92M 并持续上涨；老版 SwiftUI 列表同样受影响（8 轮 2.1MB），原生列表把它放大 8 倍。
 
-修法是把缩放从 SwiftUI 移到宿主 `CALayer`：`HistoryPopupWindow.setContentScale` / `animateContentScale` 直接设 `layer.transform = CATransform3DMakeScale`，并显式设 `anchorPoint = (0.5,0.5)` + `position = bounds 中心`（**两者都不能省**：只设 transform 时每轮仍 +60 个位图，因为默认锚点在图层原点，缩放会把内容推出边界触发重绘）。内容只按 1.0 栅格化一次，动画只缩放已渲染的位图。实测 30 轮开合 `footprint` 恒定 44.6–45.8M、`written` 57.5M 不再上涨；Animation Hitches 三次运行共 2 个 hitch，与改造前持平。
+修法是把缩放从 SwiftUI 移到宿主 `CALayer`：`HistoryPopupWindow.setContentScale` / `animateContentScale` 直接设 `layer.transform`。内容只按 1.0 栅格化一次，动画只缩放已渲染的位图。实测 30 轮开合 `footprint` 恒定 44.6–45.8M、`written` 57.5M 不再上涨；Animation Hitches 三次运行共 2 个 hitch，与改造前持平。
+
+**缩放必须内嵌平移、不能设 `anchorPoint`**：`NSHostingView` 挂到窗口后约 20ms 内，AppKit 会把 `layer.anchorPoint` 与 `layer.position` 重置为 `{0,0}`（实测：设好后 `t+20ms` 已变成 `anchor={0,0} pos={0,0}`）。因此缩放中心会跑到图层左上角，视觉上表现为「从右下往左上收」，而不是 Spotlight 那种从中心收缩。正确做法是把中心锚点编进 transform 本身——`translate(cx,cy) → scale → translate(-cx,-cy)`，完全不碰 `anchorPoint`/`position`。
+
+**曲线用 `CASpringAnimation` 复刻原版**：`stiffness = (2π/response)²`、`damping = 2·dampingFraction·√stiffness`、`mass = 1`，对应 SwiftUI 的 `spring(response:dampingFraction:)`；开弹窗 `response 0.2 / damping 0.85`，关闭 `1.04 倍 / response 0.15 / damping 1`，反向打开时同样回 1.0。
 
 **`drawingGroup()` 不是替代方案**：它会把整块列表渲染成黄色错误占位图——SwiftUI 无法栅格化 `NSViewRepresentable` 承载的 AppKit 内容。
 
