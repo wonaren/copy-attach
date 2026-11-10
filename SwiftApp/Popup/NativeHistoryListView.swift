@@ -1038,7 +1038,7 @@ final class NativeHistoryRowView: NSTableCellView {
                               configuration: NativeHistoryRowConfiguration,
                               primary: NSColor, secondary: NSColor) -> NSRect {
         let theme = configuration.theme
-        var right = rect.maxX - 2
+        var right = rect.maxX - 4
         var trailingMinX = right
         if configuration.isSelected && configuration.isDeleteModifierPressed {
             if let image = NativeSymbols.image("delete.left.fill", size: 13, color: .white) {
