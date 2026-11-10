@@ -863,11 +863,11 @@ struct HistoryPopupContent: View {
     }
 
     private var itemsListScrollView: some View {
-        let rows = nativeRows
+        let model = nativeListModel(from: currentDisplayMemo)
         return NativeHistoryListView(
-            rows: rows,
-            structureToken: nativeStructureToken(for: rows),
-            visualToken: nativeVisualToken(for: rows),
+            rows: model.rows,
+            structureToken: model.structureToken,
+            visualToken: model.visualToken,
             theme: nativeTheme,
             selectedItemId: nativeSelectedItemId,
             editingItemID: editingItemId,
@@ -940,18 +940,37 @@ struct HistoryPopupContent: View {
         )
     }
 
-    private var nativeRows: [NativeHistoryListRow] {
-        let memo = currentDisplayMemo
+    private struct NativeListModel {
+        let rows: [NativeHistoryListRow]
+        let structureToken: Int
+        let visualToken: Int
+    }
+
+    private func nativeListModel(from memo: DisplayMemo) -> NativeListModel {
+        let perfModel = PerfSpan.start("swift", "list.model")
+        defer { perfModel?.end() }
         let favorites = backend.favoriteIds
         let slots = backend.slotByEntryId
         let queue = PasteQueueManager.shared.orderMap
         let command = isCommandPressed
-        var result: [NativeHistoryListRow] = []
-        result.reserveCapacity(memo.items.count * 2)
+        let editingId = editingItemId
+
+        var rows: [NativeHistoryListRow] = []
+        rows.reserveCapacity(memo.items.count * 2)
+        var structure = Hasher()
+        var visual = Hasher()
+        structure.combine(memo.itemsGeneration)
+        structure.combine(memo.effectiveSearchText)
+        structure.combine(memo.searchResultsGeneration)
+        structure.combine(memo.filterMode)
+        visual.combine(command)
+
         for section in memo.sections {
             if section.showsHeader {
-                result.append(NativeHistoryListRow(
-                    id: DayGroup.separatorID(for: section.timestamp),
+                structure.combine(section.id)
+                structure.combine(true)
+                rows.append(NativeHistoryListRow(
+                    id: section.id,
                     kind: .separator,
                     timestamp: section.timestamp,
                     itemIndex: -1,
@@ -964,47 +983,33 @@ struct HistoryPopupContent: View {
             }
             for row in section.rows {
                 let item = row.item
-                result.append(NativeHistoryListRow(
+                let favorite = favorites.contains(item.id)
+                let slot = slots[item.id]
+                let order = queue[item.id]
+                let hint = command && row.index < 9 ? "⌘\(row.index + 1)" : nil
+                structure.combine(item.id)
+                structure.combine(false)
+                visual.combine(favorite)
+                visual.combine(slot)
+                visual.combine(order)
+                visual.combine(hint)
+                rows.append(NativeHistoryListRow(
                     id: item.id,
                     kind: .item,
                     timestamp: item.timestamp,
                     itemIndex: row.index,
                     item: item,
-                    isFavorite: favorites.contains(item.id),
-                    quickSlot: slots[item.id],
-                    queueOrder: queue[item.id],
-                    shortcutHint: command && row.index < 9 ? "⌘\(row.index + 1)" : nil,
-                    isEditing: editingItemId == item.id
+                    isFavorite: favorite,
+                    quickSlot: slot,
+                    queueOrder: order,
+                    shortcutHint: hint,
+                    isEditing: editingId == item.id
                 ))
             }
         }
-        return result
-    }
-
-    private func nativeStructureToken(for rows: [NativeHistoryListRow]) -> Int {
-        var hasher = Hasher()
-        let memo = currentDisplayMemo
-        hasher.combine(memo.itemsGeneration)
-        hasher.combine(memo.effectiveSearchText)
-        hasher.combine(memo.searchResultsGeneration)
-        hasher.combine(memo.filterMode)
-        for row in rows {
-            hasher.combine(row.id)
-            hasher.combine(row.kind == .separator)
-        }
-        return hasher.finalize()
-    }
-
-    private func nativeVisualToken(for rows: [NativeHistoryListRow]) -> Int {
-        var hasher = Hasher()
-        hasher.combine(isCommandPressed)
-        for row in rows {
-            hasher.combine(row.isFavorite)
-            hasher.combine(row.quickSlot)
-            hasher.combine(row.queueOrder)
-            hasher.combine(row.shortcutHint)
-        }
-        return hasher.finalize()
+        return NativeListModel(rows: rows,
+                               structureToken: structure.finalize(),
+                               visualToken: visual.finalize())
     }
 
     private func activateRow(index: Int, item: ClipboardItem) {
