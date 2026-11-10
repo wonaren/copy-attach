@@ -497,7 +497,7 @@ final class NativeHistoryListContainerView: NSView {
     override func layout() {
         super.layout()
         scrollView.frame = bounds
-        let width = max(scrollView.contentSize.width, 1)
+        let width = max(scrollView.contentSize.width.rounded(), 1)
         if abs(tableView.frame.width - width) > 0.5 {
             tableView.setFrameSize(NSSize(width: width, height: tableView.frame.height))
         }
@@ -563,7 +563,7 @@ final class NativeHistoryListContainerView: NSView {
     func reloadRows() {
         guard let coordinator else { return }
         let totalHeight = coordinator.rows.reduce(CGFloat(0)) { $0 + $1.rowHeight }
-        let width = max(scrollView.contentSize.width, 1)
+        let width = max(scrollView.contentSize.width.rounded(), 1)
         tableView.setFrameSize(NSSize(width: width, height: totalHeight))
         tableView.reloadData()
         hasHeaders = coordinator.rows.first?.kind == .separator
@@ -1038,7 +1038,7 @@ final class NativeHistoryRowView: NSTableCellView {
                               configuration: NativeHistoryRowConfiguration,
                               primary: NSColor, secondary: NSColor) -> NSRect {
         let theme = configuration.theme
-        var right = rect.maxX - 4
+        var right = rect.maxX - 3
         var trailingMinX = right
         if configuration.isSelected && configuration.isDeleteModifierPressed {
             if let image = NativeSymbols.image("delete.left.fill", size: 13, color: .white) {
