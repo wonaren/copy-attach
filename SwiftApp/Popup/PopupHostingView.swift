@@ -14,7 +14,6 @@ let startInlineEditNotification = Notification.Name("PopupStartInlineEdit")
 let arrowKeyFromSearchNotification = Notification.Name("PopupArrowKeyFromSearch")
 let focusSearchAndBackspaceNotification = Notification.Name("PopupFocusSearchAndBackspace")
 let escapeKeyNotification = Notification.Name("PopupEscapeKeyPressed")
-let popupContextMenuNotification = Notification.Name("PopupContextMenuRequested")
 let popupSwipeNotification = Notification.Name("PopupSwipe")
 let popupWillDismissNotification = Notification.Name("PopupWillDismiss")
 let popupCancelDismissNotification = Notification.Name("PopupCancelDismiss")
@@ -23,7 +22,6 @@ let popupDidScrollNotification = Notification.Name("PopupDidScroll")
 
 struct PopupContextMenuRequest {
     let entryId: Int?
-    let viewPoint: NSPoint
     let windowPoint: NSPoint
 }
 
@@ -73,18 +71,6 @@ class PopupHostingView: NSHostingView<AnyView> {
             removeMenuTrackingObservers()
             removeSwipeMonitor()
         }
-    }
-
-    override func rightMouseDown(with event: NSEvent) {
-        super.rightMouseDown(with: event)
-        guard self.window != nil else { return }
-        let viewPoint = convert(event.locationInWindow, from: nil)
-        NotificationCenter.default.post(
-            name: popupContextMenuNotification,
-            object: PopupContextMenuRequest(entryId: nil,
-                                            viewPoint: viewPoint,
-                                            windowPoint: event.locationInWindow)
-        )
     }
 
     private func installMenuTrackingObservers() {

@@ -6,19 +6,6 @@ extension HistoryPopupContent {
         displayItems.firstIndex(where: { $0.id == entryId })
     }
 
-    func resolveContextMenu(frames: [Int: CGRect], request: PopupContextMenuRequest) {
-        guard let (entryId, _) = frames.first(where: { $0.value.contains(request.viewPoint) }) else {
-            return
-        }
-        let resolved = PopupContextMenuRequest(entryId: entryId,
-                                               viewPoint: request.viewPoint,
-                                               windowPoint: request.windowPoint)
-        DispatchQueue.main.async { [self] in
-            guard currentIndex(of: entryId) != nil else { return }
-            showContextMenu(for: resolved)
-        }
-    }
-
     func showContextMenu(for request: PopupContextMenuRequest) {
         guard let entryId = request.entryId,
               let index = currentIndex(of: entryId) else { return }

@@ -257,7 +257,7 @@ struct NativeHistoryListView: NSViewRepresentable {
         }
 
         private func currentScrollAnchor() -> ScrollAnchor? {
-            guard let tableView, let container, !rows.isEmpty else { return nil }
+            guard let tableView, !rows.isEmpty else { return nil }
             let visible = tableView.visibleRect
             let row = tableView.row(at: NSPoint(x: 1, y: visible.minY + 1))
             guard row >= 0, row < rows.count else { return nil }

@@ -14,7 +14,7 @@ extension HistoryPopupContent {
         pendingFilterMode = target
         filterSwitchGeneration &+= 1
         let generation = filterSwitchGeneration
-        scrollTarget = listTopAnchorID
+        scrollTarget = 0
 
         DispatchQueue.main.async {
             guard self.filterSwitchGeneration == generation,

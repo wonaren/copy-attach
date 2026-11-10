@@ -48,78 +48,11 @@ enum ClipboardDragProvider {
         return Payload(data: data, suggestedName: nil)
     }
 
-    static func provider(for item: ClipboardItem, richText: Bool = false) -> NSItemProvider {
-        let perfDrag = PerfSpan.start("swift", "drag.materialize")
-        if let span = perfDrag {
-            span.data = item.isImage ? "image" : "text"
-        }
-        let provider = NSItemProvider()
-        defer { perfDrag?.end() }
-        switch item {
-        case .text:
-            guard let full = item.fullText else {
-                debugLog("Drag: failed to load full text for entry \(item.id)")
-                return NSItemProvider(object: "" as NSString)
-            }
-            let plain = Data(full.utf8)
-            let rich = richText ? Self.richRepresentations(for: full) : [:]
-            let types = richText ? Self.richTextRepresentationTypes : Self.plainTextRepresentationTypes
-            for type in types {
-                let data = rich[type.identifier] ?? plain
-                provider.registerDataRepresentation(
-                    forTypeIdentifier: type.identifier,
-                    visibility: .all
-                ) { completion in
-                    completion(data, nil)
-                    return nil
-                }
-            }
-
-        case .image:
-            guard let data = item.imageData else {
-                debugLog("Drag: failed to load PNG data for image entry \(item.id); offering empty drag")
-                return NSItemProvider()
-            }
-
-            do {
-                let url = try temporaryImageURL(entryId: item.id)
-                try data.write(to: url, options: .atomic)
-
-                provider.registerDataRepresentation(
-                    forTypeIdentifier: UTType.fileURL.identifier,
-                    visibility: .all
-                ) { completion in
-                    completion(url.absoluteString.data(using: .utf8), nil)
-                    return nil
-                }
-                provider.suggestedName = url.lastPathComponent
-            } catch {
-                errorLog("Drag: failed to materialize image entry \(item.id): \(error)")
-                return NSItemProvider()
-            }
-        }
-        return provider
-    }
-
     private static let plainTextRepresentationTypes: [UTType] = [
         .utf8PlainText,
         .plainText,
         .text,
     ]
-
-    static func placeholderProvider() -> NSItemProvider {
-        let provider = NSItemProvider()
-        for type in plainTextRepresentationTypes {
-            provider.registerDataRepresentation(
-                forTypeIdentifier: type.identifier,
-                visibility: .all
-            ) { completion in
-                completion(Data(), nil)
-                return nil
-            }
-        }
-        return provider
-    }
 
     private static let richTextRepresentationTypes: [UTType] = [
         .utf8PlainText,

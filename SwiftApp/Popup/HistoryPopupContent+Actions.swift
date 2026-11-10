@@ -34,18 +34,6 @@ extension HistoryPopupContent {
         return NativeDragPayload(data: payload.data, chipItem: item, chipCount: 1)
     }
 
-    func dragProvider(item: ClipboardItem, batch: BatchDragPlan?) -> NSItemProvider {
-        closeHoverPreview()
-        popupWindow?.beginItemDrag()
-        let richText = backend.sourceAppNeedsRichTextDrag
-        if let batch {
-            BatchDragController.shared.begin(items: batch.items)
-            return ClipboardDragProvider.placeholderProvider()
-        }
-        BatchDragController.shared.cancel()
-        return ClipboardDragProvider.provider(for: item, richText: richText)
-    }
-
     var selectedItemId: Int? {
         guard selectedIndex > 0 else { return nil }
         let index = selectedIndex - 1

@@ -47,13 +47,6 @@ private struct PopupSection: Identifiable {
     let rows: [PopupRow]
 }
 
-private struct RowFramePreferenceKey: PreferenceKey {
-    static let defaultValue: [Int: CGRect] = [:]
-    static func reduce(value: inout [Int: CGRect], nextValue: () -> [Int: CGRect]) {
-        value.merge(nextValue()) { $1 }
-    }
-}
-
 private struct QuickSlotDialAnchorPreferenceKey: PreferenceKey {
     static let defaultValue: CGRect = .null
     static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
@@ -91,16 +84,11 @@ struct HistoryPopupContent: View {
     @State var effectiveSearchText: String = ""
     @State private var searchTask: Task<Void, Never>?
     @State var scrollTarget: Int?
-    let listTopAnchorID = 0
 
     @State var filterMode: FilterMode = .all
     @State var pendingFilterMode: FilterMode?
     @State var filterSwitchGeneration = 0
 
-    @State var contextMenuArmed = false
-    @State var pendingContextMenuRequest: PopupContextMenuRequest?
-
-    @Namespace private var selectionNamespace
     @Namespace private var filterTabNamespace
 
     @State private var openingScale: CGFloat = 1.06
@@ -426,8 +414,6 @@ struct HistoryPopupContent: View {
             filterSwitchGeneration &+= 1
             showPreview = false
             scrollTarget = nil
-            contextMenuArmed = false
-            pendingContextMenuRequest = nil
             pendingQuickSlotAnchor = nil
             displayMemoBox.memo = nil
             editingItemId = nil
@@ -604,11 +590,6 @@ struct HistoryPopupContent: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: undoKeyNotification)) { _ in
             performUndo()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: popupContextMenuNotification)) { note in
-            guard let request = note.object as? PopupContextMenuRequest else { return }
-            pendingContextMenuRequest = request
-            contextMenuArmed = true
         }
         .onReceive(NotificationCenter.default.publisher(for: startInlineEditNotification)) { _ in
             if selectedIndex > 0 {
@@ -886,10 +867,6 @@ struct HistoryPopupContent: View {
             }
     }
 
-    private static var rowChangeTransition: AnyTransition {
-        .opacity.combined(with: .scale(scale: 0.96))
-    }
-
     private var itemsListScrollView: some View {
         let rows = nativeRows
         return NativeHistoryListView(
@@ -918,7 +895,6 @@ struct HistoryPopupContent: View {
             onContextMenu: { item, windowPoint in
                 closeHoverPreview()
                 showContextMenu(for: PopupContextMenuRequest(entryId: item.id,
-                                                             viewPoint: .zero,
                                                              windowPoint: windowPoint))
             },
             onCommitRemark: { entryId, text in
