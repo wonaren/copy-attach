@@ -449,6 +449,7 @@ final class NativeHistoryListContainerView: NSView {
         scrollView.contentView.postsBoundsChangedNotifications = true
         scrollView.contentInsets = NSEdgeInsets(top: 2, left: 0, bottom: 2, right: 0)
 
+        tableView.style = .plain
         tableView.backgroundColor = .clear
         tableView.selectionHighlightStyle = .none
         tableView.allowsEmptySelection = true
@@ -458,7 +459,7 @@ final class NativeHistoryListContainerView: NSView {
         tableView.usesAlternatingRowBackgroundColors = false
         tableView.headerView = nil
         tableView.focusRingType = .none
-        tableView.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
+        tableView.columnAutoresizingStyle = .noColumnAutoresizing
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("NativeHistoryColumn"))
         column.resizingMask = .autoresizingMask
         tableView.addTableColumn(column)
@@ -499,6 +500,9 @@ final class NativeHistoryListContainerView: NSView {
         let width = max(scrollView.contentSize.width, 1)
         if abs(tableView.frame.width - width) > 0.5 {
             tableView.setFrameSize(NSSize(width: width, height: tableView.frame.height))
+        }
+        if let column = tableView.tableColumns.first, abs(column.width - tableView.bounds.width) > 0.5 {
+            column.width = tableView.bounds.width
         }
         headerView.frame = NSRect(x: NativeListMetrics.contentLeading,
                                   y: NativeListMetrics.headerTop,

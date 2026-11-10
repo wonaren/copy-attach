@@ -135,7 +135,7 @@ Phase 1 同步 hash + 缩略图（fit 进显示框 920×200px = 460×100pt @2×�
 
 ### 原生列表（0.111.4-dev 起）
 
-滚动掉帧的根因不在吸顶头，而在 SwiftUI 行：Time Profiler 的快速滚动窗口（3.2–5.45s）里 `NSHostingView.layout` 累计 502ms、AttributeGraph 布局 442ms（v1113），行绘制本身很轻。把列表整体换成 `NSScrollView + NSTableView`（`Popup/NativeHistoryListView.swift`）后，同窗口 layout 30ms、AG 26ms、body 23ms。Animation Hitches（同一驱动脚本：开弹窗、快速上下滑动、按阶段切窗）：v1113 early 段 hitch 中位数 13/次（5 次），原生版 15 次有效运行 early 段共 2 次、中位数 0；两版 late 段持平。行高固定（分隔 22 / 文本 26 / 图片 52，行距 3），无需测量；`NSTableCellView` 自绘图标、文本、缩略图、收藏/槽位/队列徽标。
+滚动掉帧的根因不在吸顶头，而在 SwiftUI 行：Time Profiler 的快速滚动窗口（3.2–5.45s）里 `NSHostingView.layout` 累计 502ms、AttributeGraph 布局 442ms（v1113），行绘制本身很轻。把列表整体换成 `NSScrollView + NSTableView`（`Popup/NativeHistoryListView.swift`）后，同窗口 layout 30ms、AG 26ms、body 23ms。Animation Hitches（同一驱动脚本：开弹窗、快速上下滑动、按阶段切窗）：v1113 early 段 hitch 中位数 13/次（5 次），原生版 15 次有效运行 early 段共 2 次、中位数 0；两版 late 段持平。行高固定（分隔 22 / 文本 26 / 图片 52，行距 3），无需测量；`NSTableCellView` 自绘图标、文本、缩略图、收藏/槽位/队列徽标。**`tableView.style` 必须显式设 `.plain`**：`.automatic` 在弹窗里解析成 `.inset`（`style=1`），AppKit 把每行单元格左移 6pt 并收窄 12pt，选中 pill 距弹窗边 20.5pt（旧版 5.5pt）；改成 `.plain`（`style=4`）后 `cell.frame` 与行等宽（实测 `{{0,0},{493.87,25}}`），pill 回到 11–989px。
 
 - **吸顶日期头**：覆盖层 + `CAShapeLayer` 的 even-odd 遮罩开洞（洞高 24pt），只影响绘制与命中测试，不参与滚动内容；头部文本由 `updateHeader()` 按可见首行推算。滚动期间不重排任何 SwiftUI 视图。
 - **两类 token**：`structureToken`（行集合 / 搜索 / 过滤 / 日期分组）触发整表 reload；`visualToken`（收藏、队列序号、快捷槽位、⌘ 提示）只重配可见行。整表 reload 前记录 `ScrollAnchor`（行 id + 偏移 + 是否在顶），reload 后恢复；搜索词变化与切过滤走 `resetToken` → `scrollToTop()`。
