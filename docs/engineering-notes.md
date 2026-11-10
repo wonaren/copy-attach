@@ -133,11 +133,27 @@ Phase 1 同步 hash + 缩略图（fit 进显示框 920×200px = 460×100pt @2×�
 - **Escape 三层拦截**：SwiftUI `.onKeyPress(.escape)` → PopupHostingView NSEvent local monitor（NSTextView 第一响应者时）→ Notification 转发。优先关预览，否则关弹窗。
 - FocusState 双管理：isSearchFocused（selectedIndex=0）和 isContainerFocused（selectedIndex>0），解决 TextField focus 接管后 onKeyPress 失效。
 
-### 日期栏吸顶（0.111.3）
+### 原生列表（0.111.4-dev 起）
+
+滚动掉帧的根因不在吸顶头，而在 SwiftUI 行：Time Profiler 的快速滚动窗口（3.2–5.45s）里 `NSHostingView.layout` 累计 502ms、AttributeGraph 布局 442ms（v1113），行绘制本身很轻。把列表整体换成 `NSScrollView + NSTableView`（`Popup/NativeHistoryListView.swift`）后，同窗口 layout 30ms、AG 26ms、body 23ms。Animation Hitches（同一驱动脚本：开弹窗、快速上下滑动、按阶段切窗）：v1113 early 段 hitch 中位数 13/次（5 次），原生版 15 次有效运行 early 段共 2 次、中位数 0；两版 late 段持平。行高固定（分隔 22 / 文本 26 / 图片 52，行距 3），无需测量；`NSTableCellView` 自绘图标、文本、缩略图、收藏/槽位/队列徽标。
+
+- **吸顶日期头**：覆盖层 + `CAShapeLayer` 的 even-odd 遮罩开洞（洞高 24pt），只影响绘制与命中测试，不参与滚动内容；头部文本由 `updateHeader()` 按可见首行推算。滚动期间不重排任何 SwiftUI 视图。
+- **两类 token**：`structureToken`（行集合 / 搜索 / 过滤 / 日期分组）触发整表 reload；`visualToken`（收藏、队列序号、快捷槽位、⌘ 提示）只重配可见行。整表 reload 前记录 `ScrollAnchor`（行 id + 偏移 + 是否在顶），reload 后恢复；搜索词变化与切过滤走 `resetToken` → `scrollToTop()`。
+- **点按与菜单**：mouseDown 只记 pending，mouseUp 位移 ≤3pt 才执行；队列勾选圈有独立命中矩形（`insetBy(-2,-2)`），点它只切换队列、不粘贴；右键由 `menu(for:)` 委托弹出，不再需要 SwiftUI 行 frame 快照。
+- **拖拽**：`mouseDragged` 超过 3pt 启动 `NSDraggingSession`；载荷沿用旧实现（文本三种 plain UTI，富文本按目标 app 加 html/rtf，图片写临时 PNG file-url）；批量拖拽仍用空占位，内容统一由 `BatchDispenseRunner` 派发。拖拽 chip 用离屏 `NSHostingView` 渲染。
+- **行内备注**：`NSTextField`（200 标量上限，自动聚焦全选，Return/Tab 提交、Esc 取消、失焦提交）包在 `NSHostingView` 里挂到行上；编辑中的行按文本行高处理。图片行同样可编辑（实测写入并回读成功）。
+- **搜索高亮**：命中片段在自绘文本里加 attributed background；`#rrggbb` / `#rgb` 用 10×10 `NSTextAttachment` 色块代替文字。
+- **无障碍**：行暴露 `AXCell` + `AXDescription`（同屏文本）、`AXPress`（粘贴）、`AXSelected` 与自定义动作「加入粘贴队列」。
+
+未实测：真实触控板双指横滑切标签（合成事件不进手势路径）；引导聚光灯 / 快捷槽位盘在原生行上的几何表现。旧 SwiftUI 列表代码（`ItemRowView`、`RowFramePreferenceKey`、`popupContextMenuNotification` 解析）暂留未删。
+
+### 日期栏吸顶（0.111.3，SwiftUI 时期；0.111.4 起见上节）
 
 列表按天分组为 `PopupSection`，`LazyVStack(pinnedViews: [.sectionHeaders])` 让当前日期栏吸附在顶部，跨天时由下一天顶替。**头部不能用背景色遮挡**：弹窗底色本身是半透明的（浅色 0.88 / 深色 0.82 alpha），任何叠加的底色都会与周围列表形成色带，浅色主题下尤其明显（初版用两层 `popupBackground`，被判定「没有一体感」）。现改为 `destinationOut` 擦除：头部背景铺 `Rectangle().fill(.black).blendMode(.destinationOut)`，把滚到头下的行在合成组内擦掉，露出与列表完全相同的底层；`compositingGroup()`（加在滚动内容 VStack 上）是必需配套，否则会连弹窗底色一起擦穿。**两者必须成对存在**，删掉 `compositingGroup` 或换回普通背景都会退化成色带。**滚动定位不能依赖系统默认**：`scrollPosition` 是最小滚动——目标已在视口内则不动，目标在视口上方时把它顶到内容顶部，而内容顶部恒被 pinned header 压住约一行。因此方向键上移若直接以选中行为目标，选中行会缩进日期栏下（用户实测截图复现）。修法：上移时（`scrollTargetForItem(at:movingUp:)` 的 `movingUp` 分支）改以**上一行**为滚动目标——上一行被头部遮住无所谓，选中行紧随其后、必然完整落在头部下方；上一行恰是当天首行时目标换成该天的日期栏 id（日期栏顶到内容顶部即成为吸顶头，首行在其下方）。下移不变，仍以选中行为目标，最小滚动落在视口底部。实测（真机 cua-driver 方向键 + 窗口截图）：同日上移、单行上移、跨天上移（含目标行恰为上一自然日末行）的落点均为选中行完整可见；「跨天移入次日第 2 行、目标为日期栏 id 且需滚动」的分支未构造出滚动帧，仅按同一机制推导。Tab 切换沿用「先滚到顶、再切 filter」，pinned 状态在每次切换前必然解除；槽位模式 `showsHeader=false`。CPU 粗测：密集滚轮 1.5s 内本进程消耗 0.42s CPU（约单核 28%），未做 Perf 门禁 A/B。
 
 ### 触控板双指滑动切换标签页
+
+0.111.4 起列表是 NSScrollView：local monitor 仍在滚动视图消费事件之前拦截，方向判定不变；切 Tab 的落点改为 `resetToken → scrollToTop()`，原生行不再有逐行溶解过渡。
 
 PopupHostingView 的 `.scrollWheel` local monitor 在 ScrollView 消费事件之前拦截——只认手指手势（`event.phase != []`），鼠标滚轮/惯性动量忽略；水平位移累积 ≥50pt 且水平:垂直 ≥ 1.5:1 即在手势中途提交切换（不等松手），累积前按 `isDirectionInvertedFromDevice` 还原手指实际方向；监视器只认弹窗自身窗口的事件（`event.window === self.window`）；事件只在提交切换后才吞掉，提交前全部透传——未达阈值的横滑不产生冻结死区；`.stationary` 保留累积进度不重置（`.began` 每个手势只来一次）；`menuTracking` 期间让位。手势中途反向重定向：当前事件横向位移与已累积方向相反、且达到已累积量的 0.5 时丢弃旧 run 重新累积。
 
@@ -145,7 +161,7 @@ PopupHostingView 的 `.scrollWheel` local monitor 在 ScrollView 消费事件之
 
 **切换 = 先滚到顶、再切 filter**（单一主流程）：先把 `scrollTarget` 指向列表顶部锚点（`listTopAnchorID`，LazyVStack 上方恒 0 高普通视图——始终被布局，不依赖未物化行的行高估算），再在下一个 runloop turn 切换 `filterMode`。原因：滚动与内容变化同事务时，scrollPosition 与 LazyVStack 行高估算和 ScrollView 偏移保持竞速——实测滚动完全丢失或反复振荡（offset 1261→0→541→0→289），按住 ↓ 深滚后立刻切换可稳定复现。切标签后 `onChange(of: filterMode)`：关预览；`selectedIndex != 0` 时重置为新列表第一条，空列表落回搜索栏；搜索框聚焦时不预滚。滚动靠 `.scrollPosition(id: $scrollTarget)`，无 ScrollViewReader/`scrollTo`。
 
-### 右键上下文菜单
+### 右键上下文菜单（SwiftUI 时期；0.111.4 起原生列表走 `menu(for:)`，见「原生列表」）
 
 `PopupHostingView.rightMouseDown` 只发 `popupContextMenuNotification`（`.global` 坐标；NSHostingView `isFlipped=true`，`convert(_:from:nil)` 与 `.global` 同坐标系）→ 置 `contextMenuArmed`，行 frame 按需一次性快照（`RowFramePreferenceKey`：仅武装期间行才挂 GeometryReader）——滚动全程无每行几何上报开销，菜单延迟仅一帧；`resolveContextMenu` 在下一 runloop 回合 `showContextMenu`（`NSMenu.popUp` 不能在 SwiftUI 布局中途开始）。菜单项 handler 用 `ContextMenuItemTarget`（`NSMenuItem.target` 是 weak，靠 `representedObject` 强持有）；动作一律 `currentIndex(of:)` 按稳定 entry_id 重新解析行。菜单 tracking 期间（`isMenuTracking`）Esc/←/→/⌘Z 全让位。图片行含「另存为…」（NSSavePanel 写 PNG）：保存面板是本应用的模态窗口，必然从非激活弹窗夺走 key——弹窗靠 `isPresentingModalPanel` 屏蔽这次 resign-key 的关闭（弹窗留在面板后方继续显示），`runModal()` 返回后 `makeKey()` 交还 key 状态。**不得在调起面板前 `close()`/`onClose()` 收起弹窗**（0.100.10 曾如此，实为把弹窗在保存过程中异步销毁）。
 

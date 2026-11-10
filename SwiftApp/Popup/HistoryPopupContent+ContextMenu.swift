@@ -19,7 +19,7 @@ extension HistoryPopupContent {
         }
     }
 
-    private func showContextMenu(for request: PopupContextMenuRequest) {
+    func showContextMenu(for request: PopupContextMenuRequest) {
         guard let entryId = request.entryId,
               let index = currentIndex(of: entryId) else { return }
         let item = displayItems[index]

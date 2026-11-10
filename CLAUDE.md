@@ -126,7 +126,7 @@ SwiftApp/
   │                                       + GeneralTab / ShortcutsTab / StorageTab / IgnoreTab / AboutTab / SheetDismissHelper
   ├── Onboarding/                      ← 核心操作引导（5 文件：引导模型/浮窗卡片/聚光灯遮罩）
   ├── Queue/                           ← 粘贴队列（6 文件：状态管理/HUD窗口/HUD视图/CGEventTap拦截器/批量派发/批量HUD）
-  ├── Popup/                           ← 主弹窗（13 文件：内容/窗口/事件/行/拖拽/批量拖拽/右键菜单/标签过滤/预览/动作）
+  ├── Popup/                           ← 主弹窗（17 文件：内容/窗口/事件/原生列表/行/拖拽/批量拖拽/右键菜单/标签过滤/预览/动作）
   ├── Preview/                         ← 预览窗口（4 文件：窗口/内容/布局/缩放）
   ├── Backend/                         ← ClipboardItem / ImageDecode / AppIcon 缓存 / PackedSnapshot / PreviewDecodeGate
   ├── Stress/                          ← 压力测试面板与视图模型（依赖 STRESS=1 构建）
@@ -161,10 +161,11 @@ SwiftApp/
 - **弹窗开启**：窗口 alpha 淡入 0.2s easeOut，内容 `scaleEffect` 1.10→1.0（`spring(0.2, 0.85)` 接近临界无可见过冲）。淡入看门狗：若首帧事务未提交动画被静默丢弃，`show()` 在 0.3s 后校验并 snap 到可见
 - **弹窗关闭**：失焦走 `closeWithAnimation()`（popup 0.12s fade 与 preview 0.1s fade 独立并行，0.4s Timer 保证关闭必然执行）；关闭前必须 `makeFirstResponder(nil)`，停止 macOS 15+ 文本插入光标的 120Hz `CADisplayLink`；关闭时置空 `contentView` 和 `popupHostingView`，令整棵 SwiftUI 视图图及图片引用按会话释放。拖拽后自动关闭走直接 `close()`
 - **触控板双指滑动切换标签页**：`.scrollWheel` local monitor 在 ScrollView 前拦截，只认手指手势，水平 ≥50pt 且 h:v ≥ 1.5:1；切换请求在下一轮 run loop 合并，快速往返只提交最新状态；**切换 = 先滚到顶、再切 filter**（单一主流程，解决 scrollPosition 与 LazyVStack 行高估算竞速导致的滚动丢失），列表不再逐行做淡入淡出；**底栏数量的 `.contentTransition(.numericText())` 必须包在 `.drawingGroup()` 里**——不隔离时每次值变化会让整窗重放 display list 并滞留约 1.4MB 字形位图，隔离后原生逐位动画保留且 20 次切 Tab 零增长（详见 engineering-notes）
-- **右键上下文菜单**：行 frame 按需一次性快照（`RowFramePreferenceKey`：仅武装期间行才挂 GeometryReader）——滚动全程无每行几何上报开销，菜单延迟仅一帧
+- **右键上下文菜单（0.111.4 起）**：由 NSTableView 的 `menu(for:)` 委托直接弹出（原生行不再有 SwiftUI 视图），菜单项按稳定 entry_id 重新解析行；图片行含「另存为…」，保存面板期间用 `isPresentingModalPanel` 屏蔽 resign-key 关闭
 - **搜索**：统一在 Rust/SQLite 侧完成检索。正文搜索走 SQLite FTS5 trigram 索引（≥3 字符 `MATCH` + 超限行 LIKE 兜底；<3 字符 LIKE 全表扫描；LIKE 回退是有意保留的语义承诺：1-2 字符查询必须命中长文中段）。元数据字段（label、custom_label、source_name）走 LIKE 子串匹配，Swift 侧仅需按 matchIds 筛选并辅以动态日期分组（DayGroup），彻底杜绝前端多字段遍历过滤开销。**图片条目的 `label` 列恒为空**（不落库）：界面上的「Image (W×H)」是读取时由 `width`/`height` 合成的（`types.rs`），因此历史记录**不支持按尺寸搜索图片**，图片只能按 `custom_label`（备注）与 `source_name`（来源应用）命中——这是有意的产品边界，不要对外宣称按尺寸检索。
 - FocusState 双管理：isSearchFocused（selectedIndex=0）和 isContainerFocused（selectedIndex>0）。Escape 三层拦截：SwiftUI `.onKeyPress` → PopupHostingView local monitor → Notification。**大预览（`.large`）仍要两步：第一次 Esc 关预览，第二次关主弹窗；只有侧边气泡（`.mini`）时 Esc 一步关闭主弹窗，气泡随弹窗一起消失**；编辑备注或粘贴队列非空时先取消该状态
-- 选中高亮：`matchedGeometryEffect` 在行间滑动；hover 静态填充；删除模式（⌃⌫）高亮变红。**选中填充必须用 `NSColor.selectedContentBackgroundColor`（白字 5.4/6.3:1），不能用 `controlAccentColor`（白字仅 4.07:1，低于 AA）；删除红需向黑混合 22% 才够 5:1。选中行不画来源胶囊**——浅色主题的 `popupTagBackground` 是近白块，压在蓝底上很跳
+- **历史列表（0.111.4 起，`Popup/NativeHistoryListView.swift`）**：`NSScrollView + NSTableView`，固定行高（分隔 22 / 文本 26 / 图片 52，行距 3），行由 `NSTableCellView` 自绘；吸顶日期头是覆盖层 + `CAShapeLayer` 遮罩开洞（不画底色）；`structureToken`（行集合/搜索/过滤）与 `visualToken`（收藏/队列/槽位/⌘）分离驱动 reload，重载前记锚点行 + 偏移、之后恢复；点按在 mouseUp 生效（3pt 容差），右键走原生菜单，拖拽走 `NSDraggingSession`，备注编辑是行内 `NSTextField` host；搜索词变化滚回顶部。根因与实测数据见 `docs/engineering-notes.md` 的「原生列表」
+- 选中高亮：原生行自绘圆角填充；hover 静态填充；删除模式（⌃⌫）高亮变红。**选中填充必须用 `NSColor.selectedContentBackgroundColor`（白字 5.4/6.3:1），不能用 `controlAccentColor`（白字仅 4.07:1，低于 AA）；删除红需向黑混合 22% 才够 5:1。选中行不画来源胶囊**——浅色主题的 `popupTagBackground` 是近白块，压在蓝底上很跳
 
 **许可证体系归档**（<= v0.107.10 商业版，已封存至 `archive/commercial-v0.107` 分支）：
 
