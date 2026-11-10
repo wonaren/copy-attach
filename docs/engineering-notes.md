@@ -22,7 +22,7 @@
 - 全文搜索走 SQLite FTS5 trigram 索引（`db::search_history`：≥3 字符用 `MATCH` 子串匹配 + 对超出索引上限的超大文本行做 LIKE 兜底；<3 字符退回 LIKE 全表扫描，`clipboard_search_ids` 返回匹配 entry_id）。全文只存在 DB，内存历史 Vec 不持正文（Text 条目只带 preview/label/text_hash，粘贴/预览/拖拽按 `db_id` 从 DB 按需载入，与图片同约定）。
 - **LIKE 回退是有意保留的语义承诺**：1-2 字符查询必须命中长文中段（曾提议改扫内存 preview 换取无磁盘读，因静默丢失长文中段匹配被否——`test_search_short_query_matches_full_text_middle` 是语义绊线）；已知代价是首两次击键的全表扫描与 LIKE 仅 ASCII 大小写折叠。
 - 元数据字段匹配（label、custom_label、source_name）统一在 Rust/SQLite 侧由 LIKE 子串检索完成（图片条目 label 列恒为 NULL 不落库，不支持按尺寸检索，图片按备注与来源应用匹配），Swift 侧仅需按 matchIds 筛选并辅以动态日期分组（DayGroup 是 UI 派生文本）。FTS 索引同步用 SQLite 触发器（AFTER INSERT/DELETE on `clipboard_history`，触发器 DROP+CREATE 以替换旧版无上限触发器，backfill 只跑一次且含上限条件，启动时清理存量超大行）。
-- 行渲染（0.111.8 起由 `NativeHistoryListView` 自绘取代旧 `ItemRowView`）：无 `#` 的文本跳过正则、hex 色票 NSImage 按色值缓存（`swatchCache`，countLimit 64）——不再每帧 lockFocus 现画。搜索栏固定 index 0，项目从 index 1 开始。
+- 行渲染（0.111.4 起由 `NativeHistoryListView` 自绘取代旧 `ItemRowView`）：无 `#` 的文本跳过正则、hex 色票 NSImage 按色值缓存（`swatchCache`，countLimit 64）——不再每帧 lockFocus 现画。搜索栏固定 index 0，项目从 index 1 开始。
 
 ## 两阶段图片捕获与内存治理
 
@@ -133,9 +133,9 @@ Phase 1 同步 hash + 缩略图（fit 进显示框 920×200px = 460×100pt @2×�
 - **Escape 三层拦截**：SwiftUI `.onKeyPress(.escape)` → PopupHostingView NSEvent local monitor（NSTextView 第一响应者时）→ Notification 转发。优先关预览，否则关弹窗。
 - FocusState 双管理：isSearchFocused（selectedIndex=0）和 isContainerFocused（selectedIndex>0），解决 TextField focus 接管后 onKeyPress 失效。
 
-### 原生列表（0.111.4-dev 起）
+### 原生列表（0.111.4 起）
 
-滚动掉帧的根因不在吸顶头，而在 SwiftUI 行：Time Profiler 的快速滚动窗口（3.2–5.45s）里 `NSHostingView.layout` 累计 502ms、AttributeGraph 布局 442ms（v1113），行绘制本身很轻。把列表整体换成 `NSScrollView + NSTableView`（`Popup/NativeHistoryListView.swift`）后，同窗口 layout 30ms、AG 26ms、body 23ms。Animation Hitches（同一驱动脚本：开弹窗、快速上下滑动、按阶段切窗）：v1113 early 段 hitch 中位数 13/次（5 次），原生版 15 次有效运行 early 段共 2 次、中位数 0；两版 late 段持平。行高固定（分隔 22 / 文本 26 / 图片 52，行距 3），无需测量；`NSTableCellView` 自绘图标、文本、缩略图、收藏/槽位/队列徽标。**`tableView.style` 必须显式设 `.plain`**：`.automatic` 在弹窗里解析成 `.inset`（`style=1`），AppKit 把每行单元格左移 6pt 并收窄 12pt，选中 pill 距弹窗边 20.5pt（旧版 5.5pt）；改成 `.plain`（`style=4`）后 `cell.frame` 与行等宽（实测 `{{0,0},{493.87,25}}`），pill 回到 11–989px。
+滚动掉帧的根因不在吸顶头，而在 SwiftUI 行：Time Profiler 的快速滚动窗口（3.2–5.45s）里 `NSHostingView.layout` 累计 502ms、AttributeGraph 布局 442ms（v1113），行绘制本身很轻。把列表整体换成 `NSScrollView + NSTableView`（`Popup/NativeHistoryListView.swift`）后，同窗口 layout 30ms、AG 26ms、body 23ms（约 17 倍）。Animation Hitches（同一驱动脚本：开弹窗、快速上下滑动、按阶段切窗）：v1113 early 段 hitch 中位数 13/次（5 次运行共 66 次），原生版 16 次有效运行 early 段共 2 次、中位数 0；两版 late 段持平。行高固定（分隔 22 / 文本 26 / 图片 52，行距 3），无需测量；`NSTableCellView` 自绘图标、文本、缩略图、收藏/槽位/队列徽标。**`tableView.style` 必须显式设 `.plain`**：`.automatic` 在弹窗里解析成 `.inset`（`style=1`），AppKit 把每行单元格左移 6pt 并收窄 12pt，选中 pill 距弹窗边 20.5pt（旧版 5.5pt）；改成 `.plain`（`style=4`）后 `cell.frame` 与行等宽（实测 `{{0,0},{493.87,25}}`），pill 回到 11–989px。
 
 - **吸顶日期头**：覆盖层 + `CAShapeLayer` 的 even-odd 遮罩开洞（洞高 24pt），只影响绘制与命中测试，不参与滚动内容；头部文本由 `updateHeader()` 按可见首行推算。滚动期间不重排任何 SwiftUI 视图。
 - **两类 token**：`structureToken`（行集合 / 搜索 / 过滤 / 日期分组）触发整表 reload；`visualToken`（收藏、队列序号、快捷槽位、⌘ 提示）只重配可见行。两者与行数组在 `nativeListModel(from:)` 里**一次遍历同时算完**（旧实现先建 700 行数组、再各遍历一遍做哈希，且 `currentDisplayMemo` 被重复调用）。实测 p50 303µs → 135µs、p95 627µs → 253µs（perf 仪表 `swift/list.model`，各 48 次采样）。整表 reload 前记录 `ScrollAnchor`（行 id + 偏移 + 是否在顶），reload 后恢复；搜索词变化与切过滤走 `resetToken` → `scrollToTop()`。
@@ -145,13 +145,13 @@ Phase 1 同步 hash + 缩略图（fit 进显示框 920×200px = 460×100pt @2×�
 - **搜索高亮**：命中片段在自绘文本里加 attributed background；`#rrggbb` / `#rgb` 用 10×10 `NSTextAttachment` 色块代替文字。
 - **无障碍**：行暴露 `AXCell` + `AXDescription`（同屏文本）、`AXPress`（粘贴）、`AXSelected` 与自定义动作「加入粘贴队列」。
 
-未实测：真实触控板双指横滑切标签（合成事件不进手势路径）；引导聚光灯 / 快捷槽位盘在原生行上的几何表现。旧 SwiftUI 列表代码（`ItemRowView`、`RowFramePreferenceKey`、`popupContextMenuNotification` 解析、`DateSeparatorView`）已于 0.111.8 删除，`DayGroup` 拆到独立文件。
+未实测：真实触控板双指横滑切标签（合成事件不进手势路径）；引导聚光灯 / 快捷槽位盘在原生行上的几何表现。旧 SwiftUI 列表代码（`ItemRowView`、`RowFramePreferenceKey`、`popupContextMenuNotification` 解析、`DateSeparatorView`）已于 0.111.4 删除，`DayGroup` 拆到独立文件。
 
-### 弹窗开合缩放不能走 SwiftUI `scaleEffect`（0.111.9）
+### 弹窗开合缩放不能走 SwiftUI `scaleEffect`（0.111.4）
 
 `scaleEffect` 会让 SwiftUI 在整个开合动画期间**按每个中间缩放比例重新栅格化整棵内容树**。列表里有自绘 `NSTableCellView` 文本时，每帧每个新比例都会在 CoreGraphics 生成一批新的字形位图（`CGGlyphBitmapCreate` / `CGGlyphBuilderLockBitmaps`），且这些位图**永久留在进程里**。实测：每次开合 +约 1500 个位图 / +1MB，20 轮 `written` 从 48M 涨到 92M 并持续上涨；老版 SwiftUI 列表同样受影响（8 轮 2.1MB），原生列表把它放大 8 倍。
 
-修法是把缩放从 SwiftUI 移到宿主 `CALayer`：`HistoryPopupWindow.setContentScale` / `animateContentScale` 直接设 `layer.transform`。内容只按 1.0 栅格化一次，动画只缩放已渲染的位图。实测 30 轮开合 `footprint` 恒定 44.6–45.8M、`written` 57.5M 不再上涨；Animation Hitches 三次运行共 2 个 hitch，与改造前持平。
+修法是把缩放从 SwiftUI 移到宿主 `CALayer`：`HistoryPopupWindow.setContentScale` / `animateContentScale` 直接设 `layer.transform`。内容只按 1.0 栅格化一次，动画只缩放已渲染的位图。实测 50 轮开合 `footprint` 恒定 44.8–46.5M、`written` 56.9–57.8M 不再上涨（修复前 20 轮即 92M 且持续涨）；Animation Hitches 三次运行共 2 个 hitch，与改造前持平。
 
 **缩放必须内嵌平移、不能设 `anchorPoint`**：`NSHostingView` 挂到窗口后约 20ms 内，AppKit 会把 `layer.anchorPoint` 与 `layer.position` 重置为 `{0,0}`（实测：设好后 `t+20ms` 已变成 `anchor={0,0} pos={0,0}`）。因此缩放中心会跑到图层左上角，视觉上表现为「从右下往左上收」，而不是 Spotlight 那种从中心收缩。正确做法是把中心锚点编进 transform 本身——`translate(cx,cy) → scale → translate(-cx,-cy)`，完全不碰 `anchorPoint`/`position`。
 
@@ -177,7 +177,7 @@ PopupHostingView 的 `.scrollWheel` local monitor 在 ScrollView 消费事件之
 
 ### 右键上下文菜单
 
-0.111.8 起由 `NativeHistoryTableView.menu(for:)` 直接弹出（`HistoryPopupContent.showContextMenu` 组装菜单）。以下为 SwiftUI 时期的实现，仅存档：`PopupHostingView.rightMouseDown` 发 `popupContextMenuNotification` → 置 `contextMenuArmed`，行 frame 按需快照（`RowFramePreferenceKey`），`resolveContextMenu` 在下一 runloop 回合 `showContextMenu`（`NSMenu.popUp` 不能在 SwiftUI 布局中途开始）。
+0.111.4 起由 `NativeHistoryTableView.menu(for:)` 直接弹出（`HistoryPopupContent.showContextMenu` 组装菜单）。以下为 SwiftUI 时期的实现，仅存档：`PopupHostingView.rightMouseDown` 发 `popupContextMenuNotification` → 置 `contextMenuArmed`，行 frame 按需快照（`RowFramePreferenceKey`），`resolveContextMenu` 在下一 runloop 回合 `showContextMenu`（`NSMenu.popUp` 不能在 SwiftUI 布局中途开始）。
 
 菜单项 handler 用 `ContextMenuItemTarget`（`NSMenuItem.target` 是 weak，靠 `representedObject` 强持有）；动作一律 `currentIndex(of:)` 按稳定 entry_id 重新解析行。菜单 tracking 期间（`isMenuTracking`）Esc/←/→/⌘Z 全让位。图片行含「另存为…」（NSSavePanel 写 PNG）：保存面板是本应用的模态窗口，必然从非激活弹窗夺走 key——弹窗靠 `isPresentingModalPanel` 屏蔽这次 resign-key 的关闭（弹窗留在面板后方继续显示），`runModal()` 返回后 `makeKey()` 交还 key 状态。**不得在调起面板前 `close()`/`onClose()` 收起弹窗**（0.100.10 曾如此，实为把弹窗在保存过程中异步销毁）。
 
