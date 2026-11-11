@@ -132,7 +132,7 @@ Phase 1 同步 hash + 缩略图（fit 进显示框 920×200px = 460×100pt @2×�
 - **选中高亮**：`matchedGeometryEffect(id: "itemSelectionHighlight")` 在行间滑动；hover 静态填充；删除模式（⌃⌫）高亮变红。
 - **行文本 = 有界 preview 的 head……tail**：Rust `bounded_preview` 已把长文本折成 `前 180 标量……后 74 标量`（`PREVIEW_SCALARS=256`），Swift `ClipboardItem.formatDisplayPreview` 再按视觉宽度切成 `25……25`。**折叠必须遍历整段 preview**：0.100.8 为省分配加的 `collapsed.count >= 60 { break }` 会在切分之前砍掉尾部窗口，导致行尾显示的其实是头部中段（"首尾字符"退化成"首部中段"）。行内分配本身有界（preview ≤256 标量，且每次快照解码只算一次），所以提前退出换不来任何可测收益；空白分隔符延迟到下一个可见字符才落地（`pendingSeparator`），否则复制来的源文件几乎都以换行结尾，尾窗口会被一个 `⏎` 吃掉 2 个视觉宽度；预览面板传全文的那次调用已改为沿用列表的 displayPreview（面板只渲染 `item.preview` 全文，从不读该字段）。
 - **Escape 三层拦截**：SwiftUI `.onKeyPress(.escape)` → PopupHostingView NSEvent local monitor（NSTextView 第一响应者时）→ Notification 转发。优先关预览，否则关弹窗。
-- FocusState 双管理：isSearchFocused（selectedIndex=0）和 isContainerFocused（selectedIndex>0），解决 TextField focus 接管后 onKeyPress 失效。
+- FocusState 双管理：isSearchFocused（selectedIndex=0）和 isContainerFocused（selectedIndex>0），解决 TextField focus 接管后 onKeyPress 失效。**`selectedIndex` 的 `@State` 初值必须是最终值**（`items.isEmpty ? 0 : 1`）：写死 0 会让 `onAppear` 重置前先按「搜索栏选中」绘制几帧，实测呼出动画里搜索框蓝色 2pt 描边闪现一帧（243 个强调色像素），随后才消失。
 
 ### 原生列表（0.111.4 起）
 

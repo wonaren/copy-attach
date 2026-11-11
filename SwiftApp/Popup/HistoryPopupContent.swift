@@ -65,7 +65,7 @@ struct HistoryPopupContent: View {
     let onClose: () -> Void
 
     var backend: ClipboardBackend { ClipboardBackend.shared }
-    @State var selectedIndex: Int = 0
+    @State var selectedIndex: Int = ClipboardBackend.shared.items.isEmpty ? 0 : 1
     @State var showPreview: Bool = false
     @State var hoverPreviewEntryId: Int?
     @State var hoverPreviewItem: ClipboardItem?
