@@ -145,6 +145,11 @@ Phase 1 同步 hash + 缩略图（fit 进显示框 920×200px = 460×100pt @2×�
 - **行内备注**：`NSTextField`（200 标量上限，自动聚焦全选，Return/Tab 提交、Esc 取消、失焦提交）包在 `NSHostingView` 里挂到行上；编辑中的行按文本行高处理。图片行同样可编辑（实测写入并回读成功）。
 - **搜索高亮**：命中片段在自绘文本里加 attributed background；`#rrggbb` / `#rgb` 用 10×10 `NSTextAttachment` 色块代替文字。
 - **无障碍**：行暴露 `AXCell` + `AXDescription`（同屏文本）、`AXPress`（粘贴）、`AXSelected` 与自定义动作「加入粘贴队列」。
+- **滚动条只在真正滚动时出现**（0.111.6）：`autohidesScrollers = true` 本身已经做到「滚动时浮现、停下后淡出」，但**任何程序化滚动也会让它闪一次**。打开弹窗时首次 `refresh()` 命中 `resetChanged` → `scrollToTop()`，把 clip 从 0 滚到 `-contentInsets.top`（2pt），这 2pt 就足以让滚动条闪一下再消失。修法有两条：① `scrollToTop()` 先比较目标位置，已在目标就整体返回（不再调 `scrollRowToVisible`）；② 初始位置在 `scrollView.documentView = tableView` **之后**直接设好（在 `documentView` 赋值前设会被 AppKit 重置回 0）。实测（临时日志探针）：修复前打开必打 `scrollToTop from=0.0`，修复后该调用不再发生。
+  - **「滚动时很晚才出现」是遮罩几何问题，不是时序**（0.111.8）：根因是日期头遮罩：`maskLayer` 挂在 `scrollView.layer` 上，洞是**整宽**的（挖掉顶部 24pt），而 `NSScroller` 是 `scrollView` 的子视图，也在遮罩范围内；knob 在轨道顶端时位于 y 8.5–34.5，有 15.5pt 落在洞里被裁掉，必须往下滚、knob 沉到 24pt 以下才完整可见。修法只有一处：**遮罩改挂到 `tableView.layer`**（滚动条不再是遮罩对象的后代），洞按 `visible.minY` 定位以跟随滚动，并在 `boundsChanged` 里补 `updateMask()`。
+  - **还要压住首次呼出**：`autohidesScrollers` 在这个非 key 的 panel 里首次挂窗口时并不会隐藏滚动条（探针实测打开后 alpha 恒 1.00）。`viewDidMoveToWindow` 里 `scrollView.verticalScroller?.alphaValue = 0` 压住；**但此后必须自己负责显示**——把 alpha 归零后原生 autohide 不再把它拉回来（实测滚动时 knob 不出现），所以 `scrollWheel` 里补 `if scroller.alphaValue < 1 { scroller.alphaValue = 1 }`。淡出不用管，原生会自己做完（实测停手 1.3s 后 alpha 回落）。实测 4 轮呼出/滚动/停手：knob 竖条长度 13 / 50 / 13。
+- **按键导航的锚定位置必须自己算**（0.111.11）：`scrollRowToVisible` 在两个方向上不对称——向下时它把行停在底边（每次 `+29pt`），向上时只要行「已可见」就什么都不做。于是 ↑ 导航时选中行从底部一路漂到日期头洞里才被修正一次，视觉上就是「一上一下」。修法：`scrollRowToVisible` 之后统一按 `rowRect.minY - topHoleHeight` 重设 clip origin（**不能用滚动前的 `visible.minY` 算 delta**，那会按旧锚点回推，造成每步多跳一格）。实测（屏幕截图逐帧量选中 pill 顶边）：修前向上每一步 `origin` 不变、pill 从 595 漂到 44；修后三个方向连续 12 步 pill 坐标全为 0 变化，pill 固定在 164（向上）/1306（向下）。
+
 
 未实测：真实触控板双指横滑切标签（合成事件不进手势路径）；引导聚光灯 / 快捷槽位盘在原生行上的几何表现。旧 SwiftUI 列表代码（`ItemRowView`、`RowFramePreferenceKey`、`popupContextMenuNotification` 解析、`DateSeparatorView`）已于 0.111.4 删除，`DayGroup` 拆到独立文件。
 

@@ -464,14 +464,16 @@ final class NativeHistoryListContainerView: NSView {
         column.resizingMask = .autoresizingMask
         tableView.addTableColumn(column)
         scrollView.documentView = tableView
+        scrollView.contentView.scroll(to: NSPoint(x: 0, y: -scrollView.contentInsets.top))
 
         headerView.hitTestEnabled = false
         addSubview(scrollView)
         addSubview(headerView)
 
         scrollView.wantsLayer = true
+        tableView.wantsLayer = true
         maskLayer.fillRule = .evenOdd
-        scrollView.layer?.mask = maskLayer
+        tableView.layer?.mask = maskLayer
 
         boundsObserver = NotificationCenter.default.addObserver(
             forName: NSView.boundsDidChangeNotification,
@@ -516,6 +518,7 @@ final class NativeHistoryListContainerView: NSView {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         window?.acceptsMouseMovedEvents = true
+        if window != nil { scrollView.verticalScroller?.alphaValue = 0 }
     }
 
     override func viewDidChangeEffectiveAppearance() {
@@ -588,24 +591,26 @@ final class NativeHistoryListContainerView: NSView {
     }
 
     func scrollToTop() {
+        let target = -scrollView.contentInsets.top
+        guard let clip = scrollView.contentView as NSClipView?, abs(clip.bounds.origin.y - target) > 0.5 else { return }
         tableView.scrollRowToVisible(0)
-        if let clip = scrollView.contentView as NSClipView? {
-            clip.scroll(to: NSPoint(x: 0, y: -scrollView.contentInsets.top))
-            scrollView.reflectScrolledClipView(clip)
-        }
+        clip.scroll(to: NSPoint(x: 0, y: target))
+        scrollView.reflectScrolledClipView(clip)
     }
 
     func scrollToRow(_ row: Int) {
         guard row >= 0, row < tableView.numberOfRows else { return }
-        tableView.scrollRowToVisible(row)
         let rowRect = tableView.rect(ofRow: row)
         let visible = tableView.visibleRect
         let topLimit = visible.minY + topHoleHeight
-        if rowRect.minY < topLimit {
-            let delta = topLimit - rowRect.minY
-            let clip = scrollView.contentView
-            let target = NSPoint(x: clip.bounds.origin.x, y: clip.bounds.origin.y - delta)
-            clip.scroll(to: target)
+        if rowRect.minY >= topLimit && rowRect.maxY <= visible.maxY {
+            updateHeader()
+            return
+        }
+        tableView.scrollRowToVisible(row)
+        let clip = scrollView.contentView
+        if rowRect.minY < clip.bounds.origin.y + topHoleHeight {
+            clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: rowRect.minY - topHoleHeight))
             scrollView.reflectScrolledClipView(clip)
         }
         updateHeader()
@@ -646,19 +651,23 @@ final class NativeHistoryListContainerView: NSView {
     }
 
     private func boundsChanged() {
+        updateMask()
         updateHeader()
         coordinator?.reportSelectedRowFrame()
     }
 
     private func updateMask() {
         guard bounds.width > 0, bounds.height > 0 else { return }
-        maskLayer.frame = scrollView.bounds
+        let bounds = tableView.bounds
+        let visible = tableView.visibleRect
+        guard !visible.isEmpty else { maskLayer.path = nil; return }
+        maskLayer.frame = bounds
         let path = CGMutablePath()
-        path.addRect(scrollView.bounds)
+        path.addRect(bounds)
         let hole = topHoleHeight
         if hole > 0 {
-            let y = scrollView.isFlipped ? 0 : scrollView.bounds.height - hole
-            path.addRect(CGRect(x: 0, y: y, width: scrollView.bounds.width, height: hole))
+            let y = tableView.isFlipped ? visible.minY : visible.maxY - hole
+            path.addRect(CGRect(x: bounds.minX, y: y, width: bounds.width, height: hole))
         }
         maskLayer.path = path
     }
@@ -670,6 +679,13 @@ final class NativeHistoryTableView: NSTableView {
     private var pressPoint: NSPoint = .zero
 
     override var acceptsFirstResponder: Bool { false }
+
+    override func scrollWheel(with event: NSEvent) {
+        super.scrollWheel(with: event)
+        if let scroller = enclosingScrollView?.verticalScroller, scroller.alphaValue < 1 {
+            scroller.alphaValue = 1
+        }
+    }
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
         true
