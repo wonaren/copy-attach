@@ -40,6 +40,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         UpdateDownloader.cleanupLegacyArtifacts()
 
+        UpdateBadge.shared.loadCache()
+        showPendingUpdateCompletion()
+
         debugLog("Starting initialization...")
 
         let hotkeyManager = HotkeyManager.shared
@@ -336,6 +339,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             HistoryPopupWindow.shared.close()
         }
         openSettingsWindow()
+    }
+
+    private func showPendingUpdateCompletion() {
+        let defaults = UserDefaults.standard
+        guard let pending = defaults.string(forKey: UpdateBadge.pendingVersionKey) else { return }
+        defaults.removeObject(forKey: UpdateBadge.pendingVersionKey)
+        let notes = defaults.string(forKey: UpdateBadge.pendingNotesKey)
+        defaults.removeObject(forKey: UpdateBadge.pendingNotesKey)
+        debugLog("[update] previous run installed v\(pending); current v\(UpdateBadge.currentVersion)")
+        let currentBase = UpdateBadge.currentVersion.components(separatedBy: "-").first ?? UpdateBadge.currentVersion
+        guard currentBase == pending else { return }
+        UpdateCompleteWindow.shared.show(version: pending, notes: notes)
     }
 
     private func openSettingsWindow(initialTab: Int = 0) {

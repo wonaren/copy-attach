@@ -205,6 +205,39 @@ enum UpdateChecker {
         }
     }
 
+    static func isUpgrade(latest: String, current: String) -> Bool {
+        let currentBase = current.components(separatedBy: "-").first ?? current
+        guard current == currentBase else { return false }
+        return latest.compare(currentBase, options: .numeric) == .orderedDescending
+    }
+
+    private static let notesSession: URLSession = {
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 6
+        config.timeoutIntervalForResource = 6
+        return URLSession(configuration: config)
+    }()
+
+    private struct ReleasePayload: Decodable {
+        let body: String?
+    }
+
+    static func releaseNotes(version: String) async -> String? {
+        guard let url = URL(string: "https://api.github.com/repos/wonaren/copy-attach/releases/tags/v\(version)") else {
+            return nil
+        }
+        var request = URLRequest(url: url)
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        guard let (data, response) = try? await notesSession.data(for: request),
+              let http = response as? HTTPURLResponse, http.statusCode == 200,
+              let payload = try? JSONDecoder().decode(ReleasePayload.self, from: data),
+              let body = payload.body, !body.isEmpty else {
+            debugLog("[update] release notes for v\(version) unavailable")
+            return nil
+        }
+        return body
+    }
+
     private static func milliseconds(since start: Date) -> Int {
         Int(Date().timeIntervalSince(start) * 1000)
     }

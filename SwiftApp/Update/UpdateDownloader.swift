@@ -80,7 +80,12 @@ final class UpdateDownloader: NSObject, ObservableObject, URLSessionDownloadDele
         phase = .downloading(0)
         debugLog("[update] start download of v\(cleanVersion)")
         Self.cleanupLegacyArtifacts()
-        Task { await performDownload(version: cleanVersion) }
+        Task {
+            if let notes = await UpdateChecker.releaseNotes(version: cleanVersion) {
+                UserDefaults.standard.set(notes, forKey: UpdateBadge.pendingNotesKey)
+            }
+            await performDownload(version: cleanVersion)
+        }
     }
 
     private func performDownload(version: String) async {
@@ -286,6 +291,7 @@ final class UpdateDownloader: NSObject, ObservableObject, URLSessionDownloadDele
             throw UpdateError.install("替换应用失败：\(error.localizedDescription)")
         }
         debugLog("[update] new app installed at \(appDest.path)")
+        UserDefaults.standard.set(version, forKey: UpdateBadge.pendingVersionKey)
 
         phase = .installing
         let downloadDir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("CopyAttachUpdate", isDirectory: true)

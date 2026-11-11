@@ -97,6 +97,9 @@ struct HistoryPopupContent: View {
     @State var toastIcon: String = "checkmark.circle.fill"
     @State private var toastDismissTask: Task<Void, Never>? = nil
 
+    @ObservedObject var updater = UpdateDownloader.shared
+    var updateBadge: UpdateBadge { UpdateBadge.shared }
+
     func showToast(_ message: String, icon: String = "checkmark.circle.fill") {
         toastDismissTask?.cancel()
         withAnimation(AppleMotion.snappy) {
@@ -393,10 +396,16 @@ struct HistoryPopupContent: View {
             switchFilterTab(direction: "right")
             return .handled
         }
+        .onChange(of: updater.phase) { _, phase in
+            if case .failed(let message) = phase {
+                showToast("更新失败：\(message)", icon: "exclamationmark.triangle.fill")
+            }
+        }
         .onAppear {
             Perf.instant("swift", "popup.content_appear",
                          data: backend.items.isEmpty ? "empty" : "rows")
             selectedIndex = backend.items.isEmpty ? 0 : 1
+            updateBadge.refreshIfStale()
             let preserveForRetry = PasteQueueManager.shared.consumePendingBatchRetryOnOpen()
             if PasteQueueManager.shared.hasItems && !preserveForRetry {
                 PasteQueueManager.shared.clear()
@@ -809,9 +818,53 @@ struct HistoryPopupContent: View {
                 .help(mode.title)
             }
             Spacer()
+            updateBadgeButton
         }
         .padding(.vertical, 2)
         .animation(AppleMotion.snappy, value: filterMode)
+    }
+
+    @ViewBuilder
+    private var updateBadgeButton: some View {
+        if case .downloading(let progress) = updater.phase {
+            updatePill {
+                Text("下载中 \(Int((progress * 100).rounded()))%")
+            }
+        } else if case .installing = updater.phase {
+            updatePill {
+                Text("安装中…")
+            }
+        } else if let version = updateBadge.latestVersion {
+            Button {
+                updater.startDownload(version: version)
+            } label: {
+                updatePill {
+                    Image(systemName: "arrow.down.circle.fill")
+                        .font(.system(size: 10, weight: .semibold))
+                    Text("更新 v\(version)")
+                }
+            }
+            .buttonStyle(AppleTactileButtonStyle(scale: 0.94))
+            .focusable(false)
+            .help("下载并安装 v\(version)")
+        }
+    }
+
+    private func updatePill<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        HStack(spacing: 4) {
+            content()
+        }
+        .font(.system(size: 11, weight: .semibold))
+        .monospacedDigit()
+        .foregroundColor(theme.updateActionText)
+        .lineLimit(1)
+        .fixedSize()
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(theme.updateActionBackground)
+        )
     }
 
     @ViewBuilder
