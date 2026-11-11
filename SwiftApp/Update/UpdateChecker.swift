@@ -207,7 +207,7 @@ enum UpdateChecker {
 
     static func isUpgrade(latest: String, current: String) -> Bool {
         let currentBase = current.components(separatedBy: "-").first ?? current
-        guard current == currentBase else { return false }
+        if current != currentBase { return true }
         return latest.compare(currentBase, options: .numeric) == .orderedDescending
     }
 

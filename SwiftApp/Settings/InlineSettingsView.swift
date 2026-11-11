@@ -41,6 +41,7 @@ struct InlineSettingsView: View {
     @State var isCheckingUpdate = false
     @State var updateAlert: UpdateCheckState? = nil
     @StateObject var updater = UpdateDownloader.shared
+    var updateBadge: UpdateBadge { UpdateBadge.shared }
     @Environment(\.appTheme) var theme
     @Environment(\.colorScheme) var colorScheme
 
@@ -162,6 +163,14 @@ struct InlineSettingsView: View {
                 .font(.system(size: 17, weight: .medium))
                 .symbolVariant(selectedTab == i ? .fill : .none)
                 .frame(width: 22, height: 20)
+                .overlay(alignment: .topTrailing) {
+                    if i == 4, updateBadge.hasUnseenUpdate {
+                        Circle()
+                            .fill(Color.red)
+                            .frame(width: 7, height: 7)
+                            .offset(x: 3, y: -1)
+                    }
+                }
             Text(tabTitles[i])
                 .font(.system(size: 11, weight: selectedTab == i ? .semibold : .medium))
                 .lineLimit(1)
@@ -191,6 +200,7 @@ struct InlineSettingsView: View {
                     withAnimation(.smooth(duration: 0.3)) {
                         selectedTab = i
                     }
+                    if i == 4 { updateBadge.markSeen() }
                 } label: {
                     tabItemLabel(i)
                         .contentShape(RoundedRectangle(cornerRadius: tabCornerRadius, style: .continuous))

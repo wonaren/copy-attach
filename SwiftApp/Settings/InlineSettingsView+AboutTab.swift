@@ -303,10 +303,11 @@ extension InlineSettingsView {
         let currentVersion = self.appVersion
         let currentBase = stripDevSuffix(currentVersion)
         let isDev = currentVersion != currentBase
+        let isNewer = latestVersion.compare(currentBase, options: .numeric) == .orderedDescending
 
-        if latestVersion.compare(currentBase, options: .numeric) == .orderedDescending {
+        if isNewer {
             finishUpdateCheck(.updateAvailable(latestVersion: latestVersion, releaseURL: releaseURL, isDowngrade: false), showAlert: showAlert)
-        } else if isDev {
+        } else if isDev && UpdateChecker.isUpgrade(latest: latestVersion, current: currentVersion) {
             finishUpdateCheck(.updateAvailable(latestVersion: latestVersion, releaseURL: releaseURL, isDowngrade: true), showAlert: showAlert)
         } else {
             finishUpdateCheck(.upToDate(currentVersion: currentVersion), showAlert: showAlert)
