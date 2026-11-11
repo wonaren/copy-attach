@@ -79,14 +79,14 @@ struct InlineRemarkField: NSViewRepresentable {
                commandSelector == #selector(NSResponder.insertTab(_:)) {
                 if !didCommitOrCancel {
                     didCommitOrCancel = true
-                    control.window?.makeFirstResponder(control.window?.contentView)
+                    control.window?.makeFirstResponder((control.window as? HistoryPopupWindow)?.focusTargetView)
                     parent.onCommit(control.stringValue)
                 }
                 return true
             } else if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
                 if !didCommitOrCancel {
                     didCommitOrCancel = true
-                    control.window?.makeFirstResponder(control.window?.contentView)
+                    control.window?.makeFirstResponder((control.window as? HistoryPopupWindow)?.focusTargetView)
                     parent.onCancel()
                 }
                 return true
@@ -98,7 +98,7 @@ struct InlineRemarkField: NSViewRepresentable {
             guard let field = obj.object as? NSTextField else { return }
             if !didCommitOrCancel {
                 didCommitOrCancel = true
-                field.window?.makeFirstResponder(field.window?.contentView)
+                field.window?.makeFirstResponder((field.window as? HistoryPopupWindow)?.focusTargetView)
                 parent.onCommit(field.stringValue)
             }
         }

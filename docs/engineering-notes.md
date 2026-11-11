@@ -156,6 +156,8 @@ Phase 1 同步 hash + 缩略图（fit 进显示框 920×200px = 460×100pt @2×�
 
 **缩放必须内嵌平移、不能设 `anchorPoint`**：`NSHostingView` 挂到窗口后约 20ms 内，AppKit 会把 `layer.anchorPoint` 与 `layer.position` 重置为 `{0,0}`（实测：设好后 `t+20ms` 已变成 `anchor={0,0} pos={0,0}`）。因此缩放中心会跑到图层左上角，视觉上表现为「从右下往左上收」，而不是 Spotlight 那种从中心收缩。正确做法是把中心锚点编进 transform 本身——`translate(cx,cy) → scale → translate(-cx,-cy)`，完全不碰 `anchorPoint`/`position`。
 
+**缩放期间窗口会把圆角切成直角（0.111.5）**：窗口把内容裁到自己的矩形，而 1.06 倍的内容其圆角已被推到窗口边界外 ~15pt，于是窗口沿直角边切一刀。逐帧实测（60fps 录屏，取左上角每行首个亮像素的横向内缩）：开合动画中内缩从 11（圆角）掉到 0–1（直角），静止后回到 11。修法是在窗口与内容之间插一层**不参与缩放**的 `NSView` 作为 `contentView`：它铺满窗口、`masksToBounds=true` + `cornerRadius=14`，`PopupHostingView` 作为其子视图被缩放。子视图的 `frame` 必须用 `clip.bounds`（窗口坐标会把内容推到看不见），并显式设 `anchorPoint={0,0}`/`position=.zero` 让原有的中心锚点 transform 继续成立。**代价**：`contentView` 不再是 hosting 视图，所有 `makeFirstResponder(contentView)` 的调用点都改走 `HistoryPopupWindow.focusTargetView`（= hosting），否则编辑备注后焦点无法交还。
+
 **曲线用 `CASpringAnimation` 复刻原版**：`stiffness = (2π/response)²`、`damping = 2·dampingFraction·√stiffness`、`mass = 1`，对应 SwiftUI 的 `spring(response:dampingFraction:)`；开弹窗 `response 0.2 / damping 0.85`，关闭 `1.04 倍 / response 0.15 / damping 1`，反向打开时同样回 1.0。
 
 **`drawingGroup()` 不是替代方案**：它会把整块列表渲染成黄色错误占位图——SwiftUI 无法栅格化 `NSViewRepresentable` 承载的 AppKit 内容。

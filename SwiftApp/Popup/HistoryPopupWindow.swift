@@ -25,6 +25,8 @@ class HistoryPopupWindow: NSPanel {
 
     private var popupHostingView: PopupHostingView?
 
+    var focusTargetView: NSView? { popupHostingView }
+
     var parkedSide: ParkSide?
     var pendingParkTargetX: CGFloat?
     var lastParkTickX: CGFloat?
@@ -156,14 +158,20 @@ class HistoryPopupWindow: NSPanel {
         let hosting = PopupHostingView(rootView: contentView)
         popupHostingView = hosting
         let contentRect = self.contentRect(forFrameRect: self.frame)
-        hosting.frame = contentRect
-
         hosting.wantsLayer = true
-        hosting.layer?.masksToBounds = false
-        hosting.layer?.cornerRadius = 14
-        hosting.layer?.cornerCurve = .continuous
 
-        self.contentView = hosting
+        let clip = NSView(frame: contentRect)
+        clip.wantsLayer = true
+        clip.layer?.masksToBounds = true
+        clip.layer?.cornerRadius = 14
+        clip.layer?.cornerCurve = .continuous
+        hosting.frame = clip.bounds
+        clip.addSubview(hosting)
+
+        self.contentView = clip
+
+        hosting.layer?.anchorPoint = CGPoint(x: 0, y: 0)
+        hosting.layer?.position = .zero
 
         applyContentScale(1.06, to: hosting, layer: hosting.layer!)
 

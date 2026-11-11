@@ -285,8 +285,8 @@ struct HistoryPopupContent: View {
         DispatchQueue.main.async {
             self.isSearchFocused = !container
             self.isContainerFocused = container
-            if container, let window = self.popupWindow, let contentView = window.contentView {
-                window.makeFirstResponder(contentView)
+            if container, let window = self.popupWindow, let focusTarget = window.focusTargetView {
+                window.makeFirstResponder(focusTarget)
             }
         }
     }
