@@ -130,6 +130,7 @@ struct NativeHistoryListView: NSViewRepresentable {
         private var rowIndexByID: [Int: Int] = [:]
         private var rowIndexByItemID: [Int: Int] = [:]
         private(set) var hoveredRow: Int?
+        private var queueToggleHoveredRow: Int?
 
         init(_ parent: NativeHistoryListView) {
             self.parent = parent
@@ -311,6 +312,7 @@ struct NativeHistoryListView: NSViewRepresentable {
                 isDeleteModifierPressed: parent.isDeleteModifierPressed,
                 isCommandPressed: parent.isCommandPressed,
                 canToggleQueue: parent.canToggleQueue,
+                isQueueToggleHovered: row == queueToggleHoveredRow,
                 searchQuery: parent.searchQuery,
                 isEditing: model.kind == .item && model.id == parent.editingItemID,
                 editingText: parent.$editingText,
@@ -380,6 +382,15 @@ struct NativeHistoryListView: NSViewRepresentable {
                 parent.onHoverChange(item, true, screenRect(forRow: row), moved)
                 reload(row: row)
             }
+        }
+
+        func updateQueueToggleHover(row: Int?, inside: Bool) {
+            let target = inside ? row : nil
+            guard target != queueToggleHoveredRow else { return }
+            let old = queueToggleHoveredRow
+            queueToggleHoveredRow = target
+            if let old { reload(row: old) }
+            if let target { reload(row: target) }
         }
 
         func item(forRow row: Int) -> ClipboardItem? {
@@ -561,6 +572,7 @@ final class NativeHistoryListContainerView: NSView {
     override func mouseExited(with event: NSEvent) {
         lastMousePoint = nil
         coordinator?.updateHover(row: nil, moved: false)
+        coordinator?.updateQueueToggleHover(row: nil, inside: false)
     }
 
     func reloadRows() {
@@ -643,11 +655,19 @@ final class NativeHistoryListContainerView: NSView {
         let hole = topHoleHeight
         if point.y < hole {
             coordinator.updateHover(row: nil, moved: moved)
+            coordinator.updateQueueToggleHover(row: nil, inside: false)
             return
         }
         let tablePoint = tableView.convert(point, from: self)
         let row = tableView.row(at: tablePoint)
         coordinator.updateHover(row: row >= 0 ? row : nil, moved: moved)
+        var insideToggle = false
+        if row >= 0,
+           let rowView = tableView.view(atColumn: 0, row: row, makeIfNecessary: false) as? NativeHistoryRowView {
+            if rowView.queueToggleRect.isEmpty { rowView.displayIfNeeded() }
+            insideToggle = rowView.queueToggleRect.contains(rowView.convert(point, from: self))
+        }
+        coordinator.updateQueueToggleHover(row: row, inside: insideToggle)
     }
 
     private func boundsChanged() {
@@ -767,6 +787,7 @@ struct NativeHistoryRowConfiguration {
     let isDeleteModifierPressed: Bool
     let isCommandPressed: Bool
     let canToggleQueue: Bool
+    let isQueueToggleHovered: Bool
     let searchQuery: String
     let isEditing: Bool
     let editingText: Binding<String>
@@ -839,6 +860,7 @@ final class NativeHistoryRowView: NSTableCellView {
 
     func configure(configuration: NativeHistoryRowConfiguration) {
         self.configuration = configuration
+        queueToggleRect = .zero
         if configuration.row.kind == .item,
            case .image(_, let dbId, _, _, _, _, _, _, _)? = configuration.row.item {
             if thumbnailDbId != dbId {
@@ -1094,7 +1116,9 @@ final class NativeHistoryRowView: NSTableCellView {
         if configuration.canToggleQueue && (row.queueOrder != nil || configuration.isHovered) {
             let toggleRect = NSRect(x: right - 18, y: rect.midY - 9, width: 18, height: 18)
             queueToggleRect = toggleRect
-            drawQueueToggle(row: row, in: toggleRect, theme: theme, selected: configuration.isSelected)
+            drawQueueToggle(row: row, in: toggleRect, theme: theme,
+                            selected: configuration.isSelected,
+                            hovered: configuration.isQueueToggleHovered)
             right = toggleRect.minX - 4
             trailingMinX = right
         } else {
@@ -1133,10 +1157,17 @@ final class NativeHistoryRowView: NSTableCellView {
     }
 
     private func drawQueueToggle(row: NativeHistoryListRow, in rect: NSRect,
-                                 theme: NativeHistoryListTheme, selected: Bool) {
+                                 theme: NativeHistoryListTheme, selected: Bool, hovered: Bool) {
+        let inset: CGFloat = hovered ? 1.25 : 1.75
+        let circleRect = rect.insetBy(dx: row.queueOrder != nil ? inset : inset + 0.5,
+                                      dy: row.queueOrder != nil ? inset : inset + 0.5)
+        if hovered {
+            let halo = NSRect(x: rect.midX - 11, y: rect.midY - 11, width: 22, height: 22)
+            (selected ? NSColor.white.withAlphaComponent(0.20) : theme.accent.withAlphaComponent(0.15)).setFill()
+            NSBezierPath(ovalIn: halo).fill()
+        }
+        let circle = NSBezierPath(ovalIn: circleRect)
         if let order = row.queueOrder {
-            let circleRect = rect.insetBy(dx: 1.75, dy: 1.75)
-            let circle = NSBezierPath(ovalIn: circleRect)
             (selected ? NSColor.white : theme.accent).setFill()
             circle.fill()
             let text = "\(order)"
@@ -1145,19 +1176,25 @@ final class NativeHistoryRowView: NSTableCellView {
                 .foregroundColor: selected ? theme.selectedFill : NSColor.white
             ]
             let size = (text as NSString).size(withAttributes: attrs)
-            (text as NSString).draw(in: NSRect(x: rect.midX - size.width / 2,
-                                               y: rect.midY - size.height / 2,
+            (text as NSString).draw(in: NSRect(x: circleRect.midX - size.width / 2,
+                                               y: circleRect.midY - size.height / 2,
                                                width: size.width, height: size.height),
                                     withAttributes: attrs)
-        } else {
-            let circleRect = rect.insetBy(dx: 2.25, dy: 2.25)
-            let circle = NSBezierPath(ovalIn: circleRect)
+            return
+        }
+        if hovered {
             (selected ? NSColor.white.withAlphaComponent(0.18) : theme.accent.withAlphaComponent(0.12)).setFill()
             circle.fill()
-            (selected ? NSColor.white : theme.accent).setStroke()
-            circle.lineWidth = 1.15
-            circle.stroke()
         }
+        let stroke: NSColor
+        if selected {
+            stroke = hovered ? NSColor.white : NSColor.white.withAlphaComponent(0.55)
+        } else {
+            stroke = hovered ? theme.accent : theme.secondaryText.withAlphaComponent(0.65)
+        }
+        stroke.setStroke()
+        circle.lineWidth = 1.15
+        circle.stroke()
     }
 
     private func drawText(_ text: String, font: NSFont, color: NSColor, in rect: NSRect) {
