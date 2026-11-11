@@ -27,7 +27,7 @@ final class BatchDispenseRunner {
     private init() {}
 
     func start(items: [ClipboardItem], targetPID: Int32, batchSize: Int) {
-        guard !items.isEmpty, targetPID > 0, batchSize > 1 else { return }
+        guard !items.isEmpty, targetPID > 0 else { return }
         guard !isRunning else {
             errorLog("BatchDispense: start ignored; a batch is already running")
             return

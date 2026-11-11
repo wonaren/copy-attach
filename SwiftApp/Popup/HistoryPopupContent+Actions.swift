@@ -12,7 +12,7 @@ extension HistoryPopupContent {
     func batchDragPlan(for item: ClipboardItem) -> BatchDragPlan? {
         guard PasteDeliveryMode.current == .keystroke else { return nil }
         let queue = PasteQueueManager.shared
-        guard queue.totalCount > 1,
+        guard queue.hasItems,
               queue.isQueued(item),
               let payload = queue.queueItems.first else { return nil }
         return BatchDragPlan(payload: payload, items: queue.queueItems)

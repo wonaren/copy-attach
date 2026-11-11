@@ -1074,8 +1074,8 @@ struct HistoryPopupContent: View {
 
             Spacer()
 
-            if PasteQueueManager.shared.totalCount > 1 {
-                Text("拖拽整组发送")
+            if PasteQueueManager.shared.hasItems {
+                Text("拖拽发送")
                     .font(.system(size: 9.5, weight: .medium))
                     .foregroundColor(theme.popupPrimaryText)
                 Text("·")

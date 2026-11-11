@@ -70,7 +70,7 @@ final class BatchDragController {
     func begin(items: [ClipboardItem]) {
         activationTask?.cancel()
         activationTask = nil
-        guard items.count > 1 else {
+        guard !items.isEmpty else {
             cancel()
             return
         }
@@ -113,8 +113,8 @@ final class BatchDragController {
         if pruned > 0 {
             debugLog("BatchDrag: pruned \(pruned) stale queued item(s) before dispatch")
         }
-        guard live.count > 1 else {
-            debugLog("BatchDrag: only \(live.count) live queued item(s); not dispatching")
+        guard !live.isEmpty else {
+            debugLog("BatchDrag: no live queued item(s); not dispatching")
             abortDispatch("队列项已失效，未发送")
             return
         }
