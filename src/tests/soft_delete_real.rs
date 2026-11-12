@@ -64,13 +64,14 @@ fn test_soft_delete_real_path() {
     ensure_real_backend();
     let b = crate::backend::try_backend().expect("backend initialized");
 
-    let (live_before, has_col, version) = {
+    let (live_before, has_col, version, total_before) = {
         let conn = b.db.lock().unwrap();
         (
             sql(&conn, "SELECT COUNT(*) FROM clipboard_history WHERE id NOT IN (SELECT row_id FROM clipboard_deleted)"),
             sql(&conn,
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='clipboard_deleted'"),
             sql(&conn, "PRAGMA user_version"),
+            sql(&conn, "SELECT COUNT(*) FROM clipboard_history"),
         )
     };
     println!("\n[init] live rows={live_before} side table={has_col} user_version={version}");
@@ -101,6 +102,7 @@ fn test_soft_delete_real_path() {
     );
 
     let rss_before_delete = rss_kb();
+    let baseline_depth = crate::ffi::clipboard_undo_depth() as usize;
     let mut deleted = 0usize;
     for id in &ids {
         if crate::ffi::clipboard_delete_by_id(*id) != 0 {
@@ -137,13 +139,16 @@ fn test_soft_delete_real_path() {
         rss_after_delete as i64 - rss_before_delete as i64
     );
     assert_eq!(deleted, ids.len(), "every delete must succeed");
-    assert_eq!(depth, ids.len(), "undo depth must equal the number of deletions (no step cap)");
+    assert_eq!(depth, baseline_depth + ids.len(), "undo depth must equal pre-existing depth plus the number of deletions (no step cap)");
     assert_eq!(live_after_delete, 0, "no live rows may remain");
-    assert_eq!(deleted_rows, ids.len() as i64, "deleted rows must stay in the table");
-    assert!(
-        retained_bytes <= crate::backend::undo_limit(),
-        "retained deleted payload must fit the byte budget ({retained_bytes} bytes)"
-    );
+    assert_eq!(deleted_rows, (baseline_depth + ids.len()) as i64, "deleted rows must stay in the table");
+    let undo_budget = crate::backend::undo_limit();
+    if undo_budget > 0 {
+        assert!(
+            retained_bytes <= undo_budget,
+            "retained deleted payload must fit the byte budget ({retained_bytes} bytes)"
+        );
+    }
 
     let rss_before_undo = rss_kb();
     let mut undone = 0usize;
@@ -183,9 +188,9 @@ fn test_soft_delete_real_path() {
     );
     assert_eq!(undone, deleted, "every undo must succeed");
     assert_eq!(live_after_undo, ids.len() as i64, "every entry must come back");
-    assert_eq!(total_after_undo, ids.len() as i64, "deleted rows must be consumed by undo");
+    assert_eq!(total_after_undo, total_before, "undo must replace each soft-deleted payload row without touching unrelated rows");
     assert_eq!(dup_groups, 0, "undo must not leave duplicate content rows");
-    assert_eq!(crate::ffi::clipboard_undo_depth(), 0, "undo stack must be empty");
+    assert_eq!(crate::ffi::clipboard_undo_depth() as usize, baseline_depth, "undo stack must return to its pre-test depth");
 
     let delete_written_delta = written_del as i64 - written0 as i64;
     let undo_written_delta = written_undo2 as i64 - written_del as i64;
