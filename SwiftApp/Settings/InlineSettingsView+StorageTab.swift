@@ -394,7 +394,7 @@ extension InlineSettingsView {
                 StorageActionTile(
                     icon: "arrow.up.doc",
                     iconColor: Color.accentColor,
-                    title: "导出备份...",
+                    title: "导出备份",
                     subtitle: "保存为独立文件",
                     action: handleExportBackup
                 )
@@ -402,7 +402,7 @@ extension InlineSettingsView {
                 StorageActionTile(
                     icon: "arrow.down.doc",
                     iconColor: Color(nsColor: .systemGreen),
-                    title: "从备份恢复...",
+                    title: "从备份恢复",
                     subtitle: "合并或替换记录",
                     action: handleImportBackup
                 )
