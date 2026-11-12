@@ -142,7 +142,8 @@ class PreviewWindow: NSPanel {
         let hosting = PreviewHostingView(rootView: makeContent(item: item, initialImage: initialImage))
         hosting.sizingOptions = []
         let contentRect = self.contentRect(forFrameRect: self.frame)
-        hosting.frame = contentRect
+        let container = NSView(frame: NSRect(origin: .zero, size: contentRect.size))
+        hosting.frame = container.bounds
 
         hosting.wantsLayer = true
         hosting.layer?.masksToBounds = true
@@ -155,7 +156,8 @@ class PreviewWindow: NSPanel {
             self?.onHoverChange?(inside)
         }
 
-        self.contentView = hosting
+        container.addSubview(hosting)
+        self.contentView = container
         self.hostingView = hosting
     }
 

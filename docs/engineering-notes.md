@@ -22,7 +22,7 @@
 - 全文搜索走 SQLite FTS5 trigram 索引（`db::search_history`：≥3 字符用 `MATCH` 子串匹配 + 对超出索引上限的超大文本行做 LIKE 兜底；<3 字符退回 LIKE 全表扫描，`clipboard_search_ids` 返回匹配 entry_id）。全文只存在 DB，内存历史 Vec 不持正文（Text 条目只带 preview/label/text_hash，粘贴/预览/拖拽按 `db_id` 从 DB 按需载入，与图片同约定）。
 - **LIKE 回退是有意保留的语义承诺**：1-2 字符查询必须命中长文中段（曾提议改扫内存 preview 换取无磁盘读，因静默丢失长文中段匹配被否——`test_search_short_query_matches_full_text_middle` 是语义绊线）；已知代价是首两次击键的全表扫描与 LIKE 仅 ASCII 大小写折叠。
 - 元数据字段匹配（label、custom_label、source_name）统一在 Rust/SQLite 侧由 LIKE 子串检索完成（图片条目 label 列恒为 NULL 不落库，不支持按尺寸检索，图片按备注与来源应用匹配），Swift 侧仅需按 matchIds 筛选并辅以动态日期分组（DayGroup 是 UI 派生文本）。FTS 索引同步用 SQLite 触发器（AFTER INSERT/DELETE on `clipboard_history`，触发器 DROP+CREATE 以替换旧版无上限触发器，backfill 只跑一次且含上限条件，启动时清理存量超大行）。
-- 行渲染（0.111.4 起由 `NativeHistoryListView` 自绘取代旧 `ItemRowView`）：无 `#` 的文本跳过正则、hex 色票 NSImage 按色值缓存（`swatchCache`，countLimit 64）——不再每帧 lockFocus 现画。搜索栏固定 index 0，项目从 index 1 开始。
+- 行渲染（`ItemRowView`）：无 `#` 的文本跳过正则、hex 色票 NSImage 按色值缓存（`swatchCache`，countLimit 64）——不再每帧 lockFocus 现画。搜索栏固定 index 0，项目从 index 1 开始。
 
 ## 两阶段图片捕获与内存治理
 
@@ -134,7 +134,7 @@ Phase 1 同步 hash + 缩略图（fit 进显示框 920×200px = 460×100pt @2×�
 - **Escape 三层拦截**：SwiftUI `.onKeyPress(.escape)` → PopupHostingView NSEvent local monitor（NSTextView 第一响应者时）→ Notification 转发。优先关预览，否则关弹窗。
 - FocusState 双管理：isSearchFocused（selectedIndex=0）和 isContainerFocused（selectedIndex>0），解决 TextField focus 接管后 onKeyPress 失效。**`selectedIndex` 的 `@State` 初值必须是最终值**（`items.isEmpty ? 0 : 1`）：写死 0 会让 `onAppear` 重置前先按「搜索栏选中」绘制几帧，实测呼出动画里搜索框蓝色 2pt 描边闪现一帧（243 个强调色像素），随后才消失。
 
-### 原生列表（0.111.4 起）
+### 原生列表（0.111.4 的历史实现）
 
 滚动掉帧的根因不在吸顶头，而在 SwiftUI 行：Time Profiler 的快速滚动窗口（3.2–5.45s）里 `NSHostingView.layout` 累计 502ms、AttributeGraph 布局 442ms（v1113），行绘制本身很轻。把列表整体换成 `NSScrollView + NSTableView`（`Popup/NativeHistoryListView.swift`）后，同窗口 layout 30ms、AG 26ms、body 23ms（约 17 倍）。Animation Hitches（同一驱动脚本：开弹窗、快速上下滑动、按阶段切窗）：v1113 early 段 hitch 中位数 13/次（5 次运行共 66 次），原生版 16 次有效运行 early 段共 2 次、中位数 0；两版 late 段持平。行高固定（分隔 22 / 文本 26 / 图片 52，行距 3），无需测量；`NSTableCellView` 自绘图标、文本、缩略图、收藏/槽位/队列徽标。**`tableView.style` 必须显式设 `.plain`**：`.automatic` 在弹窗里解析成 `.inset`（`style=1`），AppKit 把每行单元格左移 6pt 并收窄 12pt，选中 pill 距弹窗边 20.5pt（旧版 5.5pt）；改成 `.plain`（`style=4`）后 `cell.frame` 与行等宽（实测 `{{0,0},{493.87,25}}`），pill 回到 11–989px。
 
@@ -169,23 +169,21 @@ Phase 1 同步 hash + 缩略图（fit 进显示框 920×200px = 460×100pt @2×�
 
 **测量注意**：`MallocStackLogging=1` 会显著改变内存行为（给每次分配附加栈记录、妨碍复用），MSL 下同一构建仍显示位图增长。判断稳态必须用无 MSL 的 `vmmap -summary`。
 
-### 日期栏吸顶（0.111.3，SwiftUI 时期；0.111.4 起见上节）
+### 日期栏吸顶（SwiftUI 列表）
 
 列表按天分组为 `PopupSection`，`LazyVStack(pinnedViews: [.sectionHeaders])` 让当前日期栏吸附在顶部，跨天时由下一天顶替。**头部不能用背景色遮挡**：弹窗底色本身是半透明的（浅色 0.88 / 深色 0.82 alpha），任何叠加的底色都会与周围列表形成色带，浅色主题下尤其明显（初版用两层 `popupBackground`，被判定「没有一体感」）。现改为 `destinationOut` 擦除：头部背景铺 `Rectangle().fill(.black).blendMode(.destinationOut)`，把滚到头下的行在合成组内擦掉，露出与列表完全相同的底层；`compositingGroup()`（加在滚动内容 VStack 上）是必需配套，否则会连弹窗底色一起擦穿。**两者必须成对存在**，删掉 `compositingGroup` 或换回普通背景都会退化成色带。**滚动定位不能依赖系统默认**：`scrollPosition` 是最小滚动——目标已在视口内则不动，目标在视口上方时把它顶到内容顶部，而内容顶部恒被 pinned header 压住约一行。因此方向键上移若直接以选中行为目标，选中行会缩进日期栏下（用户实测截图复现）。修法：上移时（`scrollTargetForItem(at:movingUp:)` 的 `movingUp` 分支）改以**上一行**为滚动目标——上一行被头部遮住无所谓，选中行紧随其后、必然完整落在头部下方；上一行恰是当天首行时目标换成该天的日期栏 id（日期栏顶到内容顶部即成为吸顶头，首行在其下方）。下移不变，仍以选中行为目标，最小滚动落在视口底部。实测（真机 cua-driver 方向键 + 窗口截图）：同日上移、单行上移、跨天上移（含目标行恰为上一自然日末行）的落点均为选中行完整可见；「跨天移入次日第 2 行、目标为日期栏 id 且需滚动」的分支未构造出滚动帧，仅按同一机制推导。Tab 切换沿用「先滚到顶、再切 filter」，pinned 状态在每次切换前必然解除；槽位模式 `showsHeader=false`。CPU 粗测：密集滚轮 1.5s 内本进程消耗 0.42s CPU（约单核 28%），未做 Perf 门禁 A/B。
 
 ### 触控板双指滑动切换标签页
 
-0.111.4 起列表是 NSScrollView：local monitor 仍在滚动视图消费事件之前拦截，方向判定不变；切 Tab 的落点改为 `resetToken → scrollToTop()`，原生行不再有逐行溶解过渡。
-
 PopupHostingView 的 `.scrollWheel` local monitor 在 ScrollView 消费事件之前拦截——只认手指手势（`event.phase != []`），鼠标滚轮/惯性动量忽略；水平位移累积 ≥50pt 且水平:垂直 ≥ 1.5:1 即在手势中途提交切换（不等松手），累积前按 `isDirectionInvertedFromDevice` 还原手指实际方向；监视器只认弹窗自身窗口的事件（`event.window === self.window`）；事件只在提交切换后才吞掉，提交前全部透传——未达阈值的横滑不产生冻结死区；`.stationary` 保留累积进度不重置（`.began` 每个手势只来一次）；`menuTracking` 期间让位。手势中途反向重定向：当前事件横向位移与已累积方向相反、且达到已累积量的 0.5 时丢弃旧 run 重新累积。
 
-**切换动画为同源数据重过滤**（不做翻页滑动）：行按 `entry_id` 保持稳定身份，被过滤掉的行就地溶解（透明度 + 0.96 缩放）、新行就地浮现、幸存行无过渡原地不动，仅随列表坍缩上移（`filterSwitchAnimation(removed:added:)` 自适应时长：基础 `easeOut(0.15s)`，按变更行数线性加时至 0.28s；标签胶囊 `.easeOut(0.08s)` 即时响应）。
+**行级过渡**：条目按 `entry_id` 保持稳定身份。剪贴板历史更新时，进出场行使用透明度与 0.96 缩放，弹簧响应为 0.28s；选中高亮滑动的弹簧响应为 0.18s。分类胶囊在 SwiftUI 中独立过渡。
 
-**切换 = 先滚到顶、再切 filter**（单一主流程）：先把 `scrollTarget` 指向列表顶部锚点（`listTopAnchorID`，LazyVStack 上方恒 0 高普通视图——始终被布局，不依赖未物化行的行高估算），再在下一个 runloop turn 切换 `filterMode`。原因：滚动与内容变化同事务时，scrollPosition 与 LazyVStack 行高估算和 ScrollView 偏移保持竞速——实测滚动完全丢失或反复振荡（offset 1261→0→541→0→289），按住 ↓ 深滚后立刻切换可稳定复现。切标签后 `onChange(of: filterMode)`：关预览；`selectedIndex != 0` 时重置为新列表第一条，空列表落回搜索栏；搜索框聚焦时不预滚。滚动靠 `.scrollPosition(id: $scrollTarget)`，无 ScrollViewReader/`scrollTo`。
+**切换 = 先滚到顶、再切 filter**（单一主流程）：先把 `scrollTarget` 指向列表顶部锚点（`listTopAnchorID`，LazyVStack 上方恒 0 高普通视图——始终被布局，不依赖未物化行的行高估算），再在下一个 runloop turn 切换 `filterMode`。原因：滚动与内容变化同事务时，scrollPosition 与 LazyVStack 行高估算和 ScrollView 偏移保持竞速——实测滚动完全丢失或反复振荡（offset 1261→0→541→0→289），按住 ↓ 深滚后立刻切换可稳定复现。切标签后 `onChange(of: filterMode)`：关预览；`selectedIndex != 0` 时重置为新列表第一条，空列表落回搜索栏。滚动靠 `.scrollPosition(id: $scrollTarget)`，无 ScrollViewReader/`scrollTo`。
 
 ### 右键上下文菜单
 
-0.111.4 起由 `NativeHistoryTableView.menu(for:)` 直接弹出（`HistoryPopupContent.showContextMenu` 组装菜单）。以下为 SwiftUI 时期的实现，仅存档：`PopupHostingView.rightMouseDown` 发 `popupContextMenuNotification` → 置 `contextMenuArmed`，行 frame 按需快照（`RowFramePreferenceKey`），`resolveContextMenu` 在下一 runloop 回合 `showContextMenu`（`NSMenu.popUp` 不能在 SwiftUI 布局中途开始）。
+`PopupHostingView.rightMouseDown` 发 `popupContextMenuNotification` → 置 `contextMenuArmed`，行 frame 按需快照（`RowFramePreferenceKey`），`resolveContextMenu` 在下一 runloop 回合 `showContextMenu`（`NSMenu.popUp` 不能在 SwiftUI 布局中途开始）。
 
 菜单项 handler 用 `ContextMenuItemTarget`（`NSMenuItem.target` 是 weak，靠 `representedObject` 强持有）；动作一律 `currentIndex(of:)` 按稳定 entry_id 重新解析行。菜单 tracking 期间（`isMenuTracking`）Esc/←/→/⌘Z 全让位。图片行含「另存为…」（NSSavePanel 写 PNG）：保存面板是本应用的模态窗口，必然从非激活弹窗夺走 key——弹窗靠 `isPresentingModalPanel` 屏蔽这次 resign-key 的关闭（弹窗留在面板后方继续显示），`runModal()` 返回后 `makeKey()` 交还 key 状态。**不得在调起面板前 `close()`/`onClose()` 收起弹窗**（0.100.10 曾如此，实为把弹窗在保存过程中异步销毁）。
 

@@ -47,6 +47,13 @@ private struct PopupSection: Identifiable {
     let rows: [PopupRow]
 }
 
+private struct RowFramePreferenceKey: PreferenceKey {
+    static let defaultValue: [Int: CGRect] = [:]
+    static func reduce(value: inout [Int: CGRect], nextValue: () -> [Int: CGRect]) {
+        value.merge(nextValue()) { $1 }
+    }
+}
+
 private struct QuickSlotDialAnchorPreferenceKey: PreferenceKey {
     static let defaultValue: CGRect = .null
     static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
@@ -73,7 +80,6 @@ struct HistoryPopupContent: View {
     @State var hoverPreviewPendingRect: NSRect?
     @State var hoverPreviewShowTask: Task<Void, Never>?
     @State var hoverPreviewHideTask: Task<Void, Never>?
-    @State var nativeSelectedRowFrame: CGRect?
     @State private var isControlPressed: Bool = false
     @State private var isCommandPressed: Bool = false
     @State private var isRightCommandPressed: Bool = false
@@ -84,11 +90,16 @@ struct HistoryPopupContent: View {
     @State var effectiveSearchText: String = ""
     @State private var searchTask: Task<Void, Never>?
     @State var scrollTarget: Int?
+    let listTopAnchorID = 0
 
     @State var filterMode: FilterMode = .all
     @State var pendingFilterMode: FilterMode?
     @State var filterSwitchGeneration = 0
 
+    @State private var contextMenuArmed = false
+    @State private var pendingContextMenuRequest: PopupContextMenuRequest?
+
+    @Namespace private var selectionNamespace
     @Namespace private var filterTabNamespace
 
     @State var isDismissing: Bool = false
@@ -421,6 +432,8 @@ struct HistoryPopupContent: View {
             filterSwitchGeneration &+= 1
             showPreview = false
             scrollTarget = nil
+            contextMenuArmed = false
+            pendingContextMenuRequest = nil
             pendingQuickSlotAnchor = nil
             displayMemoBox.memo = nil
             editingItemId = nil
@@ -595,6 +608,11 @@ struct HistoryPopupContent: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: undoKeyNotification)) { _ in
             performUndo()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: popupContextMenuNotification)) { note in
+            guard let request = note.object as? PopupContextMenuRequest else { return }
+            pendingContextMenuRequest = request
+            contextMenuArmed = true
         }
         .onReceive(NotificationCenter.default.publisher(for: startInlineEditNotification)) { _ in
             if selectedIndex > 0 {
@@ -893,6 +911,7 @@ struct HistoryPopupContent: View {
     @ViewBuilder
     private var itemsList: some View {
         itemsListScrollView
+            .scrollPosition(id: $scrollTarget)
             .onChange(of: selectedIndex) { oldValue, newValue in
                 Perf.instant("swift", "nav.applied", data: String(newValue))
                 if newValue == 0 {
@@ -906,61 +925,128 @@ struct HistoryPopupContent: View {
                 }
             }
             .reportSpotlightFrame(.list, hasSelectedRow: selectedIndex > 0)
-            .background {
-                if let frame = nativeSelectedRowFrame {
-                    Color.clear
-                        .preference(key: QuickSlotDialAnchorPreferenceKey.self, value: frame)
-                        .preference(key: SpotlightFramePreferenceKey.self,
-                                    value: SpotlightGeometry(frames: [.selectedRow: frame]))
-                }
-            }
+    }
+
+    private static var rowChangeTransition: AnyTransition {
+        .opacity.combined(with: .scale(scale: 0.96))
     }
 
     private var itemsListScrollView: some View {
-        let model = nativeListModel(from: currentDisplayMemo)
-        return NativeHistoryListView(
-            rows: model.rows,
-            structureToken: model.structureToken,
-            visualToken: model.visualToken,
-            theme: nativeTheme,
-            selectedItemId: nativeSelectedItemId,
-            editingItemID: editingItemId,
-            editingText: $editingText,
-            resetToken: nativeResetToken,
-            scrollTarget: scrollTarget,
-            isDeleteModifierPressed: isControlPressed,
-            isCommandPressed: isCommandPressed,
-            canToggleQueue: PasteDeliveryMode.current == .keystroke,
-            searchQuery: effectiveSearchText,
-            onActivate: { index, item in
-                activateRow(index: index, item: item)
-            },
-            onToggleQueue: { item in
-                toggleQueue(item)
-            },
-            onHoverChange: { item, hovering, rect, moved in
-                handleRowHover(item: item, hovering: hovering, screenRect: rect, moved: moved)
-            },
-            onContextMenu: { item, windowPoint in
-                closeHoverPreview()
-                showContextMenu(for: PopupContextMenuRequest(entryId: item.id,
-                                                             windowPoint: windowPoint))
-            },
-            onCommitRemark: { entryId, text in
-                commitInlineEditing(entryId: entryId, newText: text)
-            },
-            onCancelRemark: {
-                cancelInlineEditing()
-            },
-            onDragPayload: { item in
-                nativeDragPayload(for: item)
-            },
-            reportsSelectedRowFrame: OnboardingGuide.shared.isActive || isRightCommandPressed,
-            onSelectedRowFrame: { frame in
-                nativeSelectedRowFrame = frame
+        ScrollView {
+            VStack(spacing: 0) {
+                Color.clear
+                    .frame(height: 0)
+                    .id(listTopAnchorID)
+                LazyVStack(spacing: 3, pinnedViews: [.sectionHeaders]) {
+                    let queueOrderByID = PasteQueueManager.shared.orderMap
+                    let canToggleQueue = PasteDeliveryMode.current == .keystroke
+                    ForEach(popupSections) { section in
+                        Section {
+                            ForEach(section.rows, id: \.id) { row in
+                                let index = row.index
+                                let item = row.item
+                                let shortcut: String? = isCommandPressed && index < 9 ? "⌘\(index + 1)" : nil
+                                let spotlightRowArmed = OnboardingGuide.shared.isActive && selectedIndex == index + 1
+                                let dialRowArmed = isRightCommandPressed && selectedIndex == index + 1
+                                ItemRowView(
+                                    item: item,
+                                    isSelected: selectedIndex == index + 1,
+                                    isDeleteModifierPressed: isControlPressed,
+                                    shortcutHint: shortcut,
+                                    queueOrder: queueOrderByID[item.id],
+                                    canToggleQueue: canToggleQueue,
+                                    isFavorite: backend.favoriteIds.contains(item.id),
+                                    quickSlot: backend.slotByEntryId[item.id],
+                                    isEditingRemark: editingItemId == item.id,
+                                    editingText: $editingText,
+                                    searchQuery: effectiveSearchText,
+                                    onToggleQueue: { toggleQueue(item) },
+                                    onCommitRemark: { newText in
+                                        commitInlineEditing(entryId: item.id, newText: newText)
+                                    },
+                                    onCancelRemark: {
+                                        cancelInlineEditing()
+                                    },
+                                    onHoverChange: { hovering, rect, moved in
+                                        handleRowHover(item: item, hovering: hovering,
+                                                       screenRect: rect, moved: moved)
+                                    },
+                                    selectionNamespace: selectionNamespace
+                                )
+                                .equatable()
+                                .onDrag({
+                                    dragProvider(item: item, batch: batchDragPlan(for: item))
+                                }, preview: {
+                                    let plan = batchDragPlan(for: item)
+                                    DragChip(item: plan?.payload ?? item, count: plan?.count ?? 1)
+                                })
+                                .contentShape(Rectangle())
+                                .onTapGesture { activateRow(index: index, item: item) }
+                                .background {
+                                    if contextMenuArmed || spotlightRowArmed || dialRowArmed {
+                                        GeometryReader { geo in
+                                            let frame = geo.frame(in: .global)
+                                            Color.clear
+                                                .preference(
+                                                    key: RowFramePreferenceKey.self,
+                                                    value: contextMenuArmed ? [item.id: frame] : [:]
+                                                )
+                                                .preference(
+                                                    key: SpotlightFramePreferenceKey.self,
+                                                    value: spotlightRowArmed
+                                                        ? SpotlightGeometry(frames: [.selectedRow: frame])
+                                                        : SpotlightGeometry()
+                                                )
+                                                .preference(
+                                                    key: QuickSlotDialAnchorPreferenceKey.self,
+                                                    value: dialRowArmed ? frame : .null
+                                                )
+                                        }
+                                    }
+                                }
+                                .id(item.id)
+                                .transition(Self.rowChangeTransition)
+                            }
+                        } header: {
+                            if section.showsHeader {
+                                DateSeparatorView(timestamp: section.timestamp)
+                                    .padding(.top, section.isFirst ? 2 : 8)
+                                    .padding(.bottom, 1)
+                                    .background {
+                                        Rectangle()
+                                            .fill(Color.black)
+                                            .blendMode(.destinationOut)
+                                    }
+                                    .id(section.id)
+                                    .transition(Self.rowChangeTransition)
+                            }
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-        )
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .compositingGroup()
+            .padding(.all, 2)
+            .animation(.spring(response: 0.18, dampingFraction: 0.82, blendDuration: 0),
+                       value: selectedIndex)
+            .animation(rowsReadyForAnimation
+                       ? .spring(response: 0.28, dampingFraction: 0.82, blendDuration: 0)
+                       : nil,
+                       value: backend.itemsGeneration)
+        }
+        .onPreferenceChange(RowFramePreferenceKey.self) { frames in
+            guard contextMenuArmed, let request = pendingContextMenuRequest else { return }
+            contextMenuArmed = false
+            pendingContextMenuRequest = nil
+            resolveContextMenu(frames: frames, request: request)
+        }
+        .onPreferenceChange(QuickSlotDialAnchorPreferenceKey.self) { frame in
+            let next = frame.isNull ? CGRect.null : frame
+            if next != dialAnchor {
+                dialAnchor = next
+            }
+            refreshQuickSlotDial()
+        }
         .background(theme.popupRowDefault)
         .overlay(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
@@ -969,102 +1055,7 @@ struct HistoryPopupContent: View {
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 
-    private var nativeSelectedItemId: Int? {
-        guard selectedIndex > 0, selectedIndex <= displayItems.count else { return nil }
-        return displayItems[selectedIndex - 1].id
-    }
-
-    private var nativeResetToken: Int {
-        filterSwitchGeneration
-    }
-
-    private var nativeTheme: NativeHistoryListTheme {
-        NativeHistoryListTheme(
-            primaryText: NSColor(theme.popupPrimaryText),
-            secondaryText: NSColor(theme.popupSecondaryText),
-            mutedText: NSColor(theme.popupMutedText),
-            rowHover: NSColor(theme.popupRowHover),
-            rowBorder: NSColor(theme.popupRowBorder),
-            selectedFill: NSColor.selectedContentBackgroundColor,
-            deleteFill: NSColor.systemRed.blended(withFraction: 0.22, of: .black) ?? .systemRed,
-            accent: NSColor.controlAccentColor,
-            tagAccent: NSColor(theme.popupRemarkAccent),
-            searchHighlightBackground: NSColor(theme.popupSearchHighlightBackground),
-            searchHighlightText: NSColor(theme.popupSearchHighlightText)
-        )
-    }
-
-    private struct NativeListModel {
-        let rows: [NativeHistoryListRow]
-        let structureToken: Int
-        let visualToken: Int
-    }
-
-    private func nativeListModel(from memo: DisplayMemo) -> NativeListModel {
-        let perfModel = PerfSpan.start("swift", "list.model")
-        defer { perfModel?.end() }
-        let favorites = backend.favoriteIds
-        let slots = backend.slotByEntryId
-        let queue = PasteQueueManager.shared.orderMap
-        let command = isCommandPressed
-        let editingId = editingItemId
-
-        var rows: [NativeHistoryListRow] = []
-        rows.reserveCapacity(memo.items.count * 2)
-        var structure = Hasher()
-        var visual = Hasher()
-        structure.combine(memo.itemsGeneration)
-        structure.combine(memo.effectiveSearchText)
-        structure.combine(memo.searchResultsGeneration)
-        structure.combine(memo.filterMode)
-        visual.combine(command)
-
-        for section in memo.sections {
-            if section.showsHeader {
-                structure.combine(section.id)
-                structure.combine(true)
-                rows.append(NativeHistoryListRow(
-                    id: section.id,
-                    kind: .separator,
-                    timestamp: section.timestamp,
-                    itemIndex: -1,
-                    item: nil,
-                    isFavorite: false,
-                    quickSlot: nil,
-                    queueOrder: nil,
-                    shortcutHint: nil
-                ))
-            }
-            for row in section.rows {
-                let item = row.item
-                let favorite = favorites.contains(item.id)
-                let slot = slots[item.id]
-                let order = queue[item.id]
-                let hint = command && row.index < 9 ? "⌘\(row.index + 1)" : nil
-                structure.combine(item.id)
-                structure.combine(false)
-                visual.combine(favorite)
-                visual.combine(slot)
-                visual.combine(order)
-                visual.combine(hint)
-                rows.append(NativeHistoryListRow(
-                    id: item.id,
-                    kind: .item,
-                    timestamp: item.timestamp,
-                    itemIndex: row.index,
-                    item: item,
-                    isFavorite: favorite,
-                    quickSlot: slot,
-                    queueOrder: order,
-                    shortcutHint: hint,
-                    isEditing: editingId == item.id
-                ))
-            }
-        }
-        return NativeListModel(rows: rows,
-                               structureToken: structure.finalize(),
-                               visualToken: visual.finalize())
-    }
+    private var popupSections: [PopupSection] { currentDisplayMemo.sections }
 
     private func activateRow(index: Int, item: ClipboardItem) {
         if editingItemId == item.id { return }

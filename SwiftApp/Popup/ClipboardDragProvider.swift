@@ -3,49 +3,57 @@ import Foundation
 import UniformTypeIdentifiers
 
 enum ClipboardDragProvider {
-    struct Payload {
-        let data: [String: Data]
-        let suggestedName: String?
-    }
-
-    static func payload(for item: ClipboardItem, richText: Bool = false) -> Payload? {
+    static func provider(for item: ClipboardItem, richText: Bool = false) -> NSItemProvider {
+        let perfDrag = PerfSpan.start("swift", "drag.materialize")
+        if let span = perfDrag {
+            span.data = item.isImage ? "image" : "text"
+        }
+        let provider = NSItemProvider()
+        defer { perfDrag?.end() }
         switch item {
         case .text:
             guard let full = item.fullText else {
                 debugLog("Drag: failed to load full text for entry \(item.id)")
-                return nil
+                return NSItemProvider()
             }
             let plain = Data(full.utf8)
             let rich = richText ? Self.richRepresentations(for: full) : [:]
             let types = richText ? Self.richTextRepresentationTypes : Self.plainTextRepresentationTypes
-            var data: [String: Data] = [:]
             for type in types {
-                data[type.identifier] = rich[type.identifier] ?? plain
+                let data = rich[type.identifier] ?? plain
+                provider.registerDataRepresentation(
+                    forTypeIdentifier: type.identifier,
+                    visibility: .all
+                ) { completion in
+                    completion(data, nil)
+                    return nil
+                }
             }
-            return Payload(data: data, suggestedName: nil)
+
         case .image:
             guard let data = item.imageData else {
                 debugLog("Drag: failed to load PNG data for image entry \(item.id); offering empty drag")
-                return nil
+                return NSItemProvider()
             }
+
             do {
                 let url = try temporaryImageURL(entryId: item.id)
                 try data.write(to: url, options: .atomic)
-                return Payload(data: [UTType.fileURL.identifier: Data(url.absoluteString.utf8)],
-                               suggestedName: url.lastPathComponent)
+
+                provider.registerDataRepresentation(
+                    forTypeIdentifier: UTType.fileURL.identifier,
+                    visibility: .all
+                ) { completion in
+                    completion(url.absoluteString.data(using: .utf8), nil)
+                    return nil
+                }
+                provider.suggestedName = url.lastPathComponent
             } catch {
                 errorLog("Drag: failed to materialize image entry \(item.id): \(error)")
-                return nil
+                return NSItemProvider()
             }
         }
-    }
-
-    static func placeholderPayload() -> Payload {
-        var data: [String: Data] = [:]
-        for type in plainTextRepresentationTypes {
-            data[type.identifier] = Data()
-        }
-        return Payload(data: data, suggestedName: nil)
+        return provider
     }
 
     private static let plainTextRepresentationTypes: [UTType] = [
@@ -53,6 +61,20 @@ enum ClipboardDragProvider {
         .plainText,
         .text,
     ]
+
+    static func placeholderProvider() -> NSItemProvider {
+        let provider = NSItemProvider()
+        for type in plainTextRepresentationTypes {
+            provider.registerDataRepresentation(
+                forTypeIdentifier: type.identifier,
+                visibility: .all
+            ) { completion in
+                completion(Data(), nil)
+                return nil
+            }
+        }
+        return provider
+    }
 
     private static let richTextRepresentationTypes: [UTType] = [
         .utf8PlainText,
