@@ -1,4 +1,5 @@
 import AppKit
+import Carbon
 import CoreGraphics
 
 enum QuickSlotKeyMap {
@@ -46,16 +47,37 @@ enum QuickSlotKeyMap {
 final class QuickSlotEventTap: @unchecked Sendable {
     static let shared = QuickSlotEventTap()
 
-    private var eventTap: CFMachPort?
-    private var runLoopSource: CFRunLoopSource?
-    private(set) var isRunning = false
+    private let lock = NSLock()
 
-    var boundSlots: Set<Int> = []
-    var popupOpen = false
-    var isRecording = false
-    var appIsFrontmost = false
-
+    private var boundSlotsStorage: Set<Int> = []
+    private var popupOpenStorage = false
+    private var isRecordingStorage = false
+    private var appIsFrontmostStorage = false
     private var swallowedKeyCodes: Set<Int64> = []
+
+    private var eventTap: CFMachPort?
+    private var activity: NSObjectProtocol?
+    private var wanted = false
+
+    var boundSlots: Set<Int> {
+        get { lock.withLock { boundSlotsStorage } }
+        set { lock.withLock { boundSlotsStorage = newValue } }
+    }
+
+    var popupOpen: Bool {
+        get { lock.withLock { popupOpenStorage } }
+        set { lock.withLock { popupOpenStorage = newValue } }
+    }
+
+    var isRecording: Bool {
+        get { lock.withLock { isRecordingStorage } }
+        set { lock.withLock { isRecordingStorage = newValue } }
+    }
+
+    var appIsFrontmost: Bool {
+        get { lock.withLock { appIsFrontmostStorage } }
+        set { lock.withLock { appIsFrontmostStorage = newValue } }
+    }
 
     private init() {}
 
@@ -70,117 +92,167 @@ final class QuickSlotEventTap: @unchecked Sendable {
 
     @discardableResult
     func start() -> Bool {
-        guard !isRunning else { return true }
-
-        let mask = (1 << CGEventType.keyDown.rawValue) | (1 << CGEventType.keyUp.rawValue)
-
-        let callback: CGEventTapCallBack = { proxy, type, event, refcon in
-            if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-                if let refcon = refcon {
-                    Unmanaged<QuickSlotEventTap>.fromOpaque(refcon)
-                        .takeUnretainedValue()
-                        .reEnable()
-                }
-                return Unmanaged.passUnretained(event)
+        if let tap = lock.withLock({ eventTap }) {
+            let newlyWanted = lock.withLock { () -> Bool in
+                defer { wanted = true }
+                return !wanted
             }
-
-            guard let refcon = refcon else {
-                return Unmanaged.passUnretained(event)
+            if newlyWanted {
+                beginActivity()
+                debugLog("QuickSlotEventTap: enabled with slots \(boundSlots.sorted())")
             }
-            let tapInstance = Unmanaged<QuickSlotEventTap>.fromOpaque(refcon).takeUnretainedValue()
-            guard tapInstance.isRunning else {
-                return Unmanaged.passUnretained(event)
-            }
-            if event.getIntegerValueField(.eventSourceUnixProcessID) == Int64(getpid()) {
-                return Unmanaged.passUnretained(event)
-            }
-            guard type == .keyDown || type == .keyUp else {
-                return Unmanaged.passUnretained(event)
-            }
-
-            let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
-
-            if type == .keyUp {
-                if tapInstance.swallowedKeyCodes.remove(keyCode) != nil {
-                    return nil
-                }
-                return Unmanaged.passUnretained(event)
-            }
-
-            guard let slot = QuickSlotKeyMap.slot(forKeyCode: keyCode) else {
-                return Unmanaged.passUnretained(event)
-            }
-            let shiftHeld = event.flags.contains(.maskShift)
-            if shiftHeld, !QuickSlotKeyMap.shiftYieldsDigit(event) {
-                return Unmanaged.passUnretained(event)
-            }
-            let sides = QuickSlotKeyMap.commandSides(rawFlags: event.flags.rawValue, allowingShift: shiftHeld)
-            guard sides.right else {
-                return Unmanaged.passUnretained(event)
-            }
-            if tapInstance.popupOpen || tapInstance.isRecording || tapInstance.appIsFrontmost {
-                return Unmanaged.passUnretained(event)
-            }
-            guard tapInstance.boundSlots.contains(slot) else {
-                return Unmanaged.passUnretained(event)
-            }
-
-            tapInstance.swallowedKeyCodes.insert(keyCode)
-            if event.getIntegerValueField(.keyboardEventAutorepeat) != 0 {
-                return nil
-            }
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    ClipboardBackend.shared.pasteQuickSlot(slot)
-                }
-            }
-            return nil
+            CGEvent.tapEnable(tap: tap, enable: true)
+            return true
         }
 
+        let mask = (1 << CGEventType.keyDown.rawValue) | (1 << CGEventType.keyUp.rawValue)
         let refcon = Unmanaged.passUnretained(self).toOpaque()
         guard let tap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
             place: .headInsertEventTap,
             options: .defaultTap,
             eventsOfInterest: CGEventMask(mask),
-            callback: callback,
+            callback: { _, type, event, refcon in
+                guard let refcon else { return Unmanaged.passUnretained(event) }
+                let instance = Unmanaged<QuickSlotEventTap>.fromOpaque(refcon).takeUnretainedValue()
+                return instance.handle(type: type, event: event)
+            },
             userInfo: refcon
         ) else {
             errorLog("QuickSlotEventTap: CGEvent.tapCreate failed (check Accessibility permission)")
             return false
         }
 
-        eventTap = tap
-        swallowedKeyCodes.removeAll()
-        let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
-        runLoopSource = source
-        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
-        CGEvent.tapEnable(tap: tap, enable: true)
-        isRunning = true
+        guard let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0) else {
+            CFMachPortInvalidate(tap)
+            errorLog("QuickSlotEventTap: failed to create run loop source")
+            return false
+        }
+
+        lock.withLock {
+            eventTap = tap
+            wanted = true
+            swallowedKeyCodes.removeAll()
+        }
+        beginActivity()
+
+        let thread = Thread { [self] in
+            CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
+            applyEnabledState()
+            CFRunLoopRun()
+        }
+        thread.name = "QuickSlotEventTap"
+        thread.qualityOfService = .userInteractive
+        thread.start()
+
         debugLog("QuickSlotEventTap: started with slots \(boundSlots.sorted())")
         return true
     }
 
     func stop() {
-        guard isRunning else { return }
-        isRunning = false
-        swallowedKeyCodes.removeAll()
-        if let tap = eventTap {
-            CGEvent.tapEnable(tap: tap, enable: false)
-            CFMachPortInvalidate(tap)
+        let tap = lock.withLock { () -> CFMachPort? in
+            guard wanted else { return nil }
+            wanted = false
+            swallowedKeyCodes.removeAll()
+            return eventTap
         }
-        if let source = runLoopSource {
-            CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
-            runLoopSource = nil
-        }
-        eventTap = nil
-        debugLog("QuickSlotEventTap: stopped")
+        guard let tap else { return }
+        CGEvent.tapEnable(tap: tap, enable: false)
+        endActivity()
+        debugLog("QuickSlotEventTap: disabled")
     }
 
-    private func reEnable() {
-        if let tap = eventTap {
-            CGEvent.tapEnable(tap: tap, enable: true)
-            debugLog("QuickSlotEventTap: re-enabled after system throttle")
+    private func handle(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+        if type == .tapDisabledByTimeout {
+            debugLog("QuickSlotEventTap: re-enabled after timeout")
+            applyEnabledState()
+            return Unmanaged.passUnretained(event)
         }
+        if type == .tapDisabledByUserInput {
+            scheduleReenableAfterSecureInput()
+            return Unmanaged.passUnretained(event)
+        }
+        guard type == .keyDown || type == .keyUp else {
+            return Unmanaged.passUnretained(event)
+        }
+        if event.getIntegerValueField(.eventSourceUnixProcessID) == Int64(getpid()) {
+            return Unmanaged.passUnretained(event)
+        }
+
+        let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+
+        if type == .keyUp {
+            let swallowed = lock.withLock { swallowedKeyCodes.remove(keyCode) != nil }
+            return swallowed ? nil : Unmanaged.passUnretained(event)
+        }
+
+        guard let slot = QuickSlotKeyMap.slot(forKeyCode: keyCode) else {
+            return Unmanaged.passUnretained(event)
+        }
+        let shiftHeld = event.flags.contains(.maskShift)
+        if shiftHeld, !QuickSlotKeyMap.shiftYieldsDigit(event) {
+            return Unmanaged.passUnretained(event)
+        }
+        let sides = QuickSlotKeyMap.commandSides(rawFlags: event.flags.rawValue, allowingShift: shiftHeld)
+        guard sides.right else {
+            return Unmanaged.passUnretained(event)
+        }
+
+        let shouldHandle = lock.withLock { () -> Bool in
+            guard !popupOpenStorage, !isRecordingStorage, !appIsFrontmostStorage,
+                  boundSlotsStorage.contains(slot) else { return false }
+            swallowedKeyCodes.insert(keyCode)
+            return true
+        }
+        guard shouldHandle else {
+            return Unmanaged.passUnretained(event)
+        }
+
+        if event.getIntegerValueField(.keyboardEventAutorepeat) != 0 {
+            return nil
+        }
+        DispatchQueue.main.async {
+            MainActor.assumeIsolated {
+                ClipboardBackend.shared.pasteQuickSlot(slot)
+            }
+        }
+        return nil
+    }
+
+    private func applyEnabledState() {
+        let (tap, enabled) = lock.withLock { (eventTap, wanted) }
+        guard let tap else { return }
+        CGEvent.tapEnable(tap: tap, enable: enabled)
+    }
+
+    private func scheduleReenableAfterSecureInput() {
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 1) { [weak self] in
+            guard let self, self.lock.withLock({ self.wanted }) else { return }
+            if IsSecureEventInputEnabled() {
+                self.scheduleReenableAfterSecureInput()
+            } else {
+                self.applyEnabledState()
+                debugLog("QuickSlotEventTap: re-enabled after secure input ended")
+            }
+        }
+    }
+
+    private func beginActivity() {
+        lock.withLock {
+            guard activity == nil else { return }
+            activity = ProcessInfo.processInfo.beginActivity(
+                options: .userInitiatedAllowingIdleSystemSleep,
+                reason: "Global quick slot hotkeys"
+            )
+        }
+    }
+
+    private func endActivity() {
+        let token = lock.withLock { () -> NSObjectProtocol? in
+            defer { activity = nil }
+            return activity
+        }
+        guard let token else { return }
+        ProcessInfo.processInfo.endActivity(token)
     }
 }

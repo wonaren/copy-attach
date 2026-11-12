@@ -721,3 +721,37 @@ fn test_backup_export_compacts_deleted_payload() {
     drop(backup_conn);
     let _ = std::fs::remove_file(&backup_path);
 }
+
+#[test]
+fn test_restore_tolerates_rows_the_loader_skips() {
+    let (_src_path, src_conn) = make_temp_db("skip_src");
+    let text = "旧备份里没有持久化预览的正文";
+    let entry = ClipboardEntry::text_entry(new_entry_id(), text, 1700000000, String::new(), String::new(), 0);
+    insert_entry_to_db(&src_conn, &entry, Some(text), None, None).unwrap();
+    src_conn
+        .execute("UPDATE clipboard_history SET preview = ''", [])
+        .unwrap();
+
+    let mut backup_path = std::env::temp_dir();
+    backup_path.push(format!("copyattach-skip-{}.cabackup", std::process::id()));
+    let _ = std::fs::remove_file(&backup_path);
+    export_backup(&src_conn, &backup_path).expect("export_backup must succeed");
+
+    let (_dst_path, mut dst_conn) = make_temp_db("skip_dst");
+    let result = restore_backup_overwrite(&mut dst_conn, &backup_path, 10_000);
+    assert!(
+        result.is_ok(),
+        "restore must not fail because a row has no persisted preview: {result:?}"
+    );
+    let (restored_count, _favorites, snapshot) = result.unwrap();
+    assert_eq!(restored_count, 0);
+    assert!(snapshot.items.is_empty());
+
+    let (_merge_dst_path, mut merge_dst_conn) = make_temp_db("skip_merge_dst");
+    let merged = restore_backup_merge(&mut merge_dst_conn, &backup_path, 10_000);
+    assert!(
+        merged.is_ok(),
+        "merge restore must not fail because a row has no persisted preview: {merged:?}"
+    );
+    let _ = std::fs::remove_file(&backup_path);
+}

@@ -346,30 +346,44 @@ fn keep_newest_row(conn: &Connection, rows: &[(i64, i64)]) -> Result<(), rusqlit
 }
 
 pub(crate) fn trim_db_history(conn: &Connection, threshold: usize) -> Result<HashSet<i64>, ()> {
+    trim_db_history_keeping(conn, threshold, None)
+}
+
+pub(crate) fn trim_db_history_keeping(
+    conn: &Connection,
+    threshold: usize,
+    keep_row_id: Option<i64>,
+) -> Result<HashSet<i64>, ()> {
     trim_oldest_ordinary(conn,
         "(SELECT MAX(0, COUNT(*) - ?1) FROM clipboard_history
-         WHERE id NOT IN (SELECT row_id FROM clipboard_deleted))", threshold as i64)
+         WHERE id NOT IN (SELECT row_id FROM clipboard_deleted))", threshold as i64, keep_row_id)
 }
 
 pub(crate) fn trim_db_history_by_percent(conn: &Connection, percent: i32) -> Result<HashSet<i64>, ()> {
     let limit = format!("(SELECT (COUNT(*) * ?1 + 99) / 100 FROM clipboard_history WHERE {ORDINARY_HISTORY})");
-    trim_oldest_ordinary(conn, &limit, i64::from(percent))
+    trim_oldest_ordinary(conn, &limit, i64::from(percent), None)
 }
 
 const ORDINARY_HISTORY: &str = "id NOT IN (SELECT row_id FROM clipboard_deleted)
     AND entry_id NOT IN (SELECT entry_id FROM clipboard_favorites)
     AND entry_id NOT IN (SELECT entry_id FROM clipboard_quick_slots)";
 
-fn trim_oldest_ordinary(conn: &Connection, limit: &str, value: i64) -> Result<HashSet<i64>, ()> {
+fn trim_oldest_ordinary(
+    conn: &Connection,
+    limit: &str,
+    value: i64,
+    keep_row_id: Option<i64>,
+) -> Result<HashSet<i64>, ()> {
     let sql = format!("DELETE FROM clipboard_history
                WHERE id IN (SELECT id FROM clipboard_history
                             WHERE {ORDINARY_HISTORY}
+                              AND (?2 IS NULL OR id != ?2)
                             ORDER BY timestamp ASC, id ASC
                             LIMIT {limit})
                RETURNING id");
     (|| {
         let mut stmt = conn.prepare_cached(&sql)?;
-        let rows = stmt.query_map([value], |row| row.get(0))?;
+        let rows = stmt.query_map(rusqlite::params![value, keep_row_id], |row| row.get(0))?;
         rows.collect::<Result<HashSet<i64>, _>>()
     })().map_err(|e: rusqlite::Error| crate::error_log!("CopyAttach: failed to trim DB history: {e}"))
 }
@@ -750,7 +764,7 @@ pub(crate) fn persist_entry_to_db(
     insert_entry_to_db(&tx, entry, text, image_png, image_thumb)?;
     let row_id = tx.last_insert_rowid();
     let duplicates = delete_matching_entry(&tx, entry, text)?;
-    let mut removed = trim_db_history(&tx, threshold)?;
+    let mut removed = trim_db_history_keeping(&tx, threshold, Some(row_id))?;
     removed.extend(duplicates);
     tx.commit().map_err(|e| {
         crate::error_log!("CopyAttach: failed to commit write transaction: {e}");

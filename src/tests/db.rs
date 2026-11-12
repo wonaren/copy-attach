@@ -252,6 +252,41 @@ fn test_trim_db_history_never_evicts_favorites() {
 }
 
 #[test]
+fn test_new_capture_survives_when_protected_rows_fill_threshold() {
+    let mut conn = test_db();
+    for i in 0..2u64 {
+        insert_text(&conn, &format!("pinned-{i}"), i);
+    }
+    let pinned: Vec<u64> = {
+        let mut stmt = conn
+            .prepare("SELECT entry_id FROM clipboard_history ORDER BY timestamp ASC")
+            .unwrap();
+        let it = stmt.query_map([], |r| r.get::<_, i64>(0)).unwrap();
+        it.map(|r| r.unwrap() as u64).collect()
+    };
+    for id in &pinned {
+        set_favorite(&conn, *id, true).unwrap();
+    }
+
+    let captured = ClipboardEntry::text_entry(new_entry_id(), "fresh capture", 10, String::new(), String::new(), 0);
+    let (row_id, removed) = persist_entry_to_db(&mut conn, &captured, Some("fresh capture"), None, None, 2)
+        .expect("persist must succeed");
+
+    assert!(
+        !removed.contains(&row_id),
+        "the row written by this capture must not be trimmed away in the same transaction"
+    );
+    let stored: i64 = conn
+        .query_row("SELECT COUNT(*) FROM clipboard_history WHERE id = ?1", [row_id], |r| r.get(0))
+        .unwrap();
+    assert_eq!(stored, 1, "the new capture must remain stored");
+    let favorites: i64 = conn
+        .query_row("SELECT COUNT(*) FROM clipboard_favorites", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(favorites, 2, "protected rows must still survive");
+}
+
+#[test]
 fn test_import_favorites_skips_missing_rows_and_is_idempotent() {
     let conn = test_db();
     for i in 0..2u64 {

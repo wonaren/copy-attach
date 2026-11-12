@@ -218,13 +218,15 @@ pub(crate) struct RestoredSnapshot {
 type RestoreResult = Result<(usize, Vec<u64>, RestoredSnapshot), String>;
 
 fn read_restored_snapshot(conn: &Connection, threshold: usize) -> Result<RestoredSnapshot, String> {
-    let live_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM clipboard_history WHERE id NOT IN (SELECT row_id FROM clipboard_deleted)",
+    let loadable_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM clipboard_history
+         WHERE id NOT IN (SELECT row_id FROM clipboard_deleted)
+           AND (entry_type = 1 OR (entry_type = 0 AND preview IS NOT NULL AND preview <> ''))",
         [],
         |row| row.get(0),
     ).map_err(|e| format!("读取恢复后的条目数失败: {e}"))?;
     let items = super::load_history_from_db(conn, threshold);
-    if items.len() as i64 != live_count {
+    if items.len() as i64 != loadable_count {
         return Err("恢复后的历史记录不完整".to_string());
     }
     let slots = super::load_quick_slots(conn).map_err(|()| "读取恢复后的快捷槽位失败".to_string())?;

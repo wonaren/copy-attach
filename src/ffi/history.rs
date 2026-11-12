@@ -492,7 +492,11 @@ pub extern "C" fn clipboard_undo_delete() -> c_int {
             return 0;
         }
     }
-    let Ok(mut removed) = crate::db::trim_db_history(&tx, b.cleanup_threshold.load(Ordering::Relaxed)) else {
+    let Ok(mut removed) = crate::db::trim_db_history_keeping(
+        &tx,
+        b.cleanup_threshold.load(Ordering::Relaxed),
+        Some(new_row_id),
+    ) else {
         return 0;
     };
     if removed.contains(&new_row_id) {
