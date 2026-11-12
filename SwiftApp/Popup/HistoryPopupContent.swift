@@ -233,12 +233,12 @@ struct HistoryPopupContent: View {
         guard isRightCommandPressed, !isDismissing, !showPreview, editingItemId == nil,
               !dialAnchor.isNull,
               let popup = popupWindow, popup.isVisible,
-              let contentView = popup.contentView else {
+              let hostingView = popup.focusTargetView else {
             QuickSlotDialWindow.shared.hide()
             return
         }
         let localCenter = NSPoint(x: dialAnchor.midX, y: dialAnchor.midY)
-        let windowPoint = contentView.convert(localCenter, to: nil)
+        let windowPoint = hostingView.convert(localCenter, to: nil)
         let screenPoint = popup.convertPoint(toScreen: windowPoint)
         QuickSlotDialWindow.shared.show(boundSlots: Set(backend.slotByEntryId.values),
                                         popupFrame: popup.frame,

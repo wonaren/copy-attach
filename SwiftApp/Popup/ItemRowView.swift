@@ -152,9 +152,6 @@ struct ItemRowView: View {
                     .symbolEffect(.bounce, value: isFavorite)
                     .transition(.scale(scale: 0.9).combined(with: .opacity))
             }
-            if let slot = quickSlot, shortcutHint == nil {
-                quickSlotBadge(slot)
-            }
             queueToggleControl
             if isSelected && isDeleteModifierPressed {
                 Image(systemName: "delete.left.fill")
@@ -165,12 +162,9 @@ struct ItemRowView: View {
                     .symbolEffect(.pulse, isActive: isDeleteModifierPressed)
                     .transition(.scale(scale: 0.9).combined(with: .opacity))
             } else if let hint = shortcutHint {
-                Text(hint)
-                    .font(.system(size: 13, weight: .regular))
-                    .foregroundColor(isSelected ? sourceNameColor(true) : Color(nsColor: .controlAccentColor))
-                    .lineLimit(1)
-                    .monospacedDigit()
-                    .transition(.scale(scale: 0.9).combined(with: .opacity))
+                shortcutBadge(hint)
+            } else if let slot = quickSlot {
+                shortcutBadge("右⌘\(slot)")
             } else if !item.sourceName.isEmpty {
                 let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
                 let nameText: Text = query.isEmpty ? Text(item.sourceName) : Text(highlightedAttributedString(item.sourceName, query: query))
@@ -197,13 +191,12 @@ struct ItemRowView: View {
         })
     }
 
-    private func quickSlotBadge(_ slot: Int) -> some View {
-        Text("右⌘\(slot)")
-            .font(.system(size: 12, weight: .medium))
+    private func shortcutBadge(_ label: String) -> some View {
+        Text(label)
+            .font(.system(size: 13, weight: .regular))
             .monospacedDigit()
             .foregroundColor(isSelected ? sourceNameColor(true) : Color(nsColor: .controlAccentColor))
             .lineLimit(1)
-            .padding(.horizontal, 2)
             .transition(.scale(scale: 0.9).combined(with: .opacity))
     }
 

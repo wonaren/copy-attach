@@ -81,9 +81,8 @@ final class UpdateDownloader: NSObject, ObservableObject, URLSessionDownloadDele
         debugLog("[update] start download of v\(cleanVersion)")
         Self.cleanupLegacyArtifacts()
         Task {
-            if let notes = await UpdateChecker.releaseNotes(version: cleanVersion) {
-                UserDefaults.standard.set(notes, forKey: UpdateBadge.pendingNotesKey)
-            }
+            let notes = await UpdateChecker.releaseNotes(version: cleanVersion)
+            UserDefaults.standard.set(notes, forKey: UpdateBadge.pendingNotesKey)
             await performDownload(version: cleanVersion)
         }
     }
