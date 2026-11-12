@@ -105,6 +105,12 @@
 | `scripts/stress/prepare.sh` | P0：检查构建/签名、备份真实库、准备隔离副本、记录基线 |
 | `scripts/stress/data_suite.sh` | P1：真实库副本启动 + 数据集启动 + 弹窗开合 + 捕获风暴 + 不变量对账 + 崩溃扫描 |
 | `scripts/stress/rust_suite.sh` | P1：真实路径批量删除/撤销/内存断言（Rust 测试二进制，隔离库） |
+| `scripts/stress/ui_suite.sh` | P2：真实 GUI 搜索/收藏/删除/撤销/预览/队列（cua-driver，隔离实例） |
+| `scripts/stress/race_suite.sh` | P3：捕获与开合交错、kill -9 恢复、真实路径测试重复 ≥20 次 |
+| `scripts/stress/fault_suite.sh` | P4：只读库退避恢复、损坏库弹窗重建、RAM 盘写满恢复 |
+| `scripts/stress/soak_suite.sh` | P5：8 小时长跑，每小时内存/线程/fd/不变量，定时重启持久化 |
+| `scripts/stress/popup_cycles.sh` | 弹窗开合与内存检查点 |
+| `scripts/stress/thumb_probe.sh` | 缩略图延迟 A/B（迁移前后） |
 | `scripts/stress/invariants.py` | SQL 不变量检查（收藏/槽位/撤销侧表/去重/阈值/水位） |
 | `scripts/stress/crash_scan.sh` | 指定时间窗口内的 `.ips` 崩溃报告扫描 |
 | `scripts/stress/common.sh` | 隔离启动、备份、vmmap、日志等待等公共函数 |
@@ -114,6 +120,10 @@ bash scripts/stress/prepare.sh
 bash scripts/stress/data_suite.sh                # 1000 条 + 200 次捕获 + 10 次开合
 bash scripts/stress/data_suite.sh --full         # 10000 条数据集
 bash scripts/stress/rust_suite.sh                # 真实路径批量删除/撤销/内存
+bash scripts/stress/ui_suite.sh --rounds 5       # GUI 交互（需 cua-driver 与辅助功能授权）
+bash scripts/stress/race_suite.sh                # 竞态：20 轮 + kill -9 + Rust 20 次
+bash scripts/stress/fault_suite.sh               # 故障注入（--skip-disk 跳过 RAM 盘）
+bash scripts/stress/soak_suite.sh --hours 8      # 8 小时长跑（期间真实实例保持退出）
 ```
 
 执行期间会临时退出真实实例、启动隔离实例；脚本退出时恢复真实实例与原剪贴板文本。真实库只备份、不写入。
