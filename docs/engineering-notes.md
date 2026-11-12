@@ -63,9 +63,19 @@ Phase 1 同步 hash + 缩略图（fit 进显示框 920×200px = 460×100pt @2×�
 
 ### 预览解码（0.99.17-dev）
 
-预览解码走 Rust 而非 ImageIO：ImageIO 的缩略图解码把全分辨率解码 + 缩放结果留在 malloc 区永不归还（实测 8 个已释放的预览解码缓冲以 `MALLOC_LARGE (empty)` 形态滞留 ~47MB——正是「预览关闭后内存不回落」的根因）。`clipboard_decode_preview_by_db_id` 用与捕获管线相同的编解码路径（RGBA8 PNG 快路径 + 通用回退）解码并降采样到 ≤max_dim，所有中间缓冲归还时标记可回收；交付给 Swift 的是**恰好 w×h×4 的独立缓冲**，分配后即 claim。Swift 侧 `ImageDecode.previewImage` 用 `CGDataProvider(dataInfo:data:size:releaseData:)` 包成 CGImage，`PreviewBufferBox` 经 `Unmanaged.passRetained` 挂 dataInfo——CGImage 消亡（预览关闭）时回调触发 box deinit → `clipboard_preview_buffer_release`（标记可回收 + dealloc）。**交付缓冲只能经 `clipboard_preview_buffer_release` 释放，绝不能用 `clipboard_free_bytes`（两者 Layout 不同）。**
+预览解码走 Rust 而非 ImageIO：ImageIO 的缩略图解码把全分辨率解码 + 缩放结果留在 malloc 区永不归还（实测 8 个已释放的预览解码缓冲以 `MALLOC_LARGE (empty)` 形态滞留 ~47MB——正是「预览关闭后内存不回落」的根因）。`clipboard_decode_preview_by_db_id` 用与捕获管线相同的编解码路径（RGBA8 PNG 快路径 + 通用回退）解码并降采样到 ≤max_dim，所有中间缓冲归还时标记可回收；交付给 Swift 的是**恰好 w×h×4 的独立缓冲**，分配后即 claim。Swift 侧 `ImageDecode.previewImage` 用 `CGDataProvider(dataInfo:data:size:releaseData:)` 包成 CGImage，`PreviewBufferBox` 经 `Unmanaged.passRetained` 挂 dataInfo——CGImage 的视图与缓存引用全部释放后，回调触发 box deinit → `clipboard_preview_buffer_release`（标记可回收 + dealloc）。**交付缓冲只能经 `clipboard_preview_buffer_release` 释放，绝不能用 `clipboard_free_bytes`（两者 Layout 不同）。**
 
 **关闭路径强制释放（0.99.25-dev）**：`PreviewWindow.close()` 先 `hostingView.rootView = AnyView(EmptyView())` + `hostingView = nil` 再 `contentView = nil`——contentView 不是唯一持有者，窗口自身强持有 hostingView，其 rootView 上的 `PreviewContent.image` 不拆会随窗口存活到下次打开；配套 `onDisappear { image = nil }` 兜住任务取消间隙。
+
+**预览缓存按弹窗会话释放（0.111.16-dev）**：0.111.1 引入的 `ImageDecode.previewCache` 同时缓存 800px 气泡和大预览（8 项 / 24MB 预算），原来跨会话保留，导致关闭视图仍不释放交付缓冲。现在 `HistoryPopupWindow.show()` 新建会话、实际 `close()` 结束会话并清空；关闭动画反向打开不结束会话。缓存和 UUID 会话标识均在 MainActor，排队与后台解码完成后分别检查会话身份和 `Task.isCancelled`，检查到缓存写入之间没有 await。Rust 解码仍在 detached task，释放仍走原有 `PreviewBufferBox → clipboard_preview_buffer_release`，没有改 madvise/claim 契约。列表缩略图缓存保持跨会话复用。
+
+2026-11-12，34 条真实运行库、同一组 8 张图片、正式签名 release 构建，未开 MallocStackLogging：
+
+- 修改前（0.111.15-dev）关闭后仍有 2 个交付缓冲，合计 **20.06 MiB**；修改后（0.111.16-dev）相同路径关闭后 **0 个**。随后 8 轮「打开弹窗 → 预览同一图两次 → 关闭」全部完成，每轮只有一次解码，4/8 轮后的 heap 均为 0 个预览缓冲；快速切图产生的 2 次 cancelled 加载结束后仍为 0。
+- `Writable regions` 的 written / resident：旧进程八图关闭后 **161.6 / 155.2 MiB**；新进程八图关闭后 **164.6 / 170.5 MiB**，再经过 4 / 8 轮为 **118.8 / 124.3**、**96.7 / 100.3 MiB**。释放后的页可以继续驻留，新进程八图后的 `Malloc Large (Reusable)` resident 为 97.4 MiB。两个进程热身历史不同，这些整进程数字不能直接当成改动的 RAM 节省量；直接证据是活预览缓冲归零及 release 日志。
+- 同次弹窗内再次预览：8 次 `preview.image_load` 中位 **0.021 ms**（0.017–0.027 ms）；跨会话重新解码同一图：中位 **35.44 ms**（31.16–44.12 ms）。初次遍历八图的加载中位 **31.79 ms**，最慢 **117.38 ms**。该埋点是加载任务开始到图像写入视图状态，不含屏幕扫描输出。
+- 相同八图遍历的 Rust 解码中位：修改前 28.17 ms（7 次，另一次命中旧缓存）；修改后 28.51 ms（8 次）。随后八轮的列表缩略图为 **64 次命中 / 0 次未命中**。前后 Perf 仪表均通过全部门禁。
+- `bash scripts/check_preview_session.sh` 用受控解码时序运行 8 轮，覆盖缓存复用/关闭失效、排队时关闭、旧解码跨到新会话、任务取消；它是并发回归检查，真实路径内存与延迟证据来自上面的 GUI 实测。实测结果汇总于本节。
 
 **imageops::resize 陷阱**：`image` crate 的 `resize`（CatmullRom/Lanczos3）内部经 `Rgba32FImage`（width×height×16 字节）中转——2940×1846→2048 预览一次分配 60.5MB f32 缓冲且释放后永不归还（malloc_history 定位）；预览路径与捕获 Phase 1 缩略图（0.99.26-dev，`create_thumbnail_fast`）均改用自研两遍 CatmullRom u8 resize（`image::resize_rgba`，水平过渡带标记可回收，直通 alpha 不预乘），缩略图尺寸逻辑（`thumbnail_target_dims`）不变。GIF blob（`out_is_gif`）仍走 `NSImage(data:)` 保动画（历史存量，现行存储一律 PNG）。
 

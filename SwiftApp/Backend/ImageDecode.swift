@@ -41,23 +41,39 @@ enum ImageDecode {
 
     private static let decodeGate = PreviewDecodeGate(limit: 2)
 
-    nonisolated(unsafe) private static let previewCache: NSCache<NSString, DecodedImage> = {
+    @MainActor private static var previewSession: UUID?
+
+    @MainActor private static let previewCache: NSCache<NSString, DecodedImage> = {
         let cache = NSCache<NSString, DecodedImage>()
         cache.countLimit = 8
         cache.totalCostLimit = 24 * 1024 * 1024
         return cache
     }()
 
+    @MainActor
+    static func beginPreviewSession() {
+        previewSession = UUID()
+    }
+
+    @MainActor
+    static func endPreviewSession() {
+        previewSession = nil
+        previewCache.removeAllObjects()
+    }
+
+    @MainActor
     static func previewImageAsync(dbId: Int, maxPixel: Int) async -> DecodedImage? {
+        guard let session = previewSession, !Task.isCancelled else { return nil }
         let key = "\(dbId):\(maxPixel)" as NSString
         if let cached = previewCache.object(forKey: key) { return cached }
         guard let ticket = await decodeGate.acquire() else { return nil }
         defer { ticket.release() }
-        guard !Task.isCancelled else { return nil }
+        guard !Task.isCancelled, previewSession == session else { return nil }
         if let cached = previewCache.object(forKey: key) { return cached }
         let decoded = await Task.detached(priority: .userInitiated) { () -> DecodedImage? in
             previewImage(dbId: dbId, maxPixel: maxPixel)
         }.value
+        guard !Task.isCancelled, previewSession == session else { return nil }
         if let decoded {
             let cost = Int(decoded.image.size.width * decoded.image.size.height * 4)
             previewCache.setObject(decoded, forKey: key, cost: cost)

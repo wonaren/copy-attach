@@ -67,6 +67,7 @@ __CA_PERF__ v=1 pid=<u32> tid=<hex> t=<mono_ns> wall=<unix_ms> kind=<b|e|i|c> ca
 | `search.end_to_end` / `search.filter` | 按键 → 结果上屏（含 debounce）；detached 过滤本身 |
 | `thumb.decode_total` / `thumb.queue_wait` / `thumb.ffi_read` / `thumb.imageio` | 行缩略图：总耗时拆成「等 4 槽信号量 + 取 blob + ImageIO 重采样」 |
 | `preview.open` / `preview.load_full_text` | 预览窗口建立；主线程同步读全文（预览的 suspect 点） |
+| `preview.image_load` | 图片加载任务开始 → 解码结果写入视图状态，包含缓存查询、排队与解码；`data=mini/large` 为成功，`cancelled/unavailable` 不计入成功延迟；不代表屏幕扫描输出时刻 |
 | `paste.menu_to_keystroke` | 菜单动作 → 剪贴板就绪 → 关弹窗 → 发出 ⌘V |
 | `drag.materialize` | `.onDrag` 闭包里同步读全文/整图并物化临时文件 |
 | `undo.perform` | 撤销删除（主线程同步 DB 读 + 插入） |

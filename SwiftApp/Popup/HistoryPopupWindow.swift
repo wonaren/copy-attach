@@ -142,6 +142,7 @@ class HistoryPopupWindow: NSPanel {
         let session = closeSessionGeneration
         lifecycleState = .opening
 
+        ImageDecode.beginPreviewSession()
         ClipboardBackend.shared.recordFrontmostApp()
 
         ClipboardBackend.shared.setPopupVisible(true)
@@ -483,6 +484,7 @@ class HistoryPopupWindow: NSPanel {
     override func close() {
         let perfClose = PerfSpan.start("swift", "popup.close")
         lifecycleState = .closed
+        ImageDecode.endPreviewSession()
         ClipboardBackend.shared.setPopupVisible(false)
 
         NotificationCenter.default.removeObserver(self, name: NSWindow.didResignKeyNotification, object: self)

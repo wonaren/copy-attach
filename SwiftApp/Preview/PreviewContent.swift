@@ -299,6 +299,10 @@ struct PreviewContent: View {
 
     private func loadImage(dbId: Int) async {
         guard dbId != 0 else { return }
+        let perfLoad = PerfSpan.start("swift", "preview.image_load")
+        perfLoad?.val = Int64(dbId)
+        perfLoad?.data = "cancelled"
+        defer { perfLoad?.end() }
 
         if let image {
             onImageLoaded?(image)
@@ -321,8 +325,10 @@ struct PreviewContent: View {
         if let decoded {
             applyImage(decoded.image)
             hasFailed = false
+            perfLoad?.data = showsZoomHint ? "mini" : "large"
         } else if image == nil {
             hasFailed = true
+            perfLoad?.data = "unavailable"
         }
     }
 }

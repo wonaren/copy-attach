@@ -51,6 +51,7 @@ SPAN_ORDER = [
     ("swift", "thumb.ffi_read"),
     ("swift", "thumb.imageio"),
     ("swift", "preview.open"),
+    ("swift", "preview.image_load"),
     ("swift", "preview.load_full_text"),
     ("swift", "paste.menu_to_keystroke"),
     ("swift", "drag.materialize"),
@@ -318,6 +319,8 @@ def main():
     by_span = defaultdict(list)
     for r in measured:
         if r["kind"] == "e" and r["dur_us"] is not None:
+            if r["name"] == "preview.image_load" and r.get("data") not in ("mini", "large"):
+                continue
             by_span[(r["cat"], r["name"])].append(r["dur_us"])
     spans = {"%s/%s" % k: summarize(v) for k, v in by_span.items()}
 
