@@ -20,6 +20,14 @@ CopyAttach 是一个 macOS 剪贴板历史管理器：Rust 后端（cdylib）+ S
 - 报「已修复」前必须能回答：改动前失败、改动后成功，两次都在真实场景里观察到。做不到就明说「尚未实测」。
 - **并发/竞态类问题单次运行不足以下结论**。踩过的坑：`src/ffi/paste.rs` 与 `src/tests/backend.rs` 各持一份 `Once` + `set_backend` 争抢进程级单例，6 次运行中 3 次失败（105/109），单跑一次全绿就提交了。**这类验证要连跑多次（≥8 次）并观察失败率**，不能以「这一次是绿的」收尾。
 - **验证手法本身可能破坏被测前提**。踩过的坑：① 用覆盖的 `HOME` 启动 GUI 测内存，导致钥匙串不可达而弹出无关对话框，差点误导成「沙箱读不到钥匙串」（详见「钥匙串弹窗」节）；② 用每 500ms 新开一个 SQLite 连接轮询 `user_version` 来判定迁移结束——对一个 188MB 的库反复建连，把它自己注入了被测的常驻内存，得出前后矛盾的稳态数字；③ 起第二个 GUI 实例被单实例守卫直接 `exit(0)`，采样到的「进程消失」毫无意义。**观测动作不能改变被测对象；判定结束优先靠日志标记而非副作用式探询。**
+- **做任何会写库的实测前，必须先备份真实库**（硬约束）。踩过的坑：测连续删除动画时直接对真实库长按 `⌃⌫`，执行了 765 次删除；撤销上限默认只保留 1 条，`purge_expired_deleted_rows` 会把上一条载荷行硬删，**三个月的历史不可恢复地丢失**。备份命令（`sqlite3 .backup` 走在线备份 API，自动处理 WAL，不需要先 checkpoint）：
+  ```bash
+  DB="$HOME/Library/Application Support/CopyAttach/history.db"
+  BK="$HOME/Library/Application Support/CopyAttach/backups/history_backup_$(date +%Y%m%d_%H%M%S).db"
+  sqlite3 "$DB" ".backup '$BK'"
+  sqlite3 "$BK" "select count(*) from clipboard_history;"   # 必须与当前库一致才算备份成功
+  ```
+  **删除、清空、批量导入、迁移这类不可逆操作尤其必须先备份**，并在动手前确认备份行数与当前一致。
 
 ## 构建与测试
 
