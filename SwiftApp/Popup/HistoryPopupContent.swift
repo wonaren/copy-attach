@@ -834,12 +834,7 @@ struct HistoryPopupContent: View {
                                     )
                                     .matchedGeometryEffect(id: "activeFilterPill", in: filterTabNamespace)
                             } else {
-                                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                    .fill(theme.popupFilterTabBackground)
-                                    .overlay(
-                                        RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                            .strokeBorder(theme.popupRowBorder, lineWidth: 1)
-                                    )
+                                toolbarButtonBackground
                             }
                         }
                 }
@@ -853,47 +848,49 @@ struct HistoryPopupContent: View {
         .animation(AppleMotion.snappy, value: filterMode)
     }
 
+    private var toolbarButtonBackground: some View {
+        let shape = RoundedRectangle(cornerRadius: 6, style: .continuous)
+        return shape.fill(theme.popupFilterTabBackground)
+            .overlay(shape.strokeBorder(theme.popupRowBorder, lineWidth: 1))
+    }
+
     @ViewBuilder
     private var updateBadgeButton: some View {
         if case .downloading(let progress) = updater.phase {
-            updatePill {
-                Text("下载中 \(Int((progress * 100).rounded()))%")
-            }
+            updateStatus(Text("下载中 \(Int((progress * 100).rounded()))%"))
         } else if case .installing = updater.phase {
-            updatePill {
-                Text("安装中…")
-            }
+            updateStatus(Text("安装中…"))
         } else if let version = updateBadge.latestVersion {
             Button {
                 updater.startDownload(version: version)
             } label: {
-                updatePill {
-                    Image(systemName: "arrow.down.circle.fill")
+                HStack(spacing: 4) {
+                    Image(systemName: "arrow.up")
                         .font(.system(size: 10, weight: .semibold))
-                    Text("更新 v\(version)")
+                    Text("v\(version)")
+                        .font(.system(size: 11, weight: .bold))
+                        .monospacedDigit()
                 }
+                .foregroundStyle(.white)
+                .padding(.horizontal, 8)
+                .frame(height: 24)
+                .background(theme.popupUpdateBackground, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
             }
             .buttonStyle(AppleTactileButtonStyle(scale: 0.94))
             .focusable(false)
-            .help("下载并安装 v\(version)")
+            .accessibilityLabel("更新至 v\(version)")
         }
     }
 
-    private func updatePill<Content: View>(@ViewBuilder content: () -> Content) -> some View {
-        HStack(spacing: 4) {
-            content()
-        }
-        .font(.system(size: 11, weight: .semibold))
-        .monospacedDigit()
-        .foregroundColor(theme.updateActionText)
-        .lineLimit(1)
-        .fixedSize()
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .background(
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .fill(theme.updateActionBackground)
-        )
+    private func updateStatus(_ text: Text) -> some View {
+        text.font(.system(size: 11, weight: .medium))
+            .monospacedDigit()
+            .foregroundStyle(theme.popupSecondaryText)
+            .lineLimit(1)
+            .fixedSize()
+            .frame(minWidth: 76, alignment: .trailing)
+            .padding(.trailing, 6)
+            .frame(height: 24)
     }
 
     @ViewBuilder

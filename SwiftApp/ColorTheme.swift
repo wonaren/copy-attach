@@ -24,6 +24,7 @@ struct AppTheme {
     let popupMutedText: Color
     let popupDimText: Color
     let popupRemarkAccent: Color
+    let popupUpdateBackground: Color
     let popupRowHover: Color
     let popupRowDefault: Color
     let popupRowBorder: Color
@@ -62,6 +63,7 @@ struct AppTheme {
         popupMutedText: Color.white.opacity(0.68),
         popupDimText: Color.white.opacity(0.60),
         popupRemarkAccent: Color(nsColor: NSColor(srgbRed: 0.059, green: 0.655, blue: 0.604, alpha: 1.0)),
+        popupUpdateBackground: Color(red: 0.122, green: 0.490, blue: 0.282),
         popupRowHover: Color.white.opacity(0.09),
         popupRowDefault: .clear,
         popupRowBorder: Color.white.opacity(0.14),
@@ -101,6 +103,7 @@ struct AppTheme {
         popupMutedText: Color(white: 0.36),
         popupDimText: Color(white: 0.38),
         popupRemarkAccent: Color(nsColor: NSColor(srgbRed: 0.0, green: 0.357, blue: 0.322, alpha: 1.0)),
+        popupUpdateBackground: Color(red: 0.059, green: 0.361, blue: 0.200),
         popupRowHover: Color.black.opacity(0.07),
         popupRowDefault: .clear,
         popupRowBorder: Color.black.opacity(0.14),
@@ -140,6 +143,7 @@ struct AppTheme {
         popupMutedText: Color.white.opacity(0.85),
         popupDimText: Color.white.opacity(0.78),
         popupRemarkAccent: Color(nsColor: NSColor(srgbRed: 0.498, green: 0.906, blue: 0.863, alpha: 1.0)),
+        popupUpdateBackground: Color(red: 0.08, green: 0.38, blue: 0.21),
         popupRowHover: Color.white.opacity(0.16),
         popupRowDefault: .clear,
         popupRowBorder: Color.white.opacity(0.40),
@@ -179,6 +183,7 @@ struct AppTheme {
         popupMutedText: Color(white: 0.20),
         popupDimText: Color(white: 0.24),
         popupRemarkAccent: Color(nsColor: NSColor(srgbRed: 0.0, green: 0.325, blue: 0.294, alpha: 1.0)),
+        popupUpdateBackground: Color(red: 0.043, green: 0.290, blue: 0.165),
         popupRowHover: Color.black.opacity(0.12),
         popupRowDefault: .clear,
         popupRowBorder: Color.black.opacity(0.40),
@@ -226,6 +231,7 @@ struct AppTheme {
             popupMutedText: self.popupMutedText,
             popupDimText: self.popupDimText,
             popupRemarkAccent: self.popupRemarkAccent,
+            popupUpdateBackground: self.popupUpdateBackground,
             popupRowHover: self.popupRowHover,
             popupRowDefault: self.popupRowDefault,
             popupRowBorder: self.popupRowBorder,
