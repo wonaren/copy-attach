@@ -69,10 +69,14 @@ final class ContextMenuItemTarget: NSObject {
 }
 
 struct HistoryPopupContent: View {
+    static let singleClickUsesItemKey = "SingleClickUsesHistoryItem"
+
     let onClose: () -> Void
 
     var backend: ClipboardBackend { ClipboardBackend.shared }
     @State var selectedIndex: Int = ClipboardBackend.shared.items.isEmpty ? 0 : 1
+    @AppStorage(HistoryPopupContent.singleClickUsesItemKey) private var singleClickUsesItem = false
+    @State private var mouseSelectedItemId: Int?
     @State var showPreview: Bool = false
     @State var hoverPreviewEntryId: Int?
     @State var hoverPreviewItem: ClipboardItem?
@@ -416,6 +420,7 @@ struct HistoryPopupContent: View {
             Perf.instant("swift", "popup.content_appear",
                          data: backend.items.isEmpty ? "empty" : "rows")
             selectedIndex = backend.items.isEmpty ? 0 : 1
+            mouseSelectedItemId = nil
             updateBadge.refreshIfStale()
             let preserveForRetry = PasteQueueManager.shared.consumePendingBatchRetryOnOpen()
             if PasteQueueManager.shared.hasItems && !preserveForRetry {
@@ -647,6 +652,7 @@ struct HistoryPopupContent: View {
             switchFilterTab(direction: direction)
         }
         .onChange(of: filterMode) { _, _ in
+            mouseSelectedItemId = nil
             commitPendingInlineEdit()
             closePreview()
             if selectedIndex != 0 {
@@ -712,6 +718,11 @@ struct HistoryPopupContent: View {
                 return
             }
         }
+        }
+        .onChange(of: selectedItemId) { _, newValue in
+            if mouseSelectedItemId != newValue {
+                mouseSelectedItemId = nil
+            }
         }
         .onChange(of: selectedIndex) { _, newValue in
             if newValue == 0 && !backend.items.isEmpty {
@@ -919,9 +930,13 @@ struct HistoryPopupContent: View {
                     return
                 }
                 let itemIndex = newValue - 1
-                if itemIndex < displayItems.count {
-                    scrollTarget = scrollTargetForItem(at: itemIndex, movingUp: newValue < oldValue)
-                    updatePreviewContent(item: displayItems[itemIndex])
+                let items = displayItems
+                if items.indices.contains(itemIndex) {
+                    let item = items[itemIndex]
+                    if mouseSelectedItemId != item.id {
+                        scrollTarget = scrollTargetForItem(at: itemIndex, movingUp: newValue < oldValue)
+                    }
+                    updatePreviewContent(item: item)
                 }
             }
             .reportSpotlightFrame(.list, hasSelectedRow: selectedIndex > 0)
@@ -1058,12 +1073,14 @@ struct HistoryPopupContent: View {
     private var popupSections: [PopupSection] { currentDisplayMemo.sections }
 
     private func activateRow(index: Int, item: ClipboardItem) {
+        guard !isDismissing else { return }
         if editingItemId == item.id { return }
         if editingItemId != nil {
             commitPendingInlineEdit()
             return
         }
         if PasteQueueManager.shared.hasItems {
+            mouseSelectedItemId = nil
             closeHoverPreview()
             guard PasteDeliveryMode.current == .keystroke else { return }
             withAnimation(AppleMotion.snappy) {
@@ -1073,6 +1090,14 @@ struct HistoryPopupContent: View {
             OnboardingGuide.shared.record(.queueToggled)
             return
         }
+        let items = displayItems
+        guard items.indices.contains(index), items[index].id == item.id else { return }
+        if !singleClickUsesItem && (mouseSelectedItemId != item.id || selectedIndex != index + 1) {
+            selectedIndex = index + 1
+            mouseSelectedItemId = item.id
+            return
+        }
+        mouseSelectedItemId = nil
         selectItem(at: index)
     }
 

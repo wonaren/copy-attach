@@ -195,6 +195,16 @@ extension InlineSettingsView {
             }
             sectionDivider().padding(.vertical, 7)
             settingToggleRow(
+                icon: "cursorarrow.click",
+                iconColor: singleClickUsesItem ? Color.accentColor : theme.secondaryText,
+                title: "单击使用条目",
+                desc: singleClickUsesItem
+                    ? "单击条目即可使用。"
+                    : "先点击选中，再点击同一条目或按Enter使用。",
+                isOn: $singleClickUsesItem
+            )
+            sectionDivider().padding(.vertical, 7)
+            settingToggleRow(
                 icon: "menubar.rectangle",
                 iconColor: showMenuBarIcon ? Color.accentColor : theme.secondaryText,
                 title: "显示菜单栏图标",

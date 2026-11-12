@@ -10,6 +10,7 @@ struct InlineSettingsView: View {
     @State var launchAtLogin = UserDefaults.standard.bool(forKey: "LaunchAtLogin")
     @State var runInBackground = UserDefaults.standard.object(forKey: "RunInBackground") as? Bool ?? true
     @State var autoPasteAtCursor = PasteDeliveryMode.current == .keystroke
+    @AppStorage(HistoryPopupContent.singleClickUsesItemKey) var singleClickUsesItem = false
     @State var showMenuBarIcon = UserDefaults.standard.object(forKey: "ShowMenuBarIcon") as? Bool ?? true
     @State var cleanupThreshold: Double = {
         let saved = UserDefaults.standard.integer(forKey: "CleanupThreshold")
