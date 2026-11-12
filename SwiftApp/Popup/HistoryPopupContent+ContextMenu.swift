@@ -92,7 +92,7 @@ extension HistoryPopupContent {
         slotMenu.autoenablesItems = false
         for slot in 1...9 {
             let handler = ContextMenuItemTarget { [self] in
-                applyQuickSlotToggle(item: item, slot: slot)
+                applyQuickSlotChange(item: item, slot: slot, removeBinding: boundSlot == slot)
             }
             let title: String
             if let owner = backend.slotByEntryId.first(where: { $0.value == slot })?.key,
@@ -113,7 +113,7 @@ extension HistoryPopupContent {
         if let boundSlot {
             slotMenu.addItem(.separator())
             let handler = ContextMenuItemTarget { [self] in
-                applyQuickSlotToggle(item: item, slot: boundSlot)
+                applyQuickSlotChange(item: item, slot: boundSlot, removeBinding: true)
             }
             let entry = NSMenuItem(title: "取消快捷槽位",
                                    action: #selector(ContextMenuItemTarget.invoke(_:)),
@@ -138,16 +138,23 @@ extension HistoryPopupContent {
         menu.popUp(positioning: nil, at: point, in: contentView)
     }
 
-    func applyQuickSlotToggle(item: ClipboardItem, slot: Int) {
+    func applyQuickSlotChange(item: ClipboardItem, slot: Int, removeBinding: Bool = false) {
         let anchorId = selectedItemId
         let wasBound = backend.slotByEntryId[item.id] == slot
-        guard backend.toggleQuickSlot(entryId: item.id, slot: slot) else {
-            showToast("绑定失败，请重试", icon: "exclamationmark.triangle.fill")
+        let success = removeBinding
+            ? backend.removeQuickSlot(entryId: item.id, slot: slot)
+            : backend.toggleQuickSlot(entryId: item.id, slot: slot)
+        guard success else {
+            showToast(removeBinding ? "解除失败，请重试" : "绑定失败，请重试",
+                      icon: "exclamationmark.triangle.fill")
             return
         }
-        pendingQuickSlotAnchor = anchorId
-        showToast(wasBound ? "已解除 右⌘\(slot) 绑定" : "已绑定到 右⌘\(slot)",
-                  icon: wasBound ? "xmark.circle.fill" : "bolt.fill")
+        if !removeBinding || wasBound {
+            pendingQuickSlotAnchor = anchorId
+        }
+        let removed = removeBinding || wasBound
+        showToast(removed ? "已解除 右⌘\(slot) 绑定" : "已绑定到 右⌘\(slot)",
+                  icon: removed ? "xmark.circle.fill" : "bolt.fill")
     }
 
     private func addContextMenuItem(to menu: NSMenu, title: String, symbol: String,

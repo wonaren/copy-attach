@@ -83,6 +83,7 @@ int32_t clipboard_send_paste(int32_t pid);
 // otherwise the slot and the entry are both reassigned atomically.
 // `slot` must be 1..9. 1 = ok, 0 = rejected (unknown entry / DB failure).
 int32_t clipboard_toggle_quick_slot(uint64_t entry_id, int32_t slot);
+int32_t clipboard_remove_quick_slot(uint64_t entry_id, int32_t slot);
 int32_t clipboard_clear_quick_slots(void);
 // Background paste: writes the slot payload to the pasteboard without
 // touching the history order or rewriting SQLite. `delivery_mode` follows

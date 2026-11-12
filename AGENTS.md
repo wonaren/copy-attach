@@ -20,7 +20,7 @@ CopyAttach 是一个 macOS 剪贴板历史管理器：Rust cdylib 后端（`src/
 | 看内存（只认 `Writable regions` 行） | `vmmap -summary $(pgrep -f 'CopyAttach.app/Contents/MacOS/CopyAttach') \| head -16` |
 
 - **没有 `Package.swift`，也没有 `.xcodeproj`**：Swift 由 `build.sh` 里的裸 `swiftc` 编译，源文件用 `find SwiftApp -name '*.swift'` 收集 —— 新增 `.swift` 文件自动入编，不需要改构建脚本。
-- `./build.sh` 开头 `rm -rf CopyAttach.app`；版本号从 `Cargo.toml` 注入产物 `Info.plist`（源码 `SwiftApp/Info.plist` 里是恒为 `0.0.0` 的死值，不要改它）；签名身份按 `Developer ID Application|Apple Development` 过滤选取。
+- `./build.sh` 在临时目录完成打包并验证签名后原子替换 `CopyAttach.app`。签名身份按 `Developer ID Application|Apple Development` 过滤选取，缺少可用身份时保留已有的正式签名产物。版本号从 `Cargo.toml` 注入产物 `Info.plist`（源码 `SwiftApp/Info.plist` 里是恒为 `0.0.0` 的占位值）。
 - `bash stress_test.sh [--quick|--generate-only|--measure-only|--count N]`（默认 10000 条）**会把真实 `~/Library/Application Support/CopyAttach/history.db` 挪走**（退出时恢复），不要在用户数据上随手跑。
 - `./videos/demo.sh` 是同一类操作的常驻版本：演示库固定为 `demo-data/history.db`（gitignored，由 `cargo build --release --features demo-data --bin demo-gen` 生成；照片缓存在 `demo-data/images/`，首次生成需联网从 Unsplash 下载），个人库整体停放到 `<support>/personal/` 再换回，全程 `mv`/`cp` 不重写数据。它支持 `COPYATTACH_SUPPORT_DIR` 指向别处，只用于隔离测试，不影响 App 真实路径。
 - `[profile.release]` 开了 `lto` + `codegen-units=1`，release 构建慢是正常的。

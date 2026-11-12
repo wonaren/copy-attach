@@ -570,7 +570,7 @@ struct HistoryPopupContent: View {
                 return
             }
             guard itemIndex < displayItems.count else { return }
-            applyQuickSlotToggle(item: displayItems[itemIndex], slot: slot)
+            applyQuickSlotChange(item: displayItems[itemIndex], slot: slot)
         }
         .onReceive(NotificationCenter.default.publisher(for: commandNumberNotification)) { note in
             guard editingItemId == nil,

@@ -706,64 +706,65 @@ pub extern "C" fn clipboard_set_favorite(entry_id: u64, favorite: c_int) -> c_in
 
 #[no_mangle]
 pub extern "C" fn clipboard_toggle_quick_slot(entry_id: u64, slot: c_int) -> c_int {
-    if slot < 0 || slot as usize > crate::db::QUICK_SLOT_COUNT {
+    if slot < 1 || slot as usize > crate::db::QUICK_SLOT_COUNT {
         crate::error_log!("CopyAttach: toggle_quick_slot: slot {slot} out of range");
         return 0;
     }
-    let b = match try_backend() {
-        Some(b) => b,
-        None => return 0,
-    };
-    let slots_after = {
-        let conn = match b.db.lock() {
-            Ok(c) => c,
-            Err(e) => {
-                crate::error_log!("CopyAttach: DB mutex poisoned toggling quick slot for {entry_id}: {e}");
-                return 0;
-            }
-        };
-        if crate::db::toggle_quick_slot(&conn, entry_id, slot as u8).is_err() {
-            return 0;
-        }
-        match crate::db::load_quick_slots(&conn) {
-            Ok(s) => s,
-            Err(()) => return 0,
-        }
-    };
-    {
-        let mut mirror = match b.quick_slots.lock() {
-            Ok(s) => s,
-            Err(e) => {
-                crate::error_log!("CopyAttach: quick-slots mutex poisoned toggling {entry_id}: {e}");
-                return 0;
-            }
-        };
-        *mirror = slots_after;
+    update_quick_slots(|conn, slots| {
+        crate::db::toggle_quick_slot(conn, entry_id, slot as u8)?;
+        *slots = crate::db::load_quick_slots(conn)?;
+        Ok(())
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn clipboard_remove_quick_slot(entry_id: u64, slot: c_int) -> c_int {
+    if entry_id == 0 || entry_id > i64::MAX as u64 || slot < 1 || slot as usize > crate::db::QUICK_SLOT_COUNT {
+        crate::error_log!("CopyAttach: remove_quick_slot: invalid entry {entry_id} or slot {slot}");
+        return 0;
     }
-    crate::backend::mark_history_changed();
-    1
+    update_quick_slots(|conn, slots| {
+        crate::db::remove_quick_slot(conn, entry_id, slot as u8)?;
+        let owner = &mut slots[(slot - 1) as usize];
+        if *owner == entry_id {
+            *owner = 0;
+        }
+        Ok(())
+    })
 }
 
 #[no_mangle]
 pub extern "C" fn clipboard_clear_quick_slots() -> c_int {
+    update_quick_slots(|conn, slots| {
+        crate::db::clear_quick_slots(conn)?;
+        slots.fill(0);
+        Ok(())
+    })
+}
+
+fn update_quick_slots(
+    update: impl FnOnce(&rusqlite::Connection, &mut [u64; crate::db::QUICK_SLOT_COUNT]) -> Result<(), ()>,
+) -> c_int {
     let b = match try_backend() {
         Some(b) => b,
         None => return 0,
     };
-    {
-        let conn = match b.db.lock() {
-            Ok(c) => c,
-            Err(e) => {
-                crate::error_log!("CopyAttach: DB mutex poisoned clearing quick slots: {e}");
-                return 0;
-            }
-        };
-        if crate::db::clear_quick_slots(&conn).is_err() {
+    let conn = match b.db.lock() {
+        Ok(conn) => conn,
+        Err(e) => {
+            crate::error_log!("CopyAttach: DB mutex poisoned updating quick slots: {e}");
             return 0;
         }
-    }
-    if let Ok(mut mirror) = b.quick_slots.lock() {
-        *mirror = [0u64; crate::db::QUICK_SLOT_COUNT];
+    };
+    let mut slots = match b.quick_slots.lock() {
+        Ok(slots) => slots,
+        Err(e) => {
+            crate::error_log!("CopyAttach: quick-slots mutex poisoned: {e}");
+            return 0;
+        }
+    };
+    if update(&conn, &mut slots).is_err() {
+        return 0;
     }
     crate::backend::mark_history_changed();
     1

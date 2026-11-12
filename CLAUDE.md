@@ -190,7 +190,7 @@ SwiftApp/
 
 ## 钥匙串弹窗
 
-钥匙串条目（Lease + 设备密钥，svce=`com.example.copyattach.licensing`）按创建应用的代码签名授权。**必须用正式签名身份构建**：ad-hoc 签名的 cdhash 每次构建都变，导致每次重开 App 都弹钥匙串授权。build.sh 自动用 `security find-identity -v -p codesigning` 并按 **`Developer ID Application|Apple Development` 过滤**取第一个匹配身份（与 CI 同一套规则；过滤是必要的——不再"取第一个 codesigning 身份"，否则会静默选中与钥匙串 ACL 无关的自签名/他人证书），找不到才回退 ad-hoc 并打印告警。构建结束会回显 `codesign -dv` 的 `Authority`/`Signature` 行供确认。
+钥匙串条目（Lease + 设备密钥，svce=`com.example.copyattach.licensing`）按创建应用的代码签名授权。**必须用正式签名身份构建**：ad-hoc 签名的 cdhash 每次构建都变，导致每次重开 App 都弹钥匙串授权。build.sh 自动用 `security find-identity -v -p codesigning` 并按 **`Developer ID Application|Apple Development` 过滤**取第一个匹配身份（与 CI 同一套规则；过滤是必要的——不再"取第一个 codesigning 身份"，否则会静默选中与钥匙串 ACL 无关的自签名/他人证书），找不到可用身份时仅可新建或替换 ad-hoc 产物，已有正式签名包会保留。构建在临时目录完成签名验证后原子替换旧包。构建结束会回显 `codesign -dv` 的 `Authority`/`Signature` 行供确认。
 
 ### 严禁用覆盖的 HOME 启动 GUI（踩过的坑）
 

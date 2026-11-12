@@ -460,6 +460,17 @@ pub(crate) fn toggle_quick_slot(conn: &Connection, entry_id: u64, slot: u8) -> R
     })
 }
 
+pub(crate) fn remove_quick_slot(conn: &Connection, entry_id: u64, slot: u8) -> Result<(), ()> {
+    conn.execute(
+        "DELETE FROM clipboard_quick_slots WHERE slot = ?1 AND entry_id = ?2",
+        rusqlite::params![slot, entry_id as i64],
+    )
+    .map(|_| ())
+    .map_err(|e| {
+        crate::error_log!("CopyAttach: failed to remove quick slot {slot} for entry {entry_id}: {e}");
+    })
+}
+
 pub(crate) fn clear_quick_slots(conn: &Connection) -> Result<(), ()> {
     let tx = conn.unchecked_transaction().map_err(|e| {
         crate::error_log!("CopyAttach: failed to begin quick-slot clear transaction: {e}");

@@ -357,12 +357,28 @@ class ClipboardBackend {
         return true
     }
 
+    func removeQuickSlot(entryId: Int, slot: Int) -> Bool {
+        guard let id = UInt64(exactly: entryId), let number = Int32(exactly: slot),
+              clipboard_remove_quick_slot(id, number) != 0 else {
+            errorLog("removeQuickSlot: backend rejected slot \(slot) for entry \(entryId) — see Rust log")
+            return false
+        }
+        if slotByEntryId[entryId] == slot {
+            slotByEntryId.removeValue(forKey: entryId)
+            syncQuickSlotTap()
+        }
+        reloadItems()
+        return true
+    }
+
     @discardableResult
     func clearQuickSlots() -> Bool {
         guard clipboard_clear_quick_slots() != 0 else {
             errorLog("clearQuickSlots: backend rejected the clear — see Rust log")
             return false
         }
+        slotByEntryId.removeAll()
+        syncQuickSlotTap()
         reloadItems()
         return true
     }

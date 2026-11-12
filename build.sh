@@ -8,6 +8,34 @@ export PATH="$HOME/.cargo/bin:$PATH"
 
 APP_NAME="CopyAttach"
 SWIFT_SRC="SwiftApp"
+APP_OUTPUT="${APP_NAME}.app"
+
+SIGN_LIST=$(security find-identity -v -p codesigning)
+SIGN_IDENTITY=$(printf '%s\n' "$SIGN_LIST" \
+    | awk '/^[[:space:]]*[0-9]+\)/ && /Developer ID Application|Apple Development/ {print $2; exit}')
+
+check_output_signature() {
+    if [ -z "$SIGN_IDENTITY" ] && { [ -e "$APP_OUTPUT" ] || [ -L "$APP_OUTPUT" ]; }; then
+        if ! codesign -dv --verbose=4 "$APP_OUTPUT" 2>&1 | grep -qx 'Signature=adhoc'; then
+            echo "error: no Apple Development or Developer ID Application signing identity is available. Existing ${APP_OUTPUT} was preserved." >&2
+            exit 1
+        fi
+    fi
+}
+
+check_output_signature
+
+BUILD_DIR=$(mktemp -d "$PWD/.copyattach-build.XXXXXX")
+APP_BUNDLE="$BUILD_DIR/$APP_OUTPUT"
+PUBLISH_LOCK=""
+cleanup() {
+    rm -rf "$BUILD_DIR"
+    if [ -n "$PUBLISH_LOCK" ]; then
+        rmdir "$PUBLISH_LOCK"
+    fi
+}
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
 
 echo "==> Building Rust backend library…"
 
@@ -24,41 +52,31 @@ cargo build --release ${CARGO_FEATURES}
 
 echo "==> Building Swift frontend app…"
 
-# Create app bundle structure
-rm -rf "${APP_NAME}.app"
-mkdir -p "${APP_NAME}.app/Contents/MacOS"
-mkdir -p "${APP_NAME}.app/Contents/Frameworks"
-mkdir -p "${APP_NAME}.app/Contents/Resources"
+mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Frameworks" "$APP_BUNDLE/Contents/Resources"
 
 # Generate AppIcon.icns from SVG if assets/icon.svg exists
 if [ -f "assets/icon.svg" ]; then
     echo "==> Generating AppIcon.icns from assets/icon.svg..."
-    mkdir -p AppIcon.iconset
+    ICONSET="$BUILD_DIR/AppIcon.iconset"
+    mkdir "$ICONSET"
     # sips handles SVG rendering correctly (unlike NSImage-based Swift renderer)
-    sips -s format png assets/icon.svg --out AppIcon.iconset/base.png >/dev/null
+    sips -s format png assets/icon.svg --out "$ICONSET/base.png" >/dev/null
     for size in 16 32 128 256 512; do
-        sips -z $size $size AppIcon.iconset/base.png --out AppIcon.iconset/icon_${size}x${size}.png >/dev/null
+        sips -z $size $size "$ICONSET/base.png" --out "$ICONSET/icon_${size}x${size}.png" >/dev/null
         double=$((size * 2))
-        sips -z $double $double AppIcon.iconset/base.png --out AppIcon.iconset/icon_${size}x${size}@2x.png >/dev/null
+        sips -z $double $double "$ICONSET/base.png" --out "$ICONSET/icon_${size}x${size}@2x.png" >/dev/null
     done
-    iconutil -c icns AppIcon.iconset -o assets/AppIcon.icns
-    rm -rf AppIcon.iconset
-fi
-
-# Copy AppIcon.icns to resources if it exists
-if [ -f "assets/AppIcon.icns" ]; then
-    cp "assets/AppIcon.icns" "${APP_NAME}.app/Contents/Resources/AppIcon.icns"
+    iconutil -c icns "$ICONSET" -o "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
+elif [ -f "assets/AppIcon.icns" ]; then
+    cp "assets/AppIcon.icns" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
 fi
 
 # Copy SVG resources
-cp "assets/about/github.svg" "${APP_NAME}.app/Contents/Resources/github.svg"
-cp "assets/about/menubar-stack.svg" "${APP_NAME}.app/Contents/Resources/menubar-stack.svg"
-cp "assets/icon.svg" "${APP_NAME}.app/Contents/Resources/icon.svg"
-cp "assets/icon_inner.svg" "${APP_NAME}.app/Contents/Resources/icon_inner.svg"
+cp "assets/about/github.svg" "assets/about/menubar-stack.svg" "assets/icon.svg" "assets/icon_inner.svg" "$APP_BUNDLE/Contents/Resources/"
 
 # Copy the Rust dylib into Frameworks and set its install name
-cp "target/release/libcopy_attach.dylib" "${APP_NAME}.app/Contents/Frameworks/"
-install_name_tool -id "@rpath/libcopy_attach.dylib" "${APP_NAME}.app/Contents/Frameworks/libcopy_attach.dylib"
+cp "target/release/libcopy_attach.dylib" "$APP_BUNDLE/Contents/Frameworks/"
+install_name_tool -id "@rpath/libcopy_attach.dylib" "$APP_BUNDLE/Contents/Frameworks/libcopy_attach.dylib"
 
 # Find the Swift compiler and SDK
 XCODE_TOOLCHAIN="/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain"
@@ -89,11 +107,11 @@ $SWIFTC $SDK \
     -swift-version 6 \
     -O \
     -whole-module-optimization \
-    -o "${APP_NAME}.app/Contents/MacOS/CopyAttach" \
+    -o "$APP_BUNDLE/Contents/MacOS/CopyAttach" \
     -framework SwiftUI \
     -framework AppKit \
     -framework Carbon \
-    -L "${APP_NAME}.app/Contents/Frameworks" \
+    -L "$APP_BUNDLE/Contents/Frameworks" \
     -lcopy_attach \
     -I "${SWIFT_SRC}" \
     -import-objc-header "${SWIFT_SRC}/CopyAttach-Bridging-Header.h" \
@@ -103,45 +121,55 @@ $SWIFTC $SDK \
 
 # Copy and configure Info.plist in app bundle.
 # Keep the tracked source plist (${SWIFT_SRC}/Info.plist) completely clean and unmodified.
-TARGET_PLIST="${APP_NAME}.app/Contents/Info.plist"
+TARGET_PLIST="$APP_BUNDLE/Contents/Info.plist"
 cp "${SWIFT_SRC}/Info.plist" "${TARGET_PLIST}"
 # Critical plist writes must fail the build; only deleting an optional old key is allowed to be idempotent.
 /usr/libexec/PlistBuddy -c "Set CFBundleShortVersionString ${CARGO_VERSION}" "${TARGET_PLIST}"
 
 # Copy bridging header for reference
-cp "${SWIFT_SRC}/CopyAttach-Bridging-Header.h" "${APP_NAME}.app/Contents/Resources/"
+cp "${SWIFT_SRC}/CopyAttach-Bridging-Header.h" "$APP_BUNDLE/Contents/Resources/"
 
 # This is a required runtime search path for the bundled dylib.
-install_name_tool -add_rpath "@executable_path/../Frameworks" "${APP_NAME}.app/Contents/MacOS/CopyAttach" 2>/dev/null || {
+install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP_BUNDLE/Contents/MacOS/CopyAttach" 2>/dev/null || {
     # The path may already exist; verify that it is present instead of hiding
     # an unrelated install_name_tool failure.
-    otool -l "${APP_NAME}.app/Contents/MacOS/CopyAttach" | grep -Fq '@executable_path/../Frameworks' || {
+    otool -l "$APP_BUNDLE/Contents/MacOS/CopyAttach" | grep -Fq '@executable_path/../Frameworks' || {
         echo "error: required Frameworks rpath is missing" >&2
         exit 1
     }
 }
 
 echo "==> Signing app bundle…"
-# 优先用已安装的正式签名身份（Developer ID Application / Apple Development）签名。
-# 正式身份让钥匙串 ACL 按稳定标识匹配：ad-hoc 签名的 cdhash 每次构建都会变，
-# 导致每次重新打开 App 都弹「CopyAttach想要使用钥匙串中的机密信息」。
-# 用正式身份后重建/重装都不会再弹（首次启动对旧条目点一次「始终允许」即可）。
-#
-# 必须按类型过滤，不能取第一个 codesigning 身份：钥匙串里可能还装着与钥匙串 ACL
-# 无关的身份（自签名、团队其他人的证书），取第一个会静默签错身份。
-# 与 CI 的过滤规则保持一致（.github/workflows/build.yml）。
-SIGN_LIST=$(security find-identity -v -p codesigning 2>/dev/null || true)
-SIGN_IDENTITY=$(printf '%s\n' "$SIGN_LIST" \
-    | grep -E 'Developer ID Application|Apple Development' \
-    | head -1 | sed 's/.*"\(.*\)".*/\1/' || true)
 if [ -n "$SIGN_IDENTITY" ]; then
     echo "  Using signing identity: $SIGN_IDENTITY"
-    codesign --force --deep --sign "$SIGN_IDENTITY" "${APP_NAME}.app" 2>&1
 else
-    echo "  No Apple Development / Developer ID Application identity found; falling back to ad-hoc signature"
-    codesign --force --deep --sign - "${APP_NAME}.app" 2>&1
+    echo "  No signing identity available. Using ad-hoc signature."
 fi
-codesign -dv --verbose=4 "${APP_NAME}.app" 2>&1 | grep -E '^(Authority|Signature)=' | sed 's/^/  /' || true
+codesign --force --deep --sign "${SIGN_IDENTITY:--}" "$APP_BUNDLE"
+codesign --verify --deep --strict "$APP_BUNDLE"
+codesign -dv --verbose=4 "$APP_BUNDLE" 2>&1 | grep -E '^(Authority|Signature)=' | sed 's/^/  /' || true
+
+cat > "$BUILD_DIR/Publish.swift" <<'EOF'
+import Darwin
+
+let candidate = CommandLine.arguments[1]
+let destination = CommandLine.arguments[2]
+if renamex_np(candidate, destination, UInt32(RENAME_EXCL)) != 0 {
+    if errno != EEXIST || renamex_np(candidate, destination, UInt32(RENAME_SWAP)) != 0 {
+        perror("Publishing CopyAttach.app")
+        exit(1)
+    }
+}
+EOF
+$SWIFTC $SDK -module-cache-path /tmp/copyattach_module_cache "$BUILD_DIR/Publish.swift" -o "$BUILD_DIR/publish"
+
+if ! mkdir .copyattach-publish.lock; then
+    echo "error: another build is publishing ${APP_OUTPUT}" >&2
+    exit 1
+fi
+PUBLISH_LOCK=.copyattach-publish.lock
+check_output_signature
+"$BUILD_DIR/publish" "$APP_BUNDLE" "$APP_OUTPUT"
 
 echo "==> Done! App bundle at '${APP_NAME}.app'"
 echo "==> Run: open \"${APP_NAME}.app\""

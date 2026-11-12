@@ -1481,6 +1481,7 @@ fn test_quick_slot_toggle_delete_undo_roundtrip() {
     );
 
     let base: u64 = 949_000_000;
+    let replacement = base + 1;
     let row_id = {
         let conn = b.db.lock().unwrap();
         conn.execute(
@@ -1492,7 +1493,14 @@ fn test_quick_slot_toggle_delete_undo_roundtrip() {
             rusqlite::params![base as i64],
         )
         .expect("insert quick-slot fixture row");
-        conn.last_insert_rowid()
+        let row_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO clipboard_history (entry_type, text, hash, timestamp, entry_id, preview, label)
+             VALUES (0, 'replacement', 2, 1, ?1, 'replacement', 'replacement')",
+            rusqlite::params![replacement as i64],
+        )
+        .expect("insert quick-slot replacement");
+        row_id
     };
     {
         let mut hist = b.history.lock().unwrap();
@@ -1530,6 +1538,19 @@ fn test_quick_slot_toggle_delete_undo_roundtrip() {
         "undo must restore the slot binding"
     );
 
+    assert_eq!(crate::ffi::clipboard_toggle_quick_slot(base, 5), 1);
+    assert_eq!(crate::ffi::clipboard_toggle_quick_slot(replacement, 2), 1);
+    assert_eq!(crate::ffi::clipboard_remove_quick_slot(base, 2), 1);
+    let expected = [0, replacement, 0, 0, base, 0, 0, 0, 0];
+    assert_eq!(*b.quick_slots.lock().unwrap(), expected);
+    assert_eq!(crate::db::load_quick_slots(&b.db.lock().unwrap()).unwrap(), expected);
+
+    assert_eq!(crate::ffi::clipboard_remove_quick_slot(base, 5), 1);
+    assert_eq!(crate::ffi::clipboard_remove_quick_slot(base, 5), 1);
+    let expected = [0, replacement, 0, 0, 0, 0, 0, 0, 0];
+    assert_eq!(*b.quick_slots.lock().unwrap(), expected);
+    assert_eq!(crate::db::load_quick_slots(&b.db.lock().unwrap()).unwrap(), expected);
+
     assert_eq!(crate::ffi::clipboard_clear_quick_slots(), 1);
     assert_eq!(
         *b.quick_slots.lock().unwrap(),
@@ -1543,8 +1564,8 @@ fn test_quick_slot_toggle_delete_undo_roundtrip() {
     }
     let conn = b.db.lock().unwrap();
     conn.execute(
-        "DELETE FROM clipboard_history WHERE entry_id = ?1",
-        rusqlite::params![base as i64],
+        "DELETE FROM clipboard_history WHERE entry_id IN (?1, ?2)",
+        rusqlite::params![base as i64, replacement as i64],
     )
     .expect("cleanup fixture row");
     conn.execute(

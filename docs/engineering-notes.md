@@ -227,7 +227,7 @@ COPYATTACH_LICENSE_PUBLIC_KEY='<production Ed25519 public key>' \
 
 ### 钥匙串弹窗
 
-钥匙串条目（Lease + 设备密钥，svce=`com.example.copyattach.licensing`）按创建应用的代码签名授权。**必须用正式签名身份构建**：ad-hoc 签名的 cdhash 每次构建都变，导致每次重开 App 都弹钥匙串授权（可能弹两次）。用正式身份后首次启动点一次「始终允许」即永久免弹。build.sh 自动用 `security find-identity` 找 Apple Development 身份，找不到才回退 ad-hoc。
+钥匙串条目（Lease + 设备密钥，svce=`com.example.copyattach.licensing`）按创建应用的代码签名授权。**必须用正式签名身份构建**：ad-hoc 签名的 cdhash 每次构建都变，导致每次重开 App 都弹钥匙串授权（可能弹两次）。用正式身份后首次启动点一次「始终允许」即永久免弹。build.sh 自动用 `security find-identity` 找 Apple Development 身份，找不到可用身份时仅可新建或替换 ad-hoc 产物，已有正式签名包会保留。
 
 ### GitHub Actions 分发
 
