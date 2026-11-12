@@ -71,9 +71,9 @@ struct StressTestPanel: View {
                     .disabled(vm.isRunning)
 
                     Button("重新加载（阈值 10000）") {
-                        UserDefaults.standard.set(10000, forKey: "CleanupThreshold")
-                        clipboard_set_cleanup_threshold(10000)
-                        vm.reloadHistory()
+                        if ClipboardBackend.shared.setCleanupThreshold(10000) {
+                            vm.reloadHistory()
+                        }
                     }
                     .buttonStyle(.borderedProminent)
                     .tint(.blue)

@@ -231,7 +231,7 @@ extension InlineSettingsView {
                         pendingThreshold = Int(cleanupThreshold)
                         cleanupThreshold = thresholdBeforeEdit
                     } else {
-                        backend.setCleanupThreshold(Int(cleanupThreshold))
+                        applyCleanupThreshold(Int(cleanupThreshold))
                     }
                 }
                 GeometryReader { geo in
@@ -257,8 +257,7 @@ extension InlineSettingsView {
                                         thresholdBeforeEdit = cleanupThreshold
                                         pendingThreshold = newVal
                                     } else {
-                                        cleanupThreshold = value
-                                        backend.setCleanupThreshold(newVal)
+                                        applyCleanupThreshold(newVal)
                                     }
                                 }
                                 .position(x: w * (value - minV) / range, y: 4)
@@ -267,7 +266,7 @@ extension InlineSettingsView {
                 }
                 .frame(height: 14)
             }
-            Text("当未收藏的记录超过该阈值时，自动清理最早的记录；收藏的条目不会被清理，也不计入该阈值。")
+            Text("总数超过阈值时，自动清理最早的普通条目。收藏和快捷槽位条目计入总数，并始终保留。")
                 .font(.system(size: 11))
                 .foregroundColor(theme.secondaryText)
                 .padding(.top, 4)
@@ -278,22 +277,20 @@ extension InlineSettingsView {
                 Button {
                     let total = backend.items.count
                     guard total > 0 else { return }
-                    let favorites = backend.favoriteIds
-                    let cleanableCount = backend.items.filter { !favorites.contains($0.id) }.count
+                    let cleanableCount = total - protectedHistoryCount
                     if cleanableCount == 0 {
                         let alert = NSAlert()
                         alert.messageText = "无需清理"
-                        alert.informativeText = "当前所有剪贴板记录均已收藏，收藏的条目不会被清理。"
+                        alert.informativeText = "当前条目均受收藏或快捷槽位保护。"
                         alert.alertStyle = .informational
                         alert.addButton(withTitle: "好")
                         alert.runModal()
                         return
                     }
-                    let estimated = Int((Double(cleanableCount) * 0.4).rounded(.up))
-                    let favNote = favorites.isEmpty ? "" : "，已收藏的条目将保留"
+                    let estimated = (cleanableCount * 40 + 99) / 100
                     let alert = NSAlert()
                     alert.messageText = "清理前 40% 的剪贴板历史?"
-                    alert.informativeText = "将从 \(total) 条记录中移除最旧的 \(estimated) 条（约前 40%\(favNote)），且无法撤销。"
+                    alert.informativeText = "将移除最旧的 \(estimated) 条普通记录。收藏和快捷槽位条目会保留。此操作无法撤销。"
                     alert.alertStyle = .warning
                     alert.addButton(withTitle: "确认清理")
                     alert.addButton(withTitle: "取消")
@@ -334,8 +331,7 @@ extension InlineSettingsView {
         )) {
             Button("确认调整") {
                 if let val = pendingThreshold {
-                    cleanupThreshold = Double(val)
-                    backend.setCleanupThreshold(val)
+                    applyCleanupThreshold(val)
                 }
                 pendingThreshold = nil
             }
@@ -344,9 +340,28 @@ extension InlineSettingsView {
             }
         } message: {
             if let val = pendingThreshold {
-                Text("当前已有 \(backend.items.count) 条记录。阈值降至 \(val) 条后，超出部分将被自动清理。是否继续？")
+                let total = backend.items.count
+                let remaining = min(total, max(val, protectedHistoryCount))
+                Text("将清理最早的 \(total - remaining) 条普通记录，清理后共 \(remaining) 条。收藏和快捷槽位条目会保留。是否继续？")
             }
         }
+    }
+
+    private var protectedHistoryCount: Int {
+        backend.items.filter { backend.favoriteIds.contains($0.id) || backend.slotByEntryId[$0.id] != nil }.count
+    }
+
+    private func applyCleanupThreshold(_ value: Int) {
+        if backend.setCleanupThreshold(value) {
+            cleanupThreshold = Double(value)
+            return
+        }
+        cleanupThreshold = Double(backend.getCleanupThreshold())
+        let alert = NSAlert()
+        alert.messageText = "无法调整清理阈值"
+        alert.informativeText = "数据库清理失败。请稍后重试。"
+        alert.addButton(withTitle: "好")
+        alert.runModal()
     }
 
     private var backupRestoreCard: some View {
@@ -463,7 +478,7 @@ extension InlineSettingsView {
 
                 let alert = NSAlert()
                 alert.messageText = "要如何恢复剪贴板历史？"
-                alert.informativeText = "备份创建于 \(timeStr)，包含 \(info.totalItems) 条记录（\(info.favoriteItems) 条收藏）。\n\n您可以将备份内容与现有历史合并，或完全替换当前内容。"
+                alert.informativeText = "备份创建于 \(timeStr)，包含 \(info.totalItems) 条记录（\(info.favoriteItems) 条收藏）。\n\n合并或替换后，将按 \(backend.getCleanupThreshold()) 条阈值清理最旧的普通记录。收藏和快捷槽位条目会保留。"
                 alert.alertStyle = .informational
                 alert.addButton(withTitle: "合并")
                 alert.addButton(withTitle: "取消")
@@ -472,18 +487,18 @@ extension InlineSettingsView {
                 let choice = alert.runModal()
                 if choice == .alertFirstButtonReturn {
                     let count = try backend.restoreBackup(from: backupURL, mode: .merge)
-                    showBackupStatus("已合并恢复（新增 \(count) 条记录）")
+                    showBackupStatus("已合并恢复（保留 \(count) 条新增记录）")
                 } else if choice == .alertThirdButtonReturn {
                     let confirmAlert = NSAlert()
                     confirmAlert.messageText = "确定要替换所有剪贴板记录吗？"
-                    confirmAlert.informativeText = "当前历史将被备份中的 \(info.totalItems) 条记录完全替换。此操作无法撤销。"
+                    confirmAlert.informativeText = "当前历史将被备份替换，并按当前阈值清理最旧的普通记录。此操作无法撤销。"
                     confirmAlert.alertStyle = .critical
                     confirmAlert.addButton(withTitle: "替换")
                     confirmAlert.addButton(withTitle: "取消")
 
                     if confirmAlert.runModal() == .alertFirstButtonReturn {
                         let count = try backend.restoreBackup(from: backupURL, mode: .overwrite)
-                        showBackupStatus("已全量恢复备份（共 \(count) 条记录）")
+                        showBackupStatus("已替换历史（共保留 \(count) 条记录）")
                     }
                 }
             } catch {

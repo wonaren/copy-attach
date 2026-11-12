@@ -1,3 +1,4 @@
+use super::shared_state_guard;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
@@ -36,12 +37,6 @@ fn ensure_test_backend() {
         set_backend(backend)
             .expect("Backend singleton must not be set before this test");
     });
-}
-
-static SHARED_STATE_LOCK: Mutex<()> = Mutex::new(());
-
-fn shared_state_guard() -> std::sync::MutexGuard<'static, ()> {
-    SHARED_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 #[test]
@@ -465,7 +460,7 @@ fn test_undo_after_recapture_keeps_db_entry_id_and_star() {
             recaptured_id, body, 2, "RecapUndo".to_string(), "com.example.recapundo".to_string(), 0,
         );
         crate::db::persist_entry_to_db(&mut conn, &entry, Some(body), None, None, 3000)
-            .expect("recapture insert")
+            .expect("recapture insert").0
     };
     {
         let mut hist = b.history.lock().unwrap();
@@ -1081,11 +1076,13 @@ fn test_history_mutations_publish_a_revision() {
     let pad: u64 = 555_100_000;
     let pad_count: u64 = 150;
     {
+        let conn = b.db.lock().unwrap();
         let mut hist = b.history.lock().unwrap();
-        for i in 0..pad_count {
-            hist.push(ClipboardEntry::text_entry(
-                pad + i, "pad", 0, String::new(), String::new(), 0,
-            ));
+        for id in pad..pad + pad_count {
+            let body = format!("pad-{id}");
+            let entry = ClipboardEntry::text_entry(id, &body, 0, String::new(), String::new(), 0);
+            crate::db::insert_entry_to_db(&conn, &entry, Some(&body), None, None).unwrap();
+            crate::history::publish_persisted_entry(&mut hist, entry, conn.last_insert_rowid(), &HashSet::new());
         }
     }
     assert!(b.history.lock().unwrap().len() > 100, "fixture must exceed the clamped minimum");
@@ -1104,6 +1101,9 @@ fn test_history_mutations_publish_a_revision() {
 
     crate::ffi::clipboard_set_cleanup_threshold(3000);
     {
+        let conn = b.db.lock().unwrap();
+        conn.execute("DELETE FROM clipboard_history WHERE entry_id >= ?1 AND entry_id < ?2",
+                     [pad as i64, (pad + pad_count) as i64]).unwrap();
         let mut hist = b.history.lock().unwrap();
         hist.retain(|e| !(e.entry_id() >= pad && e.entry_id() < pad + pad_count));
     }
@@ -1443,7 +1443,9 @@ fn test_set_cleanup_threshold_leaves_memory_intact_when_db_delete_fails() {
         conn.pragma_update(None, "query_only", true).expect("enable query_only");
     }
 
-    crate::ffi::clipboard_set_cleanup_threshold(100);
+    let previous_threshold = crate::ffi::clipboard_get_cleanup_threshold();
+    assert_eq!(crate::ffi::clipboard_set_cleanup_threshold(100), 0);
+    assert_eq!(crate::ffi::clipboard_get_cleanup_threshold(), previous_threshold);
     let after = b.history.lock().unwrap().len();
 
     {

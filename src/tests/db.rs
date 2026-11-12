@@ -199,7 +199,7 @@ fn test_entry_id_monotonic_after_reload() {
 
 #[test]
 fn test_trim_db_history_never_evicts_favorites() {
-    let conn = test_db();
+    let mut conn = test_db();
     for i in 0..6u64 {
         insert_text(&conn, &format!("fav-trim-{i}"), i);
     }
@@ -222,8 +222,8 @@ fn test_trim_db_history_never_evicts_favorites() {
     let loaded = load_history_from_db(&conn, 3);
     assert_eq!(
         loaded.len(),
-        5,
-        "2 favorites + 3 cleanable rows must survive, got {:?}",
+        3,
+        "2 favorites + the newest ordinary row must survive, got {:?}",
         loaded.iter().map(|e| e.label()).collect::<Vec<_>>()
     );
     for favored in ["fav-trim-0", "fav-trim-1"] {
@@ -238,6 +238,17 @@ fn test_trim_db_history_never_evicts_favorites() {
     );
     let stored = crate::db::load_favorites(&conn).unwrap();
     assert_eq!(stored.len(), 2);
+
+    let captured = ClipboardEntry::text_entry(new_entry_id(), "new capture", 10, String::new(), String::new(), 0);
+    persist_entry_to_db(&mut conn, &captured, Some("new capture"), None, None, 3).unwrap();
+    let loaded = load_history_from_db(&conn, 10);
+    assert_eq!(loaded.len(), 3);
+    assert_eq!(loaded.first().map(ClipboardEntry::entry_id), Some(captured.entry_id()));
+
+    crate::db::trim_db_history(&conn, 1).unwrap();
+    let loaded = load_history_from_db(&conn, 10);
+    assert_eq!(loaded.len(), 2, "favorites survive when they alone exceed the threshold");
+    assert!(loaded.iter().all(|entry| stored.contains(&entry.entry_id())));
 }
 
 #[test]
@@ -287,11 +298,8 @@ fn test_load_includes_all_favorites_even_when_one_is_newest() {
     set_favorite(&conn, ids[0], true).unwrap();
 
     let loaded = load_history_from_db(&conn, 4);
-    assert_eq!(loaded.len(), 6, "4 cleanable + 2 favorites must all be visible");
-    let loaded_ids: std::collections::HashSet<u64> = loaded.iter().map(|e| e.entry_id()).collect();
-    for id in &ids {
-        assert!(loaded_ids.contains(id), "entry {id} missing from the load");
-    }
+    let loaded_ids: Vec<_> = loaded.iter().map(ClipboardEntry::entry_id).collect();
+    assert_eq!(loaded_ids, [ids[5], ids[4], ids[3], ids[0]]);
 }
 
 #[test]
@@ -407,14 +415,15 @@ fn test_persist_entry_single_transaction() {
     let entry_a = ClipboardEntry::text_entry(new_entry_id(), "txn-dedup", 100, String::new(), String::new(), 0);
     let entry_b = ClipboardEntry::text_entry(new_entry_id(), "txn-dedup", 200, String::new(), String::new(), 0);
 
-    let row_a = persist_entry_to_db(&mut conn, &entry_a, Some("txn-dedup"), None, None, 3000).unwrap();
-    let row_b = persist_entry_to_db(&mut conn, &entry_b, Some("txn-dedup"), None, None, 3000).unwrap();
+    let (row_a, _) = persist_entry_to_db(&mut conn, &entry_a, Some("txn-dedup"), None, None, 3000).unwrap();
+    let (row_b, removed) = persist_entry_to_db(&mut conn, &entry_b, Some("txn-dedup"), None, None, 3000).unwrap();
 
     let count: i64 = conn
         .query_row("SELECT COUNT(*) FROM clipboard_history WHERE entry_type = 0", [], |r| r.get(0))
         .unwrap();
     assert_eq!(count, 1, "dedup inside the transaction must leave one row");
     assert_ne!(row_a, row_b, "the duplicate capture must get a fresh row");
+    assert_eq!(removed, [row_a].into_iter().collect());
     let old_rows: i64 = conn
         .query_row("SELECT COUNT(*) FROM clipboard_history WHERE id = ?1", rusqlite::params![row_a], |r| r.get(0))
         .unwrap();

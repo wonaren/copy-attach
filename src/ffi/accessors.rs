@@ -8,7 +8,8 @@ use super::vec_to_raw;
 #[no_mangle]
 pub extern "C" fn clipboard_get_count() -> c_int {
     let Some(b) = try_backend() else { return 0 };
-    b.history.lock().unwrap().len() as c_int
+    let Ok(hist) = b.history.lock() else { return 0 };
+    crate::history::visible_history(&hist).len() as c_int
 }
 
 #[no_mangle]
@@ -286,40 +287,30 @@ pub extern "C" fn clipboard_get_cleanup_threshold() -> i32 {
 }
 
 #[no_mangle]
-pub extern "C" fn clipboard_set_cleanup_threshold(threshold: i32) {
-    if let Some(b) = try_backend() {
-        let t = threshold.clamp(
-            crate::backend::MIN_CLEANUP_THRESHOLD as i32,
-            crate::backend::MAX_CLEANUP_THRESHOLD as i32,
-        ) as usize;
-        b.cleanup_threshold.store(t, Ordering::Relaxed);
-
-        let db_trimmed = match b.db.lock() {
-            Ok(conn) => match crate::db::trim_db_history(&conn, t) {
-                Ok(()) => true,
-                Err(()) => {
-                    crate::error_log!("CopyAttach: set_cleanup_threshold DB trim failed — history left intact");
-                    false
-                }
-            },
-            Err(e) => {
-                crate::error_log!("CopyAttach: DB mutex poisoned in set_cleanup_threshold: {e} — history left intact");
-                false
-            }
-        };
-
-        if db_trimmed {
-            let mut hist = b.history.lock().unwrap();
-            let before = hist.len();
-            {
-                let favorites = b.favorites.lock().unwrap();
-                crate::backend::trim_history_memory(&mut hist, t, &favorites);
-            }
-            if hist.len() != before {
-                crate::backend::mark_history_changed();
-            }
+pub extern "C" fn clipboard_set_cleanup_threshold(threshold: i32) -> c_int {
+    let Some(b) = try_backend() else { return 0 };
+    let t = threshold.clamp(
+        crate::backend::MIN_CLEANUP_THRESHOLD as i32,
+        crate::backend::MAX_CLEANUP_THRESHOLD as i32,
+    ) as usize;
+    let conn = match b.db.lock() {
+        Ok(conn) => conn,
+        Err(e) => {
+            crate::error_log!("CopyAttach: DB mutex poisoned in set_cleanup_threshold: {e}");
+            return 0;
         }
+    };
+    let Ok(mut hist) = b.history.lock() else {
+        crate::error_log!("CopyAttach: history mutex poisoned in set_cleanup_threshold");
+        return 0;
+    };
+    let Ok(removed) = crate::db::trim_db_history(&conn, t) else { return 0 };
+    b.cleanup_threshold.store(t, Ordering::Relaxed);
+    if !removed.is_empty() {
+        hist.retain(|entry| !removed.contains(&entry.db_id()));
+        crate::backend::mark_history_changed();
     }
+    1
 }
 
 #[no_mangle]

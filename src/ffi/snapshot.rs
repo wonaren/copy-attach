@@ -50,11 +50,9 @@ pub struct Snapshot(Vec<SnapshotRow>);
 
 #[no_mangle]
 pub extern "C" fn clipboard_snapshot_acquire() -> *mut Snapshot {
-    let hist = match try_backend() {
-        Some(b) => b.history.lock().unwrap(),
-        None => return std::ptr::null_mut(),
-    };
-    let rows: Vec<SnapshotRow> = hist.iter().map(SnapshotRow::from_entry).collect();
+    let Some(b) = try_backend() else { return std::ptr::null_mut() };
+    let Ok(hist) = b.history.lock() else { return std::ptr::null_mut() };
+    let rows: Vec<SnapshotRow> = crate::history::visible_history(&hist).iter().map(SnapshotRow::from_entry).collect();
     if !crate::backend::claim_pages(
         rows.as_ptr().cast::<u8>(),
         rows.capacity() * std::mem::size_of::<SnapshotRow>(),
@@ -250,7 +248,7 @@ pub extern "C" fn clipboard_snapshot_packed_acquire(out_len: *mut c_int) -> *mut
         Some(b) => b,
         None => return std::ptr::null_mut(),
     };
-    let hist = b.history.lock().unwrap();
+    let Ok(hist) = b.history.lock() else { return std::ptr::null_mut() };
     let perf = crate::perf::PerfSpan::start("rust", "snapshot.pack");
     let favorites = match b.favorites.lock() {
         Ok(f) => f.clone(),
@@ -266,8 +264,9 @@ pub extern "C" fn clipboard_snapshot_packed_acquire(out_len: *mut c_int) -> *mut
             return std::ptr::null_mut();
         }
     };
-    let packed = encode_snapshot_packed(&hist, &favorites, &quick_slots);
-    let rows = hist.len();
+    let visible = crate::history::visible_history(&hist);
+    let packed = encode_snapshot_packed(visible, &favorites, &quick_slots);
+    let rows = visible.len();
     if let Some(mut span) = perf {
         span.val = Some(rows as i64);
         span.data = Some(format!("bytes{}", packed.len()));

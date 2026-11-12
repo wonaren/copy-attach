@@ -115,7 +115,7 @@ fn test_dedup_does_not_consume_a_deleted_row() {
     let recaptured = ClipboardEntry::text_entry(
         id_b, "same-content", 200, String::new(), String::new(), 0,
     );
-    crate::db::delete_matching_entry(&conn, &recaptured, Some("same-content"));
+    crate::db::delete_matching_entry(&conn, &recaptured, Some("same-content")).unwrap();
 
     let deleted_rows: i64 = conn
         .query_row(
@@ -210,7 +210,7 @@ fn test_undo_after_recapture_leaves_one_row_across_restart() {
     );
     let tx = conn.unchecked_transaction().unwrap();
     insert_entry_to_db(&tx, &restored, Some("recaptured-content"), None, None).unwrap();
-    crate::db::delete_matching_entry(&tx, &restored, Some("recaptured-content"));
+    crate::db::delete_matching_entry(&tx, &restored, Some("recaptured-content")).unwrap();
     tx.execute("DELETE FROM clipboard_history WHERE id = ?1", rusqlite::params![row_a]).unwrap();
     tx.commit().unwrap();
 
@@ -579,7 +579,7 @@ fn test_undo_keeps_the_star_of_the_recaptured_copy() {
 
     let restored = ClipboardEntry::text_entry(original_id, "same-content", 300, String::new(), String::new(), 0);
     crate::db::insert_entry_to_db(&conn, &restored, Some("same-content"), None, None).unwrap();
-    crate::db::delete_matching_entry(&conn, &restored, Some("same-content"));
+    crate::db::delete_matching_entry(&conn, &restored, Some("same-content")).unwrap();
     conn.execute("DELETE FROM clipboard_deleted WHERE row_id = ?1", rusqlite::params![original_row])
         .expect("drop the undo entry");
     conn.execute("DELETE FROM clipboard_history WHERE id = ?1", rusqlite::params![original_row])

@@ -134,8 +134,8 @@ class ClipboardBackend {
         }
 
         let saved = UserDefaults.standard.integer(forKey: "CleanupThreshold")
-        if saved >= 100 {
-            clipboard_set_cleanup_threshold(Int32(saved))
+        if saved >= 100 && clipboard_set_cleanup_threshold(Int32(saved)) == 0 {
+            errorLog("Could not apply saved cleanup threshold")
         }
         syncIgnoreRules()
 
@@ -866,11 +866,13 @@ class ClipboardBackend {
         Int(clipboard_get_cleanup_threshold())
     }
 
-    func setCleanupThreshold(_ threshold: Int) {
+    @discardableResult
+    func setCleanupThreshold(_ threshold: Int) -> Bool {
         let clamped = max(100, min(10000, threshold))
-        clipboard_set_cleanup_threshold(Int32(clamped))
+        guard clipboard_set_cleanup_threshold(Int32(clamped)) != 0 else { return false }
         UserDefaults.standard.set(clamped, forKey: "CleanupThreshold")
         refresh()
+        return true
     }
 
     func getStorageBreakdown() -> (text: Int64, image: Int64, undo: Int64)? {

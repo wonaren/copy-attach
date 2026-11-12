@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::thread;
@@ -8,7 +7,7 @@ use arboard::Clipboard;
 use crate::backend::{PendingSelfWrite, POLL_INTERVAL_MS};
 use crate::types::ClipboardEntry;
 use crate::image::{create_thumbnail_fast, image_hash};
-use crate::history::add_to_history;
+use crate::history::{is_pending_image, preserve_history_identity, publish_persisted_entry, visible_history};
 use crate::ignore::IgnoreRules;
 use crate::macos;
 
@@ -23,13 +22,13 @@ enum ImagePhase2Payload {
 
 struct ImagePhase2Job {
     payload: ImagePhase2Payload,
-    hash: u64,
+    entry_id: u64,
     thumb_data: Vec<u8>,
     thumb_w: u32,
     thumb_h: u32,
     history: Arc<Mutex<Vec<ClipboardEntry>>>,
     db: Arc<Mutex<rusqlite::Connection>>,
-    threshold: usize,
+    cleanup_threshold: Arc<AtomicUsize>,
 }
 
 static IMAGE_PHASE2_QUEUE: OnceLock<mpsc::SyncSender<ImagePhase2Job>> = OnceLock::new();
@@ -50,8 +49,8 @@ fn image_phase2_sender() -> &'static mpsc::SyncSender<ImagePhase2Job> {
 }
 
 fn persist_image_phase2(job: ImagePhase2Job) {
-    let ImagePhase2Job { payload, hash: item_hash, thumb_data: thumb_async,
-        thumb_w, thumb_h, history, db, threshold } = job;
+    let ImagePhase2Job { payload, entry_id, thumb_data: thumb_async,
+        thumb_w, thumb_h, history, db, cleanup_threshold } = job;
     let thumb_guard = crate::backend::MarkBlobReusableOnDrop(thumb_async);
     let thumb_async = &thumb_guard.0;
     let _existing_guard;
@@ -70,41 +69,66 @@ fn persist_image_phase2(job: ImagePhase2Job) {
             match crate::image::encode_png_into(width, height, &buffer, &mut scratch_guard) {
                 Some(()) => scratch_guard.as_slice(),
                 None => {
-                    crate::debug_log!("CopyAttach: failed to encode full-size PNG for image {width}x{height} — removing broken entry from history");
+                    crate::debug_log!("CopyAttach: failed to encode full-size PNG for image {width}x{height}");
                     let mut hist = history.lock().unwrap();
-                    hist.retain(|e| !matches!(e, ClipboardEntry::Image { hash, .. } if *hash == item_hash));
-                    crate::backend::mark_history_changed();
+                    hist.retain(|entry| entry.entry_id() != entry_id || !is_pending_image(entry));
                     return;
                 }
             }
         }
     };
-    let db_item = {
-        let hist = history.lock().unwrap();
-        hist.iter().find(|e| matches!(e, ClipboardEntry::Image { hash, .. } if *hash == item_hash)).cloned()
-    };
-    if let Some(db_item) = db_item {
-        let mut conn = match db.lock() {
-            Ok(c) => c,
-            Err(e) => {
-                crate::error_log!("CopyAttach: DB mutex poisoned in Phase 2 image persist: {e}");
-                return;
-            }
-        };
-        match crate::db::persist_entry_to_db(&mut conn, &db_item, None, Some(full_png),
-                                             Some((thumb_async, thumb_w, thumb_h)), threshold) {
-            Ok(row_id) => {
-                let mut hist = history.lock().unwrap();
-                for entry in hist.iter_mut() {
-                    if let ClipboardEntry::Image { hash, db_id, .. } = entry {
-                        if *hash == item_hash { *db_id = row_id; break; }
-                    }
-                }
-                crate::backend::mark_history_changed();
-                crate::backend::IMAGE_ENCODING_COUNTER.fetch_add(1, Ordering::Relaxed);
-            }
-            Err(()) => crate::error_log!("CopyAttach: Phase 2 DB insert failed for image hash {item_hash} — entry stays with db_id=0"),
+    let mut conn = match db.lock() {
+        Ok(conn) => conn,
+        Err(e) => {
+            crate::error_log!("CopyAttach: DB mutex poisoned in Phase 2 image persist: {e}");
+            history.lock().unwrap().retain(|entry| entry.entry_id() != entry_id || !is_pending_image(entry));
+            return;
         }
+    };
+    let mut hist = history.lock().unwrap();
+    let Some(index) = hist.iter().rposition(|entry| entry.entry_id() == entry_id && is_pending_image(entry)) else {
+        return;
+    };
+    let mut item = hist.remove(index);
+    preserve_history_identity(visible_history(&hist), &mut item);
+    match crate::db::persist_entry_to_db(
+        &mut conn, &item, None, Some(full_png), Some((thumb_async, thumb_w, thumb_h)),
+        cleanup_threshold.load(Ordering::Relaxed),
+    ) {
+        Ok((row_id, removed)) => {
+            publish_persisted_entry(&mut hist, item, row_id, &removed);
+            crate::backend::mark_history_changed();
+            crate::backend::IMAGE_ENCODING_COUNTER.fetch_add(1, Ordering::Relaxed);
+        }
+        Err(()) => crate::error_log!("CopyAttach: Phase 2 DB insert failed for image {entry_id}"),
+    }
+}
+
+fn persist_captured_text(
+    db: &Mutex<rusqlite::Connection>,
+    history: &Mutex<Vec<ClipboardEntry>>,
+    cleanup_threshold: &AtomicUsize,
+    mut item: ClipboardEntry,
+    text: &str,
+) {
+    let mut conn = match db.lock() {
+        Ok(conn) => conn,
+        Err(e) => {
+            crate::error_log!("CopyAttach: DB mutex poisoned in text capture persist: {e}");
+            return;
+        }
+    };
+    let mut hist = history.lock().unwrap();
+    preserve_history_identity(visible_history(&hist), &mut item);
+    match crate::db::persist_entry_to_db(
+        &mut conn, &item, Some(text), None, None, cleanup_threshold.load(Ordering::Relaxed),
+    ) {
+        Ok((row_id, removed)) => {
+            publish_persisted_entry(&mut hist, item, row_id, &removed);
+            crate::backend::mark_history_changed();
+            crate::perf::perf_instant("rust", "capture.text", Some("text"));
+        }
+        Err(()) => crate::error_log!("CopyAttach: failed to insert text entry to DB"),
     }
 }
 
@@ -122,7 +146,6 @@ fn insert_image_entry(
     src: &crate::types::SourceApp,
     now: u64,
     cleanup_threshold: &Arc<AtomicUsize>,
-    favorites: &Arc<Mutex<HashSet<u64>>>,
 ) {
     let item = ClipboardEntry::Image {
         id: crate::backend::new_entry_id(),
@@ -138,30 +161,19 @@ fn insert_image_entry(
         db_id: 0,
     };
 
-    {
-        let mut hist = history.lock().unwrap();
-        *hist = add_to_history(std::mem::take(&mut *hist), item);
-        {
-            let favs = favorites.lock().unwrap();
-            crate::backend::trim_history_memory(
-                &mut hist,
-                cleanup_threshold.load(Ordering::Relaxed),
-                &favs,
-            );
-        }
-        crate::backend::mark_history_changed();
-        crate::perf::perf_instant("rust", "capture.image_phase1", Some("image"));
-    }
+    let entry_id = item.entry_id();
+    history.lock().unwrap().push(item);
+    crate::perf::perf_instant("rust", "capture.image_phase1", Some("image"));
 
     let job = ImagePhase2Job {
         payload,
-        hash,
+        entry_id,
         thumb_data,
         thumb_w,
         thumb_h,
         history: history.clone(),
         db: db.clone(),
-        threshold: cleanup_threshold.load(Ordering::Relaxed),
+        cleanup_threshold: cleanup_threshold.clone(),
     };
     image_phase2_sender().send(job)
         .expect("CopyAttach: image Phase 2 worker stopped");
@@ -177,7 +189,6 @@ fn ingest_streamed_png(
     now: u64,
     cleanup_threshold: &Arc<AtomicUsize>,
     ignore_rules: &Arc<Mutex<IgnoreRules>>,
-    favorites: &Arc<Mutex<HashSet<u64>>>,
 ) {
     if ignore_rules.lock().unwrap().ignores_image() {
         crate::backend::mark_pages_reusable(png.as_ptr(), png.capacity());
@@ -197,7 +208,6 @@ fn ingest_streamed_png(
         src,
         now,
         cleanup_threshold,
-        favorites,
     );
 }
 
@@ -213,7 +223,6 @@ fn ingest_rgba_image(
     now: u64,
     cleanup_threshold: &Arc<AtomicUsize>,
     ignore_rules: &Arc<Mutex<IgnoreRules>>,
-    favorites: &Arc<Mutex<HashSet<u64>>>,
 ) {
     if ignore_rules.lock().unwrap().ignores_image() {
         if let Some(png) = raw_png {
@@ -253,8 +262,7 @@ fn ingest_rgba_image(
             src,
             now,
             cleanup_threshold,
-            favorites,
-        );
+            );
     } else if let Some(png) = raw_png {
         crate::backend::mark_pages_reusable(png.as_ptr(), png.capacity());
     }
@@ -270,7 +278,6 @@ fn ingest_decoded_png(
     now: u64,
     cleanup_threshold: &Arc<AtomicUsize>,
     ignore_rules: &Arc<Mutex<IgnoreRules>>,
-    favorites: &Arc<Mutex<HashSet<u64>>>,
 ) -> bool {
     let mut is_native_png = false;
     let decoded: Result<(crate::backend::ImageDecodeBuffer, u32, u32), image::ImageError> = {
@@ -304,7 +311,7 @@ fn ingest_decoded_png(
             ingest_rgba_image(
                 pixels, w, h, raw_png,
                 history,
-                db, src, now, cleanup_threshold, ignore_rules, favorites,
+                db, src, now, cleanup_threshold, ignore_rules,
             );
             true
         }
@@ -326,7 +333,6 @@ pub(crate) fn clipboard_monitor(
     pending_self_write: Arc<Mutex<Option<PendingSelfWrite>>>,
     cleanup_threshold: Arc<AtomicUsize>,
     ignore_rules: Arc<Mutex<IgnoreRules>>,
-    favorites: Arc<Mutex<HashSet<u64>>>,
 ) {
     let mut cb = loop {
         match Clipboard::new() {
@@ -399,13 +405,13 @@ pub(crate) fn clipboard_monitor(
                 if let Some(streamed) = crate::image::hash_and_thumbnail_streaming(&img_bytes) {
                     ingest_streamed_png(
                         img_bytes, streamed,
-                        &history, &db, &src, now, &cleanup_threshold, &ignore_rules, &favorites,
+                        &history, &db, &src, now, &cleanup_threshold, &ignore_rules,
                     );
                     captured = true;
                 } else {
                     captured = ingest_decoded_png(
                         img_bytes,
-                        &history, &db, &src, now, &cleanup_threshold, &ignore_rules, &favorites,
+                        &history, &db, &src, now, &cleanup_threshold, &ignore_rules,
                     );
                 }
             }
@@ -432,65 +438,7 @@ pub(crate) fn clipboard_monitor(
                             0,
                         );
 
-                        let item_for_db = {
-                            let mut hist = history.lock().unwrap();
-                            *hist = add_to_history(std::mem::take(&mut *hist), item);
-                            {
-                                let favorites = favorites.lock().unwrap();
-                                crate::backend::trim_history_memory(
-                                    &mut hist,
-                                    cleanup_threshold.load(Ordering::Relaxed),
-                                    &favorites,
-                                );
-                            }
-                            crate::backend::mark_history_changed();
-                            crate::perf::perf_instant("rust", "capture.text", Some("text"));
-                            hist[0].clone()
-                        };
-
-                        let failed_hash = match &item_for_db {
-                            ClipboardEntry::Text { text_hash, .. } => *text_hash,
-                            _ => unreachable!("text capture produced a non-text entry"),
-                        };
-                        match db.lock() {
-                            Ok(mut conn) => {
-                                match crate::db::persist_entry_to_db(
-                                    &mut conn,
-                                    &item_for_db,
-                                    Some(text),
-                                    None,
-                                    None,
-                                    cleanup_threshold.load(Ordering::Relaxed),
-                                ) {
-                                    Ok(row_id) => {
-                                        let mut hist = history.lock().unwrap();
-                                        crate::history::assign_db_id_by_text_hash(
-                                            &mut hist,
-                                            failed_hash,
-                                            row_id,
-                                        );
-                                    }
-                                    Err(()) => {
-                                        crate::error_log!("CopyAttach: failed to insert text entry to DB — removing it from history");
-                                        let mut hist = history.lock().unwrap();
-                                        hist.retain(|e| match e {
-                                            ClipboardEntry::Text { text_hash: h, .. } => *h != failed_hash,
-                                            _ => true,
-                                        });
-                                        crate::backend::mark_history_changed();
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                crate::error_log!("CopyAttach: DB mutex poisoned in text capture persist: {e}");
-                                let mut hist = history.lock().unwrap();
-                                hist.retain(|e| match e {
-                                    ClipboardEntry::Text { text_hash: h, .. } => *h != failed_hash,
-                                    _ => true,
-                                });
-                                crate::backend::mark_history_changed();
-                            }
-                        }
+                        persist_captured_text(&db, &history, &cleanup_threshold, item, text);
                     }
                 }
             }
@@ -498,5 +446,57 @@ pub(crate) fn clipboard_monitor(
 
         if !running.load(Ordering::SeqCst) { return; }
         thread::park_timeout(Duration::from_millis(POLL_INTERVAL_MS));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_out_of_order_image_commit_keeps_snapshot_and_database_in_sync() {
+        let _shared = crate::tests::shared_state_guard();
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::ensure_history_table(&conn).unwrap();
+        let db = Arc::new(Mutex::new(conn));
+        let history = Arc::new(Mutex::new(Vec::new()));
+        let threshold = Arc::new(AtomicUsize::new(100));
+
+        let capture_text = |id, body: &str, timestamp| {
+            let entry = ClipboardEntry::text_entry(id, body, timestamp, String::new(), String::new(), 0);
+            persist_captured_text(&db, &history, &threshold, entry, body);
+        };
+        for id in 1..=100 {
+            capture_text(id, &format!("initial {id}"), id);
+            if id <= 98 {
+                crate::db::set_favorite(&db.lock().unwrap(), id, true).unwrap();
+            }
+        }
+
+        let rgba = [1, 2, 3, 255];
+        let png = crate::image::encode_png(1, 1, &rgba).unwrap();
+        {
+            let mut hist = history.lock().unwrap();
+            hist.push(ClipboardEntry::Image {
+                id: 101, width: 1, height: 1, thumb_width: 1, thumb_height: 1,
+                hash: crate::image::image_hash(&rgba, 1, 1), custom_label: String::new(),
+                timestamp: 101, source_name: String::new(), source_bundle_id: String::new(), db_id: 0,
+            });
+            assert_eq!(visible_history(&hist).len(), 100);
+        }
+        capture_text(102, "same-second text", 101);
+        persist_image_phase2(ImagePhase2Job {
+            payload: ImagePhase2Payload::ExistingPng(png.clone()), entry_id: 101, thumb_data: png,
+            thumb_w: 1, thumb_h: 1, history: history.clone(), db: db.clone(), cleanup_threshold: threshold.clone(),
+        });
+        capture_text(103, "next capture", 102);
+
+        let ids = |entry: &ClipboardEntry| (entry.entry_id(), entry.db_id());
+        let memory: Vec<_> = visible_history(&history.lock().unwrap()).iter().map(ids).collect();
+        let disk: Vec<_> = crate::db::load_history_from_db(&db.lock().unwrap(), 1000)
+            .iter().map(ids).collect();
+        assert_eq!(memory, disk);
+        assert_eq!(memory.len(), 100);
+        assert_eq!((memory[0].0, memory[1].0), (103, 101));
     }
 }

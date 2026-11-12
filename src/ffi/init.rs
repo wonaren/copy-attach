@@ -94,10 +94,9 @@ fn clipboard_init_inner(threshold: Option<c_int>, legacy_favorites: &[u64]) -> c
             let pending_self_write = Arc::clone(&b.pending_self_write);
             let cleanup_threshold = Arc::clone(&b.cleanup_threshold);
             let ignore_rules = Arc::clone(&b.ignore_rules);
-            let favorites = Arc::clone(&b.favorites);
             move || clipboard_monitor(history, running, source_app, db,
                 pasteboard_event_lock, pending_self_write,
-                cleanup_threshold, ignore_rules, favorites)
+                cleanup_threshold, ignore_rules)
         });
         *b.monitor_handle.lock().unwrap() = Some(handle);
         return 1;
@@ -173,10 +172,11 @@ fn clipboard_init_inner(threshold: Option<c_int>, legacy_favorites: &[u64]) -> c
         }
     };
 
-    let saved = load_history_from_db(&conn, startup_threshold);
     if trim_db_history(&conn, startup_threshold).is_err() {
-        crate::error_log!("CopyAttach: startup trim failed; the table stays over the load cap until the next capture's transactional trim");
+        crate::error_log!("CopyAttach: startup trim failed; retrying initialization");
+        return INIT_RETRYABLE;
     }
+    let saved = load_history_from_db(&conn, startup_threshold);
 
     {
         let max_loaded = saved.iter().map(|e| match e {
@@ -254,7 +254,7 @@ fn clipboard_init_inner(threshold: Option<c_int>, legacy_favorites: &[u64]) -> c
     let handle = thread::spawn(|| clipboard_monitor(
         history, running, source_app, db,
         pasteboard_event_lock, pending_self_write,
-        cleanup_threshold, ignore_rules, favorites,
+        cleanup_threshold, ignore_rules,
     ));
 
     if let Some(b) = crate::backend::try_backend() {

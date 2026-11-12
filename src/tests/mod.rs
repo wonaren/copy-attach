@@ -17,6 +17,12 @@ mod soft_delete;
 mod soft_delete_real;
 mod quick_slots;
 
+static SHARED_STATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+pub(crate) fn shared_state_guard() -> std::sync::MutexGuard<'static, ()> {
+    SHARED_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn make_text(text: &str, ts: u64) -> ClipboardEntry {
     ClipboardEntry::text_entry(
         new_entry_id(),

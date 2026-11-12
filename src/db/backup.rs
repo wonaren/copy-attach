@@ -209,10 +209,33 @@ pub(crate) fn inspect_backup(backup_path: &Path) -> Result<BackupInspectInfo, St
     })
 }
 
+#[derive(Debug)]
+pub(crate) struct RestoredSnapshot {
+    pub(crate) items: Vec<crate::types::ClipboardEntry>,
+    pub(crate) slots: [u64; super::QUICK_SLOT_COUNT],
+}
+
+type RestoreResult = Result<(usize, Vec<u64>, RestoredSnapshot), String>;
+
+fn read_restored_snapshot(conn: &Connection, threshold: usize) -> Result<RestoredSnapshot, String> {
+    let live_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM clipboard_history WHERE id NOT IN (SELECT row_id FROM clipboard_deleted)",
+        [],
+        |row| row.get(0),
+    ).map_err(|e| format!("读取恢复后的条目数失败: {e}"))?;
+    let items = super::load_history_from_db(conn, threshold);
+    if items.len() as i64 != live_count {
+        return Err("恢复后的历史记录不完整".to_string());
+    }
+    let slots = super::load_quick_slots(conn).map_err(|()| "读取恢复后的快捷槽位失败".to_string())?;
+    Ok(RestoredSnapshot { items, slots })
+}
+
 pub(crate) fn restore_backup_overwrite(
     conn: &mut Connection,
     backup_path: &Path,
-) -> Result<(usize, Vec<u64>), String> {
+    threshold: usize,
+) -> RestoreResult {
     let _info = inspect_backup(backup_path)?;
 
     let backup_str = backup_path
@@ -222,7 +245,7 @@ pub(crate) fn restore_backup_overwrite(
     conn.execute("ATTACH DATABASE ?1 AS backup_db", [backup_str])
         .map_err(|e| format!("挂载备份数据库失败: {e}"))?;
 
-    let res = (|| -> Result<(usize, Vec<u64>), String> {
+    let res = (|| -> RestoreResult {
         let tx = conn
             .unchecked_transaction()
             .map_err(|e| format!("开启恢复事务失败: {e}"))?;
@@ -356,13 +379,11 @@ pub(crate) fn restore_backup_overwrite(
             let _ = bump_entry_id_watermark(&tx, floor);
         }
 
-        let restored_count: i64 = tx
-            .query_row("SELECT COUNT(*) FROM clipboard_history", [], |r| r.get(0))
-            .unwrap_or(0);
-
+        super::trim_db_history(&tx, threshold).map_err(|()| "恢复后的历史清理失败".to_string())?;
+        let snapshot = read_restored_snapshot(&tx, threshold)?;
         tx.commit().map_err(|e| format!("提交恢复事务失败: {e}"))?;
 
-        Ok((restored_count.max(0) as usize, restored_favorites))
+        Ok((snapshot.items.len(), restored_favorites, snapshot))
     })();
 
     let _ = conn.execute_batch("DETACH DATABASE backup_db;");
@@ -372,7 +393,8 @@ pub(crate) fn restore_backup_overwrite(
 pub(crate) fn restore_backup_merge(
     conn: &mut Connection,
     backup_path: &Path,
-) -> Result<(usize, Vec<u64>), String> {
+    threshold: usize,
+) -> RestoreResult {
     let _info = inspect_backup(backup_path)?;
 
     let backup_str = backup_path
@@ -382,7 +404,7 @@ pub(crate) fn restore_backup_merge(
     conn.execute("ATTACH DATABASE ?1 AS backup_db", [backup_str])
         .map_err(|e| format!("挂载备份数据库失败: {e}"))?;
 
-    let res = (|| -> Result<(usize, Vec<u64>), String> {
+    let res = (|| -> RestoreResult {
         let tx = conn
             .unchecked_transaction()
             .map_err(|e| format!("开启合并事务失败: {e}"))?;
@@ -455,7 +477,7 @@ pub(crate) fn restore_backup_merge(
             }
         }
 
-        let mut newly_added = 0usize;
+        let mut newly_added = HashSet::new();
         let mut slot_remap: HashMap<u64, u64> = HashMap::new();
 
         struct RawBackupRow {
@@ -585,14 +607,13 @@ pub(crate) fn restore_backup_merge(
                             item.preview, item.label, item.custom_label,
                         ],
                     );
-                    if res.is_ok() {
-                        newly_added += 1;
-                        if is_fav {
-                            merged_fav_set.insert(final_eid);
-                        }
-                        if item.entry_id > 0 {
-                            slot_remap.insert(item.entry_id as u64, final_eid);
-                        }
+                    res.map_err(|e| format!("合并文本失败: {e}"))?;
+                    newly_added.insert(tx.last_insert_rowid());
+                    if is_fav {
+                        merged_fav_set.insert(final_eid);
+                    }
+                    if item.entry_id > 0 {
+                        slot_remap.insert(item.entry_id as u64, final_eid);
                     }
                 }
             } else if item.entry_type == 1 {
@@ -659,14 +680,13 @@ pub(crate) fn restore_backup_merge(
                             item.custom_label,
                         ],
                     );
-                    if res.is_ok() {
-                        newly_added += 1;
-                        if is_fav {
-                            merged_fav_set.insert(final_eid);
-                        }
-                        if item.entry_id > 0 {
-                            slot_remap.insert(item.entry_id as u64, final_eid);
-                        }
+                    res.map_err(|e| format!("合并图片失败: {e}"))?;
+                    newly_added.insert(tx.last_insert_rowid());
+                    if is_fav {
+                        merged_fav_set.insert(final_eid);
+                    }
+                    if item.entry_id > 0 {
+                        slot_remap.insert(item.entry_id as u64, final_eid);
                     }
                 }
             }
@@ -720,9 +740,12 @@ pub(crate) fn restore_backup_merge(
             }
         }
 
+        let removed = super::trim_db_history(&tx, threshold).map_err(|()| "合并后的历史清理失败".to_string())?;
+        newly_added.retain(|row_id| !removed.contains(row_id));
+        let snapshot = read_restored_snapshot(&tx, threshold)?;
         tx.commit().map_err(|e| format!("提交合并事务失败: {e}"))?;
 
-        Ok((newly_added, merged_fav_set.into_iter().collect()))
+        Ok((newly_added.len(), merged_fav_set.into_iter().collect(), snapshot))
     })();
 
     let _ = conn.execute_batch("DETACH DATABASE backup_db;");

@@ -19,7 +19,7 @@ pub(crate) use schema::{
 pub(crate) use schema::{load_undo_limit, store_undo_limit};
 #[cfg(feature = "migration")]
 pub(crate) use schema::get_persist_dir;
-pub(crate) use crud::{insert_entry_to_db, load_history_from_db, persist_entry_to_db, seed_first_launch_tips, trim_db_history, update_entry_custom_label};
+pub(crate) use crud::{insert_entry_to_db, load_history_from_db, persist_entry_to_db, seed_first_launch_tips, trim_db_history, trim_db_history_by_percent, update_entry_custom_label};
 pub(crate) use crud::{
     delete_matching_entry, delete_payload_rows, history_row_payload_bytes, newest_deleted_row,
     pending_undo_evictions, purge_expired_deleted_rows, soft_delete_row, storage_breakdown,

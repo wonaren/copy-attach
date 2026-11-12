@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::ffi::{c_char, c_int, CStr};
 use std::sync::atomic::Ordering;
 
@@ -19,6 +18,7 @@ pub extern "C" fn clipboard_clear_history() -> c_int {
             return 0;
         }
     };
+    let Ok(mut hist) = b.history.lock() else { return 0 };
     let cleared: Result<(), rusqlite::Error> = (|| {
         let tx = conn.unchecked_transaction()?;
         tx.execute("DELETE FROM clipboard_history", [])?;
@@ -31,15 +31,12 @@ pub extern "C" fn clipboard_clear_history() -> c_int {
         crate::error_log!("CopyAttach: failed to clear DB history: {e}");
         return 0;
     }
-    drop(conn);
-
     if let Ok(mut favorites) = b.favorites.lock() {
         favorites.clear();
     }
     if let Ok(mut slots) = b.quick_slots.lock() {
         *slots = [0u64; crate::db::QUICK_SLOT_COUNT];
     }
-    let mut hist = b.history.lock().unwrap();
     hist.clear();
     crate::backend::mark_history_changed();
     1
@@ -391,169 +388,154 @@ pub extern "C" fn clipboard_undo_delete() -> c_int {
         None => return 0,
     };
 
-    let restored: Option<(u64, ClipboardEntry, HashSet<u64>, [u64; crate::db::QUICK_SLOT_COUNT])> = {
-        let conn = match b.db.lock() {
-            Ok(c) => c,
-            Err(e) => {
-                crate::error_log!("CopyAttach: DB mutex poisoned during undo: {e}");
+    let conn = match b.db.lock() {
+        Ok(c) => c,
+        Err(e) => {
+            crate::error_log!("CopyAttach: DB mutex poisoned during undo: {e}");
+            return 0;
+        }
+    };
+    let (old_row_id, entry_id, was_favorite, was_slot) =
+        match crate::db::newest_deleted_row(&conn) {
+            Ok(Some(t)) => t,
+            Ok(None) => {
+                crate::debug_log!("CopyAttach: undo requested with nothing deleted");
                 return 0;
             }
+            Err(()) => return 0,
         };
-        let (old_row_id, entry_id, was_favorite, was_slot) =
-            match crate::db::newest_deleted_row(&conn) {
-                Ok(Some(t)) => t,
-                Ok(None) => {
-                    crate::debug_log!("CopyAttach: undo requested with nothing deleted");
-                    return 0;
+
+    let source = match load_deleted_payload(&conn, old_row_id) {
+        Ok(s) => s,
+        Err(UndoLoadError::Unrestorable) => {
+            crate::error_log!("CopyAttach: undo could not load payload for deleted row {old_row_id} — discarding it");
+            if crate::db::delete_payload_rows(&conn, &[old_row_id]).is_err() {
+                crate::error_log!("CopyAttach: failed to discard unrestorable undo row {old_row_id}");
+            }
+            return 0;
+        }
+        Err(UndoLoadError::Read) => {
+            crate::error_log!("CopyAttach: undo read of deleted row {old_row_id} failed — undo entry kept");
+            return 0;
+        }
+    };
+
+    let tx = match conn.unchecked_transaction() {
+        Ok(t) => t,
+        Err(e) => {
+            crate::error_log!("CopyAttach: failed to begin undo transaction: {e}");
+            return 0;
+        }
+    };
+    let insert = match &source.body {
+        DeletedBody::Text(body) => {
+            crate::db::insert_entry_to_db(&tx, &source.entry, Some(body), None, None)
+        }
+        DeletedBody::Image { png, thumb } => {
+            let (tw, th) = match &source.entry {
+                ClipboardEntry::Image { thumb_width, thumb_height, .. } => {
+                    (*thumb_width, *thumb_height)
                 }
-                Err(()) => return 0,
+                _ => (0, 0),
             };
-
-        let source = match load_deleted_payload(&conn, old_row_id) {
-            Ok(s) => s,
-            Err(UndoLoadError::Unrestorable) => {
-                crate::error_log!("CopyAttach: undo could not load payload for deleted row {old_row_id} — discarding it");
-                if crate::db::delete_payload_rows(&conn, &[old_row_id]).is_err() {
-                    crate::error_log!("CopyAttach: failed to discard unrestorable undo row {old_row_id}");
-                }
-                return 0;
-            }
-            Err(UndoLoadError::Read) => {
-                crate::error_log!("CopyAttach: undo read of deleted row {old_row_id} failed — undo entry kept");
-                return 0;
-            }
-        };
-
-        let tx = match conn.unchecked_transaction() {
-            Ok(t) => t,
-            Err(e) => {
-                crate::error_log!("CopyAttach: failed to begin undo transaction: {e}");
-                return 0;
-            }
-        };
-        let insert = match &source.body {
-            DeletedBody::Text(body) => {
-                crate::db::insert_entry_to_db(&tx, &source.entry, Some(body), None, None)
-            }
-            DeletedBody::Image { png, thumb } => {
-                let (tw, th) = match &source.entry {
-                    ClipboardEntry::Image { thumb_width, thumb_height, .. } => {
-                        (*thumb_width, *thumb_height)
-                    }
-                    _ => (0, 0),
-                };
-                crate::db::insert_entry_to_db(&tx, &source.entry, None, Some(png), Some((thumb, tw, th)))
-            }
-        };
-        if insert.is_err() {
-            crate::error_log!("CopyAttach: undo failed to re-insert entry {entry_id}; the deleted row is kept for retry");
-            return 0;
+            crate::db::insert_entry_to_db(&tx, &source.entry, None, Some(png), Some((thumb, tw, th)))
         }
-        let new_row_id = match tx.query_row(
-            "SELECT COALESCE(MAX(id), 0) FROM clipboard_history",
-            [],
-            |r| r.get::<_, i64>(0),
-        ) {
-            Ok(v) => v,
-            Err(e) => {
-                crate::error_log!("CopyAttach: undo could not locate the restored row: {e}");
-                return 0;
-            }
-        };
-        crate::db::delete_matching_entry(&tx, &source.entry, source.body.as_text());
-        if let Err(e) = tx.execute(
-            "DELETE FROM clipboard_deleted WHERE row_id = ?1",
-            rusqlite::params![old_row_id],
-        ) {
-            crate::error_log!("CopyAttach: undo could not remove the undo entry {old_row_id}: {e}");
-            return 0;
-        }
-        if let Err(e) = tx.execute(
-            "DELETE FROM clipboard_history WHERE id = ?1",
-            rusqlite::params![old_row_id],
-        ) {
-            crate::error_log!("CopyAttach: undo could not remove the deleted row {old_row_id}: {e}");
-            return 0;
-        }
-        if was_favorite {
-            if let Err(e) = tx.execute(
-                "INSERT OR IGNORE INTO clipboard_favorites (entry_id) VALUES (?1)",
-                rusqlite::params![entry_id as i64],
-            ) {
-                crate::error_log!("CopyAttach: undo could not restore favorite for entry {entry_id}: {e}");
-                return 0;
-            }
-        }
-        if was_slot != 0 {
-            if let Err(e) = tx.execute(
-                "INSERT OR IGNORE INTO clipboard_quick_slots (slot, entry_id) VALUES (?1, ?2)",
-                rusqlite::params![was_slot as i64, entry_id as i64],
-            ) {
-                crate::error_log!("CopyAttach: undo could not restore quick slot for entry {entry_id}: {e}");
-                return 0;
-            }
-        }
-        let favorites_after = match crate::db::load_favorites(&tx) {
-            Ok(set) => set,
-            Err(()) => {
-                crate::error_log!("CopyAttach: undo could not read back favorites for entry {entry_id}; rolling back");
-                return 0;
-            }
-        };
-        let slots_after = match crate::db::load_quick_slots(&tx) {
-            Ok(set) => set,
-            Err(()) => {
-                crate::error_log!("CopyAttach: undo could not read back quick slots for entry {entry_id}; rolling back");
-                return 0;
-            }
-        };
-        let restored_entry = match load_live_entry_by_row(&tx, new_row_id) {
-            Some(e) => e,
-            None => {
-                crate::error_log!("CopyAttach: undo could not read back restored row {new_row_id}; rolling back");
-                return 0;
-            }
-        };
-        if let Err(e) = tx.commit() {
-            crate::error_log!("CopyAttach: failed to commit undo of entry {entry_id}: {e}");
-            return 0;
-        }
-        if let Ok(mut mirror) = b.favorites.lock() {
-            *mirror = favorites_after.clone();
-        }
-        if let Ok(mut mirror) = b.quick_slots.lock() {
-            *mirror = slots_after;
-        }
-        drop(source);
-        Some((entry_id, restored_entry, favorites_after, slots_after))
     };
-
-    let (entry_id, entry, favorites_after, _slots_after) = match restored {
-        Some(v) => v,
-        None => return 0,
+    if insert.is_err() {
+        crate::error_log!("CopyAttach: undo failed to re-insert entry {entry_id}; the deleted row is kept for retry");
+        return 0;
+    }
+    let new_row_id = match tx.query_row(
+        "SELECT COALESCE(MAX(id), 0) FROM clipboard_history",
+        [],
+        |r| r.get::<_, i64>(0),
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            crate::error_log!("CopyAttach: undo could not locate the restored row: {e}");
+            return 0;
+        }
     };
-
+    let duplicates = match crate::db::delete_matching_entry(&tx, &source.entry, source.body.as_text()) {
+        Ok(rows) => rows,
+        Err(()) => return 0,
+    };
+    if let Err(e) = tx.execute(
+        "DELETE FROM clipboard_deleted WHERE row_id = ?1",
+        rusqlite::params![old_row_id],
+    ) {
+        crate::error_log!("CopyAttach: undo could not remove the undo entry {old_row_id}: {e}");
+        return 0;
+    }
+    if let Err(e) = tx.execute(
+        "DELETE FROM clipboard_history WHERE id = ?1",
+        rusqlite::params![old_row_id],
+    ) {
+        crate::error_log!("CopyAttach: undo could not remove the deleted row {old_row_id}: {e}");
+        return 0;
+    }
+    if was_favorite {
+        if let Err(e) = tx.execute(
+            "INSERT OR IGNORE INTO clipboard_favorites (entry_id) VALUES (?1)",
+            rusqlite::params![entry_id as i64],
+        ) {
+            crate::error_log!("CopyAttach: undo could not restore favorite for entry {entry_id}: {e}");
+            return 0;
+        }
+    }
+    if was_slot != 0 {
+        if let Err(e) = tx.execute(
+            "INSERT OR IGNORE INTO clipboard_quick_slots (slot, entry_id) VALUES (?1, ?2)",
+            rusqlite::params![was_slot as i64, entry_id as i64],
+        ) {
+            crate::error_log!("CopyAttach: undo could not restore quick slot for entry {entry_id}: {e}");
+            return 0;
+        }
+    }
+    let Ok(mut removed) = crate::db::trim_db_history(&tx, b.cleanup_threshold.load(Ordering::Relaxed)) else {
+        return 0;
+    };
+    if removed.contains(&new_row_id) {
+        crate::debug_log!("CopyAttach: restored entry would exceed the history limit; undo kept for retry");
+        return 0;
+    }
+    removed.extend(duplicates);
+    let favorites_after = match crate::db::load_favorites(&tx) {
+        Ok(set) => set,
+        Err(()) => {
+            crate::error_log!("CopyAttach: undo could not read back favorites for entry {entry_id}; rolling back");
+            return 0;
+        }
+    };
+    let slots_after = match crate::db::load_quick_slots(&tx) {
+        Ok(set) => set,
+        Err(()) => {
+            crate::error_log!("CopyAttach: undo could not read back quick slots for entry {entry_id}; rolling back");
+            return 0;
+        }
+    };
+    let restored_entry = match load_live_entry_by_row(&tx, new_row_id) {
+        Some(e) => e,
+        None => {
+            crate::error_log!("CopyAttach: undo could not read back restored row {new_row_id}; rolling back");
+            return 0;
+        }
+    };
+    let Ok(mut hist) = b.history.lock() else { return 0 };
+    let Ok(mut favorites) = b.favorites.lock() else { return 0 };
+    let Ok(mut slots) = b.quick_slots.lock() else { return 0 };
+    if let Err(e) = tx.commit() {
+        crate::error_log!("CopyAttach: failed to commit undo of entry {entry_id}: {e}");
+        return 0;
+    }
     let restored_favorite = favorites_after.contains(&entry_id);
-    let restored_row_id = entry.db_id();
-    let restored_id = {
-        let mut hist = b.history.lock().unwrap();
-        *hist = crate::history::insert_restored(std::mem::take(&mut *hist), entry);
-        {
-            let favorites = b.favorites.lock().unwrap();
-            crate::backend::trim_history_memory(
-                &mut hist,
-                b.cleanup_threshold.load(Ordering::Relaxed),
-                &favorites,
-            );
-        }
-        let id = hist.first().map_or(0, ClipboardEntry::entry_id);
-        crate::backend::mark_history_changed();
-        id
-    };
-
-    b.last_restored_id.store(restored_id, Ordering::SeqCst);
+    *favorites = favorites_after;
+    *slots = slots_after;
+    crate::history::publish_persisted_entry(&mut hist, restored_entry, new_row_id, &removed);
+    b.last_restored_id.store(entry_id, Ordering::SeqCst);
+    crate::backend::mark_history_changed();
     crate::debug_log!(
-        "CopyAttach: undo restored entry {entry_id} as row {restored_row_id} (favorite={restored_favorite})"
+        "CopyAttach: undo restored entry {entry_id} as row {new_row_id} (favorite={restored_favorite})"
     );
     1
 }
@@ -798,127 +780,18 @@ pub extern "C" fn clipboard_trim_oldest_percent(percent: i32) -> c_int {
         return 0;
     }
 
-    let favorites = match b.favorites.lock() {
-        Ok(f) => f.clone(),
-        Err(e) => {
-            crate::error_log!("CopyAttach: favorites mutex poisoned in trim_oldest_percent: {e}");
-            return 0;
-        }
-    };
-    let quick_slots = match b.quick_slots.lock() {
-        Ok(s) => *s,
-        Err(e) => {
-            crate::error_log!("CopyAttach: quick-slots mutex poisoned in trim_oldest_percent: {e}");
-            return 0;
-        }
-    };
-
-    let count = {
-        let hist = b.history.lock().unwrap();
-        let cleanable_total = hist
-            .iter()
-            .filter(|e| {
-                !favorites.contains(&e.entry_id()) && !quick_slots.contains(&e.entry_id())
-            })
-            .count();
-        if cleanable_total == 0 {
-            return 0;
-        }
-        let count = ((cleanable_total as f64 * f64::from(percent) / 100.0).ceil()) as usize;
-        count.min(cleanable_total)
-    };
-
-    if count == 0 {
-        return 0;
-    }
-
-    let deleted_ids: HashSet<i64> = match b.db.lock() {
-        Ok(conn) => {
-            let mut stmt = match conn.prepare(
-                "SELECT id, entry_id FROM clipboard_history
-                 WHERE id NOT IN (SELECT row_id FROM clipboard_deleted)
-                   AND entry_id NOT IN (SELECT entry_id FROM clipboard_favorites)
-                   AND entry_id NOT IN (SELECT entry_id FROM clipboard_quick_slots)
-                 ORDER BY timestamp ASC, id ASC",
-            ) {
-                Ok(s) => s,
-                Err(e) => {
-                    crate::error_log!("CopyAttach: failed to prepare trim query: {e} — history left intact");
-                    return 0;
-                }
-            };
-            let mut rows = match stmt.query([]) {
-                Ok(r) => r,
-                Err(e) => {
-                    crate::error_log!("CopyAttach: failed to query rows to trim: {e} — history left intact");
-                    return 0;
-                }
-            };
-            let mut ids = Vec::with_capacity(count);
-            while let Ok(Some(row)) = rows.next() {
-                let db_id: i64 = match row.get(0) {
-                    Ok(id) => id,
-                    Err(_) => continue,
-                };
-                ids.push(db_id);
-                if ids.len() >= count {
-                    break;
-                }
-            }
-            drop(rows);
-            drop(stmt);
-
-            if ids.is_empty() {
-                return 0;
-            }
-
-            let tx = match conn.unchecked_transaction() {
-                Ok(t) => t,
-                Err(e) => {
-                    crate::error_log!("CopyAttach: failed to begin trim transaction: {e} — history left intact");
-                    return 0;
-                }
-            };
-            let mut deleted_count = 0;
-            for chunk in ids.chunks(500) {
-                let placeholders = vec!["?"; chunk.len()].join(",");
-                let sql = format!(
-                    "DELETE FROM clipboard_history
-                      WHERE id NOT IN (SELECT row_id FROM clipboard_deleted)
-                        AND id IN ({placeholders})"
-                );
-                match tx.execute(&sql, rusqlite::params_from_iter(chunk.iter())) {
-                    Ok(c) => deleted_count += c,
-                    Err(e) => {
-                        crate::error_log!("CopyAttach: failed to trim DB by {} entries: {e} — history left intact", ids.len());
-                        return 0;
-                    }
-                }
-            }
-            if let Err(e) = tx.commit() {
-                crate::error_log!("CopyAttach: failed to commit trim transaction: {e} — history left intact");
-                return 0;
-            }
-            ids.into_iter().take(deleted_count).collect()
-        }
+    let conn = match b.db.lock() {
+        Ok(conn) => conn,
         Err(e) => {
             crate::error_log!("CopyAttach: DB mutex poisoned in trim_oldest_percent: {e}");
             return 0;
         }
     };
-
-    if deleted_ids.is_empty() {
-        return 0;
-    }
-
-    let actual = {
-        let mut hist = b.history.lock().unwrap();
-        let before = hist.len();
-        hist.retain(|e| !deleted_ids.contains(&e.db_id()));
-        let removed = before - hist.len();
+    let Ok(mut hist) = b.history.lock() else { return 0 };
+    let Ok(removed) = crate::db::trim_db_history_by_percent(&conn, percent.min(100)) else { return 0 };
+    if !removed.is_empty() {
+        hist.retain(|entry| !removed.contains(&entry.db_id()));
         crate::backend::mark_history_changed();
-        removed
-    };
-
-    actual as c_int
+    }
+    removed.len() as c_int
 }

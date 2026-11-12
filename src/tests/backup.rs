@@ -91,7 +91,7 @@ fn test_backup_export_inspect_and_overwrite() {
     assert!(info.timestamp > 0);
 
     let (_dst_path, mut dst_conn) = make_temp_db("dst");
-    let (restored_count, restored_favs) = restore_backup_overwrite(&mut dst_conn, &backup_path)
+    let (restored_count, restored_favs, _snapshot) = restore_backup_overwrite(&mut dst_conn, &backup_path, 10_000)
         .expect("restore_backup_overwrite must succeed");
 
     assert_eq!(restored_count, 2);
@@ -181,7 +181,7 @@ fn test_backup_restore_merge_behavior() {
     );
     insert_entry_to_db(&dst_conn, &dst_item_a, Some(text_a), None, None).unwrap();
 
-    let (added_count, merged_favs) = restore_backup_merge(&mut dst_conn, &backup_path)
+    let (added_count, merged_favs, _snapshot) = restore_backup_merge(&mut dst_conn, &backup_path, 10_000)
         .expect("restore_backup_merge must succeed");
 
     assert_eq!(added_count, 1);
@@ -250,7 +250,7 @@ fn test_merge_keeps_local_rows_visible_and_newest_first() {
         insert_entry_to_db(&dst_conn, &e, Some(&format!("local-new-{i}")), None, None).unwrap();
     }
 
-    let (added, _favs) = restore_backup_merge(&mut dst_conn, &backup_path).unwrap();
+    let (added, _favs, _snapshot) = restore_backup_merge(&mut dst_conn, &backup_path, 10_000).unwrap();
     assert_eq!(added, 3, "all three backup rows are new to this DB");
 
     let loaded = load_history_from_db(&dst_conn, 3000);
@@ -291,7 +291,7 @@ fn test_overwrite_restore_never_lowers_entry_id_watermark() {
     crate::db::bump_entry_id_watermark(&dst_conn, high).unwrap();
     assert_eq!(crate::db::entry_id_watermark(&dst_conn), high);
 
-    restore_backup_overwrite(&mut dst_conn, &backup_path).unwrap();
+    restore_backup_overwrite(&mut dst_conn, &backup_path, 10_000).unwrap();
 
     let after = crate::db::entry_id_watermark(&dst_conn);
     assert!(after >= high,
@@ -322,7 +322,7 @@ fn test_merge_raises_watermark_to_max_present_id() {
     crate::db::bump_entry_id_watermark(&dst_conn, 10).unwrap();
     assert_eq!(crate::db::entry_id_watermark(&dst_conn), 10);
 
-    let (added, _favs) = restore_backup_merge(&mut dst_conn, &backup_path).unwrap();
+    let (added, _favs, _snapshot) = restore_backup_merge(&mut dst_conn, &backup_path, 10_000).unwrap();
     assert_eq!(added, 1, "the backup row is new here");
 
     let max_present: u64 = dst_conn
@@ -351,7 +351,7 @@ fn test_merge_dedup_only_still_covers_backup_ids() {
     let local = ClipboardEntry::text_entry(new_entry_id(), text, 1_780_000_000, "App".into(), "com.a".into(), 0);
     insert_entry_to_db(&dst_conn, &local, Some(text), None, None).unwrap();
 
-    let (added, _favs) = restore_backup_merge(&mut dst_conn, &backup_path).unwrap();
+    let (added, _favs, _snapshot) = restore_backup_merge(&mut dst_conn, &backup_path, 10_000).unwrap();
     assert_eq!(added, 0, "same content on both sides must dedup");
 
     let watermark = crate::db::entry_id_watermark(&dst_conn);
@@ -392,7 +392,7 @@ fn test_overwrite_restore_tolerates_archive_without_meta_table() {
     }
 
     let (_dst_path, mut dst_conn) = make_temp_db("nometa_dst");
-    let res = restore_backup_overwrite(&mut dst_conn, &backup_path);
+    let res = restore_backup_overwrite(&mut dst_conn, &backup_path, 10_000);
     assert!(
         res.is_ok(),
         "restore of a meta-less archive must succeed, got {res:?}"
@@ -522,7 +522,7 @@ fn test_merge_peak_rss() {
     let (_dst_path, mut dst_conn) = make_temp_db("rss_dst");
     let base = rss_kb();
     let t0 = Instant::now();
-    let (added, _favs) = restore_backup_merge(&mut dst_conn, &backup_path).unwrap();
+    let (added, _favs, _snapshot) = restore_backup_merge(&mut dst_conn, &backup_path, 10_000).unwrap();
     let elapsed = t0.elapsed();
     let after = peak_kb();
 
@@ -567,7 +567,7 @@ fn test_search_works_after_restore_without_explicit_rebuild() {
     export_backup(&src_conn, &backup_path).unwrap();
 
     let (_dst_path, mut dst_conn) = make_temp_db("fts_dst");
-    restore_backup_overwrite(&mut dst_conn, &backup_path).unwrap();
+    restore_backup_overwrite(&mut dst_conn, &backup_path, 10_000).unwrap();
     let hits = search_history(&dst_conn, needle);
     assert_eq!(
         hits.len(),
@@ -576,7 +576,7 @@ fn test_search_works_after_restore_without_explicit_rebuild() {
     );
 
     let (_m_path, mut merge_conn) = make_temp_db("fts_merge");
-    let (added, _f) = restore_backup_merge(&mut merge_conn, &backup_path).unwrap();
+    let (added, _f, _snapshot) = restore_backup_merge(&mut merge_conn, &backup_path, 10_000).unwrap();
     assert_eq!(added, 3, "all three rows must merge in");
     let hits = search_history(&merge_conn, needle);
     assert_eq!(
@@ -618,7 +618,7 @@ fn test_overwrite_restore_clears_the_undo_side_table() {
         "precondition: the delete is undoable before the restore"
     );
 
-    restore_backup_overwrite(&mut src_conn, &backup_path).unwrap();
+    restore_backup_overwrite(&mut src_conn, &backup_path, 10_000).unwrap();
 
     let loaded = load_history_from_db(&src_conn, 3000);
     assert_eq!(
@@ -659,7 +659,7 @@ fn test_restoring_a_raw_history_db_skips_its_soft_deleted_rows() {
 
     let (_dst_path, mut dst_conn) = make_temp_db("raw_dst");
     crate::db::store_undo_limit(&dst_conn, 64 * 1024 * 1024).unwrap();
-    restore_backup_overwrite(&mut dst_conn, &src_path).unwrap();
+    restore_backup_overwrite(&mut dst_conn, &src_path, 10_000).unwrap();
 
     let loaded = load_history_from_db(&dst_conn, 3000);
     let labels: Vec<String> = loaded.iter().map(|e| e.label()).collect();
@@ -675,7 +675,7 @@ fn test_restoring_a_raw_history_db_skips_its_soft_deleted_rows() {
         new_entry_id(), "LOCAL-ONLY", 1_700_000_000, "App".into(), "com.a".into(), 0,
     );
     insert_entry_to_db(&merge_conn, &local, Some("LOCAL-ONLY"), None, None).unwrap();
-    let (added, _) = restore_backup_merge(&mut merge_conn, &src_path).unwrap();
+    let (added, _, _snapshot) = restore_backup_merge(&mut merge_conn, &src_path, 10_000).unwrap();
     assert_eq!(added, 1, "merge must import only the backup's live row");
     let merged = load_history_from_db(&merge_conn, 3000);
     assert!(

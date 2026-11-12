@@ -157,7 +157,7 @@ int32_t clipboard_clear_history(void);
 // Favorites are read from the DB; they never count against the percentage.
 int32_t clipboard_trim_oldest_percent(int32_t percent);
 int32_t clipboard_get_cleanup_threshold(void);
-void clipboard_set_cleanup_threshold(int32_t threshold);
+int32_t clipboard_set_cleanup_threshold(int32_t threshold);
 int32_t clipboard_get_storage_breakdown(int64_t* text_bytes, int64_t* image_bytes, int64_t* undo_bytes);
 int32_t clipboard_shrink_db_memory(void);
 int32_t clipboard_delete_by_id(uint64_t entry_id);

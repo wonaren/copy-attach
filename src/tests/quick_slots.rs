@@ -45,27 +45,26 @@ fn test_schema_adds_was_slot_to_existing_deleted_table() {
 }
 
 #[test]
-fn test_quick_slot_protects_entry_from_trim_and_loads_without_it() {
+fn test_quick_slot_is_included_in_history_threshold() {
     let conn = test_db();
     let pinned_row = insert_text(&conn, "pinned phrase", 1);
     let pinned_id = entry_id_of(&conn, pinned_row);
-    for i in 0..10 {
+    for i in 0..501 {
         insert_text(&conn, &format!("filler-{i}"), 100 + i);
     }
     toggle_quick_slot(&conn, pinned_id, 1).expect("bind quick slot");
 
-    trim_db_history(&conn, 3).expect("trim");
+    let before: Vec<_> = load_history_from_db(&conn, 500).iter().map(ClipboardEntry::entry_id).collect();
+    assert_eq!(before.len(), 500);
+    assert_eq!(before.last(), Some(&pinned_id));
+    trim_db_history(&conn, 500).expect("trim");
 
     let live: i64 = conn
         .query_row("SELECT COUNT(*) FROM clipboard_history", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(live, 4, "three unprotected rows plus the protected one");
-    let loaded = load_history_from_db(&conn, 3);
-    assert_eq!(loaded.len(), 4);
-    assert!(
-        loaded.iter().any(|e| e.entry_id() == pinned_id),
-        "slot-bound entry must survive the threshold trim"
-    );
+    assert_eq!(live, 500, "the protected row occupies one of the 500 slots");
+    let after: Vec<_> = load_history_from_db(&conn, 500).iter().map(ClipboardEntry::entry_id).collect();
+    assert_eq!(after, before);
 
     let slots = load_quick_slots(&conn).unwrap();
     assert_eq!(slots[0], pinned_id);
@@ -82,12 +81,15 @@ fn test_trim_counts_favorite_slot_overlap_once() {
         insert_text(&conn, &format!("overlap-filler-{i}"), 10 + i);
     }
 
+    let loaded = load_history_from_db(&conn, 3);
+    assert_eq!(loaded.len(), 3, "the doubly protected row uses one place in the limit");
+    assert_eq!(loaded.last().map(ClipboardEntry::entry_id), Some(protected_id));
     trim_db_history(&conn, 3).expect("trim");
 
     let live: i64 = conn
         .query_row("SELECT COUNT(*) FROM clipboard_history", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(live, 4, "the doubly protected row must be subtracted only once");
+    assert_eq!(live, 3);
 }
 
 #[test]
@@ -99,7 +101,7 @@ fn test_quick_slot_follows_dedup_survivor() {
 
     let new = ClipboardEntry::text_entry(200, "same content", 20, String::new(), String::new(), 0);
     insert_entry_to_db(&conn, &new, Some("same content"), None, None).expect("insert new");
-    crate::db::delete_matching_entry(&conn, &new, Some("same content"));
+    crate::db::delete_matching_entry(&conn, &new, Some("same content")).unwrap();
 
     let slots = load_quick_slots(&conn).unwrap();
     assert_eq!(slots[1], 200, "slot must migrate to the surviving entry id");

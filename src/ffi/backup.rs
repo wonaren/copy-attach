@@ -4,7 +4,7 @@ use std::sync::atomic::Ordering;
 
 use crate::backend::try_backend;
 use crate::db::backup::{export_backup, inspect_backup, restore_backup_merge, restore_backup_overwrite};
-use crate::db::{entry_id_watermark, load_history_from_db};
+use crate::db::entry_id_watermark;
 
 #[no_mangle]
 pub extern "C" fn clipboard_export_backup(target_path: *const c_char) -> c_int {
@@ -101,26 +101,16 @@ pub extern "C" fn clipboard_restore_backup_overwrite(
         }
     };
 
-    let mut hist = b.history.lock().unwrap();
+    let Ok(mut hist) = b.history.lock() else { return -2 };
+    let Ok(mut favorites) = b.favorites.lock() else { return -2 };
+    let Ok(mut slots) = b.quick_slots.lock() else { return -2 };
 
-    match restore_backup_overwrite(&mut conn, path) {
-        Ok((count, fav_ids)) => {
-
-            let threshold = b.cleanup_threshold.load(Ordering::Relaxed);
-            *hist = load_history_from_db(&conn, threshold);
-            if let Ok(mut favorites) = b.favorites.lock() {
-                *favorites = fav_ids.iter().copied().collect();
-            }
-            let slots = match crate::db::load_quick_slots(&conn) {
-                Ok(s) => s,
-                Err(()) => {
-                    crate::error_log!("CopyAttach: restore overwrite succeeded but quick slots are unreadable");
-                    return -2;
-                }
-            };
-            if let Ok(mut mirror) = b.quick_slots.lock() {
-                *mirror = slots;
-            }
+    let threshold = b.cleanup_threshold.load(Ordering::Relaxed);
+    match restore_backup_overwrite(&mut conn, path, threshold) {
+        Ok((count, fav_ids, snapshot)) => {
+            *hist = snapshot.items;
+            *favorites = fav_ids.iter().copied().collect();
+            *slots = snapshot.slots;
 
             let max_loaded = hist.iter().map(|e| e.entry_id()).max().unwrap_or(0);
             let watermark = entry_id_watermark(&conn);
@@ -181,25 +171,16 @@ pub extern "C" fn clipboard_restore_backup_merge(
         }
     };
 
-    let mut hist = b.history.lock().unwrap();
+    let Ok(mut hist) = b.history.lock() else { return -2 };
+    let Ok(mut favorites) = b.favorites.lock() else { return -2 };
+    let Ok(mut slots) = b.quick_slots.lock() else { return -2 };
 
-    match restore_backup_merge(&mut conn, path) {
-        Ok((added_count, merged_fav_ids)) => {
-            let threshold = b.cleanup_threshold.load(Ordering::Relaxed);
-            *hist = load_history_from_db(&conn, threshold);
-            if let Ok(mut favorites) = b.favorites.lock() {
-                *favorites = merged_fav_ids.iter().copied().collect();
-            }
-            let slots = match crate::db::load_quick_slots(&conn) {
-                Ok(s) => s,
-                Err(()) => {
-                    crate::error_log!("CopyAttach: restore merge succeeded but quick slots are unreadable");
-                    return -2;
-                }
-            };
-            if let Ok(mut mirror) = b.quick_slots.lock() {
-                *mirror = slots;
-            }
+    let threshold = b.cleanup_threshold.load(Ordering::Relaxed);
+    match restore_backup_merge(&mut conn, path, threshold) {
+        Ok((added_count, merged_fav_ids, snapshot)) => {
+            *hist = snapshot.items;
+            *favorites = merged_fav_ids.iter().copied().collect();
+            *slots = snapshot.slots;
 
             let max_loaded = hist.iter().map(|e| e.entry_id()).max().unwrap_or(0);
             let watermark = entry_id_watermark(&conn);

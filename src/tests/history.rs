@@ -1,4 +1,4 @@
-use crate::history::{add_to_history, assign_db_id_by_text_hash, remove_deleted_entry};
+use crate::history::{add_to_history, remove_deleted_entry};
 use crate::types::ClipboardEntry;
 use super::{make_image, make_test_image_rgba, make_text};
 
@@ -69,60 +69,6 @@ fn test_in_memory_order_newest_first() {
     assert_eq!(hist.len(), 5);
     assert_eq!(hist[0].label(), "item-4");
     assert_eq!(hist[4].label(), "item-0");
-}
-
-#[test]
-fn test_assign_db_id_by_text_hash_ignores_head_position() {
-    let mut hist = Vec::new();
-    let pasted = make_text("other-content", 300);
-    let captured = make_text("功能验证文本", 200);
-    hist = add_to_history(hist, pasted);
-    hist = add_to_history(hist, captured);
-
-    let captured_hash = match &hist[1] {
-        ClipboardEntry::Text { text_hash, .. } => *text_hash,
-        _ => unreachable!(),
-    };
-
-    assign_db_id_by_text_hash(&mut hist, captured_hash, 42);
-
-    match &hist[0] {
-        ClipboardEntry::Text { db_id, .. } => assert_eq!(*db_id, 0, "head entry must not receive the rowid"),
-        _ => unreachable!(),
-    }
-    match &hist[1] {
-        ClipboardEntry::Text { db_id, .. } => assert_eq!(*db_id, 42, "captured entry must receive its rowid"),
-        _ => unreachable!(),
-    }
-}
-
-#[test]
-fn test_assign_db_id_by_text_hash_at_head() {
-    let mut hist = Vec::new();
-    let captured = make_text("capture-race", 100);
-    hist = add_to_history(hist, captured);
-
-    let captured_hash = match &hist[0] {
-        ClipboardEntry::Text { text_hash, .. } => *text_hash,
-        _ => unreachable!(),
-    };
-
-    assign_db_id_by_text_hash(&mut hist, captured_hash, 7);
-    match &hist[0] {
-        ClipboardEntry::Text { db_id, .. } => assert_eq!(*db_id, 7),
-        _ => unreachable!(),
-    }
-}
-
-#[test]
-fn test_assign_db_id_by_text_hash_no_match_is_noop() {
-    let mut hist = Vec::new();
-    hist = add_to_history(hist, make_text("unrelated", 100));
-    assign_db_id_by_text_hash(&mut hist, 0xDEADBEEF, 99);
-    match &hist[0] {
-        ClipboardEntry::Text { db_id, .. } => assert_eq!(*db_id, 0),
-        _ => unreachable!(),
-    }
 }
 
 #[test]

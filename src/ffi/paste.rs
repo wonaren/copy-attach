@@ -6,7 +6,7 @@ use arboard::Clipboard;
 
 use crate::backend::{try_backend, copyattach_temp_root, mark_history_changed, PendingSelfWrite};
 use crate::db::load_text_by_db_id;
-use crate::history::add_to_history;
+use crate::history::publish_persisted_entry;
 use crate::macos;
 use crate::types::ClipboardEntry;
 use super::to_ffi_cstring;
@@ -266,7 +266,11 @@ fn prepare_paste_impl(
         image_thumb_dims.map(|(tw, th)| (b.thumb.as_slice(), tw, th))
     });
 
-    let new_row_id = match crate::db::persist_entry_to_db(
+    let Ok(mut hist) = b.history.lock() else {
+        crate::error_log!("CopyAttach: history mutex poisoned in select_and_paste persist");
+        return 0;
+    };
+    let (row_id, removed) = match crate::db::persist_entry_to_db(
         &mut db_guard,
         &item,
         full_text.as_ref().map(|g| g.0.as_str()),
@@ -274,33 +278,16 @@ fn prepare_paste_impl(
         thumb_for_db,
         b.cleanup_threshold.load(Ordering::Relaxed),
     ) {
-        Ok(id) => id,
+        Ok(result) => result,
         Err(()) => {
             crate::error_log!("CopyAttach: select_and_paste DB insert failed — paste aborted");
             return 0;
         }
     };
 
-    match &mut item {
-        ClipboardEntry::Image { ref mut db_id, .. } |
-        ClipboardEntry::Text { ref mut db_id, .. } => {
-            *db_id = new_row_id;
-        }
-    }
-
-    {
-        let mut hist = b.history.lock().unwrap();
-        *hist = add_to_history(std::mem::take(&mut *hist), item);
-        {
-            let favorites = b.favorites.lock().unwrap();
-            crate::backend::trim_history_memory(
-                &mut hist,
-                b.cleanup_threshold.load(Ordering::Relaxed),
-                &favorites,
-            );
-        }
-        mark_history_changed();
-    }
+    publish_persisted_entry(&mut hist, item, row_id, &removed);
+    mark_history_changed();
+    drop(hist);
     drop(db_guard);
 
     if delivery == PasteDelivery::ClipboardOnly {
