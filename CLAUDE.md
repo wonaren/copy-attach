@@ -140,7 +140,7 @@ SwiftApp/
   ├── Preview/                         ← 预览窗口（4 文件：窗口/内容/布局/缩放）
   ├── Backend/                         ← ClipboardItem / ImageDecode / AppIcon 缓存 / PackedSnapshot / PreviewDecodeGate
   ├── Stress/                          ← 压力测试面板与视图模型（依赖 STRESS=1 构建）
-  ├── Update/                          ← 更新检查（并行竞速 + 缓存）与下载（蓝奏云优先，GitHub 兜底）
+  ├── Update/                          ← 更新检查（并行竞速 + 缓存）与下载（GitHub 优先，蓝奏云兜底）
   └── Utility/                         ← DebugLog / VisualWidth / PerfTrace / PerfSelfCheck
 ```
 

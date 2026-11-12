@@ -32,6 +32,7 @@ enum UpdateChecker {
 
     private static let staleAnswerLimit: TimeInterval = 2 * 60
     private static let unknownAnswerAge: TimeInterval = 60 * 60
+    static let cacheTTL: TimeInterval = 15 * 60
 
     private static let cacheKey = "LastUpdateCheck"
     private static let githubLatestReleaseURL = URL(string: "https://github.com/wonaren/copy-attach/releases/latest")!

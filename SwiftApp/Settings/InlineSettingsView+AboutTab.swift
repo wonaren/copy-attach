@@ -262,6 +262,7 @@ extension InlineSettingsView {
             evaluateVersion(latestVersion: cached.version,
                             releaseURL: cached.releaseURL,
                             showAlert: false)
+            if cached.age < UpdateChecker.cacheTTL { return }
         }
         checkForUpdates(showAlert: false)
     }

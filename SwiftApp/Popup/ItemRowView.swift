@@ -484,15 +484,6 @@ extension ItemRowView: @preconcurrency Equatable {
     }
 }
 
-private extension String {
-    func collapsedPreview() -> String {
-        components(separatedBy: .newlines)
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
-            .joined(separator: "⏎")
-    }
-}
-
 private struct RowHoverDetector: NSViewRepresentable {
     let onChange: (Bool, NSRect, Bool) -> Void
 

@@ -471,6 +471,21 @@ fn test_persist_entry_single_transaction() {
 }
 
 #[test]
+fn test_persist_row_id_points_at_history_row() {
+    let mut conn = test_db();
+    conn.execute("INSERT INTO clipboard_meta (key, value) VALUES ('undo_limit', 0)", [])
+        .expect("seed an unrelated meta row so clipboard_meta rowids diverge from history rowids");
+    let entry = ClipboardEntry::text_entry(new_entry_id(), "rowid-check", 100, String::new(), String::new(), 0);
+
+    let (row_id, _) = persist_entry_to_db(&mut conn, &entry, Some("rowid-check"), None, None, 3000).unwrap();
+
+    let history_rows: i64 = conn
+        .query_row("SELECT COUNT(*) FROM clipboard_history WHERE id = ?1", rusqlite::params![row_id], |r| r.get(0))
+        .unwrap();
+    assert_eq!(history_rows, 1, "persisted row_id must address clipboard_history, not clipboard_meta");
+}
+
+#[test]
 fn test_trim_range_delete_semantics() {
     let conn = test_db();
     for i in 0..5 {

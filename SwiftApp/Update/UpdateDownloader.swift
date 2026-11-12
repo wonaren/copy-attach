@@ -92,11 +92,11 @@ final class UpdateDownloader: NSObject, ObservableObject, URLSessionDownloadDele
         do {
             let package: URL
             do {
-                debugLog("[update] downloading from lanzou (NFD): v\(cleanVersion)")
-                package = try await downloadFromLanzou(version: cleanVersion)
-            } catch {
-                debugLog("[update] lanzou failed: \(error.localizedDescription); falling back to GitHub")
+                debugLog("[update] downloading from GitHub: v\(cleanVersion)")
                 package = try await downloadFromGitHub(version: cleanVersion)
+            } catch {
+                debugLog("[update] GitHub failed: \(error.localizedDescription); falling back to lanzou (NFD)")
+                package = try await downloadFromLanzou(version: cleanVersion)
             }
 
             guard Self.looksLikeInstaller(package) else {
@@ -282,9 +282,8 @@ final class UpdateDownloader: NSObject, ObservableObject, URLSessionDownloadDele
         try runAndCheck("/usr/bin/hdiutil", ["detach", mountPoint.path, "-quiet"], "卸载安装包失败")
         isMounted = false
 
-        try? fm.removeItem(at: appDest)
         do {
-            try fm.moveItem(at: staging, to: appDest)
+            _ = try fm.replaceItemAt(appDest, withItemAt: staging)
         } catch {
             try? fm.removeItem(at: staging)
             throw UpdateError.install("替换应用失败：\(error.localizedDescription)")

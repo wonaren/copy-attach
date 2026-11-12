@@ -83,8 +83,7 @@ fn insert_text(conn: &Connection, text: &str, ts: u64) -> i64 {
         String::new(),
         0,
     );
-    insert_entry_to_db(conn, &entry, Some(text), None, None).expect("insert failed");
-    conn.last_insert_rowid()
+    insert_entry_to_db(conn, &entry, Some(text), None, None).expect("insert failed")
 }
 
 fn fill_and_trim_to(threshold: usize, count: usize) -> Vec<ClipboardEntry> {

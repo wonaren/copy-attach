@@ -198,7 +198,7 @@ pub(crate) fn insert_entry_to_db(
     text: Option<&str>,
     image_png: Option<&[u8]>,
     image_thumb: Option<(&[u8], u32, u32)>,
-) -> Result<(), ()> {
+) -> Result<i64, ()> {
     let result = match entry {
         ClipboardEntry::Text { timestamp, source_name, source_bundle_id, id, preview, label, custom_label, text_hash, .. } => {
             let full = match text {
@@ -220,7 +220,7 @@ pub(crate) fn insert_entry_to_db(
                     source_name, source_bundle_id, *id as i64,
                     preview, label, custom_label,
                 ],
-            ).map(|_| ()).map_err(|e| { crate::error_log!("CopyAttach: failed to insert text entry: {e}"); })
+            ).map(|_| conn.last_insert_rowid()).map_err(|e| { crate::error_log!("CopyAttach: failed to insert text entry: {e}"); })
         }
         ClipboardEntry::Image { width, height,
                                 thumb_width: _, thumb_height: _, hash,
@@ -249,7 +249,7 @@ pub(crate) fn insert_entry_to_db(
                     *id as i64,
                     custom_label,
                 ],
-            ).map(|_| ()).map_err(|e| { crate::error_log!("CopyAttach: failed to insert image entry: {e}"); })
+            ).map(|_| conn.last_insert_rowid()).map_err(|e| { crate::error_log!("CopyAttach: failed to insert image entry: {e}"); })
         }
     };
     if result.is_ok() && bump_entry_id_watermark(conn, entry.entry_id()).is_err() {
@@ -761,8 +761,7 @@ pub(crate) fn persist_entry_to_db(
     let tx = conn.unchecked_transaction().map_err(|e| {
         crate::error_log!("CopyAttach: failed to begin write transaction: {e}");
     })?;
-    insert_entry_to_db(&tx, entry, text, image_png, image_thumb)?;
-    let row_id = tx.last_insert_rowid();
+    let row_id = insert_entry_to_db(&tx, entry, text, image_png, image_thumb)?;
     let duplicates = delete_matching_entry(&tx, entry, text)?;
     let mut removed = trim_db_history_keeping(&tx, threshold, Some(row_id))?;
     removed.extend(duplicates);

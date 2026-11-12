@@ -31,10 +31,7 @@ enum QuickSlotKeyMap {
         commandSides(rawFlags: UInt64(rawFlags), allowingShift: allowingShift)
     }
 
-    static func shiftYieldsDigit(_ event: CGEvent) -> Bool {
-        guard let event = NSEvent(cgEvent: event) else { return false }
-        return shiftYieldsDigit(event)
-    }
+    static var digitKeyCodes: [Int64] { Array(topRow.keys) + Array(keypad.keys) }
 
     static func shiftYieldsDigit(_ event: NSEvent) -> Bool {
         guard let characters = event.charactersIgnoringModifiers,
@@ -54,6 +51,8 @@ final class QuickSlotEventTap: @unchecked Sendable {
     private var isRecordingStorage = false
     private var appIsFrontmostStorage = false
     private var swallowedKeyCodes: Set<Int64> = []
+    private var shiftDigitKeys: [Int64: Bool] = [:]
+    private var layoutObserver: NSObjectProtocol?
 
     private var eventTap: CFMachPort?
     private var activity: NSObjectProtocol?
@@ -134,6 +133,17 @@ final class QuickSlotEventTap: @unchecked Sendable {
             wanted = true
             swallowedKeyCodes.removeAll()
         }
+        lock.withLock { shiftDigitKeys = Self.shiftDigitKeyMap() }
+        if layoutObserver == nil {
+            layoutObserver = DistributedNotificationCenter.default().addObserver(
+                forName: NSNotification.Name(kTISNotifySelectedKeyboardInputSourceChanged as String),
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                guard let self else { return }
+                self.lock.withLock { self.shiftDigitKeys = Self.shiftDigitKeyMap() }
+            }
+        }
         beginActivity()
 
         let thread = Thread { [self] in
@@ -157,6 +167,10 @@ final class QuickSlotEventTap: @unchecked Sendable {
             return eventTap
         }
         guard let tap else { return }
+        if let layoutObserver {
+            DistributedNotificationCenter.default().removeObserver(layoutObserver)
+            self.layoutObserver = nil
+        }
         CGEvent.tapEnable(tap: tap, enable: false)
         endActivity()
         debugLog("QuickSlotEventTap: disabled")
@@ -190,7 +204,7 @@ final class QuickSlotEventTap: @unchecked Sendable {
             return Unmanaged.passUnretained(event)
         }
         let shiftHeld = event.flags.contains(.maskShift)
-        if shiftHeld, !QuickSlotKeyMap.shiftYieldsDigit(event) {
+        if shiftHeld, !(lock.withLock { shiftDigitKeys[keyCode] == true }) {
             return Unmanaged.passUnretained(event)
         }
         let sides = QuickSlotKeyMap.commandSides(rawFlags: event.flags.rawValue, allowingShift: shiftHeld)
@@ -217,6 +231,40 @@ final class QuickSlotEventTap: @unchecked Sendable {
             }
         }
         return nil
+    }
+
+    private static func shiftDigitKeyMap() -> [Int64: Bool] {
+        guard let source = TISCopyCurrentKeyboardLayoutInputSource()?.takeRetainedValue(),
+              let raw = TISGetInputSourceProperty(source, kTISPropertyUnicodeKeyLayoutData) else {
+            return [:]
+        }
+        let layoutData = Unmanaged<CFData>.fromOpaque(raw).takeUnretainedValue() as Data
+        return layoutData.withUnsafeBytes { buffer -> [Int64: Bool] in
+            guard let layout = buffer.baseAddress?.assumingMemoryBound(to: UCKeyboardLayout.self) else {
+                return [:]
+            }
+            var map: [Int64: Bool] = [:]
+            for keyCode in QuickSlotKeyMap.digitKeyCodes {
+                var deadKeyState: UInt32 = 0
+                var length = 0
+                var characters = [UniChar](repeating: 0, count: 4)
+                let status = UCKeyTranslate(
+                    layout,
+                    UInt16(keyCode),
+                    UInt16(kUCKeyActionDown),
+                    UInt32(shiftKey) >> 8,
+                    UInt32(LMGetKbdType()),
+                    OptionBits(kUCKeyTranslateNoDeadKeysMask),
+                    &deadKeyState,
+                    characters.count,
+                    &length,
+                    &characters
+                )
+                map[keyCode] = status == noErr && length == 1
+                    && CharacterSet.decimalDigits.contains(UnicodeScalar(characters[0]) ?? " ")
+            }
+            return map
+        }
     }
 
     private func applyEnabledState() {

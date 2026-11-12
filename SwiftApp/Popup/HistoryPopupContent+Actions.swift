@@ -167,8 +167,8 @@ extension HistoryPopupContent {
         defer { perfUndo?.end() }
         let savedSearchText = searchText
 
-        let success = backend.undoDelete()
-        guard success else {
+        let restoredId = backend.undoDelete()
+        guard restoredId > 0 else {
             searchText = savedSearchText
             return
         }
@@ -186,12 +186,12 @@ extension HistoryPopupContent {
         }
 
         DispatchQueue.main.async {
-            if self.displayItems.isEmpty {
-                self.selectedIndex = 0
-            } else {
-                self.selectedIndex = 1
-                self.scrollTarget = self.scrollTargetForItem(at: 0)
+            guard let index = self.displayItems.firstIndex(where: { $0.id == restoredId }) else {
+                self.selectedIndex = self.displayItems.isEmpty ? 0 : 1
+                return
             }
+            self.selectedIndex = index + 1
+            self.scrollTarget = self.scrollTargetForItem(at: index)
         }
     }
 }

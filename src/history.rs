@@ -45,9 +45,6 @@ pub(crate) fn publish_persisted_entry(
     removed: &std::collections::HashSet<i64>,
 ) {
     history.retain(|entry| !removed.contains(&entry.db_id()));
-    if removed.contains(&row_id) {
-        return;
-    }
     match &mut item {
         ClipboardEntry::Text { db_id, .. } | ClipboardEntry::Image { db_id, .. } => *db_id = row_id,
     }

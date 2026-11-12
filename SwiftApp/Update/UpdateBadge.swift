@@ -14,7 +14,6 @@ final class UpdateBadge {
     private(set) var isChecking = false
     private(set) var hasUnseenUpdate = false
 
-    private static let throttle: TimeInterval = 15 * 60
     private var lastAttempt: Date?
 
     static var currentVersion: String {
@@ -29,14 +28,14 @@ final class UpdateBadge {
     func refreshIfStale() {
         if let cached = UpdateChecker.cachedRelease() {
             apply(cached.version)
-            if cached.age < Self.throttle { return }
+            if cached.age < UpdateChecker.cacheTTL { return }
         }
         refresh()
     }
 
     func refresh() {
         guard !isChecking else { return }
-        if let lastAttempt, Date().timeIntervalSince(lastAttempt) < Self.throttle { return }
+        if let lastAttempt, Date().timeIntervalSince(lastAttempt) < UpdateChecker.cacheTTL { return }
         lastAttempt = Date()
         isChecking = true
         Task { @MainActor in

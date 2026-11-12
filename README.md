@@ -57,7 +57,7 @@ brew install --cask wonaren/tap/copyattach
 - **自由开源 & 纯本地持久化** — 遵循 GNU GPLv3 自由软件协议，基于 SQLite WAL 事务落盘与水位持久化，零网络请求、零数据遥测、永久离线可用。
 - **常驻不打扰** — MenuBarExtra 菜单栏常驻（无 Dock 图标），开机启动、后台运行、图标显隐均可自主配置。
 
-> 应用内支持自动检查更新（蓝奏云优先、GitHub Releases 兜底），也可直接从源码一键构建。
+> 应用内支持自动检查更新（GitHub Releases 优先、蓝奏云兜底），也可直接从源码一键构建。
 
 ## 快捷键
 

@@ -710,23 +710,23 @@ class ClipboardBackend {
         return delivered ? .pasted : .keystrokeNotDelivered
     }
 
-    func undoDelete() -> Bool {
-        guard clipboard_undo_delete() != 0 else { return false }
+    func undoDelete() -> Int {
+        guard clipboard_undo_delete() != 0 else { return 0 }
 
         let restoredId = Int(clipboard_last_restored_id())
         guard restoredId > 0 else {
             errorLog("undoDelete: clipboard_undo_delete succeeded but last_restored_id is invalid (\(restoredId))")
-            return false
+            return 0
         }
 
         var packedLength: Int32 = 0
         guard let packed = clipboard_snapshot_packed_acquire(&packedLength) else {
             errorLog("undoDelete: packed snapshot unavailable after a successful undo")
-            return false
+            return 0
         }
         guard packedLength > 0 else {
             clipboard_free_bytes(packed, packedLength)
-            return false
+            return 0
         }
         defer { clipboard_free_bytes(packed, packedLength) }
 
@@ -735,14 +735,15 @@ class ClipboardBackend {
             length: Int(packedLength)
         ) else {
             errorLog("undoDelete: packed snapshot decode failed after a successful undo")
-            return false
+            return 0
         }
 
         guard newItems.contains(where: { $0.id == restoredId }) else {
             errorLog("undoDelete: restored entry \(restoredId) not found in snapshot")
-            return false
+            return 0
         }
 
+        clearThumbnailCache()
         items = newItems
         favoriteIds = favorites
         slotByEntryId = slots
@@ -750,7 +751,7 @@ class ClipboardBackend {
         itemsGeneration &+= 1
         reloadGeneration.withLock { $0 &+= 1 }
         syncQuickSlotTap()
-        return true
+        return restoredId
     }
 
     private func readSnapshotItem(_ snap: UnsafeMutableRawPointer, at i: Int32) -> ClipboardItem? {

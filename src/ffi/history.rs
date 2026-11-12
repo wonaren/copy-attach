@@ -499,10 +499,6 @@ pub extern "C" fn clipboard_undo_delete() -> c_int {
     ) else {
         return 0;
     };
-    if removed.contains(&new_row_id) {
-        crate::debug_log!("CopyAttach: restored entry would exceed the history limit; undo kept for retry");
-        return 0;
-    }
     removed.extend(duplicates);
     let favorites_after = match crate::db::load_favorites(&tx) {
         Ok(set) => set,
