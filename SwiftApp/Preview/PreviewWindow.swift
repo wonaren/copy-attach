@@ -85,13 +85,15 @@ class PreviewWindow: NSPanel {
     init(item: ClipboardItem,
          centerAt screenCenter: NSPoint,
          onPaste: ((Int) -> Void)? = nil,
-         onClose: (() -> Void)? = nil) {
+         onClose: (() -> Void)? = nil,
+         onDismiss: (() -> Void)? = nil) {
         let targetScreen = NSScreen.screens.first(where: { NSPointInRect(screenCenter, $0.frame) }) ?? NSScreen.main
         let screenFrame = targetScreen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 800, height: 600)
         let size = Self.contentSize(for: item, screenFrame: screenFrame)
 
         self.onPaste = onPaste
         self.onClose = onClose
+        self.onDismiss = onDismiss
         self.presentation = .large
         self.currentItem = item
         self.currentItemId = item.id
@@ -208,8 +210,13 @@ class PreviewWindow: NSPanel {
         }
     }
 
-    func fadeOutAndClose(duration: TimeInterval = 0.15) {
+    func fadeOutAndClose(duration: TimeInterval = 0.15,
+                         scale: CGFloat = 1.04,
+                         blur: CGFloat = 16.0) {
         guard isVisible else { close(); return }
+        dismissState.duration = duration
+        dismissState.scale = scale
+        dismissState.blur = blur
         withAnimation(.easeOut(duration: duration)) {
             dismissState.isDismissing = true
         }
@@ -299,6 +306,9 @@ class PreviewWindow: NSPanel {
 
     override func close() {
         dismissState.isDismissing = false
+        dismissState.duration = 0.15
+        dismissState.scale = 1.04
+        dismissState.blur = 16.0
 
         hostingView?.rootView = AnyView(EmptyView())
         hostingView = nil

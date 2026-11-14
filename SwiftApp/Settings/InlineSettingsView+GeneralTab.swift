@@ -204,6 +204,8 @@ extension InlineSettingsView {
                 isOn: $singleClickUsesItem
             )
             sectionDivider().padding(.vertical, 7)
+            sidePreviewToggleRow
+            sectionDivider().padding(.vertical, 7)
             settingToggleRow(
                 icon: "menubar.rectangle",
                 iconColor: showMenuBarIcon ? Color.accentColor : theme.secondaryText,
@@ -242,6 +244,45 @@ extension InlineSettingsView {
         .sheet(isPresented: $showRichTextListSheet) {
             richTextAppListSheet
         }
+    }
+
+    private var sidePreviewToggleRow: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "sidebar.left")
+                .font(.system(size: 15))
+                .foregroundColor((textSidePreviewEnabled || imageSidePreviewEnabled) ? Color.accentColor : theme.secondaryText)
+                .frame(width: 22)
+            VStack(alignment: .leading, spacing: 3) {
+                Text("侧边悬浮预览")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(theme.primaryText)
+                Text("悬停或 ↑ ↓ 时显示，右 ⌥ 手动开/关。")
+                    .font(.system(size: 11.5))
+                    .foregroundColor(theme.secondaryText)
+            }
+            Spacer()
+            HStack(spacing: 12) {
+                HStack(spacing: 5) {
+                    Text("文本")
+                        .font(.system(size: 11.5))
+                        .foregroundColor(theme.secondaryText)
+                    Toggle("", isOn: $textSidePreviewEnabled)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                }
+                HStack(spacing: 5) {
+                    Text("图片")
+                        .font(.system(size: 11.5))
+                        .foregroundColor(theme.secondaryText)
+                    Toggle("", isOn: $imageSidePreviewEnabled)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                }
+            }
+        }
+        .padding(.vertical, 4)
     }
 
     private var richTextDragRow: some View {

@@ -62,6 +62,18 @@ private struct QuickSlotDialAnchorPreferenceKey: PreferenceKey {
     }
 }
 
+struct SelectedRowAnchor: Equatable {
+    let entryId: Int
+    let rect: CGRect
+}
+
+private struct SelectedRowAnchorPreferenceKey: PreferenceKey {
+    static let defaultValue: SelectedRowAnchor? = nil
+    static func reduce(value: inout SelectedRowAnchor?, nextValue: () -> SelectedRowAnchor?) {
+        if let next = nextValue() { value = next }
+    }
+}
+
 final class ContextMenuItemTarget: NSObject {
     private let action: () -> Void
     init(_ action: @escaping () -> Void) { self.action = action }
@@ -70,20 +82,28 @@ final class ContextMenuItemTarget: NSObject {
 
 struct HistoryPopupContent: View {
     static let singleClickUsesItemKey = "SingleClickUsesHistoryItem"
+    static let textSidePreviewEnabledKey = "TextSidePreviewEnabled"
+    static let imageSidePreviewEnabledKey = "ImageSidePreviewEnabled"
 
     let onClose: () -> Void
 
     var backend: ClipboardBackend { ClipboardBackend.shared }
     @State var selectedIndex: Int = ClipboardBackend.shared.items.isEmpty ? 0 : 1
     @AppStorage(HistoryPopupContent.singleClickUsesItemKey) private var singleClickUsesItem = false
+    @AppStorage(HistoryPopupContent.textSidePreviewEnabledKey) var textSidePreviewEnabled = false
+    @AppStorage(HistoryPopupContent.imageSidePreviewEnabledKey) var imageSidePreviewEnabled = true
     @State private var mouseSelectedItemId: Int?
     @State var showPreview: Bool = false
     @State var hoverPreviewEntryId: Int?
     @State var hoverPreviewItem: ClipboardItem?
+    @State var hoverPreviewSource: HoverPreviewSource?
+    @State var keyboardPreviewTargetId: Int?
+    @State var selectedRowAnchor: SelectedRowAnchor?
     @State var hoverPreviewPendingItem: ClipboardItem?
     @State var hoverPreviewPendingRect: NSRect?
     @State var hoverPreviewShowTask: Task<Void, Never>?
     @State var hoverPreviewHideTask: Task<Void, Never>?
+    @State var keyboardPreviewAutoHideTask: Task<Void, Never>?
     @State private var isControlPressed: Bool = false
     @State private var isCommandPressed: Bool = false
     @State private var isRightCommandPressed: Bool = false
@@ -255,6 +275,7 @@ struct HistoryPopupContent: View {
 
     func startInlineEditing(for item: ClipboardItem) {
         if showPreview { closePreview() }
+        closeHoverPreview()
         withAnimation(Self.inlineEditAnimation) {
             editingItemId = item.id
             editingText = item.customLabel
@@ -364,7 +385,13 @@ struct HistoryPopupContent: View {
             guard !isDismissing, editingItemId == nil else { return .ignored }
             Perf.instant("swift", "nav.input", data: "up")
             if selectedIndex > 0 {
-                selectedIndex -= 1
+                let nextIndex = selectedIndex - 1
+                selectedIndex = nextIndex
+                if nextIndex == 0 {
+                    closeHoverPreview()
+                } else {
+                    scheduleKeyboardPreview(forItemAt: nextIndex - 1)
+                }
             }
             return .handled
         }
@@ -372,7 +399,9 @@ struct HistoryPopupContent: View {
             guard !isDismissing, editingItemId == nil else { return .ignored }
             Perf.instant("swift", "nav.input", data: "down")
             if selectedIndex < maxIndex {
-                selectedIndex += 1
+                let nextIndex = selectedIndex + 1
+                selectedIndex = nextIndex
+                scheduleKeyboardPreview(forItemAt: nextIndex - 1)
             }
             return .handled
         }
@@ -436,6 +465,11 @@ struct HistoryPopupContent: View {
             pendingFilterMode = nil
             filterSwitchGeneration &+= 1
             showPreview = false
+            hoverPreviewSource = nil
+            keyboardPreviewTargetId = nil
+            selectedRowAnchor = nil
+            keyboardPreviewAutoHideTask?.cancel()
+            keyboardPreviewAutoHideTask = nil
             scrollTarget = nil
             contextMenuArmed = false
             pendingContextMenuRequest = nil
@@ -544,6 +578,9 @@ struct HistoryPopupContent: View {
                 }
             }
             refreshQuickSlotDial()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: rightOptionTapNotification)) { _ in
+            toggleKeyboardSidePreview()
         }
         .onChange(of: backend.slotByEntryId) { _, _ in
             refreshQuickSlotDial()
@@ -661,6 +698,7 @@ struct HistoryPopupContent: View {
         }
         .onChange(of: searchText) { _, newValue in
             commitPendingInlineEdit(restoreFocus: false)
+            closeHoverPreview()
             selectedIndex = 0
             if !newValue.isEmpty { OnboardingGuide.shared.record(.searched) }
             searchTask?.cancel()
@@ -923,7 +961,12 @@ struct HistoryPopupContent: View {
             .onChange(of: selectedIndex) { oldValue, newValue in
                 Perf.instant("swift", "nav.applied", data: String(newValue))
                 if newValue == 0 {
-                    if showPreview { closePreview() }
+                    selectedRowAnchor = nil
+                    if showPreview {
+                        closePreview()
+                    } else {
+                        closeHoverPreview()
+                    }
                     return
                 }
                 let itemIndex = newValue - 1
@@ -932,6 +975,9 @@ struct HistoryPopupContent: View {
                     let item = items[itemIndex]
                     if mouseSelectedItemId != item.id {
                         scrollTarget = scrollTargetForItem(at: itemIndex, movingUp: newValue < oldValue)
+                    }
+                    if hoverPreviewSource == .keyboard, keyboardPreviewTargetId != item.id {
+                        closeHoverPreview()
                     }
                     updatePreviewContent(item: item)
                 }
@@ -958,11 +1004,13 @@ struct HistoryPopupContent: View {
                                 let index = row.index
                                 let item = row.item
                                 let shortcut: String? = isCommandPressed && index < 9 ? "⌘\(index + 1)" : nil
-                                let spotlightRowArmed = OnboardingGuide.shared.isActive && selectedIndex == index + 1
-                                let dialRowArmed = isRightCommandPressed && selectedIndex == index + 1
+                                let isSelectedRow = selectedIndex == index + 1
+                                let spotlightRowArmed = OnboardingGuide.shared.isActive && isSelectedRow
+                                let dialRowArmed = isRightCommandPressed && isSelectedRow
+                                let anchorRowArmed = isSelectedRow && (keyboardPreviewTargetId != nil || hoverPreviewSource == .keyboard)
                                 ItemRowView(
                                     item: item,
-                                    isSelected: selectedIndex == index + 1,
+                                    isSelected: isSelectedRow,
                                     isDeleteModifierPressed: isControlPressed,
                                     shortcutHint: shortcut,
                                     queueOrder: queueOrderByID[item.id],
@@ -995,7 +1043,7 @@ struct HistoryPopupContent: View {
                                 .contentShape(Rectangle())
                                 .onTapGesture { activateRow(index: index, item: item) }
                                 .background {
-                                    if contextMenuArmed || spotlightRowArmed || dialRowArmed {
+                                    if contextMenuArmed || spotlightRowArmed || dialRowArmed || anchorRowArmed {
                                         GeometryReader { geo in
                                             let frame = geo.frame(in: .global)
                                             Color.clear
@@ -1012,6 +1060,10 @@ struct HistoryPopupContent: View {
                                                 .preference(
                                                     key: QuickSlotDialAnchorPreferenceKey.self,
                                                     value: dialRowArmed ? frame : .null
+                                                )
+                                                .preference(
+                                                    key: SelectedRowAnchorPreferenceKey.self,
+                                                    value: anchorRowArmed ? SelectedRowAnchor(entryId: item.id, rect: frame) : nil
                                                 )
                                         }
                                     }
@@ -1059,6 +1111,12 @@ struct HistoryPopupContent: View {
             }
             refreshQuickSlotDial()
         }
+        .onPreferenceChange(SelectedRowAnchorPreferenceKey.self) { anchor in
+            if selectedRowAnchor != anchor {
+                selectedRowAnchor = anchor
+            }
+            handleSelectedRowAnchorUpdate(anchor)
+        }
         .background(theme.popupRowDefault)
         .overlay(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
@@ -1090,6 +1148,16 @@ struct HistoryPopupContent: View {
         let items = displayItems
         guard items.indices.contains(index), items[index].id == item.id else { return }
         if !singleClickUsesItem && (mouseSelectedItemId != item.id || selectedIndex != index + 1) {
+            if hoverPreviewSource == .keyboard {
+                if hoverPreviewEntryId == item.id {
+                    hoverPreviewSource = .mouse
+                    keyboardPreviewTargetId = nil
+                } else {
+                    closeHoverPreview()
+                }
+            } else {
+                keyboardPreviewTargetId = nil
+            }
             selectedIndex = index + 1
             mouseSelectedItemId = item.id
             return

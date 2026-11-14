@@ -386,7 +386,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func createSettingsWindow(initialTab: Int = 0) {
         debugLog("Creating settings window...")
         let window = NSWindow(
-            contentRect: NSRect(x: 100, y: 100, width: 520, height: 600),
+            contentRect: NSRect(x: 100, y: 100, width: 520, height: 680),
             styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
@@ -401,7 +401,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.delegate = self
 
         let content = makeSettingsContent(initialTab: initialTab)
-        content.view.frame = NSRect(x: 0, y: 0, width: 520, height: 600)
+        content.view.frame = NSRect(x: 0, y: 0, width: 520, height: 680)
         content.view.autoresizingMask = [NSView.AutoresizingMask.width, NSView.AutoresizingMask.height]
         window.contentViewController = content
 

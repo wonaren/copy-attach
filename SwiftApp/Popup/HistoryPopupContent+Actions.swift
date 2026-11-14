@@ -58,7 +58,9 @@ extension HistoryPopupContent {
             editingText = ""
         }
         if popupWindow?.previewPanel?.itemId == item.id { closePreview() }
-        if popupWindow?.hoverPreviewPanel?.itemId == item.id { closeHoverPreview() }
+        if popupWindow?.hoverPreviewPanel?.itemId == item.id || keyboardPreviewTargetId == item.id {
+            closeHoverPreview()
+        }
         let deleted = backend.deleteEntry(at: backendIdx)
         if deleted, !effectiveSearchText.isEmpty {
             searchResults.removeAll { $0.id == item.id }
@@ -172,6 +174,7 @@ extension HistoryPopupContent {
             searchText = savedSearchText
             return
         }
+        closeHoverPreview()
 
         OnboardingGuide.shared.record(.undone)
         let remaining = backend.undoDepth()

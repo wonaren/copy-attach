@@ -25,7 +25,12 @@ extension HistoryPopupContent {
         if showPreview { closePreview(); return }
         let itemIndex = selectedIndex - 1
         guard itemIndex >= 0, itemIndex < displayItems.count else { return }
-        openPreview(item: displayItems[itemIndex])
+        let target = displayItems[itemIndex]
+        if popupWindow?.hoverPreviewPanel != nil, hoverPreviewEntryId == target.id {
+            expandHoverPreview()
+            return
+        }
+        openPreview(item: target)
     }
 
     func openPreview(item: ClipboardItem) {
@@ -43,7 +48,8 @@ extension HistoryPopupContent {
             item: previewItem,
             centerAt: popupCenter,
             onPaste: { self.pasteItem(id: $0) },
-            onClose: { self.closePreview() }
+            onClose: { self.closePreview() },
+            onDismiss: { self.closePreview() }
         )
         popup.previewPanel = preview
         preview.alphaValue = 0
@@ -64,8 +70,9 @@ extension HistoryPopupContent {
             popupWindow?.previewPanel = nil
             changed = true
         }
-        if popupWindow?.hoverPreviewPanel != nil {
-            closeHoverPreview()
+        let hadHover = popupWindow?.hoverPreviewPanel != nil
+        closeHoverPreview()
+        if hadHover {
             changed = true
         }
         if changed {

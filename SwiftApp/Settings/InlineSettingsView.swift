@@ -11,6 +11,8 @@ struct InlineSettingsView: View {
     @State var runInBackground = UserDefaults.standard.object(forKey: "RunInBackground") as? Bool ?? true
     @State var autoPasteAtCursor = PasteDeliveryMode.current == .keystroke
     @AppStorage(HistoryPopupContent.singleClickUsesItemKey) var singleClickUsesItem = false
+    @AppStorage(HistoryPopupContent.textSidePreviewEnabledKey) var textSidePreviewEnabled = false
+    @AppStorage(HistoryPopupContent.imageSidePreviewEnabledKey) var imageSidePreviewEnabled = true
     @State var showMenuBarIcon = UserDefaults.standard.object(forKey: "ShowMenuBarIcon") as? Bool ?? true
     @State var cleanupThreshold: Double = {
         let saved = UserDefaults.standard.integer(forKey: "CleanupThreshold")
@@ -71,7 +73,7 @@ struct InlineSettingsView: View {
             tabBar
             tabContent
         }
-        .frame(width: 520, height: 600)
+        .frame(width: 520, height: 680)
         .background(theme.background)
         .task(id: backend.permissionGranted) {
             guard !backend.permissionGranted else { return }

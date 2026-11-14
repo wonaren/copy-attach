@@ -20,6 +20,7 @@ let popupWillDismissNotification = Notification.Name("PopupWillDismiss")
 let popupCancelDismissNotification = Notification.Name("PopupCancelDismiss")
 let queueToggleNotification = Notification.Name("PopupQueueTogglePressed")
 let popupDidScrollNotification = Notification.Name("PopupDidScroll")
+let rightOptionTapNotification = Notification.Name("PopupRightOptionTapped")
 
 struct PopupContextMenuRequest {
     let entryId: Int?
@@ -44,11 +45,15 @@ class PopupHostingView: NSHostingView<AnyView> {
 
     private var arrowMonitor: Any?
     private var escapeMonitor: Any?
+    private var keyPressCancelMonitor: Any?
 
     private var isMenuTracking = false
     private var menuTrackingObservers: [NSObjectProtocol] = []
     private var leftCommandDown = false
     private var rightCommandDown = false
+    private var rightOptionDown = false
+    private var anyOptionWasDown = false
+    private var pendingStandaloneRightOption = false
 
     private var swipeMonitor: Any?
     private var swipeAccumX: CGFloat = 0
@@ -65,11 +70,16 @@ class PopupHostingView: NSHostingView<AnyView> {
             refreshCommandSidesFromSession()
             installArrowMonitor()
             installEscapeMonitor()
+            installKeyPressCancelMonitor()
             installMenuTrackingObservers()
             installSwipeMonitor()
         } else {
+            pendingStandaloneRightOption = false
+            rightOptionDown = false
+            anyOptionWasDown = false
             removeArrowMonitor()
             removeEscapeMonitor()
+            removeKeyPressCancelMonitor()
             removeMenuTrackingObservers()
             removeSwipeMonitor()
         }
@@ -92,7 +102,10 @@ class PopupHostingView: NSHostingView<AnyView> {
         menuTrackingObservers.append(NotificationCenter.default.addObserver(
             forName: NSMenu.didBeginTrackingNotification, object: nil, queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.isMenuTracking = true }
+            MainActor.assumeIsolated {
+                self?.pendingStandaloneRightOption = false
+                self?.isMenuTracking = true
+            }
         })
         menuTrackingObservers.append(NotificationCenter.default.addObserver(
             forName: NSMenu.didEndTrackingNotification, object: nil, queue: .main
@@ -149,6 +162,23 @@ class PopupHostingView: NSHostingView<AnyView> {
         if let monitor = escapeMonitor {
             NSEvent.removeMonitor(monitor)
             escapeMonitor = nil
+        }
+    }
+
+    private func installKeyPressCancelMonitor() {
+        removeKeyPressCancelMonitor()
+        keyPressCancelMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.keyDown, .leftMouseDown, .rightMouseDown]
+        ) { [weak self] event in
+            self?.pendingStandaloneRightOption = false
+            return event
+        }
+    }
+
+    private func removeKeyPressCancelMonitor() {
+        if let monitor = keyPressCancelMonitor {
+            NSEvent.removeMonitor(monitor)
+            keyPressCancelMonitor = nil
         }
     }
 
@@ -251,6 +281,7 @@ class PopupHostingView: NSHostingView<AnyView> {
         MainActor.assumeIsolated {
             removeArrowMonitor()
             removeEscapeMonitor()
+            removeKeyPressCancelMonitor()
             removeMenuTrackingObservers()
             removeSwipeMonitor()
         }
@@ -263,6 +294,9 @@ class PopupHostingView: NSHostingView<AnyView> {
         )
         leftCommandDown = sides.left
         rightCommandDown = sides.right
+        rightOptionDown = false
+        anyOptionWasDown = false
+        pendingStandaloneRightOption = false
     }
 
     func resyncCommandSides() {
@@ -425,13 +459,40 @@ class PopupHostingView: NSHostingView<AnyView> {
         let controlPressed = event.modifierFlags.contains(.control)
         NotificationCenter.default.post(name: controlKeyNotification, object: controlPressed)
 
-        let physical = QuickSlotKeyMap.commandSides(rawFlags: event.modifierFlags.rawValue,
+        let rawFlags = event.modifierFlags.rawValue
+        let physical = QuickSlotKeyMap.commandSides(rawFlags: rawFlags,
                                                    allowingShift: true)
         leftCommandDown = physical.left
         rightCommandDown = physical.right
-        let sides = QuickSlotKeyMap.commandSides(rawFlags: event.modifierFlags.rawValue)
+        let sides = QuickSlotKeyMap.commandSides(rawFlags: rawFlags)
         NotificationCenter.default.post(name: commandKeyNotification, object: sides.left)
         NotificationCenter.default.post(name: rightCommandKeyNotification, object: sides.right)
+
+        let optionHeld = rawFlags & 0x0008_0000 != 0
+        let leftOpt = rawFlags & 0x0000_0020 != 0
+        let rightOpt = rawFlags & 0x0000_0040 != 0
+        let otherModifiers = rawFlags & 0x0096_0000 != 0
+        let standaloneRightOption = optionHeld && rightOpt && !leftOpt && !otherModifiers
+        let wasRightOptionDown = rightOptionDown
+        rightOptionDown = standaloneRightOption
+
+        if !wasRightOptionDown && standaloneRightOption {
+            if !isMenuTracking && !anyOptionWasDown {
+                pendingStandaloneRightOption = true
+            }
+        } else if wasRightOptionDown && !standaloneRightOption {
+            if optionHeld || otherModifiers || leftOpt {
+                pendingStandaloneRightOption = false
+            } else if pendingStandaloneRightOption {
+                pendingStandaloneRightOption = false
+                if !isMenuTracking && window?.isKeyWindow == true {
+                    NotificationCenter.default.post(name: rightOptionTapNotification, object: nil)
+                }
+            }
+        } else if optionHeld || otherModifiers || leftOpt {
+            pendingStandaloneRightOption = false
+        }
+        anyOptionWasDown = optionHeld || leftOpt || rightOpt
 
         super.flagsChanged(with: event)
     }

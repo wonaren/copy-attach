@@ -55,6 +55,7 @@ final class QuickSlotEventTap: @unchecked Sendable {
     private var layoutObserver: NSObjectProtocol?
 
     private var eventTap: CFMachPort?
+    private var runLoopSource: CFRunLoopSource?
     private var activity: NSObjectProtocol?
     private var wanted = false
 
@@ -130,6 +131,7 @@ final class QuickSlotEventTap: @unchecked Sendable {
 
         lock.withLock {
             eventTap = tap
+            runLoopSource = source
             wanted = true
             swallowedKeyCodes.removeAll()
         }
@@ -147,7 +149,9 @@ final class QuickSlotEventTap: @unchecked Sendable {
         beginActivity()
 
         let thread = Thread { [self] in
-            CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
+            if let source = lock.withLock({ runLoopSource }) {
+                CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
+            }
             applyEnabledState()
             CFRunLoopRun()
         }

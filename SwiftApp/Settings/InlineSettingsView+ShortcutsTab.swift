@@ -113,6 +113,8 @@ extension InlineSettingsView {
                 sectionDivider()
                 shortcutGuideRow(label: "预览 / 关闭预览", keycaps: ["Space"])
                 sectionDivider()
+                shortcutGuideRow(label: "开 / 关侧边预览（列表选中时）", keycaps: ["右 ⌥"])
+                sectionDivider()
                 shortcutGuideRow(label: "关闭弹窗", keycaps: ["Esc"])
                 sectionDivider()
                 shortcutGuideRow(label: "切换Tab", keycaps: ["←", "→"])
