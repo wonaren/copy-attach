@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-CopyAttach 是一个 macOS 剪贴板历史管理器：Rust 后端（cdylib）+ Swift 前端（LSUIElement agent app）+ SQLite 持久化 + 许可证体系。
+CopyAttach 是一个 macOS 剪贴板历史管理器：Rust 后端（cdylib）+ Swift 前端（LSUIElement agent app）+ SQLite 持久化。
 
 ## 行为约定
 
@@ -18,8 +18,8 @@ CopyAttach 是一个 macOS 剪贴板历史管理器：Rust 后端（cdylib）+ S
 - 在隔离环境验证替身（单独构造一个 `NSItemProvider`、手写剪贴板样本、脱离调用链跑一个函数）**不构成验证**——被测的必须是真实调用路径本身。踩过的坑：曾单独验证 provider 能注册 5 种 UTI 就宣布拖拽修好，但 SwiftUI `.onDrag` 这条真实路径根本没测，实际未修好。
 - 调试采样点自身也可能错。踩过的坑：读 `NSDragPboard` 得到「拖拽无数据」的假象——现代 macOS 拖拽剪贴板实为 `Apple CFPasteboard drag`，前者恒为空。**先证明观测手段有效（能观测到已知为真的现象），再采信它给出的「没有」。**
 - 报「已修复」前必须能回答：改动前失败、改动后成功，两次都在真实场景里观察到。做不到就明说「尚未实测」。
-- **并发/竞态类问题单次运行不足以下结论**。踩过的坑：`src/ffi/paste.rs` 与 `src/tests/backend.rs` 各持一份 `Once` + `set_backend` 争抢进程级单例，6 次运行中 3 次失败（105/109），单跑一次全绿就提交了。**这类验证要连跑多次（≥8 次）并观察失败率**，不能以「这一次是绿的」收尾。
-- **验证手法本身可能破坏被测前提**。踩过的坑：① 用覆盖的 `HOME` 启动 GUI 测内存，导致钥匙串不可达而弹出无关对话框，差点误导成「沙箱读不到钥匙串」（详见「钥匙串弹窗」节）；② 用每 500ms 新开一个 SQLite 连接轮询 `user_version` 来判定迁移结束——对一个 188MB 的库反复建连，把它自己注入了被测的常驻内存，得出前后矛盾的稳态数字；③ 起第二个 GUI 实例被单实例守卫直接 `exit(0)`，采样到的「进程消失」毫无意义。**观测动作不能改变被测对象；判定结束优先靠日志标记而非副作用式探询。**
+- **并发/竞态类问题单次运行不足以下结论**。踩过的坑：`src/tests/backend.rs` 与 `src/tests/soft_delete_real.rs` 各持一份 `Once` 初始化并争抢进程级 `Backend` 单例，6 次运行中 3 次失败（105/109），单跑一次全绿就提交了。**这类验证要连跑多次（≥8 次）并观察失败率**，不能以「这一次是绿的」收尾。
+- **验证手法本身可能破坏被测前提**。踩过的坑：① 早期用覆盖的 `HOME` 启动 GUI 测内存导致环境路径失真；现在数据库隔离统一走 `COPYATTACH_DATA_DIR`（见下文）；② 用每 500ms 新开一个 SQLite 连接轮询 `user_version` 来判定迁移结束——对一个 188MB 的库反复建连，把它自己注入了被测的常驻内存，得出前后矛盾的稳态数字；③ 起第二个 GUI 实例被单实例守卫直接 `exit(0)`，采样到的「进程消失」毫无意义。**观测动作不能改变被测对象；判定结束优先靠日志标记而非副作用式探询。**
 - **做任何会写库的实测前，必须先备份真实库**（硬约束）。踩过的坑：测连续删除动画时直接对真实库长按 `⌃⌫`，执行了 765 次删除；撤销上限默认只保留 1 条，`purge_expired_deleted_rows` 会把上一条载荷行硬删，**三个月的历史不可恢复地丢失**。备份命令（`sqlite3 .backup` 走在线备份 API，自动处理 WAL，不需要先 checkpoint）：
   ```bash
   DB="$HOME/Library/Application Support/CopyAttach/history.db"
@@ -45,9 +45,16 @@ cargo build --release
 cargo test
 cargo test test_add_text_item          # 按名称匹配
 
-# 压力测试编排（生成数据 → 部署 DB → 采集指标）
+# 压力测试编排（生成数据 → 部署 DB → 采集指标；仅解析 --measure-only / --generate-only，条数用 COUNT 控制）
 bash stress_test.sh                    # 完整 10000 条
-bash stress_test.sh --quick            # 1000 条快速测试
+COUNT=1000 bash stress_test.sh         # 1000 条快速测试
+
+# 综合压测与竞态/故障/长跑套件（详见 docs/stress-test-plan.md，使用 COPYATTACH_DATA_DIR 隔离）
+bash scripts/stress/rust_suite.sh
+bash scripts/stress/ui_suite.sh
+
+# 推送/发版前一致性门禁（11 项检查，含 clippy + test）
+bash check_push.sh
 
 # 调试日志（Swift + Rust 统一落盘）
 tail -f /tmp/copyattach_debug.log
@@ -76,7 +83,7 @@ vmmap -summary $(pgrep -f 'CopyAttach.app/Contents/MacOS/CopyAttach') | head -16
 - 稳定底线 ~36–44MB：干净空闲 19–22MB，首次开弹窗一次性 +~13–25MB（视图图，之后多轮开关零累积）。再往上的两个已实测来源：瞬时大图解码（~20MB 池，页已标记可回收、不计入 footprint）与 `NSWorkspace` 查询把 ~12MB LaunchServices 数据库拉进进程。构成与数据见 `docs/engineering-notes.md` 的「内存基线的真相」。
 - **删除/撤销不产生常驻内存**(0.109.2 起)：删除只是在 `clipboard_deleted` 侧表写一行（行号 + 时间戳 + 收藏标记），**载荷行一个字节都不动**——因此既没有落盘临时文件，也不读 blob。实测（34 条 demo 库、含 3 张 ~4MB 截图，`vmmap -summary` 的 `Writable regions`）：删 34 条 `written` **320K → 320K（+0KB）**；撤销 34 条 `written` **+32KB**、`resident` 增长 28MB 但全部落在 `Malloc Large (Reusable)`（已 `mark_pages_reusable`、不计入 footprint）；再连续 3 轮删除/撤销 `written` **零增长**（352K 恒定）。早期「载荷落盘到 `$TMPDIR/CopyAttach/Undo/*.bin`」的 1 步栈已整体删除。
 - `malloc_zone_pressure_relief` 不要加：实测它收不回任何东西——进程内 4 次调用、以及「512MB 已释放的 1MB 块仍计入 footprint」的合成场景，全部返回 `0 bytes`。
-- **缩略图迁移是一次性内存事件**（0.105.1 起，仅 user_version 3 的库首次启动触发一次）：真库 137 行 release 实测峰值 79MB、稳态回落至与 no-op 相当（~9–18MB vs ~8.7MB），完成后不再发生。它不是常驻泄漏；若在「刚升级后」看到后台内存偏高，先确认 `metadata migration complete` 日志是否已出现。实现细节与三条踩坑（绕过 madvise 契约、每行新建 blob、借用捕获池）见 `docs/engineering-notes.md`。
+- **缩略图迁移是一次性内存事件**（0.105.1 起，`METADATA_VERSION = 4`，`user_version < 4` 的库首次启动触发一次；`< 3` 先跑 hash 迁移、`< 4` 跑缩略图迁移）：真库 137 行 release 实测峰值 79MB、稳态回落至与 no-op 相当（~9–18MB vs ~8.7MB），完成后不再发生。它不是常驻泄漏；若在「刚升级后」看到后台内存偏高，先确认 `metadata migration complete` 日志是否已出现。实现细节与三条踩坑（绕过 madvise 契约、每行新建 blob、借用捕获池）见 `docs/engineering-notes.md`。
 
 ### 构建与分发
 
@@ -96,52 +103,54 @@ Homebrew cask 维护在独立仓库 `wonaren/homebrew-tap`（安装命令 `brew 
 
 | 模块 | 职责 |
 |---|---|
-| `ffi/` | 所有 FFI 导出函数（目录模块）：`snapshot.rs` / `search.rs` / `init.rs` / `accessors.rs` / `paste.rs` / `history.rs` / `stress.rs` |
-| `db/` | SQLite write-through：`schema.rs`（连接/FTS5/`user_version` 迁移）、`migration.rs`（legacy `history.json` → SQLite 导入，feature-gated）、`crud.rs`（load/insert/dedup/trim）、`search.rs`（FTS/LIKE）。禁用 mmap，4MB LRU page cache；FTS 索引上限 512K 字符，超限行走 LIKE 兜底；text/image hash 均为稳定 FNV-1a 64 |
+| `ffi/` | FFI 导出主目录（8 个子模块，68 个函数）：`snapshot.rs` / `search.rs` / `init.rs` / `accessors.rs` / `paste.rs` / `history.rs` / `backup.rs` / `stress.rs`（另有 2 个在 `backend.rs`、4 个在 `perf.rs`） |
+| `db/` | SQLite write-through：`schema.rs`（连接/FTS5/`user_version` 迁移/目录解析 `COPYATTACH_DATA_DIR`）、`migration.rs`（legacy `history.json` → SQLite 导入，feature-gated）、`crud.rs`（load/insert/dedup/trim）、`search.rs`（FTS/LIKE）、`backup.rs`（导出/校验/覆盖/合并）。禁用 mmap，4MB LRU page cache；FTS 索引上限 512K 字符，超限行走 LIKE 兜底；text/image hash 均为稳定 FNV-1a 64 |
 | `monitor.rs` | 后台线程每 500ms 轮询剪贴板，changeCount 轻量检测，write-through DB，ignore rules 过滤。图片 Phase 2 单 worker + 单槽有界队列（背压） |
 | `ignore.rs` | 捕获时忽略规则：按 app bundle ID、类型、短文本阈值过滤 |
 | `image.rs` | 解码 PNG/JPEG/GIF/WebP/BMP/TIFF，**编码只有 PNG**（存储 blob 恒为 PNG），CatmullRom 缩略图（等比 fit 进行显示框 920×200px），FNV-1a 内容哈希 |
-| `backend.rs` | `OnceLock<Backend>` 单例，entry_id（AtomicU64），HISTORY_REVISION / IMAGE_ENCODING_COUNTER 原子计数器，自写抑制 |
+| `backend.rs` | `OnceLock<Backend>` 单例，entry_id（AtomicU64），HISTORY_REVISION / IMAGE_ENCODING_COUNTER 原子计数器，自写抑制，变更等待 FFI |
+| `perf.rs` | 流畅度仪表（`__CA_PERF__`）及 4 个控制/探针 FFI |
+| `types.rs` | 核心领域模型（ClipboardEntry / HistoryItem 等） |
 | `macos.rs` | NSPasteboard changeCount + 文件 URL 读写，CGEventPost Cmd+V，AXIsProcessTrusted。cfg-gated，非 macOS 用空桩 |
 | `history.rs` | `add_to_history()` — 去重 + 头部插入，纯函数式 |
-| `tests/` | 单元测试（cfg-gated），按主题拆分：history / image / search / cleanup / db / backend |
-| `stress/` | 应力测试（feature-gated behind `stress-test`）：数据生成 + 基准测试 |
-| `demo/` | 演示数据（feature-gated behind `demo-data`）：一套人工挑选的文本 + Unsplash 实拍图（首次生成时下载并缓存到 gitignored 的 `demo-data/images/`），按生产 schema/hash/缩略图辅助函数写入独立 DB。`src/bin/demo_gen.rs` 是它的 CLI，`./videos/demo.sh` 负责与个人库换位 |
+| `tests/` | 单元测试目录模块（cfg-gated，11 个子模块）：`backend` / `backup` / `cleanup` / `db` / `history` / `image` / `migration` / `quick_slots` / `search` / `soft_delete` / `soft_delete_real` |
+| `bench_tests/` | 基准/内存探针测试目录模块（cfg-gated on `test` + `stress-test`，4 个子模块）：`thresholds` / `images` / `memory_probe` / `side_table` |
+| `stress/` | 应力测试（feature-gated behind `stress-test`）：数据生成 + 注入 + 基准测试 |
+| `demo/` | 演示数据（feature-gated behind `demo-data`）：一套人工挑选的文本 + Unsplash 实拍图（首次生成时下载并缓存到 gitignored 的 `demo-data/images/`），按生产 schema/hash/缩略图辅助函数写入独立 DB。`src/bin/` 下含 `demo_gen.rs`、`stress_gen.rs`、`bench.rs`，`./videos/demo.sh` 负责与个人库换位 |
 
 **关键机制**（详细原理见 `docs/engineering-notes.md`）：
 
 - **两阶段图片捕获**：Phase 1 同步 hash + 缩略图并排队；Phase 2 异步完整 PNG 编码，SQLite 提交后发布到列表（单槽有界队列背压，防内存无界增长）
 - **内存治理（0.99.10 起）**：启动不读剪贴板；图片捕获按固定类型优先级 PNG→TIFF→JPEG→GIF→WebP→BMP 取第一个存在的表示（**只按类型优先级，不比较各表示的体积**）；Phase 2 编码 scratch 复用；空闲池页标记可回收（`madvise MADV_FREE_REUSABLE`）；预览解码走 Rust 而非 ImageIO；自研 u8 resize 替代 `imageops::resize`（避免 f32 中转）。**改任何大缓冲路径前必读 `docs/engineering-notes.md` 的 madvise / claim 契约章节**
-- **收藏落库（0.108.5 起）**：`clipboard_favorites(entry_id)` 表是唯一权威。自动清理阈值按所有活行计算，收藏和快捷槽位条目受保护。`load_history_from_db` 先为受保护条目保留名额，再按剩余名额加载最新普通条目。受保护条目本身超过阈值时仍全部保留。打包快照每行带 favorite 标志。Swift 的 `favoriteIds` 只是快照的镜像，**不要**再写回 UserDefaults，也不要在列表发布时剪枝
+- **收藏落库（0.108.5 起）**：`clipboard_favorites(entry_id)` 表是唯一权威。自动清理阈值按所有活行计算，收藏和快捷槽位条目受保护。`load_history_from_db` 先为受保护条目保留名额，再按剩余名额加载最新普通条目。受保护条目本身超过阈值时仍全部保留。打包快照（v3）每行 `flags` 同时编码 `favorite`（bit 0）与 `quick_slot` 1~9（bits 1~4）。Swift 的 `favoriteIds` 只是快照的镜像，**不要**再写回 UserDefaults，也不要在列表发布时剪枝
 - **检查更新（`Update/UpdateChecker.swift`）**：GitHub `releases/latest` HEAD（实测 0.2–0.5s，权威且零字节）与 healthz（实测 3.9–10s，仅为 GitHub DNS 不可达时兜底）**并行竞速**，取最快成功者；结果持久化缓存 15 分钟，About 首屏直接渲染缓存、过期才后台复检。旧实现串行「healthz 6s 超时 → GitHub」，把每次检查都拖到 5s 以上
 - **弹窗内更新按钮（`Update/UpdateBadge.swift`）**：filter 行右侧，仅**真实升级**时出现（`UpdateChecker.isUpgrade`：`current` 带 `-dev` 后缀时一律算有更新——开发版不是发布产物；正式版按数值比较）。点击后同一位置变「下载中 N%」→「安装中…」，进度用 `monospacedDigit` + `fixedSize` 防止 chip 行抖动。检查时机是启动读缓存 + 每次开弹窗若缓存超 15 分钟则后台刷新（`UpdateBadge.refreshIfStale`，另有 `lastAttempt` 节流）。设置页「关于」标签的红点由 `hasUnseenUpdate` 驱动，看过一次写入 `SeenUpdateVersion` 后消失。
-- **更新完成小窗（`Update/UpdateCompleteWindow.swift`）**：`UpdateDownloader.install()` 在替换 bundle 后写 `PendingUpdateVersion`，并在下载开始时抓取 GitHub Release `body` 存 `PendingUpdateNotes`；下次启动 `AppDelegate.showPendingUpdateCompletion()` 比对 `currentVersion.hasPrefix(pending)` 才弹窗（版本不匹配就丢弃，避免手工改 defaults 造成误报）。日志从本地读、不依赖网络，取不到就明示「更新日志暂不可用」。Esc 与关闭按钮都关窗，不自动消失。
+- **更新完成小窗（`Update/UpdateCompleteWindow.swift`）**：`UpdateDownloader.install()` 在替换 bundle 后写 `PendingUpdateVersion`，并在下载开始时抓取 GitHub Release `body` 存 `PendingUpdateNotes`；下次启动 `AppDelegate.showPendingUpdateCompletion()` 剥离 `-dev` 后缀按 `currentBase == pending` 精确比对才弹窗（版本不匹配就丢弃，避免手工改 defaults 造成误报）。日志从本地读、不依赖网络，取不到就明示「更新日志暂不可用」。Esc 与关闭按钮都关窗，不自动消失。
 - **db_id 不变量**：内存条目的 `db_id` 必须指向 DB 中该条目的行，且赋值使用该条目的写库结果、绝不按头部位置
 - **Suppress re-capture**：select_and_paste 通过 `pending_self_write` 标记自身写入，监控线程跳过匹配的 changeCount
-- **undo 删除（软删除，0.109.2 起）**：删除 = 在 `clipboard_deleted` 侧表插一行 `(row_id, entry_id, deleted_at 微秒, was_favorite)` + 删掉该条的 `clipboard_favorites` 行；载荷行留在 `clipboard_history` 原地不动。撤销栈因此**由数据库派生**，没有内存栈、没有临时文件——深度只受保留期（`UNDO_RETENTION_SECS` 7 天）与**可配置上限**约束。上限编码在 `clipboard_meta.undo_budget_bytes` 单个 i64（键名沿用）：`>0` = 字节预算、`<0` = 条数上限（`-N`，即保留 N 条）、`0` = 不限制；**默认 `DEFAULT_UNDO_LIMIT` = -1（1 条）**，设置页可选「1 条 / 16MB / 64MB / 256MB / 不限制」；超限按 `deleted_at` 升序丢最老的删除。**淘汰前必须先问用户**（`UndoEvictionWarningDisabled` 默认 **true**，即默认不提醒）：`clipboard_undo_eviction_preview` 在删除**之前**算出会挤掉几条（删除后就没得报了），Swift 侧据此弹「继续删除/取消 + 不再提醒」。撤销 = 读回该行载荷 → 走 `insert_entry_to_db` + `delete_matching_entry`（dedup）→ 删掉旧行 → 按 `was_favorite` 恢复收藏，因此「删 A → 再复制 A → 删 A → ⌘Z×2」只留一行，重启也不重复（旧实现不去重，会留两行）。**侧表而非列**是实测决定的：`UPDATE clipboard_history SET deleted_at=?` 会整行重写，图片行的多 MB blob 被读出来再写回，34 次删除实测 +24MB 滞留 RSS（`shrink_memory` 不回落）；换成侧表后同样的 34 次删除是 **+0KB `written`**。所有活行查询用 `id NOT IN (SELECT row_id FROM clipboard_deleted)`（`load_history_from_db` / `trim_db_history` / `search_history` 的 FTS+LIKE+metadata 三路 / `set_favorite` / `update_entry_custom_label` / `clipboard_get_storage_size` / 备份导出与合并）。`clipboard_clear_history` 与备份覆盖恢复都硬删（**含 `clipboard_deleted` 侧表行**，两者的确认框都承诺「无法撤销」）——侧表按 `row_id == clipboard_history.id` 寻址，恢复会按归档自己的 id 重写该表，残留侧表行会把一条刚恢复的条目变成「已删除」。
+- **undo 删除（软删除，0.109.2 起）**：删除 = 在 `clipboard_deleted` 侧表插一行 `(row_id, entry_id, deleted_at 微秒, was_favorite, was_slot)` + 删掉该条的 `clipboard_favorites` 与 `clipboard_quick_slots` 行；载荷行留在 `clipboard_history` 原地不动。撤销栈因此**由数据库派生**，没有内存栈、没有临时文件——深度只受保留期（`UNDO_RETENTION_SECS` 7 天）与**可配置上限**约束。上限编码在 `clipboard_meta.undo_budget_bytes` 单个 i64（键名沿用）：`>0` = 字节预算、`<0` = 条数上限（`-N`，即保留 N 条）、`0` = 不限制；**默认 `DEFAULT_UNDO_LIMIT` = -1（1 条）**，设置页可选「1 条 / 16MB / 64MB / 256MB / 不限制」；超限按 `deleted_at` 升序丢最老的删除。**淘汰前必须先问用户**（`UndoEvictionWarningDisabled` 默认 **true**，即默认不提醒）：`clipboard_undo_eviction_preview` 在删除**之前**算出会挤掉几条（删除后就没得报了），Swift 侧据此弹「继续删除/取消 + 不再提醒」。撤销 = 读回该行载荷 → 走 `insert_entry_to_db` + `delete_matching_entry`（dedup）→ 删掉旧行 → 按 `was_favorite` 与 `was_slot` 恢复收藏和快捷槽位（目标槽位未被他人占用时），因此「删 A → 再复制 A → 删 A → ⌘Z×2」只留一行，重启也不重复（旧实现不去重，会留两行）。**侧表而非列**是实测决定的：`UPDATE clipboard_history SET deleted_at=?` 会整行重写，图片行的多 MB blob 被读出来再写回，34 次删除实测 +24MB 滞留 RSS（`shrink_memory` 不回落）；换成侧表后同样的 34 次删除是 **+0KB `written`**。所有活行查询用 `id NOT IN (SELECT row_id FROM clipboard_deleted)`（`load_history_from_db` / `trim_db_history` / `search_history` 的 FTS+LIKE+metadata 三路 / `set_favorite` / `update_entry_custom_label` / `clipboard_get_storage_breakdown` / 备份导出与合并）。`clipboard_clear_history` 与备份覆盖恢复都硬删（**含 `clipboard_deleted` 侧表行**，两者的确认框都承诺「无法撤销」）——侧表按 `row_id == clipboard_history.id` 寻址，恢复会按归档自己的 id 重写该表，残留侧表行会把一条刚恢复的条目变成「已删除」。
 
 ### Swift 前端（`SwiftApp/`，LSUIElement agent app）
 
 **LSUIElement agent app**：`Info.plist` 设 `LSUIElement=true`，无 Dock 图标，只以 MenuBarExtra + 浮动 NSPanel 存在。级联后果：① 它不是合法粘贴目标——`CGEventPostToPid` 的目标 pid 绝不能是自身；② nonactivating panel 上浮期间 agent 收不到 `applicationDidBecomeActive`，预览捏合手势需 `NSApp.activate(ignoringOtherApps:)` 真实激活；③ 弹窗与面板均为无边框 NSPanel。
 
 ```
-SwiftApp/
+SwiftApp/（共 67 个 .swift 文件）
   ├── CopyAttachApp.swift              ← @main, MenuBarExtra, 单实例守卫
   ├── ClipboardBackend.swift           ← Rust FFI 封装，@Observable，快照/历史变更等待器
   ├── HotkeyManager.swift              ← Carbon + NSEvent 双注册，录制模式
   ├── ColorTheme.swift                 ← 深色/浅色颜色体系
-  ├── Hotkey/HotkeyConfig.swift        ← 快捷键配置模型（键码/修饰键/展示串）
-  ├── App/AppDelegate.swift            ← 生命周期, 弹窗管理, 启动时 dup2 stderr → 日志
-  ├── Settings/                        ← InlineSettingsView（5 标签页：通用/快捷键/存储/忽略/关于）
-  │                                       + GeneralTab / ShortcutsTab / StorageTab / IgnoreTab / AboutTab / SheetDismissHelper
+  ├── App/AppDelegate.swift            ← 生命周期, 弹窗/设置窗(520×680)管理, 启动时 dup2 stderr → 日志
+  ├── Hotkey/                          ← 快捷键配置与全局槽位拦截（2 文件：HotkeyConfig / QuickSlotEventTap）
+  ├── Settings/                        ← InlineSettingsView（9 文件：5 标签页 通用/快捷键/存储/忽略/关于 + JustifiedParagraph / QuickSlotSettings / SheetDismissHelper）
   ├── Onboarding/                      ← 核心操作引导（5 文件：引导模型/浮窗卡片/聚光灯遮罩）
   ├── Queue/                           ← 粘贴队列（6 文件：状态管理/HUD窗口/HUD视图/CGEventTap拦截器/批量派发/批量HUD）
-  ├── Popup/                           ← 主弹窗（内容/窗口/事件/SwiftUI 列表行/日期分组/拖拽/批量拖拽/右键菜单/标签过滤/预览/动作）
-  ├── Preview/                         ← 预览窗口（4 文件：窗口/内容/布局/缩放）
-  ├── Backend/                         ← ClipboardItem / ImageDecode / AppIcon 缓存 / PackedSnapshot / PreviewDecodeGate
-  ├── Stress/                          ← 压力测试面板与视图模型（依赖 STRESS=1 构建）
-  ├── Update/                          ← 更新检查（并行竞速 + 缓存）与下载（GitHub 优先，蓝奏云兜底）
-  └── Utility/                         ← DebugLog / VisualWidth / PerfTrace / PerfSelfCheck
+  ├── Popup/                           ← 主弹窗（18 文件：内容/窗口/事件/SwiftUI列表行/日期分组/行内备注/长文本/拖拽/批量拖拽/右键菜单/标签过滤/预览/动作/快捷槽位拨盘）
+  ├── Preview/                         ← 预览窗口（5 文件：窗口/内容/底栏/布局/缩放）
+  ├── Backend/                         ← 数据模型与缓存（6 文件：ClipboardItem / ImageDecode / AppIcon缓存 / PackedSnapshot / PasteDeliveryMode / PreviewDecodeGate）
+  ├── Stress/                          ← 压力测试面板与视图模型（2 文件，依赖 STRESS=1 构建）
+  ├── Update/                          ← 更新检查（并行竞速 + 缓存）、弹窗更新按钮、更新完成小窗与下载（4 文件，GitHub 优先，蓝奏云兜底）
+  └── Utility/                         ← 工具与埋点（5 文件：AppleMotion / DebugLog / VisualWidth / PerfTrace / PerfSelfCheck）
 ```
 
 **关键 FFI 模式**：
@@ -149,11 +158,12 @@ SwiftApp/
 - **Snapshot API**（`clipboard_snapshot_acquire/release`）：Swift 批量读取时一次性加锁构建紧凑快照（`SnapshotRow`：类型/id/时间戳/label/source/图片尺寸 + preview，**不含全文**），后续无锁访问。新功能优先用此 API
 - **稳定 ID**：`entry_id`（u64，AtomicU64 单调递增），用于 `select_and_paste_by_id`，避免数组索引竞争
 - **图片加载**：缩略图走 `clipboard_get_image_thumb_by_db_id`（仅 SQLite 读），后台用 ImageIO 降采样到**行显示框**（460×46pt，按屏幕 backupScale 换算像素；Rust 端存储 blob 仍按 2× 上限 920×200 生成，无需迁移）后存入 `NSCache`（countLimit 120、8MB，cost 按实际解码尺寸计），**弹窗关闭不清空**（跨会话保温：清空会让每次打开都冷启动，首屏行先渲染占位符；实测命中率 0%→92%、占位闪烁 2 行→0，内存无变化——缓存本身仍有界且随内存压力驱逐）。只有真正使行失效的路径才清空：清空历史、撤销删除、恢复备份。**预览缓存（0.111.16 起）**独立于列表缩略图，8 项 / 24MB 预算，只在本次历史弹窗会话内复用；主弹窗真正关闭时清空，反向打开关闭动画沿用原会话。缓存与会话标识在 MainActor 管理，每次 await 后检查取消和会话身份，旧解码结果不能重新入缓存。**预览大图**走 `clipboard_decode_preview_by_db_id`，由 Rust 降采样解码（Rust 预览路径不用 ImageIO）；预算是 `min(源最长边, max(显示尺寸×scale, 2048px))` —— **2048px 是缩放下限（floor），不是上限**，实测交付缓冲的 `max_dim` 常见 2066–2348。`clipboard_get_image_full_by_db_id` 是另一条路（**仅 SQLite 读，没有任何内存层**），只用于 GIF 预览兜底与右键「复制图片」，不是预览主路径。**显示框是矩形而非「最长边」**：扁图由宽边限制、竖图由高边限制，按长/短边匹配会让竖图纵向溢出（曾实测 1362×1774 → 200×260 超出 200 高）。
-- **记录悬停气泡（0.110.6 起）**：图片行压缩到约两行文本高度（只保留 46pt 缩略图，不附尺寸文字）。鼠标在任意图片/文本行停留 180ms 后，主弹窗左侧（空间不足时右侧）浮出 `PreviewWindow` 的 `.mini` 形态（`HistoryPopupWindow.hoverPreviewPanel`，与 popup 同底色/14pt 圆角，指向手型；横向移入气泡期间有 220ms 宽限期）。图片气泡读 `thumb` / `previewImageAsync(800px)`；文本气泡直接渲染快照里的 `preview`（≤256 标量，**零 DB 读取**），320pt 宽、最多 6 行、尾部省略。**悬停气泡时左上/右下浮现直角裁剪标记**（纯图形提示，无文字；由 `PreviewHostingView` 的 NSTrackingArea 驱动 `PreviewHoverState`；mini 的图片用纯 SwiftUI `Image`，因为 `NSViewRepresentable` 会盖住 SwiftUI 覆盖层）。点按气泡把同一个 NSPanel 形变为中央 `.large` 大预览：图片直接放大，文本先 `fullTextItem` 读全文再放大。关闭动画与 popup 同款（窗口 alpha 0.15s easeOut + 内容 scale 1.04 / blur 16pt / opacity→0，由 `PreviewDismissState` 驱动）。单击退出规则：图片未缩放时单击画面关闭；文本由 `PreviewTextView` 在 `onTap` 非空（仅气泡路径）时置 `isSelectable=false` 并在 mouseUp 关闭，Space 打开的文本预览 `onTap == nil`、保持原有可选词。悬停气泡**绝不改 `selectedIndex`**；鼠标未真实移动（弹窗恰好开在光标下）、滚动、右键、拖拽、队列非空、弹窗关闭中一律不弹。键盘 Space 预览仍走 `previewPanel`，两者互斥。**mini→large 展开**：动画期间保留气泡内容，窗口用 0.24s `.easeInEaseOut` 放大，`completion` 里才安装大预览并执行 `NSApp.activate`；不要在动画首帧替换 `rootView`（会让大布局按每个中间尺寸重排）。
+- **记录侧边悬浮预览（0.110.6 起，0.112.1-dev 扩展）**：图片行压缩到约两行文本高度（只保留 46pt 缩略图，不附尺寸文字）。侧边预览支持三条入口：**鼠标悬停**（180ms 延迟，横向移入气泡有 220ms 宽限期）、**键盘 `↑ / ↓` 切换选中行**（180ms 延迟，已打开时立即跟随；初始打开默认选中首行不触发）、**`右 ⌥` 单独按下抬起**手动开/关（`PopupHostingView.flagsChanged` + 按键/点击取消防误触）；通过 `HoverPreviewSource`（`.mouse` / `.keyboard`）隔离双轨，防止滚动或鼠标扫过中间行劫持/关闭键盘气泡。键盘触发的气泡 4 秒无操作自动淡出关闭（`0.32s`、缩放 `0.94`、模糊 `10pt`，鼠标移入气泡暂停计时）。设置 → 通用提供「侧边悬浮预览」两个总开关（`TextSidePreviewEnabled` 默认关、`ImageSidePreviewEnabled` 默认开），关闭后三条入口均禁用，按 `右 ⌥` 弹出提醒 Toast。图片气泡读 `thumb` / `previewImageAsync(800px)`（`miniMaxWidth = 300pt`）；文本气泡直接渲染快照里的 `preview`（≤256 标量，**零 DB 读取**），320pt 宽、最多 6 行、尾部省略。**悬停气泡时左上/右下浮现直角裁剪标记**（纯图形提示，无文字；由 `PreviewHostingView` 的 NSTrackingArea 驱动 `PreviewHoverState`；mini 的图片用纯 SwiftUI `Image`，因为 `NSViewRepresentable` 会盖住 SwiftUI 覆盖层）。点按气泡或对选中气泡按 `Space` 把同一个 NSPanel 形变为中央 `.large` 大预览（动画期间保留气泡内容，0.24s `.easeInEaseOut` 放大，`completion` 里才安装大预览并 `NSApp.activate`）。大预览关闭动画与 popup 同款（窗口 alpha 0.15s easeOut + 内容 scale 1.04 / blur 16pt / opacity→0，由 `PreviewDismissState` 驱动）。**大预览单击退出规则统一**：`Space` 直接打开（`openPreview`）与侧边展开（`expandHoverPreview`）均传入 `onDismiss`——图片未缩放时单击画面关闭；文本预览 `onTap` 非空（置 `isSelectable=false`）并在 mouseUp 关闭。`hoverPreviewSuppressed` 在 dismiss / 编辑备注 / 大预览 / 引导激活 / 模态面板 / 拖拽 / 弹窗非打开态时抑制，不抑制粘贴队列。
 - **两阶段粘贴（prepare_paste_by_id + send_paste）**：`delivery_mode` 0 = 光标处插入、1 = 仅写剪贴板（`PasteDeliveryMode`，设置里可切）。先按 entry_id 查 history（未命中直接 return 0）→ 仅 mode 0 查 accessibility 权限（未授权直接 return 0；mode 1 无需授权）→ DB 加载正文/图片 blob（失败显式 return 0，不兜底）→ 写剪贴板（设 pending_self_write）→ DB write-through → move entry to top → mode 1 返回 1（Swift 不调 send_paste，`.copied`），mode 0 返回目标 pid（无目标 pid 返回 -1：内容已在剪贴板，只跳过击键）；Swift 侧先关闭并失焦弹窗（dismiss）避免 panel 保持 key window 截断击键 → 调 send_paste(pid) 发送 Cmd+V。**权限检查必须早于任何剪贴板写入**——写入会替换用户剪贴板，未授权时的写入等于毁掉用户内容却永远粘贴不成。**图片粘贴走唯一的文件路径模式**：先写 `$TMPDIR/CopyAttach/Paste/` 临时 PNG，剪贴板放 `public.file-url`（Finder 复制文件同款）再 Cmd+V
 - **粘贴目标 pid 不变式**：Cmd+V 投递给 `source_app.pid`（由 `NSWorkspace.didActivateApplicationNotification` 事件驱动更新，不轮询）。该 pid 必须是用户打开弹窗前的 app，绝不能是 CopyAttach 自身
 - **粘贴后必须归还前台**：预览会强制 `NSApp.activate`（捏合手势只投给最前台 app），而系统**不会**自动归还 —— 不归还的话 Cmd+V 仍能投进目标 app（内容进去了），但该 app 留在后台，光标回不到输入框。`selectItem` 粘贴后调 `ClipboardBackend.restorePasteTargetFocus()`；它只在 `NSApp.isActive` 为真时才动手，所以从不激活的普通路径是 no-op
-- **粘贴队列（`Queue/`）**：在列表按 `⌘C` 只维护一个有序数组（序号徽标在视图侧由 `orderMap` 派生，不再存第二份顺序），不写剪贴板、不触发 `monitor.rs` 重新捕获置顶；回车启动顺序取用：先按当前快照剔除已失效条目（`pruneStaleEntries`，对空快照不做剔除）→ 再启动 `QueueEventTap`，成功才允许 dismiss 弹窗展开胶囊 HUD；取用阶段通过 `ClipboardBackend.pasteEntryById` 走规范两阶段粘贴，返回 `PasteOutcome`：`.pasted` 前进、`.keystrokeNotDelivered` 前进并提示（内容已在剪贴板，重试会重复粘贴）、`.entryUnavailable` 跳过并提示；`QueueEventTap` 吞掉物理 ⌘V（修饰键精确匹配，`⌥⌘V` 等组合一律放行），合成事件按**事件来源**（`eventSourceUnixProcessID`）识别而**不是时间窗**——实测 `CGEventPostToPid` 事件根本不进 session tap，Esc 单次一律放行给目标应用、**连按两次**才退出队列；闲置看门狗 3 分钟；`clear()` / `cancel()` 强行保证同时拆除 Tap 与 HUD。
+- **全局快捷槽位（`Hotkey/QuickSlotEventTap.swift` + `Popup/QuickSlotDialWindow.swift`）**：弹窗内按 `右 ⌘` 弹出 100×100 九宫格环形拨盘（`QuickSlotDialView`），按 `1~9` 绑定/解除槽位；弹窗关闭时 `QuickSlotEventTap` 在独立 `.userInteractive` 线程跑 `.defaultTap` + `CFRunLoopSource`（持 `ProcessInfo` activity assertion），结合 `UCKeyTranslate` 与 `kTISNotifySelectedKeyboardInputSourceChanged` 正确识别 Shift 数字键，并在 `.tapDisabledByUserInput` 后轮询 `IsSecureEventInputEnabled()` 待安全输入结束后恢复。设置 → 快捷键可预览/解除/清空绑定。
+- **粘贴队列（`Queue/`）**：在列表按 `⌘C` 只维护一个有序数组（序号徽标在视图侧由 `orderMap` 派生，不再存第二份顺序），不写剪贴板、不触发 `monitor.rs` 重新捕获置顶；回车启动顺序取用：先按当前快照剔除已失效条目（`pruneStaleEntries`，对空快照不做剔除）→ 再启动 `QueueEventTap`，成功才允许 dismiss 弹窗展开胶囊 HUD；取用阶段通过 `ClipboardBackend.pasteEntryById` 走规范两阶段粘贴，返回 `PasteOutcome`：`.pasted` 前进、`.keystrokeNotDelivered` 前进并提示（内容已在剪贴板，重试会重复粘贴）、`.entryUnavailable` 跳过并提示；`QueueEventTap` 吞掉物理 ⌘V（修饰键精确匹配，`⌥⌘V` 等组合一律放行；`⇧⌘V` 触发 `skipCurrent()` 跳过当前条目），合成事件按**事件来源**（`eventSourceUnixProcessID`）识别而**不是时间窗**——实测 `CGEventPostToPid` 事件根本不进 session tap，Esc 单次一律放行给目标应用、**连按两次**才退出队列；闲置看门狗 3 分钟；`clear()` / `cancel()` 强行保证同时拆除 Tap 与 HUD。
 - **批量拖拽（`Popup/BatchDrag.swift` + `Queue/BatchDispenseRunner.swift`）**：队列 ≥1 项时，拖动队列中任一行 = 走派发器（按徽标顺序）。1 项也走这条路，是为了给「落点根本不收文本 drop」的应用（VS Code 终端只认 `Files`/`ResourceURLs`，没有 `text/plain` 分支）留一条送达方式——把该项加入队列后拖它即可。**拖拽载荷是空占位，一条内容都不走 drop**——实测接收方会选中 drop 刚插入的内容（文本：AX selection `loc=0 len=9`；图片：TextEdit 附件数 1 而非 2），紧随其后的 ⌘V 会把首条**替换**掉。所有条目统一由派发器经 `prepare → send_paste(落点 pid)` 送出（settle 250 ms、间隔 150 ms）。落点判定 = 弹窗外 `AXUIElementCopyElementAtPosition` 命中的顶层元素（返回该元素 owner pid；菜单栏/非 regular app/AX 无元素一律明示拒绝）。**旧的「前台应用 + 窗口几何」已废弃**：实测前台是 Finder、TextEdit 可见窗口在 (1200,300) 时，旧判定只查 Finder 的窗口（161..1081）→ 直接 no drop target，用户拖到可见的 TextEdit 什么都不会发生。落点应用不是前台时显式 `activate()` 并轮询确认 frontmost（最多 ~500ms）后再派发——空载荷常被 drop 拒绝，目标不会自己激活。派发前必须关闭弹窗（panel 为 key 时微信丢短粘贴）；已发送条目在整批结束时出队（不是逐条）；失败保留剩余项（`pendingBatchRetry`，下次打开历史保留一次可重试），主动打开历史取消则清空。**HUD 只说「已发送」**：`CGEventPostToPid` 成功只证明事件已投递，不证明目标消费了 ⌘V。
 - **弹窗开闭打断状态机**：弹窗通过 `LifecycleState`（`closed`/`opening`/`open`/`closing`）管理生命周期，快速连续敲击快捷键在 `closing` 阶段触发 `reverseToOpen()`，直接将当前半空 alpha 平滑插值拉回 1.0 并恢复焦点，免除冷启动与视图重建闪烁。
 
@@ -168,37 +178,31 @@ SwiftApp/
 
 **SwiftUI 关键机制**（详细行为见 `docs/engineering-notes.md`）：
 
-- **弹窗开启**：窗口 alpha 淡入 0.2s easeOut，内容 `scaleEffect` 1.10→1.0（`spring(0.2, 0.85)` 接近临界无可见过冲）。淡入看门狗：若首帧事务未提交动画被静默丢弃，`show()` 在 0.3s 后校验并 snap 到可见
-- **弹窗关闭**：失焦走 `closeWithAnimation()`（popup 0.12s fade 与 preview 0.1s fade 独立并行，0.4s Timer 保证关闭必然执行）；关闭前必须 `makeFirstResponder(nil)`，停止 macOS 15+ 文本插入光标的 120Hz `CADisplayLink`；关闭时置空 `contentView` 和 `popupHostingView`，令整棵 SwiftUI 视图图及图片引用按会话释放。拖拽后自动关闭走直接 `close()`
-- **触控板双指滑动切换标签页**：`.scrollWheel` local monitor 在 ScrollView 前拦截，只认手指手势，水平 ≥50pt 且 h:v ≥ 1.5:1；切换请求在下一轮 run loop 合并，快速往返只提交最新状态；**切换 = 先滚到顶、再切 filter**（单一主流程，解决 scrollPosition 与 LazyVStack 行高估算竞速导致的滚动丢失）；**底栏数量的 `.contentTransition(.numericText())` 必须包在 `.drawingGroup()` 里**——不隔离时每次值变化会让整窗重放 display list 并滞留约 1.4MB 字形位图，隔离后原生逐位动画保留且 20 次切 Tab 零增长（详见 engineering-notes）
+- **弹窗开启**：窗口 alpha 淡入 0.2s easeOut，内容初始缩放 1.06→1.0（`CASpringAnimation` 接近临界无可见过冲，不走 SwiftUI `scaleEffect`）。淡入看门狗：若首帧事务未提交动画被静默丢弃，`show()` 在 0.3s 后校验并 snap 到可见
+- **弹窗关闭**：失焦走 `closeWithAnimation()`（`fadeOutDuration = 0.15s` 与 preview `0.15s` 独立并行，0.4s Timer 保证关闭必然执行）；关闭前必须 `makeFirstResponder(nil)`，停止 macOS 15+ 文本插入光标的 120Hz `CADisplayLink`；关闭时置空 `contentView` 和 `popupHostingView`，令整棵 SwiftUI 视图图及图片引用按会话释放。拖拽后自动关闭走直接 `close()`
+- **触控板双指滑动与标签页（`FilterMode` 共 6 项：`收藏 / 备注 / 全部 / 图片 / 文本 / 槽位`）**：`.scrollWheel` local monitor 在 ScrollView 前拦截，只认手指手势，水平 ≥50pt 且 h:v ≥ 1.5:1；切换请求在下一轮 run loop 合并，快速往返只提交最新状态；**切换 = 先滚到顶、再切 filter**（单一主流程，解决 scrollPosition 与 LazyVStack 行高估算竞速导致的滚动丢失）；**底栏数量的 `.contentTransition(.numericText())` 必须包在 `.drawingGroup()` 里**——不隔离时每次值变化会让整窗重放 display list 并滞留约 1.4MB 字形位图，隔离后原生逐位动画保留且 20 次切 Tab 零增长（详见 engineering-notes）
 - **右键上下文菜单**：`PopupHostingView` 发出右键通知，SwiftUI 列表按需读取行 frame；菜单项按稳定 entry_id 重新解析行。图片行含「另存为…」，保存面板期间用 `isPresentingModalPanel` 屏蔽 resign-key 关闭
 - **搜索**：统一在 Rust/SQLite 侧完成检索。正文搜索走 SQLite FTS5 trigram 索引（≥3 字符 `MATCH` + 超限行 LIKE 兜底；<3 字符 LIKE 全表扫描；LIKE 回退是有意保留的语义承诺：1-2 字符查询必须命中长文中段）。元数据字段（label、custom_label、source_name）走 LIKE 子串匹配，Swift 侧仅需按 matchIds 筛选并辅以动态日期分组（DayGroup），彻底杜绝前端多字段遍历过滤开销。**图片条目的 `label` 列恒为空**（不落库）：界面上的「Image (W×H)」是读取时由 `width`/`height` 合成的（`types.rs`），因此历史记录**不支持按尺寸搜索图片**，图片只能按 `custom_label`（备注）与 `source_name`（来源应用）命中——这是有意的产品边界，不要对外宣称按尺寸检索。
 - FocusState 双管理：isSearchFocused（selectedIndex=0）和 isContainerFocused（selectedIndex>0）。Escape 三层拦截：SwiftUI `.onKeyPress` → PopupHostingView local monitor → Notification。**大预览（`.large`）仍要两步：第一次 Esc 关预览，第二次关主弹窗；只有侧边气泡（`.mini`）时 Esc 一步关闭主弹窗，气泡随弹窗一起消失**；编辑备注或粘贴队列非空时先取消该状态
 - **历史列表（0.111.15 起）**：SwiftUI `ScrollView + LazyVStack`，按天使用吸顶 section header，`ItemRowView` 以稳定 entry_id 保留行身份和过渡。拖拽用 `.onDrag` 与 `NSItemProvider`，备注编辑复用行内 `InlineRemarkField`。0.111.4 的原生列表性能记录见 `docs/engineering-notes.md`
 - 选中高亮：`matchedGeometryEffect` 驱动圆角高亮在行间滑动；hover 静态填充；删除模式（⌃⌫）高亮变红。**选中填充必须用 `NSColor.selectedContentBackgroundColor`（白字 5.4/6.3:1），不能用 `controlAccentColor`（白字仅 4.07:1，低于 AA）；删除红需向黑混合 22% 才够 5:1。选中行不画来源胶囊**——浅色主题的 `popupTagBackground` 是近白块，压在蓝底上很跳
 
-**许可证体系归档**（<= v0.107.10 商业版，已封存至 `archive/commercial-v0.107` 分支）：
-
-- **激活庆祝时序**：激活成功 → `celebration` → 窗口内播 ~2s 动画 → 回到确认视图，用户手动关闭（已许可时关闭不退出）
-- **在线状态轮询（仅试用/订阅）**：每 120s 查询 `/v1/licenses/status` 或 `/v1/trials/status`（无需签名），≤2 分钟内生效。**永久许可证不安排任何周期性检查**——签名 + 设备绑定即权威。关键约定：只有服务器明确返回非活跃状态才降级，`not_found` 和网络失败忽略
-- **设备身份**：Secure Enclave P-256 密钥对，`device_id = "sha256:" + base64url(SHA256(公钥))`；物理设备用 `hardware_anchor`（平台 UUID）标识。误删钥匙串后重新激活时服务器按 `license_id + hardware_anchor` 自动换绑，不消耗新座位
-- **激活窗口尺寸陷阱**：`LicenseGateView` 必须固定 `.frame(width: 500, height: 470)`，否则庆祝内容替换表单时窗口被 AppKit fitting-size 压缩错位
+**商业许可证体系已移除**（<= v0.107.10 商业版已整体移除并封存至 `archive/commercial-v0.107` 分支，当前活跃代码不含 `LicenseGateView`、在线轮询、Keychain Lease 或 Secure Enclave 设备密钥；仅 `docs/licensing-protocol.md` 与 `docs/engineering-notes.md` 保留历史归档参考）。
 
 ## FFI 接口
 
-`CopyAttach-Bridging-Header.h` 声明 70 个 `extern "C"` 函数：生命周期、查询、快照、图片加载、粘贴、权限、删除/撤销/收藏、ignore rules 同步、快捷槽位。新接口需在此文件添加声明，并更新 Swift 侧调用封装。
+`SwiftApp/CopyAttach-Bridging-Header.h` 声明 **74 个** `extern "C"` 函数（与 Rust 导出 1:1 匹配：68 个在 `src/ffi/` 8 个子模块，2 个在 `src/backend.rs`，4 个在 `src/perf.rs`），涵盖生命周期、查询、快照、图片加载/预览解码、粘贴、快捷槽位、权限、删除/撤销/收藏/备注、ignore rules、备份/恢复、存储统计、历史变更事件与性能仪表。新接口需同步 `src/ffi/`（或所属 Rust 模块）、Bridging Header 与 `ClipboardBackend.swift`。
 
-## 钥匙串弹窗
+## 代码签名与数据隔离
 
-钥匙串条目（Lease + 设备密钥，svce=`com.example.copyattach.licensing`）按创建应用的代码签名授权。**必须用正式签名身份构建**：ad-hoc 签名的 cdhash 每次构建都变，导致每次重开 App 都弹钥匙串授权。build.sh 自动用 `security find-identity -v -p codesigning` 并按 **`Developer ID Application|Apple Development` 过滤**取第一个匹配身份（与 CI 同一套规则；过滤是必要的——不再"取第一个 codesigning 身份"，否则会静默选中与钥匙串 ACL 无关的自签名/他人证书），找不到可用身份时仅可新建或替换 ad-hoc 产物，已有正式签名包会保留。构建在临时目录完成签名验证后原子替换旧包。构建结束会回显 `codesign -dv` 的 `Authority`/`Signature` 行供确认。
+**必须用正式签名身份构建**：ad-hoc 签名的 cdhash 每次构建都变，会影响 TCC/辅助功能授权稳定性与分发校验。`build.sh` 自动用 `security find-identity -v -p codesigning` 并按 **`Developer ID Application|Apple Development` 过滤**取第一个匹配身份（与 CI 同一套规则；过滤是必要的——不再"取第一个 codesigning 身份"，否则会静默选中无关的自签名/他人证书），找不到可用身份时仅可新建或替换 ad-hoc 产物，已有正式签名包会保留。构建在临时目录完成签名验证后原子替换旧包。构建结束会回显 `codesign -dv` 的 `Authority`/`Signature` 行供确认。
 
-### 严禁用覆盖的 HOME 启动 GUI（踩过的坑）
+### 测试数据隔离与单实例守卫
 
-**不要用 `HOME=/tmp/xxx` 启动 CopyAttach.app 做验证。** 覆盖 HOME 后 `~/Library/Keychains` 不存在，Secure Enclave 的设备密钥（`device-secure-enclave-p256-v1`）查找失败，会弹出「找不到用于储存 … 的钥匙串」对话框，并把测试者引向「沙箱读不到钥匙串」的错误结论。它不是沙箱限制，是测试手法破坏了前置条件。
-
-- 需要隔离数据做验证时，**只有 Rust 测试二进制**（`cargo test` 产物，如直接跑 `target/release/deps/copy_attach-*`）可以用覆盖的 HOME——它不碰钥匙串。GUI 一律用真实 HOME。
-- 想验证 GUI 的真实启动/迁移路径又不想动用户数据：可让 Rust 测试二进制跑真实 `clipboard_init`（它读的就是 `$HOME/Library/Application Support/CopyAttach/history.db`），GUI 本身不必启动。
-- 另注：启动第二个 GUI 实例会被单实例守卫直接 `exit(0)` 并激活已有实例（日志会出现 `Another CopyAttach instance … is running`），所以「用覆盖 HOME 起一个并行实例」这条路本身也不通。
+- **数据隔离统一走 `COPYATTACH_DATA_DIR`**（`src/db/schema.rs` `get_persist_dir` 优先读取该环境变量，未设置才回退 `$HOME/Library/Application Support/CopyAttach`；仅 `src/stress/inject.rs` 默认路径仍读取 `HOME`）。压测脚本 `scripts/stress/` 与真实路径测试 `src/tests/soft_delete_real.rs` 均用 `COPYATTACH_DATA_DIR=/tmp/...` 隔离数据库，无需覆盖 `HOME`。
+- **环境变量一览**：`COPYATTACH_DATA_DIR`（数据目录覆盖）、`COPYATTACH_PERF`（启用 `__CA_PERF__` 性能埋点）、`COPYATTACH_SUPPORT_DIR`（`videos/demo.sh` 隔离演示库换位路径）。
+- **初始化 FFI** 为 `clipboard_init_with_threshold_and_favorites`（`src/ffi/init.rs`，不存在 `clipboard_init`）。
+- **单实例守卫**：启动第二个 GUI 实例会被直接 `exit(0)` 并激活已有实例（日志出现 `Another CopyAttach instance … is running`），测试隔离实例前需先退出已有进程或只跑 Rust 测试二进制。
 
 ### GitHub Actions 分发
 
@@ -217,22 +221,16 @@ CI（`.github/workflows/build.yml`）签名步骤关键：`build` job 必须声�
 
 ## 测试覆盖
 
-`src/tests.rs`（cfg-gated）+ `src/bench_tests.rs`（cfg-gated on `test` + `stress-test`）。覆盖：去重、图片编解码、FFI 安全、阈值清理、ignore rules、db_id 按内容身份赋值、FTS 大文本上限、应力测试数据生成。
+- Rust 单元测试：`src/tests/` 目录模块（11 个子模块：backend / backup / cleanup / db / history / image / migration / quick_slots / search / soft_delete / soft_delete_real）+ `src/bench_tests/`（cfg-gated on `test` + `stress-test`，4 个子模块：thresholds / images / memory_probe / side_table）+ 非测试模块内联 `#[test]`（29 个）。默认特性 `cargo test` 共 194 个用例（191 运行 + 3 `#[ignore]`）；启用 `--features stress-test,demo-data` 共 200 个（196 + 4 `#[ignore]`）。
+- 综合压测与竞态/故障注入套件：`docs/stress-test-plan.md` 与 `scripts/stress/`（12 个脚本：`common.sh` / `prepare.sh` / `rust_suite.sh` / `data_suite.sh` / `ui_suite.sh` / `race_suite.sh` / `fault_suite.sh` / `soak_suite.sh` / `popup_cycles.sh` / `thumb_probe.sh` / `invariants.py` / `crash_scan.sh`）。
 
 ## 详细设计原理
 
-改动以下子系统前，先读 `docs/engineering-notes.md` 对应章节（保存 CLAUDE.md 精简时移出的实测数据、修复史、内存治理细节、UI 行为原理）：
+改动以下子系统前，先读对应文档：
 
-- 数据库（索引上限、FTS 兜底、hash 迁移）
-- 两阶段图片捕获与内存治理（**madvise / claim 契约——改任何大缓冲路径前必读**）
-- 预览解码（ImageIO 陷阱、imageops::resize 陷阱、关闭路径强制释放）
-- 内存基线的真相（勿再追查）
-- 捕获正确性（db_id 不变量、幽灵条目根修、suppress re-capture）
-- 粘贴（权限检查、文件路径模式、pid 不变式）
-- 原生拖拽（智能停车、松手检测）
-- 弹窗 UI（开启/关闭、选中高亮、Escape 拦截、触控板滑动切换标签页、右键菜单）
-- 许可证体系（激活庆祝、在线轮询、设备身份、尺寸陷阱）
-- 签名与分发（钥匙串弹窗、GitHub Actions 修复史）
+- `docs/engineering-notes.md`：数据库（索引上限、FTS 兜底、hash 迁移）、两阶段图片捕获与内存治理（**madvise / claim 契约——改任何大缓冲路径前必读**）、预览解码（ImageIO / `imageops::resize` 陷阱与释放）、内存基线的真相、捕获正确性（`db_id` 不变量、幽灵条目根修、自写抑制）、粘贴、原生拖拽（智能停车、松手检测）、弹窗 UI、签名与分发、以及后续 `init 失败分级` / `二进制指数退避` / `鲁棒性审查` / `事件驱动刷新` / `内存与释放语义审计`（其中许可证体系节为 <= v0.107.10 归档记录）
+- `docs/design-batch-drag.md`：批量拖拽设计（v0.108.4 实装，§12/§13 修订了早期 §4.3/§6）
+- `docs/stress-test-plan.md`：全链路压测、竞态、故障注入与 8 小时长跑验收门槛
 
 ### 性能测量（流畅度仪表）
 

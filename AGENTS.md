@@ -1,6 +1,6 @@
 # AGENTS.md
 
-CopyAttach 是一个 macOS 剪贴板历史管理器：Rust cdylib 后端（`src/`）+ Swift 6 LSUIElement agent 前端（`SwiftApp/`）+ SQLite 持久化 + 许可证体系。
+CopyAttach 是一个 macOS 剪贴板历史管理器：Rust cdylib 后端（`src/`）+ Swift 6 LSUIElement agent 前端（`SwiftApp/`）+ SQLite 持久化。
 
 **`CLAUDE.md` 是本仓库权威的行为规范与架构说明，动手前先读它。** 本文件只列"立刻要用"的命令、边界与不变量，原理与实测数据见文末文档索引。
 
@@ -21,7 +21,7 @@ CopyAttach 是一个 macOS 剪贴板历史管理器：Rust cdylib 后端（`src/
 
 - **没有 `Package.swift`，也没有 `.xcodeproj`**：Swift 由 `build.sh` 里的裸 `swiftc` 编译，源文件用 `find SwiftApp -name '*.swift'` 收集 —— 新增 `.swift` 文件自动入编，不需要改构建脚本。
 - `./build.sh` 在临时目录完成打包并验证签名后原子替换 `CopyAttach.app`。签名身份按 `Developer ID Application|Apple Development` 过滤选取，缺少可用身份时保留已有的正式签名产物。版本号从 `Cargo.toml` 注入产物 `Info.plist`（源码 `SwiftApp/Info.plist` 里是恒为 `0.0.0` 的占位值）。
-- `bash stress_test.sh [--quick|--generate-only|--measure-only|--count N]`（默认 10000 条）**会把真实 `~/Library/Application Support/CopyAttach/history.db` 挪走**（退出时恢复），不要在用户数据上随手跑。
+- `stress_test.sh` 只解析 `$1` 的 `--generate-only` / `--measure-only`（不解析 `--quick`/`--count`），默认 10000 条，改条数用环境变量 `COUNT=1000 bash stress_test.sh`；**会把真实 `~/Library/Application Support/CopyAttach/history.db` 挪走**（退出时恢复），不要在用户数据上随手跑。全链路压测与竞态/故障/长跑套件见 `docs/stress-test-plan.md` 与 `scripts/stress/*.sh`（使用 `COPYATTACH_DATA_DIR` 隔离）。
 - `./videos/demo.sh` 是同一类操作的常驻版本：演示库固定为 `demo-data/history.db`（gitignored，由 `cargo build --release --features demo-data --bin demo-gen` 生成；照片缓存在 `demo-data/images/`，首次生成需联网从 Unsplash 下载），个人库整体停放到 `<support>/personal/` 再换回，全程 `mv`/`cp` 不重写数据。它支持 `COPYATTACH_SUPPORT_DIR` 指向别处，只用于隔离测试，不影响 App 真实路径。
 - `[profile.release]` 开了 `lto` + `codegen-units=1`，release 构建慢是正常的。
 
@@ -32,12 +32,12 @@ CopyAttach 是一个 macOS 剪贴板历史管理器：Rust cdylib 后端（`src/
 3. **观测手段先自证。** 采样点本身可能错（例：现代 macOS 拖拽剪贴板是 `Apple CFPasteboard drag`，读 `NSDragPboard` 恒为空）。先证明它能观测到已知为真的现象，再采信它给出的"没有"。
 4. **版本号只允许改末尾 patch 位**（`0.105.11` 里只动 `11`），`105`/`0` 由人决定，需要联动大版本时停下问。开发期带 `-dev` 后缀，发布时去掉；CHANGELOG 纯面向用户、简洁。
 5. **改任何大缓冲路径前**先读 `docs/engineering-notes.md` 的 madvise / claim 契约：`mark_pages_reusable` / `claim_pages` 必须成对且页对齐。
-6. **不要用覆盖的 `HOME` 启动 GUI。** 钥匙串不可达会弹无关对话框，把结论引向"沙箱读不到钥匙串"的错误方向。只有 `cargo test` 的测试二进制可以覆盖 `HOME`（它不碰钥匙串）。
-7. 注释写"为什么"和实测数字，不写复述代码的注释。用户可见字符串是中文，标识符与注释是英文。
+6. **隔离测试用 `COPYATTACH_DATA_DIR`，不要起并行 GUI。** `src/db/schema.rs` 优先读取 `COPYATTACH_DATA_DIR=/tmp/...`（未设置才回退真实库；仅 `src/stress/inject.rs` 默认路径读 `HOME`）。不要用覆盖的 `HOME` 启动 GUI；单实例守卫也会让第二个 GUI 实例直接 `exit(0)`。
+7. **不在代码中写任何注释**（与 `CLAUDE.md` 一致；仅保留 `SwiftApp/CopyAttach-Bridging-Header.h` 既有接口契约注释）。用户可见字符串是中文，标识符是英文。
 
 ## 边界与不变量
 
-- **FFI 三处同步**：`src/ffi/` 用 `#[no_mangle]` 定义（`pub use` 汇出）、`SwiftApp/CopyAttach-Bridging-Header.h` 声明（现有 66 个 `extern "C"`）、`ClipboardBackend.swift` 封装。加接口漏掉任一处就是断链。
+- **FFI 三处同步**：`src/ffi/`（8 个子模块，68 个函数，另有 2 个在 `src/backend.rs`、4 个在 `src/perf.rs`）用 `#[no_mangle]` 定义、`SwiftApp/CopyAttach-Bridging-Header.h` 声明（现有 74 个 `extern "C"`）、`ClipboardBackend.swift` 封装。加接口漏掉任一处就是断链。
 - **FFI 边界不许 panic**：`extern "C"` 里 panic 会 abort 整个进程。用 `try_backend()` 返回哨兵值（`0` / `-1` / `null`）。
 - **内存所有权**（契约写在 bridging header 注释里）：C 字符串 → `clipboard_free_string`；字节缓冲 → `clipboard_free_bytes`；u64 数组 → `clipboard_free_u64_array`；快照 `acquire`/`release` 成对，且快照内的 `char*` 仍要各自 free；预览缓冲由 Rust 拥有，靠 `PreviewBufferBox.deinit` 释放。**长度为 0 时也必须走 FFI free**（`Data(bytesNoCopy:)` 在 count 为 0 时不保证触发 deallocator）。
 - **身份不变量**：条目的稳定身份是 `entry_id`（原子递增、水位持久化，Swift 收藏引用它）；`db_id` 必须按**内容 hash** 赋值，绝不按头部位置。
@@ -51,7 +51,9 @@ CopyAttach 是一个 macOS 剪贴板历史管理器：Rust cdylib 后端（`src/
 | 文档 | 内容 |
 |---|---|
 | [CLAUDE.md](CLAUDE.md) | 权威：行为约定、架构、模块表、各子系统踩坑记录 |
-| [docs/engineering-notes.md](docs/engineering-notes.md) | 从 CLAUDE.md 精简时移出的原理与实测数据：DB / 两阶段图片捕获与内存治理 / 预览解码 / 粘贴 / 原生拖拽 / 弹窗 UI / 许可证 / 签名分发 |
+| [docs/engineering-notes.md](docs/engineering-notes.md) | 从 CLAUDE.md 精简时移出的原理与实测数据：DB / 两阶段图片捕获与内存治理 / 预览解码 / 粘贴 / 原生拖拽 / 弹窗 UI / 启动与重试 / 签名分发 |
+| [docs/design-batch-drag.md](docs/design-batch-drag.md) | 批量拖拽设计规范（v0.108.4 实装，§12/§13 覆盖 §4.3/§6） |
+| [docs/stress-test-plan.md](docs/stress-test-plan.md) | 压测、竞态、故障注入与 8 小时稳定性验收方案（配套 `scripts/stress/`） |
 | [docs/perf-instrumentation.md](docs/perf-instrumentation.md) | 流畅度仪表的埋点契约、门禁与基线；[perf/BASELINE.md](perf/BASELINE.md) 是已实测基线 |
-| [docs/licensing-protocol.md](docs/licensing-protocol.md) | 设备身份、Lease、签名信封、HTTP 端点 |
+| [docs/licensing-protocol.md](docs/licensing-protocol.md) | （<= v0.107.10 已归档）商业版设备身份、Lease、签名信封、HTTP 端点历史说明 |
 | [README.md](README.md) | 面向用户的功能、快捷键与设计原则 |
