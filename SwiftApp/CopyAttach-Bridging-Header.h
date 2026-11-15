@@ -1,103 +1,42 @@
-// CopyAttach-Bridging-Header.h
-// C FFI declarations for the Rust copy_attach library
-
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
 
-// ─── History change events (event-driven UI refresh) ───
-// Block until history changes after `since`, or timeout_ms elapses. Returns the
-// newest observed revision (> since when awakened; == since on timeout).
 uint64_t clipboard_wait_for_history_change(uint64_t since, uint64_t timeout_ms);
-// Read the revision counters the UI keys its reload decision on, together.
 int32_t clipboard_history_counters(uint64_t* out_revision, uint64_t* out_image_encoding);
 
-// ─── Performance instrumentation (opt-in, see Utility/PerfTrace.swift) ───
-// Enable/disable runtime perf tracing; returns the effective state (1/0).
 int32_t clipboard_set_perf_enabled(int32_t state);
-// Current effective state (1/0).
 int32_t clipboard_perf_enabled(void);
-// Write a probe record carrying the C string token; returns the monotonic ns
-// stamp (0 on a null token). Used by the instrument self-check.
 uint64_t clipboard_perf_emit_probe(const char* token);
-// Self-check of the Rust-side instrument primitives (bitmask; 7 == all pass).
 int32_t clipboard_perf_selfcheck(void);
 
-// ─── Lifecycle ───
-// 1 = running, 0 = retryable failure, -1 = database corrupt (call
-// clipboard_recover_corrupt_db and re-init, or quit), -2 = environment failure
-// (read-only / permissions / disk full; auto-recovering via backoff).
-//
-// Init with the user's saved cleanup threshold and the legacy favorites CSV.
-// `threshold` <= 0 means "no saved preference" (default 3000); a positive value
-// is clamped to [100, 10000]. The favorites list is imported BEFORE the startup
-// trim, so the first launch of a DB-backed build cannot delete a favorite it is
-// about to migrate.
 int32_t clipboard_init_with_threshold_and_favorites(int32_t threshold, const char* favorite_ids_csv);
-// Moves history.db (+ -wal/-shm) aside as history.db.corrupt-<secs>. Only
-// valid after clipboard_init returned -1. Returns 1 on success.
 int32_t clipboard_recover_corrupt_db(void);
 void clipboard_cleanup(void);
-// Debug logging toggle: default is debug-build-on / release-build-off.
-// Settings UI can override at runtime.
 int32_t clipboard_set_debug_logging(int32_t enabled);
 int32_t clipboard_is_debug_logging(void);
 
-// ─── Query ───
 int32_t clipboard_get_count(void);
 uint64_t clipboard_get_image_encoding_counter(void);
 uint64_t clipboard_get_history_revision(void);
 
-// ─── Free ───
 void clipboard_free_string(char* s);
 void clipboard_free_bytes(uint8_t* data, int32_t len);
 
-// ─── Action ───
-// Single-phase select-and-paste was removed: it blocked the caller thread and
-// could post Cmd+V while the panel was still key. Use the two-phase
-// clipboard_prepare_paste_by_id + clipboard_send_paste below.
-// Two-phase paste. Phase 1 writes the pasteboard and returns:
-//   >0  target pid for phase 2 (the content is on the clipboard, ⌘V may be sent)
-//   1   ClipboardOnly mode: the content is on the clipboard; do NOT call phase 2
-//   -1  the payload was written but no target pid is known (content is on the
-//       clipboard; only the keystroke is impossible)
-//    0  nothing was written (entry missing, load/write failed, or Accessibility
-//       is missing in Keystroke mode)
-// Phase 2 posts the paste keystroke to that pid. The caller must dismiss its
-// own key window between the phases: posting the keystroke while the popup is
-// still key makes a target that resolves the paste against its key window
-// (WeChat) intermittently drop it.
-//
-// `delivery_mode` states what the caller wants:
-//   0 COPYATTACH_DELIVERY_KEYSTROKE      — phase 1 + phase 2 (needs Accessibility)
-//   1 COPYATTACH_DELIVERY_CLIPBOARD_ONLY — clipboard write only; no permission
-//                                          needed, and phase 2 must NOT be called
-// Any other value returns 0 (explicit failure, nothing written).
 #define COPYATTACH_DELIVERY_KEYSTROKE 0
 #define COPYATTACH_DELIVERY_CLIPBOARD_ONLY 1
 int32_t clipboard_prepare_paste_by_id(uint64_t entry_id, bool as_path, int32_t delivery_mode);
 int32_t clipboard_send_paste(int32_t pid);
 
-// ─── Quick Slots (Right ⌘ + 1~9) ───
-// Toggle a slot: if entry_id already owns `slot` the binding is removed;
-// otherwise the slot and the entry are both reassigned atomically.
-// `slot` must be 1..9. 1 = ok, 0 = rejected (unknown entry / DB failure).
 int32_t clipboard_toggle_quick_slot(uint64_t entry_id, int32_t slot);
 int32_t clipboard_remove_quick_slot(uint64_t entry_id, int32_t slot);
 int32_t clipboard_clear_quick_slots(void);
-// Background paste: writes the slot payload to the pasteboard without
-// touching the history order or rewriting SQLite. `delivery_mode` follows
-// clipboard_prepare_paste_by_id: keystroke returns the target pid (0/-1 on
-// failure), clipboard-only returns 1 and needs no keystroke.
 int32_t clipboard_prepare_quick_paste_by_id(uint64_t entry_id, int32_t delivery_mode);
 int32_t clipboard_prepare_quick_paste_by_slot(int32_t slot, int32_t delivery_mode);
 
-// ─── Lazy Text Loading (on-demand full text by entry ID) ───
 char* clipboard_get_text_by_id(uint64_t entry_id);
 
-// ─── Snapshot API (single-lock, race-free read) ───
 void* clipboard_snapshot_acquire(void);
-// One-allocation wire-format snapshot: caller frees with clipboard_free_bytes.
 uint8_t* clipboard_snapshot_packed_acquire(int32_t* out_len);
 int32_t clipboard_snapshot_count(void* snap);
 int32_t clipboard_snapshot_item_type(void* snap, int32_t index);
@@ -113,49 +52,26 @@ int32_t clipboard_snapshot_get_image_width(void* snap, int32_t index);
 int32_t clipboard_snapshot_get_image_height(void* snap, int32_t index);
 void clipboard_snapshot_release(void* snap);
 
-// ─── Search (case-insensitive substring over label/source/full text) ───
-// Returns a malloc'd array of matching entry_ids; caller must free with
-// clipboard_free_u64_array. Null + 0 count when no matches.
 uint64_t* clipboard_search_ids(const char* query, int32_t* out_count);
 void clipboard_free_u64_array(uint64_t* ptr, int32_t len);
 
-// ─── Temp drag output sweep (TTL; see src/ffi/paste.rs) ───
-// Called after the drag provider writes a new PNG, so the Drag directory is
-// bounded by age rather than by "the next image drag".
 void clipboard_purge_stale_drag_images(void);
 
-// ─── Image by DB row id (no history lock) ───
 uint8_t* clipboard_get_image_thumb_by_db_id(int64_t db_id, int32_t* out_len);
 uint8_t* clipboard_get_image_full_by_db_id(int64_t db_id, int32_t* out_len);
 
-// ─── Pooled preview decode (Rust-decoded RGBA, caller owns via
-//     clipboard_preview_buffer_release) ───
-// Decodes + downscales the stored image to at most `max_dim` on its longest
-// side (aspect preserved; never upscales). Returns a Rust-owned RGBA8 buffer
-// (length w*h*4) or null on failure. `out_is_gif` is set to 1 when the stored
-// blob is an animated GIF; in that case the return value is null and callers
-// should keep the NSImage(data:) path instead; the Rust side deliberately
-// does not decode a throwaway first frame. The buffer's pages are marked
-// reusable by `clipboard_preview_buffer_release`, so closed previews stop
-// counting against the process footprint (the malloc pages never return
-// otherwise).
 uint8_t* clipboard_decode_preview_by_db_id(int64_t db_id, int32_t max_dim,
                                            int32_t* out_len, int32_t* out_w, int32_t* out_h,
                                            int32_t* out_is_gif);
 void clipboard_preview_buffer_release(uint8_t* ptr, int32_t len);
 
-// ─── Source App ───
 void clipboard_set_source_app(const char* name, const char* bundle_id, int32_t pid);
-// Newline-delimited application bundle IDs; 0 disables the text-length rule.
 int32_t clipboard_set_ignore_rules(const char* app_bundle_ids, int32_t ignore_text, int32_t ignore_images, int32_t min_text_characters, int32_t ignore_sensitive);
 
-// ─── Permissions ───
 int32_t clipboard_check_permission(void);
 void clipboard_open_preferences(void);
 
-// ─── History Management ───
 int32_t clipboard_clear_history(void);
-// Favorites are read from the DB; they never count against the percentage.
 int32_t clipboard_trim_oldest_percent(int32_t percent);
 int32_t clipboard_get_cleanup_threshold(void);
 int32_t clipboard_set_cleanup_threshold(int32_t threshold);
@@ -163,29 +79,21 @@ int32_t clipboard_get_storage_breakdown(int64_t* text_bytes, int64_t* image_byte
 int32_t clipboard_shrink_db_memory(void);
 int32_t clipboard_delete_by_id(uint64_t entry_id);
 int32_t clipboard_set_custom_label(uint64_t entry_id, const char* label);
-// Persist a favorite on the entry (DB table + in-memory mirror). 1 = ok, 0 = failure.
 int32_t clipboard_set_favorite(uint64_t entry_id, int32_t favorite);
 int32_t clipboard_undo_delete(void);
-// Number of deletions currently undoable (deleted rows still inside retention).
 int32_t clipboard_undo_depth(void);
-// Deletions the undo limit would evict if this entry were deleted now.
-// -1 = could not be determined (unknown entry / DB error); 0 = none evicted.
 int32_t clipboard_undo_eviction_preview(uint64_t entry_id);
-// Undo limit: >0 bytes, <0 item count (-N), 0 unlimited.
 int64_t clipboard_get_undo_limit(void);
 int32_t clipboard_set_undo_limit(int64_t limit);
 uint64_t clipboard_last_restored_id(void);
 
-// ─── History Reload (for stress testing) ───
 int32_t clipboard_reload_history(void);
 
-// ─── Stress Test (cfg-gated, stubs at link time) ───
 int32_t clipboard_stress_available(void);
 int32_t clipboard_stress_inject(int32_t count, double text_ratio, int64_t seed);
 void clipboard_stress_reset(void);
 char* clipboard_stress_run_bench(void);
 
-// ─── Data Backup & Restore ───
 int32_t clipboard_export_backup(const char* target_path);
 int32_t clipboard_inspect_backup(const char* backup_path, int32_t* out_item_count, int32_t* out_fav_count, uint64_t* out_timestamp);
 int32_t clipboard_restore_backup_overwrite(const char* backup_path, char** out_fav_str);

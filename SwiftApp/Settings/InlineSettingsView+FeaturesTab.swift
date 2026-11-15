@@ -120,10 +120,11 @@ extension InlineSettingsView {
                     }
                 }
 
-                Text(richTextSummaryText)
+                Text("拖拽时保留字体、颜色与链接；仅对列表中的应用生效。")
                     .font(.system(size: 11.5))
                     .foregroundColor(theme.secondaryText)
-                    .lineLimit(1)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             Spacer()
@@ -172,7 +173,7 @@ extension InlineSettingsView {
                 }
             }
 
-            Text("默认拖拽输出纯文本，以确保与 VS Code Copilot 等聊天框的兼容性。添加到下方的应用在拖拽时将额外提供 HTML / RTF 富文本，以满足思源笔记、Typora 等编辑器的接收需求。")
+            Text("拖拽默认输出纯文本，兼容大多数应用。列表中的应用会额外收到 HTML / RTF，从而保留字体、颜色与链接。")
                 .font(.system(size: 11.5))
                 .foregroundColor(theme.secondaryText)
                 .lineSpacing(2)
@@ -263,19 +264,6 @@ extension InlineSettingsView {
             }
         }
         .padding(.trailing, 2)
-    }
-
-    private var richTextSummaryText: String {
-        if richTextDragApps.isEmpty {
-            return "全部按纯文本拖拽（未设置特殊应用）"
-        }
-        let names = richTextDragApps.prefix(2).map { richTextDragApplicationName(for: $0) }
-        let joined = names.joined(separator: "、")
-        if richTextDragApps.count > 2 {
-            return "仅 \(joined) 等 \(richTextDragApps.count) 个应用启用富文本"
-        } else {
-            return "仅为 \(joined) 启用富文本，其余保持纯文本"
-        }
     }
 
     private func richTextAppRow(bundleID: String) -> some View {

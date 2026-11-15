@@ -224,7 +224,7 @@ extension InlineSettingsView {
                     .foregroundColor(systemForcesOpaqueBackground ? theme.secondaryText : Color.accentColor)
                     .frame(width: 22)
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("弹出窗口透明度")
+                    Text("弹窗透明度")
                         .font(.system(size: 13, weight: .medium))
                         .foregroundColor(theme.primaryText)
                     Text(systemForcesOpaqueBackground
