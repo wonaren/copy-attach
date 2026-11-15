@@ -20,6 +20,8 @@ struct PreviewContent: View {
     private let showsZoomHint: Bool
     private let hoverState: PreviewHoverState?
     private let dismissState: PreviewDismissState?
+    private let expandStartHeight: CGFloat?
+    private let expandEndHeight: CGFloat?
 
     @State private var image: NSImage?
     @State private var hasFailed = false
@@ -36,7 +38,9 @@ struct PreviewContent: View {
          onImageLoaded: ((NSImage) -> Void)? = nil,
          showsZoomHint: Bool = false,
          hoverState: PreviewHoverState? = nil,
-         dismissState: PreviewDismissState? = nil) {
+         dismissState: PreviewDismissState? = nil,
+         expandStartHeight: CGFloat? = nil,
+         expandEndHeight: CGFloat? = nil) {
         self.item = item
         self.maxPixelOverride = maxPixelOverride
         self.onTapWhenUnzoomed = onTapWhenUnzoomed
@@ -46,6 +50,8 @@ struct PreviewContent: View {
         self.showsZoomHint = showsZoomHint
         self.hoverState = hoverState
         self.dismissState = dismissState
+        self.expandStartHeight = expandStartHeight
+        self.expandEndHeight = expandEndHeight
         let seeded: NSImage?
         if let initialImage {
             seeded = initialImage
@@ -181,24 +187,13 @@ struct PreviewContent: View {
         Group {
             if showsZoomHint {
                 miniImageContent
-            } else {
-                VStack(spacing: 0) {
-                    largeImageBody(dbId: dbId)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
-                        .padding(.horizontal, 3)
-                        .padding(.top, 3)
-
-                    Divider()
-                        .opacity(colorScheme == .dark ? 0.12 : 0.08)
-
-                    PreviewFooterBar(
-                        item: item,
-                        details: .image(width: imagePixelSize.w, height: imagePixelSize.h),
-                        onPaste: onPaste,
-                        onClose: onClose
-                    )
+            } else if let startH = expandStartHeight, let endH = expandEndHeight, endH > startH {
+                GeometryReader { geo in
+                    largeImageStack(dbId: dbId,
+                                    t: min(max((geo.size.height - startH) / (endH - startH), 0), 1))
                 }
+            } else {
+                largeImageStack(dbId: dbId, t: 1)
             }
         }
         .task(id: imageLoadKey, priority: .userInitiated) {
@@ -207,6 +202,30 @@ struct PreviewContent: View {
         .onDisappear {
             image = nil
             hasFailed = false
+        }
+    }
+
+    private func largeImageStack(dbId: Int, t: CGFloat) -> some View {
+        VStack(spacing: 0) {
+            largeImageBody(dbId: dbId)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+                .padding(.horizontal, 3)
+                .padding(.top, 3)
+                .padding(.bottom, 3 * (1 - t))
+
+            Divider()
+                .opacity((colorScheme == .dark ? 0.12 : 0.08) * t)
+                .frame(height: t)
+
+            PreviewFooterBar(
+                item: item,
+                details: .image(width: imagePixelSize.w, height: imagePixelSize.h),
+                onPaste: onPaste,
+                onClose: onClose
+            )
+            .frame(height: PreviewFooterBar.height * t)
+            .opacity(t)
         }
     }
 

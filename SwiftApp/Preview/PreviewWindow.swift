@@ -163,7 +163,10 @@ class PreviewWindow: NSPanel {
         self.hostingView = hosting
     }
 
-    private func makeContent(item: ClipboardItem, initialImage: NSImage?) -> AnyView {
+    private func makeContent(item: ClipboardItem,
+                             initialImage: NSImage?,
+                             expandStartHeight: CGFloat? = nil,
+                             expandEndHeight: CGFloat? = nil) -> AnyView {
         let content: PreviewContent
         switch presentation {
         case .mini:
@@ -191,7 +194,9 @@ class PreviewWindow: NSPanel {
                 onTapWhenUnzoomed: dismiss,
                 onPaste: onPaste,
                 onClose: onClose ?? dismiss,
-                dismissState: dismissState
+                dismissState: dismissState,
+                expandStartHeight: expandStartHeight,
+                expandEndHeight: expandEndHeight
             )
         }
         return AnyView(content.id(item.id).withAppTheme())
@@ -266,6 +271,21 @@ class PreviewWindow: NSPanel {
                             y: point.y - size.height / 2,
                             width: size.width,
                             height: size.height)
+        if case .image = item {
+            let startHeight = frame.height
+            if let hosting = hostingView {
+                hosting.rootView = makeContent(item: item,
+                                               initialImage: miniImage,
+                                               expandStartHeight: startHeight,
+                                               expandEndHeight: size.height)
+            }
+            animateFrame(target,
+                         duration: 0.24,
+                         timing: CAMediaTimingFunction(name: .easeInEaseOut)) {
+                completion?()
+            }
+            return
+        }
         animateFrame(target,
                      duration: 0.24,
                      timing: CAMediaTimingFunction(name: .easeInEaseOut)) { [weak self] in
