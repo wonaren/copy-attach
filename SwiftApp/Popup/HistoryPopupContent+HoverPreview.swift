@@ -9,7 +9,7 @@ enum HoverPreviewSource: Equatable {
 extension HistoryPopupContent {
     private static let hoverPreviewShowDelay: UInt64 = 180_000_000
     private static let hoverPreviewHideDelay: UInt64 = 220_000_000
-    private static let keyboardPreviewAutoHideDelay: UInt64 = 4_000_000_000
+    private static let sidePreviewAutoHideDelay: UInt64 = 3_000_000_000
 
     var hoverPreviewSuppressed: Bool {
         isDismissing
@@ -19,6 +19,7 @@ extension HistoryPopupContent {
             || popupWindow?.isPresentingModalPanel == true
             || popupWindow?.isItemDragInProgress == true
             || popupWindow?.isOpenOrOpening != true
+            || QuickSlotDialWindow.shared.isVisible
     }
 
     func isSidePreviewEnabled(for item: ClipboardItem) -> Bool {
@@ -61,6 +62,8 @@ extension HistoryPopupContent {
 
             hoverPreviewPendingItem = item
             hoverPreviewPendingRect = screenRect
+            sidePreviewAutoHideTask?.cancel()
+            sidePreviewAutoHideTask = nil
             hoverPreviewShowTask?.cancel()
             hoverPreviewShowTask = Task { @MainActor in
                 try? await Task.sleep(nanoseconds: Self.hoverPreviewShowDelay)
@@ -129,46 +132,11 @@ extension HistoryPopupContent {
         presentKeyboardHoverPreview(item: item, localRect: anchor.rect)
     }
 
-    func toggleKeyboardSidePreview() {
-        if popupWindow?.hoverPreviewPanel != nil {
-            closeHoverPreview()
-            return
-        }
-        guard !hoverPreviewSuppressed, selectedIndex > 0 else { return }
-        let itemIndex = selectedIndex - 1
-        let items = displayItems
-        guard items.indices.contains(itemIndex) else { return }
-        let item = items[itemIndex]
-
-        guard isSidePreviewEnabled(for: item) else {
-            showToast(
-                item.isImage ? "图片侧边预览已关闭，可在偏好设置中开启" : "文本侧边预览已关闭，可在偏好设置中开启",
-                icon: "eye.slash"
-            )
-            return
-        }
-        guard canHoverPreview(item) else {
-            if case .image(_, 0, _, _, _, _, _, _, _) = item {
-                showToast("图片仍在编码，请稍后再试", icon: "photo")
-            }
-            return
-        }
-
-        hoverPreviewHideTask?.cancel()
-        hoverPreviewHideTask = nil
-        cancelPendingHoverPreview()
-        keyboardPreviewTargetId = item.id
-        if let anchor = selectedRowAnchor, anchor.entryId == item.id {
-            presentKeyboardHoverPreview(item: item, localRect: anchor.rect)
-        }
-    }
-
-    func scheduleKeyboardPreviewAutoHide(for entryId: Int) {
-        keyboardPreviewAutoHideTask?.cancel()
-        keyboardPreviewAutoHideTask = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: Self.keyboardPreviewAutoHideDelay)
+    func scheduleSidePreviewAutoHide(for entryId: Int) {
+        sidePreviewAutoHideTask?.cancel()
+        sidePreviewAutoHideTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: Self.sidePreviewAutoHideDelay)
             guard !Task.isCancelled,
-                  hoverPreviewSource == .keyboard,
                   hoverPreviewEntryId == entryId,
                   popupWindow?.hoverPreviewPanel != nil else { return }
             closeHoverPreview(autoDismiss: true)
@@ -198,11 +166,8 @@ extension HistoryPopupContent {
         hoverPreviewSource = source
         if source == .mouse {
             keyboardPreviewTargetId = nil
-            keyboardPreviewAutoHideTask?.cancel()
-            keyboardPreviewAutoHideTask = nil
-        } else {
-            scheduleKeyboardPreviewAutoHide(for: item.id)
         }
+        scheduleSidePreviewAutoHide(for: item.id)
         if let existing = popup.hoverPreviewPanel {
             hoverPreviewEntryId = item.id
             hoverPreviewItem = item
@@ -222,7 +187,8 @@ extension HistoryPopupContent {
             handleMiniHoverChange(inside)
         }
         popup.hoverPreviewPanel = mini
-        mini.orderFront(nil)
+        mini.alphaValue = 0
+        mini.orderFrontRegardless()
         mini.fadeIn(duration: 0.12)
         hoverPreviewEntryId = item.id
         hoverPreviewItem = item
@@ -251,8 +217,8 @@ extension HistoryPopupContent {
         cancelPendingHoverPreview()
         hoverPreviewHideTask?.cancel()
         hoverPreviewHideTask = nil
-        keyboardPreviewAutoHideTask?.cancel()
-        keyboardPreviewAutoHideTask = nil
+        sidePreviewAutoHideTask?.cancel()
+        sidePreviewAutoHideTask = nil
         hoverPreviewEntryId = nil
         hoverPreviewItem = nil
         hoverPreviewSource = nil
@@ -264,8 +230,10 @@ extension HistoryPopupContent {
         mini.onPaste = { self.pasteItem(id: $0) }
         mini.onClose = { self.closePreview() }
         mini.onDismiss = { self.closePreview() }
+        mini.orderFrontRegardless()
         mini.expandToLarge(item: expanded, centerAt: NSPoint(x: popup.frame.midX, y: popup.frame.midY)) {
             NSApp.activate(ignoringOtherApps: true)
+            mini.orderFrontRegardless()
             OnboardingGuide.shared.record(.previewed)
             OnboardingGuide.shared.refreshSpotlight()
         }
@@ -277,12 +245,10 @@ extension HistoryPopupContent {
             cancelPendingHoverPreview()
             hoverPreviewHideTask?.cancel()
             hoverPreviewHideTask = nil
-            keyboardPreviewAutoHideTask?.cancel()
-            keyboardPreviewAutoHideTask = nil
-        } else if hoverPreviewSource == .mouse {
-            scheduleHoverPreviewHide(for: hoverPreviewEntryId)
-        } else if hoverPreviewSource == .keyboard, let entryId = hoverPreviewEntryId {
-            scheduleKeyboardPreviewAutoHide(for: entryId)
+            sidePreviewAutoHideTask?.cancel()
+            sidePreviewAutoHideTask = nil
+        } else if let entryId = hoverPreviewEntryId {
+            scheduleSidePreviewAutoHide(for: entryId)
         }
     }
 
@@ -309,8 +275,8 @@ extension HistoryPopupContent {
         cancelPendingHoverPreview()
         hoverPreviewHideTask?.cancel()
         hoverPreviewHideTask = nil
-        keyboardPreviewAutoHideTask?.cancel()
-        keyboardPreviewAutoHideTask = nil
+        sidePreviewAutoHideTask?.cancel()
+        sidePreviewAutoHideTask = nil
         hoverPreviewEntryId = nil
         hoverPreviewItem = nil
         hoverPreviewSource = nil

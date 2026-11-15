@@ -467,6 +467,9 @@ class ClipboardBackend {
                     self.favoriteIds = favorites
                     self.slotByEntryId = slots
                     self.syncQuickSlotTap()
+                    if self.itemsGeneration == 0 {
+                        prewarmAppIcons(for: newItems)
+                    }
                     self.itemsGeneration &+= 1
                     Perf.instant("swift", "list.published")
                     if let span = perfReload {

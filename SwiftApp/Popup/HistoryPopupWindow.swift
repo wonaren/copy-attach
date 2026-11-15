@@ -256,6 +256,7 @@ class HistoryPopupWindow: NSPanel {
 
         if let hosting = popupHostingView {
             self.makeKey()
+            raisePreviewWindows()
             _ = self.makeFirstResponder(hosting)
             _ = hosting.becomeFirstResponder()
         }
@@ -286,6 +287,12 @@ class HistoryPopupWindow: NSPanel {
         awaitingPostDragInteraction = false
         removePostDragClickMonitor()
         popupHostingView?.resyncCommandSides()
+        raisePreviewWindows()
+    }
+
+    func raisePreviewWindows() {
+        previewPanel?.orderFrontRegardless()
+        hoverPreviewPanel?.orderFrontRegardless()
     }
 
     @objc private func didResignKey(_ notification: Notification) {

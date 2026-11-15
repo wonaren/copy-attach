@@ -103,7 +103,7 @@ struct HistoryPopupContent: View {
     @State var hoverPreviewPendingRect: NSRect?
     @State var hoverPreviewShowTask: Task<Void, Never>?
     @State var hoverPreviewHideTask: Task<Void, Never>?
-    @State var keyboardPreviewAutoHideTask: Task<Void, Never>?
+    @State var sidePreviewAutoHideTask: Task<Void, Never>?
     @State private var isControlPressed: Bool = false
     @State private var isCommandPressed: Bool = false
     @State private var isRightCommandPressed: Bool = false
@@ -424,6 +424,7 @@ struct HistoryPopupContent: View {
         }
         .onKeyPress(.space) {
             guard !isDismissing, editingItemId == nil else { return .ignored }
+            guard !isRightCommandPressed else { return .handled }
             if selectedIndex == 0 { return .ignored }
             togglePreview()
             return .handled
@@ -468,8 +469,8 @@ struct HistoryPopupContent: View {
             hoverPreviewSource = nil
             keyboardPreviewTargetId = nil
             selectedRowAnchor = nil
-            keyboardPreviewAutoHideTask?.cancel()
-            keyboardPreviewAutoHideTask = nil
+            sidePreviewAutoHideTask?.cancel()
+            sidePreviewAutoHideTask = nil
             scrollTarget = nil
             contextMenuArmed = false
             pendingContextMenuRequest = nil
@@ -579,9 +580,6 @@ struct HistoryPopupContent: View {
             }
             refreshQuickSlotDial()
         }
-        .onReceive(NotificationCenter.default.publisher(for: rightOptionTapNotification)) { _ in
-            toggleKeyboardSidePreview()
-        }
         .onChange(of: backend.slotByEntryId) { _, _ in
             refreshQuickSlotDial()
             guard let anchor = pendingQuickSlotAnchor else { return }
@@ -673,6 +671,10 @@ struct HistoryPopupContent: View {
                     let isFav = backend.favoriteIds.contains(item.id)
                     if backend.toggleFavorite(item.id) {
                         showToast(!isFav ? "已加入收藏" : "已取消收藏", icon: !isFav ? "star.fill" : "star.slash.fill")
+                        if isFav, filterMode == .favorites {
+                            if popupWindow?.previewPanel?.itemId == item.id { closePreview() }
+                            if popupWindow?.hoverPreviewPanel?.itemId == item.id { closeHoverPreview() }
+                        }
                     } else {
                         showToast("收藏失败，请重试", icon: "exclamationmark.triangle.fill")
                     }

@@ -256,7 +256,7 @@ extension InlineSettingsView {
                 Text("侧边悬浮预览")
                     .font(.system(size: 13, weight: .medium))
                     .foregroundColor(theme.primaryText)
-                Text("悬停或 ↑ ↓ 时显示，右 ⌥ 手动开/关。")
+                Text("悬停或 ↑ ↓ 时显示，3 秒后自动关闭。")
                     .font(.system(size: 11.5))
                     .foregroundColor(theme.secondaryText)
             }

@@ -35,7 +35,7 @@ extension HistoryPopupContent {
 
     func openPreview(item: ClipboardItem) {
         let perfPreview = PerfSpan.start("swift", "preview.open")
-        guard let popup = popupWindow else { return }
+        guard let popup = popupWindow, popup.isOpenOrOpening, !isDismissing else { return }
         if case .image(_, 0, _, _, _, _, _, _, _) = item {
             perfPreview?.end()
             showToast("图片仍在编码，请稍后再试", icon: "photo")
@@ -43,7 +43,10 @@ extension HistoryPopupContent {
         }
         closeHoverPreview()
         let popupCenter = NSPoint(x: popup.frame.midX, y: popup.frame.midY)
-        guard let previewItem = fullTextItem(item) else { return }
+        guard let previewItem = fullTextItem(item) else {
+            showToast("内容加载失败，请重试", icon: "exclamationmark.triangle.fill")
+            return
+        }
         let preview = PreviewWindow(
             item: previewItem,
             centerAt: popupCenter,
@@ -53,9 +56,9 @@ extension HistoryPopupContent {
         )
         popup.previewPanel = preview
         preview.alphaValue = 0
-        preview.orderFront(nil)
-        preview.fadeIn()
         NSApp.activate(ignoringOtherApps: true)
+        preview.orderFrontRegardless()
+        preview.fadeIn()
         showPreview = true
         OnboardingGuide.shared.record(.previewed)
         OnboardingGuide.shared.refreshSpotlight()

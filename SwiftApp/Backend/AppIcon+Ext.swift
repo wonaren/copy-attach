@@ -23,9 +23,22 @@ extension NSImage {
     return cache
 }()
 
+@MainActor private var missingAppIcons: Set<String> = []
+
+@MainActor
+func prewarmAppIcons(for items: [ClipboardItem]) {
+    var seen = Set<String>()
+    for item in items {
+        let bundleId = item.sourceBundleId
+        guard !bundleId.isEmpty, seen.insert(bundleId).inserted else { continue }
+        _ = getAppIcon(for: bundleId)
+    }
+}
+
 @MainActor
 func getAppIcon(for bundleId: String) -> NSImage? {
     if bundleId.isEmpty { return nil }
+    if missingAppIcons.contains(bundleId) { return nil }
     let key = bundleId as NSString
     if let cached = appIconCache.object(forKey: key) { return cached }
 
@@ -39,7 +52,10 @@ func getAppIcon(for bundleId: String) -> NSImage? {
         }
         return nil
     }()
-    guard let icon else { return nil }
+    guard let icon else {
+        missingAppIcons.insert(bundleId)
+        return nil
+    }
 
     let scaled = NSImage(size: NSSize(width: 36, height: 36))
     scaled.lockFocus()

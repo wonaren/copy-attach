@@ -14,8 +14,13 @@ final class QuickSlotDialWindow {
 
     private init() {}
 
+    var isVisible: Bool {
+        panel?.isVisible == true
+    }
+
     func show(boundSlots: Set<Int>, popupFrame: NSRect, anchorY: CGFloat) {
         let panel = ensurePanel()
+        let appearing = !panel.isVisible
         if boundSlots != currentBoundSlots {
             currentBoundSlots = boundSlots
             hosting?.rootView = AnyView(QuickSlotDialView(boundSlots: boundSlots).withAppTheme())
@@ -27,9 +32,11 @@ final class QuickSlotDialWindow {
         x = min(x, visible.maxX - Self.dialSize.width - 4)
         y = max(visible.minY + 4, min(y, visible.maxY - Self.dialSize.height - 4))
         panel.setFrame(NSRect(origin: NSPoint(x: x, y: y), size: Self.dialSize), display: true)
-        if !panel.isVisible {
+        if appearing {
             panel.alphaValue = 0
-            panel.orderFrontRegardless()
+        }
+        panel.orderFrontRegardless()
+        if appearing {
             NSAnimationContext.runAnimationGroup { ctx in
                 ctx.duration = 0.12
                 panel.animator().alphaValue = 1
