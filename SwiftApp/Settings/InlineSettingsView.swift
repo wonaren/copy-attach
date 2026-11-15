@@ -77,7 +77,7 @@ struct InlineSettingsView: View {
             tabContent
         }
         .frame(width: 520, height: 680)
-        .background(Color(nsColor: .windowBackgroundColor).opacity(0.7))
+        .background(Color(nsColor: .windowBackgroundColor).opacity(0.9))
         .task(id: backend.permissionGranted) {
             guard !backend.permissionGranted else { return }
             while !Task.isCancelled && !backend.permissionGranted {
