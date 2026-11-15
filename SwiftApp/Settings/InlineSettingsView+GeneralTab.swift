@@ -217,38 +217,39 @@ extension InlineSettingsView {
     }
 
     private var windowBackgroundRow: some View {
-        HStack(alignment: .top, spacing: 12) {
-            Image(systemName: "rectangle.fill")
-                .font(.system(size: 15))
-                .foregroundColor(systemForcesOpaqueBackground ? theme.secondaryText : Color.accentColor)
-                .frame(width: 22)
-            VStack(alignment: .leading, spacing: 5) {
-                Text("窗口背景")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundColor(theme.primaryText)
-                Text(systemForcesOpaqueBackground
-                     ? "系统已开启「降低透明度」或「增强对比度」，背景保持不透明。"
-                     : effectivePopupBackgroundOpacity < 0.6
-                        ? "已很透明：明亮背景下文字会变淡。"
-                        : "低于 100% 时透出模糊的桌面背景。")
-                    .font(.system(size: 11.5))
-                    .foregroundColor(theme.secondaryText)
-                    .fixedSize(horizontal: false, vertical: true)
-                HStack(spacing: 10) {
-                    Slider(value: $popupBackgroundOpacity,
-                           in: HistoryPopupContent.popupBackgroundOpacityRange,
-                           step: 0.1)
-                        .disabled(systemForcesOpaqueBackground)
-                    Text("\(Int((effectivePopupBackgroundOpacity * 100).rounded()))%")
-                        .font(.system(size: 11.5, weight: .medium))
-                        .monospacedDigit()
+        VStack(spacing: 10) {
+            HStack(spacing: 12) {
+                Image(systemName: "rectangle.fill")
+                    .font(.system(size: 15))
+                    .foregroundColor(systemForcesOpaqueBackground ? theme.secondaryText : Color.accentColor)
+                    .frame(width: 22)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("弹出窗口透明度")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(theme.primaryText)
+                    Text(systemForcesOpaqueBackground
+                         ? "系统已开启降低透明度，背景保持不透明。"
+                         : effectivePopupBackgroundOpacity < 0.6
+                            ? "已很透明：文字会变淡。"
+                            : "透出模糊的桌面背景。")
+                        .font(.system(size: 11.5))
                         .foregroundColor(theme.secondaryText)
-                        .frame(width: 34, alignment: .trailing)
+                        .lineLimit(1)
                 }
-                .padding(.top, 3)
-                windowBackgroundPreview
-                    .padding(.top, 4)
+                Spacer()
+                Slider(value: $popupBackgroundOpacity,
+                       in: HistoryPopupContent.popupBackgroundOpacityRange,
+                       step: 0.1)
+                    .frame(width: 150)
+                    .disabled(systemForcesOpaqueBackground)
+                Text("\(Int((effectivePopupBackgroundOpacity * 100).rounded()))%")
+                    .font(.system(size: 11.5, weight: .medium))
+                    .monospacedDigit()
+                    .foregroundColor(theme.secondaryText)
+                    .frame(width: 34, alignment: .trailing)
             }
+            windowBackgroundPreview
+                .padding(.leading, 34)
         }
         .padding(.vertical, 4)
     }
@@ -262,23 +263,26 @@ extension InlineSettingsView {
             ], startPoint: .topLeading, endPoint: .bottomTrailing)
             Rectangle().fill(.regularMaterial)
             theme.popupBackground.opacity(systemForcesOpaqueBackground ? 1.0 : effectivePopupBackgroundOpacity)
-            HStack(spacing: 8) {
+            HStack(spacing: 10) {
                 Image(systemName: "doc.text.fill")
-                    .font(.system(size: 12))
+                    .font(.system(size: 14))
                     .foregroundColor(theme.popupSecondaryText)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("示例条目")
-                        .font(.system(size: 11, weight: .medium))
+                        .font(.system(size: 12, weight: .medium))
                         .foregroundColor(theme.popupPrimaryText)
                     Text("背景越不透明，文字越清晰")
-                        .font(.system(size: 10))
+                        .font(.system(size: 10.5))
                         .foregroundColor(theme.popupSecondaryText)
                 }
                 Spacer()
+                Text("刚刚")
+                    .font(.system(size: 10.5))
+                    .foregroundColor(theme.popupMutedText)
             }
-            .padding(.horizontal, 10)
+            .padding(.horizontal, 12)
         }
-        .frame(height: 46)
+        .frame(height: 54)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 8, style: .continuous)
