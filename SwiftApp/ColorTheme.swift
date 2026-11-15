@@ -57,7 +57,7 @@ struct AppTheme {
         updateActionBackground: Color(nsColor: NSColor(srgbRed: 0.122, green: 0.490, blue: 0.282, alpha: 1.0)),
         updateActionText: Color.white,
 
-        popupBackground: Color.black.opacity(0.82),
+        popupBackground: Color.black,
         popupPrimaryText: Color.white.opacity(0.94),
         popupSecondaryText: Color.white.opacity(0.76),
         popupMutedText: Color.white.opacity(0.68),
@@ -97,7 +97,7 @@ struct AppTheme {
         updateActionBackground: Color(nsColor: NSColor(srgbRed: 0.059, green: 0.361, blue: 0.200, alpha: 1.0)),
         updateActionText: Color.white,
 
-        popupBackground: Color(nsColor: NSColor(calibratedRed: 0.92, green: 0.92, blue: 0.94, alpha: 0.88)),
+        popupBackground: Color(nsColor: NSColor(calibratedRed: 0.92, green: 0.92, blue: 0.94, alpha: 1.0)),
         popupPrimaryText: Color(white: 0.10),
         popupSecondaryText: Color(white: 0.33),
         popupMutedText: Color(white: 0.36),
@@ -137,7 +137,7 @@ struct AppTheme {
         updateActionBackground: Color(nsColor: NSColor(srgbRed: 0.373, green: 0.851, blue: 0.541, alpha: 1.0)),
         updateActionText: Color.black,
 
-        popupBackground: Color(nsColor: NSColor(calibratedRed: 0.08, green: 0.08, blue: 0.09, alpha: 0.98)),
+        popupBackground: Color(nsColor: NSColor(calibratedRed: 0.08, green: 0.08, blue: 0.09, alpha: 1.0)),
         popupPrimaryText: Color.white,
         popupSecondaryText: Color.white.opacity(0.92),
         popupMutedText: Color.white.opacity(0.85),

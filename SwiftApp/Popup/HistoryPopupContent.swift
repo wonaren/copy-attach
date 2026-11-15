@@ -84,6 +84,9 @@ struct HistoryPopupContent: View {
     static let singleClickUsesItemKey = "SingleClickUsesHistoryItem"
     static let textSidePreviewEnabledKey = "TextSidePreviewEnabled"
     static let imageSidePreviewEnabledKey = "ImageSidePreviewEnabled"
+    static let popupBackgroundOpacityKey = "PopupBackgroundOpacity"
+    static let popupBackgroundOpacityDefault = 0.7
+    static let popupBackgroundOpacityRange = 0.30...1.0
 
     let onClose: () -> Void
 
@@ -92,6 +95,7 @@ struct HistoryPopupContent: View {
     @AppStorage(HistoryPopupContent.singleClickUsesItemKey) private var singleClickUsesItem = false
     @AppStorage(HistoryPopupContent.textSidePreviewEnabledKey) var textSidePreviewEnabled = false
     @AppStorage(HistoryPopupContent.imageSidePreviewEnabledKey) var imageSidePreviewEnabled = true
+    @AppStorage(HistoryPopupContent.popupBackgroundOpacityKey) private var popupBackgroundOpacity = HistoryPopupContent.popupBackgroundOpacityDefault
     @State private var mouseSelectedItemId: Int?
     @State var showPreview: Bool = false
     @State var hoverPreviewEntryId: Int?
@@ -110,6 +114,8 @@ struct HistoryPopupContent: View {
     @State private var dialAnchor: CGRect = .null
     @State var pendingQuickSlotAnchor: Int?
     @Environment(\.appTheme) var theme
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.colorSchemeContrast) private var colorSchemeContrast
     @State var searchText: String = ""
     @State var effectiveSearchText: String = ""
     @State private var searchTask: Task<Void, Never>?
@@ -337,9 +343,16 @@ struct HistoryPopupContent: View {
         NSApp.windows.first(where: { $0 is HistoryPopupWindow }) as? HistoryPopupWindow
     }
 
+    private var effectiveBackgroundOpacity: Double {
+        if reduceTransparency || colorSchemeContrast == .increased { return 1.0 }
+        return min(max(popupBackgroundOpacity, HistoryPopupContent.popupBackgroundOpacityRange.lowerBound),
+                   HistoryPopupContent.popupBackgroundOpacityRange.upperBound)
+    }
+
     var body: some View {
         ZStack {
             theme.popupBackground
+                .opacity(effectiveBackgroundOpacity)
                 .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
 
             if backend.items.isEmpty {

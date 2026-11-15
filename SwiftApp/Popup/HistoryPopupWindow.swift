@@ -166,6 +166,12 @@ class HistoryPopupWindow: NSPanel {
         clip.layer?.masksToBounds = true
         clip.layer?.cornerRadius = 14
         clip.layer?.cornerCurve = .continuous
+        let material = NSVisualEffectView(frame: clip.bounds)
+        material.material = .popover
+        material.blendingMode = .behindWindow
+        material.state = .active
+        material.autoresizingMask = [.width, .height]
+        clip.addSubview(material)
         hosting.frame = clip.bounds
         clip.addSubview(hosting)
 

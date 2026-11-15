@@ -13,6 +13,7 @@ struct InlineSettingsView: View {
     @AppStorage(HistoryPopupContent.singleClickUsesItemKey) var singleClickUsesItem = false
     @AppStorage(HistoryPopupContent.textSidePreviewEnabledKey) var textSidePreviewEnabled = false
     @AppStorage(HistoryPopupContent.imageSidePreviewEnabledKey) var imageSidePreviewEnabled = true
+    @AppStorage(HistoryPopupContent.popupBackgroundOpacityKey) var popupBackgroundOpacity = HistoryPopupContent.popupBackgroundOpacityDefault
     @State var showMenuBarIcon = UserDefaults.standard.object(forKey: "ShowMenuBarIcon") as? Bool ?? true
     @State var cleanupThreshold: Double = {
         let saved = UserDefaults.standard.integer(forKey: "CleanupThreshold")
@@ -47,6 +48,8 @@ struct InlineSettingsView: View {
     var updateBadge: UpdateBadge { UpdateBadge.shared }
     @Environment(\.appTheme) var theme
     @Environment(\.colorScheme) var colorScheme
+    @Environment(\.accessibilityReduceTransparency) var reduceTransparency
+    @Environment(\.colorSchemeContrast) var colorSchemeContrast
 
     init(initialTab: Int = 0) {
         _selectedTab = State(initialValue: initialTab)
@@ -74,7 +77,7 @@ struct InlineSettingsView: View {
             tabContent
         }
         .frame(width: 520, height: 680)
-        .background(theme.background)
+        .background(Color(nsColor: .windowBackgroundColor).opacity(0.7))
         .task(id: backend.permissionGranted) {
             guard !backend.permissionGranted else { return }
             while !Task.isCancelled && !backend.permissionGranted {
@@ -95,8 +98,8 @@ struct InlineSettingsView: View {
         (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "0.0"
     }
 
-    private let tabTitles = ["通用", "快捷键", "存储", "忽略", "关于"]
-    private let tabIcons = ["gearshape", "keyboard", "externaldrive", "eye.slash", "info.circle"]
+    private let tabTitles = ["通用", "功能", "快捷键", "存储", "忽略", "关于"]
+    private let tabIcons = ["gearshape", "switch.2", "keyboard", "externaldrive", "eye.slash", "info.circle"]
 
     @State private var hoveredTab: Int? = nil
     @Namespace private var tabGlassNamespace
@@ -167,7 +170,7 @@ struct InlineSettingsView: View {
                 .symbolVariant(selectedTab == i ? .fill : .none)
                 .frame(width: 22, height: 20)
                 .overlay(alignment: .topTrailing) {
-                    if i == 4, updateBadge.hasUnseenUpdate {
+                    if i == 5, updateBadge.hasUnseenUpdate {
                         Circle()
                             .fill(Color.red)
                             .frame(width: 7, height: 7)
@@ -203,7 +206,7 @@ struct InlineSettingsView: View {
                     withAnimation(.smooth(duration: 0.3)) {
                         selectedTab = i
                     }
-                    if i == 4 { updateBadge.markSeen() }
+                    if i == 5 { updateBadge.markSeen() }
                 } label: {
                     tabItemLabel(i)
                         .contentShape(RoundedRectangle(cornerRadius: tabCornerRadius, style: .continuous))
@@ -243,9 +246,10 @@ struct InlineSettingsView: View {
     private var tabContent: some View {
         Group {
             if selectedTab == 0 { generalTab }
-            else if selectedTab == 1 { shortcutsTab }
-            else if selectedTab == 2 { storageTab }
-            else if selectedTab == 3 { ignoreTab }
+            else if selectedTab == 1 { featuresTab }
+            else if selectedTab == 2 { shortcutsTab }
+            else if selectedTab == 3 { storageTab }
+            else if selectedTab == 4 { ignoreTab }
             else { aboutTab }
         }
         .id(selectedTab)

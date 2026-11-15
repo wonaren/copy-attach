@@ -5,6 +5,7 @@ import SwiftUI
 class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     static var shared: AppDelegate?
     private var settingsWindow: NSWindow?
+    private var settingsHostingController: NSViewController?
     private var backendRetryTimer: Timer?
     private var stressWindowController: StressTestWindowController?
     private var firstLaunchDone = false
@@ -253,6 +254,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard window === settingsWindow else { return }
         HotkeyManager.shared.stopRecording()
         settingsWindow = nil
+        settingsHostingController = nil
 
         let runInBackground = UserDefaults.standard.object(forKey: "RunInBackground") as? Bool ?? true
         if !runInBackground { NSApp.terminate(nil) }
@@ -386,7 +388,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func createSettingsWindow(initialTab: Int = 0) {
         debugLog("Creating settings window...")
         let window = NSWindow(
-            contentRect: NSRect(x: 100, y: 100, width: 520, height: 680),
+            contentRect: NSRect(x: 100, y: 100, width: 520, height: 712),
             styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
@@ -398,12 +400,23 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.isMovableByWindowBackground = false
         window.isReleasedWhenClosed = false
         window.hidesOnDeactivate = false
+        window.isOpaque = false
+        window.backgroundColor = .clear
         window.delegate = self
 
         let content = makeSettingsContent(initialTab: initialTab)
-        content.view.frame = NSRect(x: 0, y: 0, width: 520, height: 680)
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 520, height: 712))
+        let material = NSVisualEffectView(frame: container.bounds)
+        material.material = .underWindowBackground
+        material.blendingMode = .behindWindow
+        material.state = .active
+        material.autoresizingMask = [.width, .height]
+        container.addSubview(material)
+        content.view.frame = container.bounds
         content.view.autoresizingMask = [NSView.AutoresizingMask.width, NSView.AutoresizingMask.height]
-        window.contentViewController = content
+        container.addSubview(content.view)
+        window.contentView = container
+        settingsHostingController = content
 
         window.center()
         window.makeKeyAndOrderFront(nil)
