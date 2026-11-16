@@ -775,6 +775,14 @@ struct HistoryPopupContent: View {
             if mouseSelectedItemId != newValue {
                 mouseSelectedItemId = nil
             }
+            if let target = keyboardPreviewTargetId, target != newValue {
+                if let newValue,
+                   let index = displayItems.firstIndex(where: { $0.id == newValue }) {
+                    scheduleKeyboardPreview(forItemAt: index)
+                } else {
+                    closeHoverPreview()
+                }
+            }
         }
         .onChange(of: selectedIndex) { _, newValue in
             if newValue == 0 && !backend.items.isEmpty {

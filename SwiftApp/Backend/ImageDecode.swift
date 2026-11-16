@@ -42,6 +42,7 @@ enum ImageDecode {
     private static let decodeGate = PreviewDecodeGate(limit: 2)
 
     @MainActor private static var previewSession: UUID?
+    @MainActor private static var previewSessionOwners: Set<UUID> = []
 
     @MainActor private static let previewCache: NSCache<NSString, DecodedImage> = {
         let cache = NSCache<NSString, DecodedImage>()
@@ -51,12 +52,20 @@ enum ImageDecode {
     }()
 
     @MainActor
-    static func beginPreviewSession() {
-        previewSession = UUID()
+    @discardableResult
+    static func beginPreviewSession() -> UUID {
+        let token = UUID()
+        previewSessionOwners.insert(token)
+        if previewSession == nil {
+            previewSession = UUID()
+        }
+        return token
     }
 
     @MainActor
-    static func endPreviewSession() {
+    static func endPreviewSession(_ token: UUID) {
+        previewSessionOwners.remove(token)
+        guard previewSessionOwners.isEmpty else { return }
         previewSession = nil
         previewCache.removeAllObjects()
     }

@@ -23,7 +23,8 @@ final class SquircleMaskView: NSView {
     override func layout() {
         super.layout()
         maskLayer.frame = bounds
-        maskLayer.path = PreviewWindow.squirclePath(bounds, radius: 19, exponent: 2.4)
+        let radius = min(19, max(0, min(bounds.width, bounds.height) / 2))
+        maskLayer.path = PreviewWindow.squirclePath(bounds, radius: radius, exponent: 2.4)
     }
 }
 
@@ -303,6 +304,7 @@ class PreviewWindow: NSPanel {
         isMovableByWindowBackground = true
         hoverState.isHovering = false
         hostingView?.usesPointingHand = false
+        hostingView?.allowsWindowDrag = true
         if let hosting = hostingView {
             invalidateCursorRects(for: hosting)
         }
@@ -324,7 +326,8 @@ class PreviewWindow: NSPanel {
             }
             animateFrame(target,
                          duration: 0.24,
-                         timing: CAMediaTimingFunction(name: .easeInEaseOut)) {
+                         timing: CAMediaTimingFunction(name: .easeInEaseOut)) { [weak self] in
+                guard let self, self.isVisible, self.hostingView != nil else { return }
                 completion?()
             }
             return

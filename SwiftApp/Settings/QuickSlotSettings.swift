@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -25,6 +26,8 @@ struct QuickSlotSettings: View {
     @State private var hoverSlot: Int?
     @State private var trashTargeted = false
     @State private var previewSlot: Int?
+    @State private var previewSessionToken: UUID?
+    @State private var dragReleaseTask: Task<Void, Never>?
 
     private let slots = 1...9
 
@@ -63,8 +66,36 @@ struct QuickSlotSettings: View {
         .animation(changeAnimation, value: draggingSlot)
         .animation(changeAnimation, value: backend.slotByEntryId)
         .animation(changeAnimation, value: backend.permissionGranted)
-        .onAppear { ImageDecode.beginPreviewSession() }
-        .onDisappear { ImageDecode.endPreviewSession() }
+        .onAppear {
+            if let token = previewSessionToken {
+                ImageDecode.endPreviewSession(token)
+            }
+            previewSessionToken = ImageDecode.beginPreviewSession()
+        }
+        .onDisappear {
+            if let token = previewSessionToken {
+                ImageDecode.endPreviewSession(token)
+                previewSessionToken = nil
+            }
+            dragReleaseTask?.cancel()
+            dragReleaseTask = nil
+        }
+        .onChange(of: draggingSlot) { _, slot in
+            dragReleaseTask?.cancel()
+            dragReleaseTask = nil
+            guard slot != nil else { return }
+            dragReleaseTask = Task { @MainActor in
+                while !Task.isCancelled, NSEvent.pressedMouseButtons & 1 != 0 {
+                    try? await Task.sleep(nanoseconds: 40_000_000)
+                }
+                guard !Task.isCancelled else { return }
+                try? await Task.sleep(nanoseconds: 150_000_000)
+                guard !Task.isCancelled else { return }
+                draggingSlot = nil
+                hoverSlot = nil
+                trashTargeted = false
+            }
+        }
         .alert("解除全部快捷槽位？", isPresented: $confirmClear) {
             Button("解除全部", role: .destructive) {
                 showFailure = !backend.clearQuickSlots()

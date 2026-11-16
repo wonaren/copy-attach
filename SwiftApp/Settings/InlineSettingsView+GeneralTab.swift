@@ -216,6 +216,10 @@ extension InlineSettingsView {
             HistoryPopupContent.popupBackgroundOpacityRange.upperBound)
     }
 
+    private var displayedPopupBackgroundOpacity: Double {
+        systemForcesOpaqueBackground ? 1.0 : effectivePopupBackgroundOpacity
+    }
+
     private var windowBackgroundRow: some View {
         VStack(spacing: 10) {
             HStack(spacing: 12) {
@@ -242,7 +246,7 @@ extension InlineSettingsView {
                        step: 0.1)
                     .frame(width: 150)
                     .disabled(systemForcesOpaqueBackground)
-                Text("\(Int((effectivePopupBackgroundOpacity * 100).rounded()))%")
+                Text("\(Int((displayedPopupBackgroundOpacity * 100).rounded()))%")
                     .font(.system(size: 11.5, weight: .medium))
                     .monospacedDigit()
                     .foregroundColor(theme.secondaryText)

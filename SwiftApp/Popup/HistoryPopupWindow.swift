@@ -22,6 +22,7 @@ class HistoryPopupWindow: NSPanel {
     private var mouseUpWatcher: Timer?
     private var postDragClickMonitor: Any?
     private var closeGuaranteeTimer: Timer?
+    private var previewSessionToken: UUID?
 
     private var popupHostingView: PopupHostingView?
 
@@ -148,7 +149,10 @@ class HistoryPopupWindow: NSPanel {
         let session = closeSessionGeneration
         lifecycleState = .opening
 
-        ImageDecode.beginPreviewSession()
+        if let token = previewSessionToken {
+            ImageDecode.endPreviewSession(token)
+        }
+        previewSessionToken = ImageDecode.beginPreviewSession()
         ClipboardBackend.shared.recordFrontmostApp()
 
         ClipboardBackend.shared.setPopupVisible(true)
@@ -500,7 +504,10 @@ class HistoryPopupWindow: NSPanel {
     override func close() {
         let perfClose = PerfSpan.start("swift", "popup.close")
         lifecycleState = .closed
-        ImageDecode.endPreviewSession()
+        if let token = previewSessionToken {
+            ImageDecode.endPreviewSession(token)
+            previewSessionToken = nil
+        }
         ClipboardBackend.shared.setPopupVisible(false)
 
         NotificationCenter.default.removeObserver(self, name: NSWindow.didResignKeyNotification, object: self)

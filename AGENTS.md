@@ -33,13 +33,13 @@ CopyAttach 是一个 macOS 剪贴板历史管理器：Rust cdylib 后端（`src/
 4. **版本号只允许改末尾 patch 位**（`0.105.11` 里只动 `11`），`105`/`0` 由人决定，需要联动大版本时停下问。开发期带 `-dev` 后缀，发布时去掉；CHANGELOG 纯面向用户、简洁。
 5. **改任何大缓冲路径前**先读 `docs/engineering-notes.md` 的 madvise / claim 契约：`mark_pages_reusable` / `claim_pages` 必须成对且页对齐。
 6. **隔离测试用 `COPYATTACH_DATA_DIR`，不要起并行 GUI。** `src/db/schema.rs` 优先读取 `COPYATTACH_DATA_DIR=/tmp/...`（未设置才回退真实库；仅 `src/stress/inject.rs` 默认路径读 `HOME`）。不要用覆盖的 `HOME` 启动 GUI；单实例守卫也会让第二个 GUI 实例直接 `exit(0)`。
-7. **不在代码中写任何注释**（与 `CLAUDE.md` 一致；仅保留 `SwiftApp/CopyAttach-Bridging-Header.h` 既有接口契约注释）。用户可见字符串是中文，标识符是英文。
+7. **不在代码中写任何注释**（与 `CLAUDE.md` 一致）。用户可见字符串是中文，标识符是英文。
 
 ## 边界与不变量
 
 - **FFI 三处同步**：`src/ffi/`（8 个子模块，68 个函数，另有 2 个在 `src/backend.rs`、4 个在 `src/perf.rs`）用 `#[no_mangle]` 定义、`SwiftApp/CopyAttach-Bridging-Header.h` 声明（现有 74 个 `extern "C"`）、`ClipboardBackend.swift` 封装。加接口漏掉任一处就是断链。
 - **FFI 边界不许 panic**：`extern "C"` 里 panic 会 abort 整个进程。用 `try_backend()` 返回哨兵值（`0` / `-1` / `null`）。
-- **内存所有权**（契约写在 bridging header 注释里）：C 字符串 → `clipboard_free_string`；字节缓冲 → `clipboard_free_bytes`；u64 数组 → `clipboard_free_u64_array`；快照 `acquire`/`release` 成对，且快照内的 `char*` 仍要各自 free；预览缓冲由 Rust 拥有，靠 `PreviewBufferBox.deinit` 释放。**长度为 0 时也必须走 FFI free**（`Data(bytesNoCopy:)` 在 count 为 0 时不保证触发 deallocator）。
+- **内存所有权**（契约如下）：C 字符串 → `clipboard_free_string`；字节缓冲 → `clipboard_free_bytes`；u64 数组 → `clipboard_free_u64_array`；快照 `acquire`/`release` 成对，且快照内的 `char*` 仍要各自 free；预览缓冲由 Rust 拥有，靠 `PreviewBufferBox.deinit` 释放。**长度为 0 时也必须走 FFI free**（`Data(bytesNoCopy:)` 在 count 为 0 时不保证触发 deallocator）。
 - **身份不变量**：条目的稳定身份是 `entry_id`（原子递增、水位持久化，Swift 收藏引用它）；`db_id` 必须按**内容 hash** 赋值，绝不按头部位置。
 - **自写抑制**：`select_and_paste` 设 `pending_self_write` 标记，监控线程按**精确匹配的 changeCount** 跳过自身写入。
 - `src/ffi/stress.rs` 始终编译，只有内部函数被 feature gate —— release 包里也存在 `clipboard_stress_available`。
