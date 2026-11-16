@@ -87,18 +87,24 @@ class HistoryPopupWindow: NSPanel {
 
         super.init(
             contentRect: NSRect(x: x, y: y, width: popupWidth, height: popupHeight),
-            styleMask: [.borderless, .nonactivatingPanel, .fullSizeContentView],
+            styleMask: [.titled, .nonactivatingPanel, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
 
+        self.title = "CopyAttach"
+        self.titleVisibility = .hidden
+        self.titlebarAppearsTransparent = true
+        self.titlebarSeparatorStyle = .none
+        self.standardWindowButton(.closeButton)?.isHidden = true
+        self.standardWindowButton(.miniaturizeButton)?.isHidden = true
+        self.standardWindowButton(.zoomButton)?.isHidden = true
         self.isOpaque = false
-        self.backgroundColor = .clear
+        self.backgroundColor = NSColor(white: 0, alpha: 0.001)
         self.level = .floating
         self.isReleasedWhenClosed = false
         self.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         self.hasShadow = true
-        self.title = "CopyAttach"
         self.isMovableByWindowBackground = false
     }
 
@@ -158,14 +164,11 @@ class HistoryPopupWindow: NSPanel {
         }).withAppTheme())
         let hosting = PopupHostingView(rootView: contentView)
         popupHostingView = hosting
+        hosting.safeAreaRegions = []
         let contentRect = self.contentRect(forFrameRect: self.frame)
         hosting.wantsLayer = true
 
         let clip = NSView(frame: contentRect)
-        clip.wantsLayer = true
-        clip.layer?.masksToBounds = true
-        clip.layer?.cornerRadius = 14
-        clip.layer?.cornerCurve = .continuous
         let material = NSVisualEffectView(frame: clip.bounds)
         material.material = .popover
         material.blendingMode = .behindWindow

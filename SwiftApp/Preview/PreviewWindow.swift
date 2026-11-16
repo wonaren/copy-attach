@@ -7,12 +7,35 @@ final class PreviewHoverState {
     var isHovering = false
 }
 
+final class SquircleMaskView: NSView {
+    private let maskLayer = CAShapeLayer()
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.mask = maskLayer
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func layout() {
+        super.layout()
+        maskLayer.frame = bounds
+        maskLayer.path = PreviewWindow.squirclePath(bounds, radius: 19, exponent: 2.4)
+    }
+}
+
 final class PreviewHostingView: NSHostingView<AnyView> {
     var onHoverChange: ((Bool) -> Void)?
     var usesPointingHand = false
     private var installedArea: NSTrackingArea?
 
     override var acceptsFirstResponder: Bool { false }
+
+    var allowsWindowDrag = false
+    override var mouseDownCanMoveWindow: Bool { allowsWindowDrag }
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
@@ -144,14 +167,11 @@ class PreviewWindow: NSPanel {
         let hosting = PreviewHostingView(rootView: makeContent(item: item, initialImage: initialImage))
         hosting.sizingOptions = []
         let contentRect = self.contentRect(forFrameRect: self.frame)
-        let container = NSView(frame: NSRect(origin: .zero, size: contentRect.size))
+        let container = SquircleMaskView(frame: NSRect(origin: .zero, size: contentRect.size))
         hosting.frame = container.bounds
 
-        hosting.wantsLayer = true
-        hosting.layer?.masksToBounds = true
-        hosting.layer?.cornerRadius = 14
-        hosting.layer?.cornerCurve = .continuous
         hosting.autoresizingMask = [.width, .height]
+        hosting.allowsWindowDrag = presentation == .large
         hosting.usesPointingHand = presentation == .mini
         hosting.onHoverChange = { [weak self] inside in
             self?.hoverState.isHovering = inside
@@ -163,6 +183,29 @@ class PreviewWindow: NSPanel {
         self.hostingView = hosting
     }
 
+    static func squirclePath(_ rect: CGRect, radius a: CGFloat, exponent n: CGFloat, steps: Int = 160) -> CGPath {
+        let path = CGMutablePath()
+        let e = 2 / n
+        func cosE(_ t: CGFloat) -> CGFloat { pow(abs(cos(t)), e) }
+        func sinE(_ t: CGFloat) -> CGFloat { pow(abs(sin(t)), e) }
+        func arc(cx: CGFloat, cy: CGFloat, sx: CGFloat, sy: CGFloat, from: CGFloat, to: CGFloat) {
+            for i in 0...steps {
+                let t = from + (to - from) * CGFloat(i) / CGFloat(steps)
+                path.addLine(to: CGPoint(x: cx + sx * a * cosE(t), y: cy + sy * a * sinE(t)))
+            }
+        }
+        path.move(to: CGPoint(x: rect.minX + a, y: rect.maxY))
+        path.addLine(to: CGPoint(x: rect.maxX - a, y: rect.maxY))
+        arc(cx: rect.maxX - a, cy: rect.maxY - a, sx: 1, sy: 1, from: .pi / 2, to: 0)
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.minY + a))
+        arc(cx: rect.maxX - a, cy: rect.minY + a, sx: 1, sy: -1, from: 0, to: .pi / 2)
+        path.addLine(to: CGPoint(x: rect.minX + a, y: rect.minY))
+        arc(cx: rect.minX + a, cy: rect.minY + a, sx: -1, sy: -1, from: .pi / 2, to: 0)
+        path.addLine(to: CGPoint(x: rect.minX, y: rect.maxY - a))
+        arc(cx: rect.minX + a, cy: rect.maxY - a, sx: -1, sy: 1, from: 0, to: .pi / 2)
+        path.closeSubpath()
+        return path
+    }
     private func makeContent(item: ClipboardItem,
                              initialImage: NSImage?,
                              expandStartHeight: CGFloat? = nil,

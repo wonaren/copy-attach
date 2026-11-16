@@ -401,7 +401,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.isReleasedWhenClosed = false
         window.hidesOnDeactivate = false
         window.isOpaque = false
-        window.backgroundColor = .clear
+        window.backgroundColor = NSColor(white: 0, alpha: 0.001)
         window.delegate = self
 
         let content = makeSettingsContent(initialTab: initialTab)

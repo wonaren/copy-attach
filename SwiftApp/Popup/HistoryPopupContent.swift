@@ -353,7 +353,6 @@ struct HistoryPopupContent: View {
         ZStack {
             theme.popupBackground
                 .opacity(effectiveBackgroundOpacity)
-                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
 
             if backend.items.isEmpty {
                 emptyStateView

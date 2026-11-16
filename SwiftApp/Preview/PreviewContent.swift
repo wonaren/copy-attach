@@ -101,7 +101,6 @@ struct PreviewContent: View {
                 theme.popupBackground
             } else {
                 theme.popupBackgroundSolid
-                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
             }
 
             switch item {

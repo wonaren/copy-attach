@@ -32,6 +32,8 @@ class PopupHostingView: NSHostingView<AnyView> {
 
     override var acceptsFirstResponder: Bool { true }
 
+    override var mouseDownCanMoveWindow: Bool { false }
+
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
         guard point.x <= windowDragBorder || point.x >= bounds.maxX - windowDragBorder ||
