@@ -75,7 +75,6 @@ struct QuickSlotSettings: View {
             }
         }
         .animation(changeAnimation, value: draggingSlot)
-        .animation(changeAnimation, value: backend.slotByEntryId)
         .animation(changeAnimation, value: backend.permissionGranted)
         .onAppear {
             if let token = previewSessionToken {
@@ -156,6 +155,7 @@ struct QuickSlotSettings: View {
             }
         }
         .animation(changeAnimation, value: draggingSlot)
+        .animation(changeAnimation, value: backend.slotByEntryId)
         .overlay {
             GeometryReader { geo in
                 let count = CGFloat(slots.count)
@@ -174,9 +174,8 @@ struct QuickSlotSettings: View {
                         .padding(.horizontal, 6)
                         .frame(height: 18)
                         .background(Capsule().fill(Color.accentColor))
-                        .shadow(color: .black.opacity(0.16), radius: 4, y: 2)
-                        .position(x: fromX + (toX - fromX) * swapProgress,
-                                  y: geo.size.height / 2 + lane)
+                        .position(x: fromX, y: geo.size.height / 2 + lane)
+                        .offset(x: (toX - fromX) * swapProgress)
                         .opacity(swapVisible ? 1 : 0)
                 }
             }
@@ -254,27 +253,24 @@ struct QuickSlotSettings: View {
         }
         swapChips = chips
         swapProgress = 0
-        swapVisible = false
-        let travel: TimeInterval = reduceMotion ? 0.14 : 0.26
+        swapVisible = true
+        let travel: TimeInterval = reduceMotion ? 0.14 : 0.3
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 16_000_000)
             guard swapGeneration == generation else { return }
-            withAnimation(.easeOut(duration: 0.1)) {
-                swapVisible = true
-            }
             if reduceMotion {
                 swapProgress = 1
             } else {
-                withAnimation(.timingCurve(0.77, 0, 0.175, 1, duration: travel)) {
+                withAnimation(.timingCurve(0.45, 0, 0.2, 1, duration: travel)) {
                     swapProgress = 1
                 }
             }
-            try? await Task.sleep(nanoseconds: UInt64((travel + 0.04) * 1_000_000_000))
+            try? await Task.sleep(nanoseconds: UInt64((travel + 0.06) * 1_000_000_000))
             guard swapGeneration == generation else { return }
-            withAnimation(.easeOut(duration: 0.14)) {
+            withAnimation(.easeOut(duration: 0.12)) {
                 swapVisible = false
             }
-            try? await Task.sleep(nanoseconds: 180_000_000)
+            try? await Task.sleep(nanoseconds: 160_000_000)
             guard swapGeneration == generation else { return }
             swapChips = []
             swapProgress = 0
