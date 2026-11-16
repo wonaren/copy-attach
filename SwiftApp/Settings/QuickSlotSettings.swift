@@ -15,6 +15,13 @@ private func makeQuickSlotProvider(slot: Int) -> NSItemProvider {
     return provider
 }
 
+private struct SlotSwapChip: Identifiable {
+    let id = UUID()
+    let label: String
+    let from: Int
+    let to: Int
+}
+
 struct QuickSlotSettings: View {
     let backend: ClipboardBackend
 
@@ -28,6 +35,10 @@ struct QuickSlotSettings: View {
     @State private var previewSlot: Int?
     @State private var previewSessionToken: UUID?
     @State private var dragReleaseTask: Task<Void, Never>?
+    @State private var swapChips: [SlotSwapChip] = []
+    @State private var swapProgress: CGFloat = 0
+    @State private var swapVisible = true
+    @State private var swapGeneration = 0
 
     private let slots = 1...9
 
@@ -145,6 +156,32 @@ struct QuickSlotSettings: View {
             }
         }
         .animation(changeAnimation, value: draggingSlot)
+        .overlay {
+            GeometryReader { geo in
+                let count = CGFloat(slots.count)
+                let spacing: CGFloat = 6
+                let tileWidth = max(0, (geo.size.width - spacing * (count - 1)) / count)
+                let pitch = tileWidth + spacing
+                ForEach(swapChips.indices, id: \.self) { index in
+                    let chip = swapChips[index]
+                    let fromX = tileWidth / 2 + CGFloat(chip.from - 1) * pitch
+                    let toX = tileWidth / 2 + CGFloat(chip.to - 1) * pitch
+                    let lane: CGFloat = swapChips.count > 1 ? (index == 0 ? -9 : 9) : 0
+                    Text(chip.label)
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                        .padding(.horizontal, 6)
+                        .frame(height: 18)
+                        .background(Capsule().fill(Color.accentColor))
+                        .shadow(color: .black.opacity(0.16), radius: 4, y: 2)
+                        .position(x: fromX + (toX - fromX) * swapProgress,
+                                  y: geo.size.height / 2 + lane)
+                        .opacity(swapVisible ? 1 : 0)
+                }
+            }
+            .allowsHitTesting(false)
+        }
     }
 
     private func slotTile(slot: Int, item: ClipboardItem?) -> some View {
@@ -201,7 +238,56 @@ struct QuickSlotSettings: View {
         }
         guard let from = draggingSlot, from != slot else { return false }
         guard let item = slotOwners[from] else { return false }
-        return backend.moveQuickSlot(entryId: item.id, to: slot)
+        let displaced = slotOwners[slot]
+        guard backend.moveQuickSlot(entryId: item.id, to: slot) else { return false }
+        playSwapAnimation(from: from, to: slot, moving: item, displaced: displaced)
+        return true
+    }
+
+    private func playSwapAnimation(from: Int, to: Int,
+                                   moving: ClipboardItem, displaced: ClipboardItem?) {
+        swapGeneration &+= 1
+        let generation = swapGeneration
+        var chips = [SlotSwapChip(label: chipLabel(for: moving), from: from, to: to)]
+        if let displaced {
+            chips.append(SlotSwapChip(label: chipLabel(for: displaced), from: to, to: from))
+        }
+        swapChips = chips
+        swapProgress = 0
+        swapVisible = false
+        let travel: TimeInterval = reduceMotion ? 0.14 : 0.26
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 16_000_000)
+            guard swapGeneration == generation else { return }
+            withAnimation(.easeOut(duration: 0.1)) {
+                swapVisible = true
+            }
+            if reduceMotion {
+                swapProgress = 1
+            } else {
+                withAnimation(.timingCurve(0.77, 0, 0.175, 1, duration: travel)) {
+                    swapProgress = 1
+                }
+            }
+            try? await Task.sleep(nanoseconds: UInt64((travel + 0.04) * 1_000_000_000))
+            guard swapGeneration == generation else { return }
+            withAnimation(.easeOut(duration: 0.14)) {
+                swapVisible = false
+            }
+            try? await Task.sleep(nanoseconds: 180_000_000)
+            guard swapGeneration == generation else { return }
+            swapChips = []
+            swapProgress = 0
+            swapVisible = true
+        }
+    }
+
+    private func chipLabel(for item: ClipboardItem) -> String {
+        if item.isImage { return "图片" }
+        let text = item.slotDisplayName
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return String((text.isEmpty ? "文本" : text).prefix(5))
     }
 
     private var trashZone: some View {
