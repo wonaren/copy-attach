@@ -357,6 +357,23 @@ class ClipboardBackend {
         return true
     }
 
+    @discardableResult
+    func moveQuickSlot(entryId: Int, to slot: Int) -> Bool {
+        let previous = slotByEntryId[entryId]
+        guard previous != slot else { return false }
+        guard clipboard_toggle_quick_slot(UInt64(entryId), Int32(slot)) != 0 else {
+            errorLog("moveQuickSlot: backend rejected slot \(slot) for entry \(entryId) — see Rust log")
+            return false
+        }
+        if let displaced = slotByEntryId.first(where: { $0.value == slot && $0.key != entryId })?.key {
+            slotByEntryId[displaced] = previous
+        }
+        slotByEntryId[entryId] = slot
+        syncQuickSlotTap()
+        reloadItems()
+        return true
+    }
+
     func removeQuickSlot(entryId: Int, slot: Int) -> Bool {
         guard let id = UInt64(exactly: entryId), let number = Int32(exactly: slot),
               clipboard_remove_quick_slot(id, number) != 0 else {

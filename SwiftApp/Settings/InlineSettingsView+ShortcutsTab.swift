@@ -6,9 +6,6 @@ extension InlineSettingsView {
         ScrollView {
             VStack(spacing: 16) {
                 shortcutConfigCard
-                settingsCard {
-                    QuickSlotSettings(backend: backend)
-                }
                 shortcutsGuideCard
             }
             .padding(20)
@@ -78,6 +75,9 @@ extension InlineSettingsView {
                 .buttonStyle(.plain)
                 .help(hotkeyManager.isRecording ? "" : "点击可更改快捷键组合")
             }
+            sectionDivider()
+                .padding(.vertical, 12)
+            QuickSlotSettings(backend: backend)
         }
     }
 

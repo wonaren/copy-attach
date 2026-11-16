@@ -50,7 +50,7 @@ class PreviewWindow: NSPanel {
     private static let miniMaxWidth: CGFloat = 300
     private static let miniMaxHeight: CGFloat = 280
     private static let miniPadding: CGFloat = 6
-    private static let miniMaxPixel: Int = 800
+    static let miniMaxPixel: Int = 800
     private static let miniGap: CGFloat = 10
     private static let miniMinSideSpace: CGFloat = 120
 
@@ -376,7 +376,7 @@ class PreviewWindow: NSPanel {
         return NSRect(x: x, y: y, width: width, height: height)
     }
 
-    private static func miniSize(for item: ClipboardItem) -> NSSize {
+    static func miniSize(for item: ClipboardItem) -> NSSize {
         switch item {
         case .image(_, _, let w, let h, _, _, _, _, _):
             guard w > 0, h > 0 else { return NSSize(width: 220, height: 160) }

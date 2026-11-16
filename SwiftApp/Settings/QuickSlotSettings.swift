@@ -1,4 +1,18 @@
 import SwiftUI
+import UniformTypeIdentifiers
+
+private func makeQuickSlotProvider(slot: Int) -> NSItemProvider {
+    let provider = NSItemProvider()
+    let payload = Data(String(slot).utf8)
+    provider.registerDataRepresentation(
+        forTypeIdentifier: UTType.data.identifier,
+        visibility: .ownProcess
+    ) { completion in
+        completion(payload, nil)
+        return nil
+    }
+    return provider
+}
 
 struct QuickSlotSettings: View {
     let backend: ClipboardBackend
@@ -7,80 +21,58 @@ struct QuickSlotSettings: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var confirmClear = false
     @State private var showFailure = false
-
-    private struct SlotBinding {
-        let slot: Int
-        let item: ClipboardItem
-    }
+    @State private var draggingSlot: Int?
+    @State private var hoverSlot: Int?
+    @State private var trashTargeted = false
+    @State private var previewSlot: Int?
 
     private let slots = 1...9
 
-    private var bindings: [SlotBinding] {
+    private var slotOwners: [Int: ClipboardItem] {
         let slotsByEntryID = backend.slotByEntryId
-        guard !slotsByEntryID.isEmpty else { return [] }
-        return backend.items.compactMap { item -> SlotBinding? in
-            guard let slot = slotsByEntryID[item.id] else { return nil }
-            return SlotBinding(slot: slot, item: item)
-        }.sorted { $0.slot < $1.slot }
+        guard !slotsByEntryID.isEmpty else { return [:] }
+        var result: [Int: ClipboardItem] = [:]
+        for item in backend.items {
+            guard let slot = slotsByEntryID[item.id] else { continue }
+            result[slot] = item
+        }
+        return result
     }
 
+    private var boundCount: Int { backend.slotByEntryId.count }
+
     private var changeAnimation: Animation? {
-        reduceMotion ? nil : .smooth(duration: 0.24)
+        reduceMotion ? nil : .smooth(duration: 0.22)
     }
 
     var body: some View {
-        let bindings = bindings
-        VStack(alignment: .leading, spacing: 12) {
-            header(count: bindings.count)
-            keyStrip(occupied: Set(bindings.map(\.slot)))
-
-            if bindings.isEmpty {
-                Text("还没有绑定内容")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(theme.secondaryText)
-                    .frame(maxWidth: .infinity, minHeight: 28)
-                    .transition(.opacity)
-            } else {
-                VStack(spacing: 0) {
-                    ForEach(bindings, id: \.slot) { binding in
-                        bindingRow(binding)
-                            .transition(.opacity)
-                    }
-                }
-                .background(theme.secondaryBackground, in: RoundedRectangle(cornerRadius: 8))
-                .transition(.opacity)
+        let owners = slotOwners
+        VStack(alignment: .leading, spacing: 10) {
+            header
+            grid(owners: owners)
+            if draggingSlot != nil {
+                trashZone
+                    .transition(.opacity.combined(with: .scale(scale: 0.96)))
             }
-
-            HStack(spacing: 12) {
-                Text("在剪贴板列表中选中条目，按右 ⌘ + 数字绑定。")
-                    .font(.system(size: 11))
-                    .foregroundStyle(theme.secondaryText)
-                Spacer(minLength: 0)
-                if !bindings.isEmpty {
-                    Button("解除全部") { confirmClear = true }
-                        .buttonStyle(.borderless)
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(theme.secondaryText)
-                        .fixedSize()
-                        .transition(.opacity)
-                        .alert("解除全部快捷槽位？", isPresented: $confirmClear) {
-                            Button("解除全部", role: .destructive) {
-                                showFailure = !backend.clearQuickSlots()
-                            }
-                            Button("取消", role: .cancel) {}
-                        } message: {
-                            Text("剪贴板历史会保留。之后撤销删除时，恢复的条目需要重新绑定槽位。")
-                        }
-                }
-            }
-
-            if !bindings.isEmpty && !backend.permissionGranted {
+            footer
+            if boundCount > 0 && !backend.permissionGranted {
                 permissionNotice
                     .transition(.opacity)
             }
         }
+        .animation(changeAnimation, value: draggingSlot)
         .animation(changeAnimation, value: backend.slotByEntryId)
         .animation(changeAnimation, value: backend.permissionGranted)
+        .onAppear { ImageDecode.beginPreviewSession() }
+        .onDisappear { ImageDecode.endPreviewSession() }
+        .alert("解除全部快捷槽位？", isPresented: $confirmClear) {
+            Button("解除全部", role: .destructive) {
+                showFailure = !backend.clearQuickSlots()
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("剪贴板历史会保留。之后撤销删除时，恢复的条目需要重新绑定槽位。")
+        }
         .alert("无法解除快捷槽位", isPresented: $showFailure) {
             Button("好", role: .cancel) {}
         } message: {
@@ -88,26 +80,25 @@ struct QuickSlotSettings: View {
         }
     }
 
-    private func header(count: Int) -> some View {
-        HStack(spacing: 10) {
-            Image(systemName: "command")
-                .font(.system(size: 15, weight: .medium))
-                .foregroundStyle(Color.accentColor)
-                .frame(width: 32, height: 32)
-                .background(Color.accentColor.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
-                .accessibilityHidden(true)
+    private func previewBinding(_ slot: Int) -> Binding<Bool> {
+        Binding(
+            get: { previewSlot == slot },
+            set: { if !$0 { previewSlot = nil } }
+        )
+    }
 
-            VStack(alignment: .leading, spacing: 3) {
+    private var header: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
                 Text("快捷槽位粘贴")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(theme.primaryText)
-                    .accessibilityAddTraits(.isHeader)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(theme.primaryText)
                 Text("关闭剪贴板列表后，按对应组合键粘贴。")
                     .font(.system(size: 11))
-                    .foregroundStyle(theme.secondaryText)
+                    .foregroundColor(theme.secondaryText)
             }
             Spacer(minLength: 0)
-            Text("已绑定 \(count)/\(slots.count)")
+            Text("已绑定 \(boundCount)/\(slots.count)")
                 .font(.system(size: 11, weight: .medium))
                 .monospacedDigit()
                 .foregroundStyle(theme.secondaryText)
@@ -116,78 +107,119 @@ struct QuickSlotSettings: View {
         }
     }
 
-    private func keyStrip(occupied: Set<Int>) -> some View {
+    private func grid(owners: [Int: ClipboardItem]) -> some View {
         HStack(spacing: 6) {
-            Text("右 ⌘")
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(theme.primaryText)
-                .frame(width: 46, height: 29)
-                .background(theme.secondaryBackground, in: RoundedRectangle(cornerRadius: 6))
-
-            Image(systemName: "plus")
-                .font(.system(size: 8, weight: .semibold))
-                .foregroundStyle(theme.secondaryText)
-
             ForEach(slots, id: \.self) { slot in
-                let isOccupied = occupied.contains(slot)
-                let shape = RoundedRectangle(cornerRadius: 6)
-                Text("\(slot)")
-                    .font(.system(size: 12, weight: isOccupied ? .semibold : .regular, design: .monospaced))
-                    .foregroundStyle(isOccupied ? theme.primaryText : theme.secondaryText)
-                    .frame(maxWidth: .infinity, minHeight: 29)
-                    .background(isOccupied ? Color.accentColor.opacity(0.12) : Color.clear, in: shape)
-                    .overlay {
-                        shape.strokeBorder(isOccupied ? Color.accentColor.opacity(0.36) : theme.cardBorder)
-                    }
-                    .overlay(alignment: .bottom) {
-                        Circle()
-                            .fill(Color.accentColor)
-                            .frame(width: 3, height: 3)
-                            .padding(.bottom, 3)
-                            .opacity(isOccupied ? 1 : 0)
-                    }
+                slotTile(slot: slot, item: owners[slot])
             }
         }
-        .accessibilityHidden(true)
+        .animation(changeAnimation, value: draggingSlot)
     }
 
-    private func bindingRow(_ binding: SlotBinding) -> some View {
-        let item = binding.item
-        let name = item.slotDisplayName
-        return HStack(spacing: 8) {
-            Text("\(binding.slot)")
-                .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                .frame(width: 20)
-                .accessibilityHidden(true)
-            Image(systemName: item.isImage ? "photo" : "text.alignleft")
-                .font(.system(size: 11, weight: .medium))
-                .frame(width: 14)
-                .accessibilityHidden(true)
-            Text(name)
-                .font(.system(size: 12))
-                .foregroundStyle(theme.primaryText)
-                .lineLimit(1)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentTransition(.opacity)
-                .help(name)
-                .accessibilityLabel("槽位 \(binding.slot)，\(item.isImage ? "图片" : "文本")，\(name)")
-
-            Button {
-                showFailure = !backend.removeQuickSlot(entryId: item.id, slot: binding.slot)
-            } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 9, weight: .semibold))
-                    .frame(width: 26, height: 26)
-                    .contentShape(Rectangle())
+    private func slotTile(slot: Int, item: ClipboardItem?) -> some View {
+        let occupied = item != nil
+        let isDropTarget = hoverSlot == slot
+        let isSource = draggingSlot == slot
+        return QuickSlotTile(
+            slot: slot,
+            item: item,
+            isDropTarget: isDropTarget,
+            onPreview: {
+                guard occupied else { return }
+                previewSlot = slot
             }
-            .buttonStyle(QuickSlotRemoveStyle())
-            .help("解除槽位 \(binding.slot)")
-            .accessibilityLabel("解除槽位 \(binding.slot)")
+        )
+        .opacity(isSource ? 0.45 : 1)
+        .popover(isPresented: previewBinding(slot), arrowEdge: .bottom) {
+            if let item {
+                let size = PreviewWindow.miniSize(for: item)
+                PreviewContent(item: item,
+                               maxPixelOverride: PreviewWindow.miniMaxPixel,
+                               showsZoomHint: true,
+                               embedded: true)
+                    .frame(width: size.width, height: size.height)
+            }
         }
-        .foregroundStyle(theme.secondaryText)
-        .padding(.leading, 5)
-        .padding(.trailing, 4)
-        .padding(.vertical, 3)
+        .onDrag {
+            guard occupied else { return NSItemProvider() }
+            draggingSlot = slot
+            return makeQuickSlotProvider(slot: slot)
+        }
+        .onDrop(of: [.data], isTargeted: dropTargetBinding(slot)) { _ in
+            handleDrop(to: slot)
+        }
+    }
+
+    private func dropTargetBinding(_ slot: Int) -> Binding<Bool> {
+        Binding(
+            get: { hoverSlot == slot },
+            set: { inside in
+                if inside {
+                    hoverSlot = slot
+                } else if hoverSlot == slot {
+                    hoverSlot = nil
+                }
+            }
+        )
+    }
+
+    private func handleDrop(to slot: Int) -> Bool {
+        defer {
+            hoverSlot = nil
+            draggingSlot = nil
+        }
+        guard let from = draggingSlot, from != slot else { return false }
+        guard let item = slotOwners[from] else { return false }
+        return backend.moveQuickSlot(entryId: item.id, to: slot)
+    }
+
+    private var trashZone: some View {
+        HStack(spacing: 8) {
+            Image(systemName: trashTargeted ? "trash.fill" : "trash")
+                .font(.system(size: 15))
+            Text(trashTargeted ? "松开以解除槽位" : "拖到此处解除槽位")
+                .font(.system(size: 12, weight: .medium))
+            Spacer(minLength: 0)
+        }
+        .foregroundStyle(trashTargeted ? Color.red : theme.secondaryText)
+        .padding(.horizontal, 12)
+        .frame(height: 44)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(trashTargeted ? Color.red.opacity(0.12) : theme.secondaryBackground)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .strokeBorder(
+                    trashTargeted ? Color.red : theme.cardBorder,
+                    style: StrokeStyle(lineWidth: trashTargeted ? 1.5 : 1,
+                                       dash: trashTargeted ? [] : [4, 3])
+                )
+        )
+        .onDrop(of: [.data], isTargeted: $trashTargeted) { _ in
+            defer {
+                trashTargeted = false
+                draggingSlot = nil
+            }
+            guard let from = draggingSlot, let item = slotOwners[from] else { return false }
+            return backend.removeQuickSlot(entryId: item.id, slot: from)
+        }
+    }
+
+    private var footer: some View {
+        HStack(spacing: 12) {
+            Text("拖拽交换槽位，拖到垃圾桶解除；点击槽位查看内容。")
+                .font(.system(size: 11))
+                .foregroundStyle(theme.secondaryText)
+            Spacer(minLength: 0)
+            if boundCount > 0 {
+                Button("解除全部") { confirmClear = true }
+                    .buttonStyle(.borderless)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(theme.secondaryText)
+                    .fixedSize()
+            }
+        }
     }
 
     private var permissionNotice: some View {
@@ -208,18 +240,57 @@ struct QuickSlotSettings: View {
     }
 }
 
-private struct QuickSlotRemoveStyle: ButtonStyle {
+private struct QuickSlotTile: View {
+    let slot: Int
+    let item: ClipboardItem?
+    let isDropTarget: Bool
+    let onPreview: () -> Void
+
     @Environment(\.appTheme) private var theme
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isHovered = false
 
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .foregroundStyle(isHovered ? theme.primaryText : theme.secondaryText)
-            .background(isHovered ? theme.popupRowHover : Color.clear, in: RoundedRectangle(cornerRadius: 5))
-            .scaleEffect(configuration.isPressed && !reduceMotion ? 0.94 : 1)
-            .animation(.easeOut(duration: 0.14), value: isHovered)
-            .animation(AppleMotion.tactilePress, value: configuration.isPressed)
+    private var occupied: Bool { item != nil }
+
+    var body: some View {
+        Text("\(slot)")
+            .font(.system(size: 15, weight: .semibold, design: .rounded))
+            .monospacedDigit()
+            .foregroundStyle(labelColor)
+            .frame(maxWidth: .infinity)
+            .frame(height: 40)
+            .background(background)
+            .overlay(border)
+            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .onTapGesture { onPreview() }
             .onHover { isHovered = $0 }
+            .help(helpText)
+    }
+
+    private var labelColor: Color {
+        if isDropTarget { return Color.accentColor }
+        return occupied ? Color.accentColor : theme.tertiaryText
+    }
+
+    private var background: some View {
+        let fill: Color = isDropTarget
+            ? Color.accentColor.opacity(0.20)
+            : (occupied
+               ? (isHovered ? Color.accentColor.opacity(0.12) : Color.accentColor.opacity(0.07))
+               : Color.clear)
+        return RoundedRectangle(cornerRadius: 8, style: .continuous).fill(fill)
+    }
+
+    private var border: some View {
+        RoundedRectangle(cornerRadius: 8, style: .continuous)
+            .strokeBorder(
+                isDropTarget ? Color.accentColor : theme.cardBorder,
+                style: StrokeStyle(lineWidth: isDropTarget ? 1.5 : 1,
+                                   dash: occupied ? [] : [4, 3])
+            )
+    }
+
+    private var helpText: String {
+        guard let item else { return "槽位 \(slot) 未绑定" }
+        return "右 ⌘\(slot)：\(item.slotDisplayName)"
     }
 }

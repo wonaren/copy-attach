@@ -22,6 +22,7 @@ struct PreviewContent: View {
     private let dismissState: PreviewDismissState?
     private let expandStartHeight: CGFloat?
     private let expandEndHeight: CGFloat?
+    private let embedded: Bool
 
     @State private var image: NSImage?
     @State private var hasFailed = false
@@ -40,7 +41,8 @@ struct PreviewContent: View {
          hoverState: PreviewHoverState? = nil,
          dismissState: PreviewDismissState? = nil,
          expandStartHeight: CGFloat? = nil,
-         expandEndHeight: CGFloat? = nil) {
+         expandEndHeight: CGFloat? = nil,
+         embedded: Bool = false) {
         self.item = item
         self.maxPixelOverride = maxPixelOverride
         self.onTapWhenUnzoomed = onTapWhenUnzoomed
@@ -52,6 +54,7 @@ struct PreviewContent: View {
         self.dismissState = dismissState
         self.expandStartHeight = expandStartHeight
         self.expandEndHeight = expandEndHeight
+        self.embedded = embedded
         let seeded: NSImage?
         if let initialImage {
             seeded = initialImage
@@ -94,8 +97,12 @@ struct PreviewContent: View {
 
     var body: some View {
         ZStack {
-            theme.popupBackgroundSolid
-                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            if embedded {
+                theme.popupBackground
+            } else {
+                theme.popupBackgroundSolid
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            }
 
             switch item {
             case .text:
@@ -170,10 +177,10 @@ struct PreviewContent: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .padding(9)
             .background(
-                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                RoundedRectangle(cornerRadius: embedded ? 0 : 11, style: .continuous)
                     .fill(theme.previewBackground)
             )
-            .padding(3)
+            .padding(embedded ? 0 : 3)
             .contentShape(Rectangle())
             .onTapGesture { onTapWhenUnzoomed?() }
     }
@@ -237,8 +244,8 @@ struct PreviewContent: View {
                 .interpolation(.high)
                 .aspectRatio(contentMode: .fit)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
-                .padding(3)
+                .clipShape(RoundedRectangle(cornerRadius: embedded ? 0 : 11, style: .continuous))
+                .padding(embedded ? 0 : 3)
                 .contentShape(Rectangle())
                 .onTapGesture { onTapWhenUnzoomed?() }
         } else if hasFailed {
