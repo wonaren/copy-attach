@@ -73,7 +73,7 @@ struct OnboardingWelcomeView: View {
         )
         .background(
             RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(theme.popupBackground)
+                .fill(theme.popupBackgroundSolid)
         )
         .overlay(
             RoundedRectangle(cornerRadius: 16, style: .continuous)

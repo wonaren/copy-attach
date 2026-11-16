@@ -144,7 +144,7 @@ private struct UpdateCompleteView: View {
         .frame(width: UpdateCompleteWindow.width)
         .background(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(theme.popupBackground)
+                .fill(theme.popupBackgroundSolid)
                 .overlay(
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
                         .strokeBorder(theme.popupRowBorder, lineWidth: 1)

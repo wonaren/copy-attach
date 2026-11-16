@@ -47,7 +47,7 @@ struct QuickSlotDialView: View {
         .frame(width: 100, height: 100)
         .background(
             Circle()
-                .fill(theme.popupBackground.opacity(0.94))
+                .fill(theme.popupBackgroundSolid.opacity(0.94))
                 .overlay(Circle().strokeBorder(theme.popupRowBorder, lineWidth: 0.5))
                 .shadow(color: .black.opacity(0.18), radius: 10, y: 4)
         )

@@ -94,7 +94,7 @@ struct PreviewContent: View {
 
     var body: some View {
         ZStack {
-            theme.popupBackground
+            theme.popupBackgroundSolid
                 .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
 
             switch item {

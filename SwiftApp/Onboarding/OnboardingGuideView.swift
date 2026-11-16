@@ -24,7 +24,7 @@ struct OnboardingGuideView: View {
         )
         .background(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(theme.popupBackground)
+                .fill(theme.popupBackgroundSolid)
         )
         .overlay(
             RoundedRectangle(cornerRadius: 14, style: .continuous)

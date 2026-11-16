@@ -19,6 +19,7 @@ struct AppTheme {
     let updateActionText: Color
 
     let popupBackground: Color
+    let popupBackgroundSolid: Color
     let popupPrimaryText: Color
     let popupSecondaryText: Color
     let popupMutedText: Color
@@ -58,6 +59,7 @@ struct AppTheme {
         updateActionText: Color.white,
 
         popupBackground: Color.black,
+        popupBackgroundSolid: Color.black.opacity(0.82),
         popupPrimaryText: Color.white.opacity(0.94),
         popupSecondaryText: Color.white.opacity(0.76),
         popupMutedText: Color.white.opacity(0.68),
@@ -98,6 +100,7 @@ struct AppTheme {
         updateActionText: Color.white,
 
         popupBackground: Color(nsColor: NSColor(calibratedRed: 0.92, green: 0.92, blue: 0.94, alpha: 1.0)),
+        popupBackgroundSolid: Color(nsColor: NSColor(calibratedRed: 0.92, green: 0.92, blue: 0.94, alpha: 0.88)),
         popupPrimaryText: Color(white: 0.10),
         popupSecondaryText: Color(white: 0.33),
         popupMutedText: Color(white: 0.36),
@@ -138,6 +141,7 @@ struct AppTheme {
         updateActionText: Color.black,
 
         popupBackground: Color(nsColor: NSColor(calibratedRed: 0.08, green: 0.08, blue: 0.09, alpha: 1.0)),
+        popupBackgroundSolid: Color(nsColor: NSColor(calibratedRed: 0.08, green: 0.08, blue: 0.09, alpha: 0.98)),
         popupPrimaryText: Color.white,
         popupSecondaryText: Color.white.opacity(0.92),
         popupMutedText: Color.white.opacity(0.85),
@@ -178,6 +182,7 @@ struct AppTheme {
         updateActionText: Color.white,
 
         popupBackground: Color(nsColor: NSColor(calibratedRed: 0.96, green: 0.96, blue: 0.97, alpha: 1.0)),
+        popupBackgroundSolid: Color(nsColor: NSColor(calibratedRed: 0.96, green: 0.96, blue: 0.97, alpha: 1.0)),
         popupPrimaryText: Color.black,
         popupSecondaryText: Color(white: 0.16),
         popupMutedText: Color(white: 0.20),
@@ -224,6 +229,9 @@ struct AppTheme {
             updateActionBackground: self.updateActionBackground,
             updateActionText: self.updateActionText,
             popupBackground: isDark
+                ? Color(nsColor: NSColor(calibratedRed: 0.10, green: 0.10, blue: 0.11, alpha: 1.0))
+                : Color(nsColor: NSColor(calibratedRed: 0.94, green: 0.94, blue: 0.96, alpha: 1.0)),
+            popupBackgroundSolid: isDark
                 ? Color(nsColor: NSColor(calibratedRed: 0.10, green: 0.10, blue: 0.11, alpha: 1.0))
                 : Color(nsColor: NSColor(calibratedRed: 0.94, green: 0.94, blue: 0.96, alpha: 1.0)),
             popupPrimaryText: self.popupPrimaryText,
