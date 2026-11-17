@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 
 enum UpdateChecker {
@@ -219,24 +220,90 @@ enum UpdateChecker {
         return URLSession(configuration: config)
     }()
 
-    private struct ReleasePayload: Decodable {
-        let body: String?
-    }
+    private static let releasesFeedURL = URL(string: "https://github.com/wonaren/copy-attach/releases.atom")!
 
     static func releaseNotes(version: String) async -> String? {
-        guard let url = URL(string: "https://api.github.com/repos/wonaren/copy-attach/releases/tags/v\(version)") else {
-            return nil
-        }
-        var request = URLRequest(url: url)
-        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        var request = URLRequest(url: releasesFeedURL)
+        request.cachePolicy = .reloadIgnoringLocalCacheData
         guard let (data, response) = try? await notesSession.data(for: request),
-              let http = response as? HTTPURLResponse, http.statusCode == 200,
-              let payload = try? JSONDecoder().decode(ReleasePayload.self, from: data),
-              let body = payload.body, !body.isEmpty else {
-            debugLog("[update] release notes for v\(version) unavailable")
+              let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            debugLog("[update] release feed unavailable for v\(version)")
             return nil
         }
-        return body
+        let parser = ReleaseFeedParser(wantedVersion: version)
+        let xml = XMLParser(data: data)
+        xml.delegate = parser
+        xml.parse()
+        guard let html = parser.notes, let text = await plainText(fromHTML: html) else {
+            debugLog("[update] release notes for v\(version) not found in feed")
+            return nil
+        }
+        return text
+    }
+
+    @MainActor
+    private static func plainText(fromHTML html: String) -> String? {
+        guard let data = html.data(using: .utf8),
+              let attributed = try? NSAttributedString(
+                data: data,
+                options: [
+                    .documentType: NSAttributedString.DocumentType.html,
+                    .characterEncoding: String.Encoding.utf8.rawValue,
+                ],
+                documentAttributes: nil
+              ) else { return nil }
+        let text = attributed.string.trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? nil : text
+    }
+
+    private final class ReleaseFeedParser: NSObject, XMLParserDelegate {
+        private let tagSuffix: String
+        private var inEntry = false
+        private var entryMatches = false
+        private var inContent = false
+        private var content = ""
+        private(set) var notes: String?
+
+        init(wantedVersion: String) {
+            tagSuffix = "/releases/tag/v\(wantedVersion)"
+        }
+
+        func parser(_ parser: XMLParser, didStartElement elementName: String,
+                    namespaceURI: String?, qualifiedName qName: String?,
+                    attributes: [String: String]) {
+            switch elementName {
+            case "entry":
+                inEntry = true
+                entryMatches = false
+                content = ""
+            case "link" where inEntry:
+                if attributes["rel"] == "alternate", attributes["href"]?.hasSuffix(tagSuffix) == true {
+                    entryMatches = true
+                }
+            case "content" where inEntry:
+                inContent = true
+            default:
+                break
+            }
+        }
+
+        func parser(_ parser: XMLParser, foundCharacters string: String) {
+            if inContent { content += string }
+        }
+
+        func parser(_ parser: XMLParser, didEndElement elementName: String,
+                    namespaceURI: String?, qualifiedName qName: String?) {
+            switch elementName {
+            case "entry":
+                if entryMatches, notes == nil { notes = content }
+                inEntry = false
+                entryMatches = false
+            case "content":
+                inContent = false
+            default:
+                break
+            }
+        }
     }
 
     private static func milliseconds(since start: Date) -> Int {
