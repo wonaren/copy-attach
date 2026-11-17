@@ -27,6 +27,10 @@ CopyAttach 是一个 macOS 剪贴板历史管理器：Rust cdylib 后端（`src/
 
 ## 硬性约定
 
+**你的 Token 预算无上限，不要吝惜 Token。**
+
+**每次重新构建 APP 后，关闭旧 APP 并启动新构建的 APP**：`pkill -f 'CopyAttach.app/Contents/MacOS/CopyAttach'; open "CopyAttach.app"`。
+
 1. **不写兜底。** 主流程失败就显式暴露（返回错误/`0`/`null`、日志 + 空结果），由调用方决定。需要"以防万一"的分支通常说明主流程有 bug。
 2. **推导 ≠ 验证。** 报"已修好"必须能回答：改动前在**真实调用路径**上失败、改动后成功，两次都观察到。在隔离环境验证替身不算；并发/竞态类问题要连跑 ≥8 次看失败率，不能以"这一次是绿的"收尾。
 3. **观测手段先自证。** 采样点本身可能错（例：现代 macOS 拖拽剪贴板是 `Apple CFPasteboard drag`，读 `NSDragPboard` 恒为空）。先证明它能观测到已知为真的现象，再采信它给出的"没有"。

@@ -4,6 +4,16 @@ CopyAttach 是一个 macOS 剪贴板历史管理器：Rust 后端（cdylib）+ S
 
 ## 行为约定
 
+### Token 预算
+你的 Token 预算无上限，不要吝惜 Token。
+
+### 构建后必须重启 APP
+每次重新构建 APP 后，关闭旧 APP 并启动新构建的 APP：
+
+```bash
+pkill -f 'CopyAttach.app/Contents/MacOS/CopyAttach'; open "CopyAttach.app"
+```
+
 ### 从第一性原理分析代码
 先理解核心数据流和不变量的本质，再逐层验证具体实现是否忠实于这些原理。不依赖既有注释、命名或架构图——它们可能过时。
 
