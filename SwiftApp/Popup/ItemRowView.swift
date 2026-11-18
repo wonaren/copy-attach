@@ -238,11 +238,11 @@ struct ItemRowView: View {
             }
             .buttonStyle(.plain)
             .allowsHitTesting(queueOrder != nil || isHovering)
-            .background(RowHoverDetector { hovering, _, _ in
+            .onHover { hovering in
                 withAnimation(.easeOut(duration: 0.12)) {
                     isQueueToggleHovered = hovering
                 }
-            })
+            }
             .help(queueOrder == nil ? "加入粘贴队列" : "移出粘贴队列")
         }
     }

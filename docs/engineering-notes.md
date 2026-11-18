@@ -85,6 +85,44 @@ Phase 1 同步 hash + 缩略图（fit 进显示框 920×200px = 460×100pt @2×�
 
 用户实测（0.99.17-dev 仪器化会话）：基线 39MB → 预览 2880×1800 大图 71MB（峰值 113MB 瞬时解码）→ Esc 关预览 46MB（立即回落 25MB）→ 关弹窗 44MB → 稳定 44MB。诊断日志覆盖每条路径：`preview_decode done` / `preview_buffer_release` / `decode_scratch drop … mark_reusable`。长会话 125MB 进程 = 44MB 稳态 + 大图解码峰值残留与框架侧会话增长 + 多会话滚动 churn——无预览链残留（撤销栈自 0.109.2 起为软删除侧表，删除不读载荷）。且该数中大部分页已被系统压缩出 RAM，footprint 仍把压缩页计为脏页，故不等于占用。
 
+### 弹窗内存二次调查（2026-11-18，0.113.2-dev）
+
+**结论先行**：53 → 60–65MB 的抬升不是泄漏，是「本进程最坏一次会话的峰值」被 malloc 小 zone 保留下来。行内容贡献开窗约 7MB、每次切换约 0.4MB，但**单点删除任何一个节点都无效**（实测 6 个变体全在噪声内），只有把整行内容整体掏空才拿到收益——所以这不是可以顺手优化的热点。
+
+**观测污染（先记住这条）**：用 AX 驱动的点击/读树来测这个 App 的内存，会把增长放大约 **2.8 倍**。`sample` 抓到的栈：
+
+```
+NSAccessibilityEntryPointValueForAttribute → AccessibilityNode.accessibilityLabel()
+  → AXSwiftUIDescriptionForSymbolName → AXNSLocalizedStringForLocale
+    → CFBundleCopyLocalizedStringForLocalization → _loadLocTable
+      → __CFBundleCreateStringsFromPlistData → _CFPropertyListCreateFiltered
+```
+
+每次 AX 查询都会把 SF Symbol 的本地化字符串表解析成上万个 `PropertyList.Element`。实测同一条路径：AX 点击 10 次切换 → plist 元素 +29,310、footprint 69MB；键盘驱动同样 10 次 → +10,441、63MB。**内存测量必须用键盘/真实输入，禁用 AX 自动化。**
+
+**成本模型**（键盘驱动，`COPYATTACH_DATA_DIR` 隔离库对照，50/301/600 行）：
+
+| 阶段 | footprint | 备注 |
+|---|---|---|
+| 刚启动 | 25–26MB | 与行数无关（50 行与 600 行同价） |
+| 首次开窗 | 48–53MB | 一次性 +23~27MB：框架底座 + 行内容（约 7MB） |
+| 每次过滤切换 | +1MB | 饱和值约 +10~12MB，与行数无关（只有可见行会被物化） |
+| 关窗 | −2~3MB | live 36→16MB（对象确实释放），页不还 |
+
+**二分结果**（每轮全新进程，`↑` 选中后 `→`×10 切换）：
+
+| 变体 | 开窗 fp | 10 次后 fp | plist 增量 |
+|---|---|---|---|
+| 基线（完整行） | 53 | 63 | +10,441 |
+| 去掉 `scrollTarget` 滚动重置 | 54 | 65 | +10,441 |
+| 单 Section、无日期分组/吸顶头 | 54 | 64 | +10,931 |
+| 去掉外层 `RowHoverDetector` | 52 | 63 | +10,483 |
+| 去掉行内 4 个 `.animation` | 53 | 63 | +10,441 |
+| 队列按钮内层 `RowHoverDetector` → `.onHover` | 53 | 65 | **+13,719→13,719（不累积）** |
+| **行体换成纯 `Text`** | **46** | **52** | **+347** |
+
+**保留的改动**：队列按钮的悬停检测从每行一个 `NSViewRepresentable` 改成 `.onHover`（少一个 NSView/行，切换时少约 11,000 个对象），行为等价、不改变 footprint。**行内容那 7MB 只能靠砍视觉拿到**（图标/缩略图/高亮文本/徽标/来源胶囊/选中背景/队列按钮），属于产品决策。
+
 ## 捕获正确性
 
 - **db_id 不变量（幽灵条目根修，0.99.13）**：内存条目的 `db_id` 必须指向 DB 中该条目的行，且赋值必须按内容身份匹配、绝不按头部位置——文本捕获曾用 `hist.get_mut(0)` 无条件写头部条目：并发 select-and-paste/undo 在锁间隙把别的条目移到头部时，本次捕获条目 db_id 保持 0（列表可见但无法预览/粘贴/删除被拒），头部条目被指向他人行，后续删除会误删该条目的行（symptom：DB 主表+FTS 双查无此文本、entry_id 连续缺失）。修复：`history::assign_db_id_by_text_hash` 按 hash 匹配赋值（与图片 Phase 2 对称），3 个回归测试覆盖头部竞争/头部正常/无匹配 no-op。配套：Rust eprintln 此前被 launchd 丢弃——AppDelegate 启动 `dup2` stderr → `/tmp/copyattach_debug.log`，Rust 侧失败从此可见。
