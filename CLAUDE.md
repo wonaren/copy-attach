@@ -4,9 +4,6 @@ CopyAttach 是一个 macOS 剪贴板历史管理器：Rust 后端（cdylib）+ S
 
 ## 行为约定
 
-### Token 预算
-你的 Token 预算无上限，不要吝惜 Token。
-
 ### 构建后必须重启 APP
 每次重新构建 APP 后，关闭旧 APP 并启动新构建的 APP：
 
