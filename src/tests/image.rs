@@ -359,3 +359,90 @@ fn test_streaming_still_falls_back_for_sixteen_bit_png() {
         "16-bit PNG must stay on the full-decode fallback"
     );
 }
+
+fn to_bgra_premultiplied(rgba: &[u8]) -> Vec<u8> {
+    rgba.chunks_exact(4)
+        .flat_map(|p| {
+            let a = p[3] as u32;
+            let pm = |v: u8| ((v as u32 * a + 127) / 255) as u8;
+            [pm(p[2]), pm(p[1]), pm(p[0]), p[3]]
+        })
+        .collect()
+}
+
+#[test]
+fn test_stream_resize_preview_matches_full_decode() {
+    let (w, h) = (97u32, 61u32);
+    let rgba = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_fn(w, h, |x, y| {
+        image::Rgba([
+            (x.wrapping_mul(7).wrapping_add(y.wrapping_mul(3))) as u8,
+            (x.wrapping_mul(x).wrapping_add(y)) as u8,
+            (x ^ y.wrapping_mul(5)) as u8,
+            ((x.wrapping_add(y)).wrapping_mul(3)) as u8,
+        ])
+    });
+    let png = encode_png(w, h, &rgba.into_raw()).expect("encode should succeed");
+    assert_eq!(crate::image::stream_png_dims(&png), Some((w, h)));
+
+    for max_dim in [8u32, 16, 40, 61, 97, 200] {
+        let (dw, dh) = crate::image::resize_dims(w, h, max_dim);
+        let stride = (dw as usize) * 4;
+        let mut streamed = vec![0u8; stride * (dh as usize)];
+        crate::image::stream_resize_preview_into(&png, dw, dh, &mut streamed, stride)
+            .expect("streaming resize should succeed");
+
+        let (decoded, _, _) = decode_png(&png).expect("full decode should succeed");
+        let mut expected = vec![0u8; stride * (dh as usize)];
+        crate::image::resize_rgba_into(&decoded, w, h, dw, dh, &mut expected)
+            .expect("full resize should succeed");
+
+        assert_eq!(
+            streamed,
+            to_bgra_premultiplied(&expected),
+            "streaming preview must match decode+resize converted to premultiplied BGRA (max_dim={max_dim})"
+        );
+    }
+}
+
+#[test]
+fn test_stream_resize_preview_honors_stride() {
+    let (w, h) = (40u32, 30u32);
+    let rgba = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_fn(w, h, |x, y| {
+        image::Rgba([x as u8, y as u8, 200, 255])
+    });
+    let png = encode_png(w, h, &rgba.into_raw()).expect("encode should succeed");
+
+    let (dw, dh) = (20u32, 15u32);
+    let row = (dw as usize) * 4;
+    let stride = row + 64;
+    let mut dst = vec![0xEEu8; stride * (dh as usize)];
+    crate::image::stream_resize_preview_into(&png, dw, dh, &mut dst, stride)
+        .expect("streaming resize should succeed");
+
+    let mut packed = vec![0u8; row * (dh as usize)];
+    crate::image::stream_resize_preview_into(&png, dw, dh, &mut packed, row)
+        .expect("packed streaming resize should succeed");
+
+    for y in 0..dh as usize {
+        assert_eq!(&dst[y * stride..y * stride + row], &packed[y * row..(y + 1) * row]);
+        assert!(
+            dst[y * stride + row..(y + 1) * stride].iter().all(|b| *b == 0xEE),
+            "padding bytes must be untouched"
+        );
+    }
+}
+
+#[test]
+fn test_stream_resize_preview_rejects_unsupported_png() {
+    let img = image::ImageBuffer::<image::LumaA<u16>, Vec<u16>>::from_fn(8, 8, |x, y| {
+        image::LumaA([(x.wrapping_mul(9000)) as u16, (y.wrapping_mul(7000)) as u16])
+    });
+    let mut bytes = Vec::new();
+    image::DynamicImage::ImageLumaA16(img)
+        .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
+        .expect("encode 16-bit png");
+    assert_eq!(crate::image::stream_png_dims(&bytes), None);
+    let mut dst = vec![0u8; 8 * 8 * 4];
+    assert!(crate::image::stream_resize_preview_into(&bytes, 4, 4, &mut dst, 16).is_none());
+}
+

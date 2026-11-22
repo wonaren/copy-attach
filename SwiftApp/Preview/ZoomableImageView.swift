@@ -1,9 +1,10 @@
 import AppKit
+import IOSurface
 import SwiftUI
 
 final class ZoomableImageNSView: NSView {
 
-    private let imageView = NSImageView()
+    private let imageView = NSView()
 
     private let transformAnimationKey = "com.copyattach.zoom.transform"
 
@@ -17,26 +18,43 @@ final class ZoomableImageNSView: NSView {
 
     private var currentDbId: Int = 0
 
+    private var imagePixelSize: CGSize = .zero
+
+    private var currentNSImage: NSImage?
+
     var image: NSImage? {
-        get { imageView.image }
+        get { nil }
         set {
             setImage(newValue, dbId: 0)
+        }
+    }
+
+    func setSurface(_ surface: PreviewSurface?, pixelSize: CGSize, dbId: Int) {
+        let isDifferentItem = (currentDbId != dbId || dbId == 0)
+        currentDbId = dbId
+        imagePixelSize = pixelSize
+        if imageView.layer?.contents as? IOSurface !== surface?.surface {
+            imageView.layer?.contents = surface?.surface
+        }
+        if isDifferentItem {
+            resetZoom()
+        } else {
+            commitTransform()
         }
     }
 
     func setImage(_ newImage: NSImage?, dbId: Int) {
         let isDifferentItem = (currentDbId != dbId || dbId == 0)
         currentDbId = dbId
-
-        if imageView.image !== newImage {
-            imageView.image = newImage
-            if isDifferentItem {
-                resetZoom()
-            } else {
-                commitTransform()
-            }
-        } else if isDifferentItem {
+        imagePixelSize = newImage?.size ?? .zero
+        if currentNSImage !== newImage {
+            currentNSImage = newImage
+            imageView.layer?.contents = newImage?.cgImage(forProposedRect: nil, context: nil, hints: nil)
+        }
+        if isDifferentItem {
             resetZoom()
+        } else {
+            commitTransform()
         }
     }
 
@@ -46,7 +64,8 @@ final class ZoomableImageNSView: NSView {
         layer?.masksToBounds = true
 
         imageView.wantsLayer = true
-        imageView.imageScaling = .scaleProportionallyUpOrDown
+        imageView.layer?.contentsGravity = .resizeAspect
+        imageView.layer?.masksToBounds = true
         imageView.layerContentsRedrawPolicy = .never
         imageView.frame = bounds
         imageView.autoresizingMask = [.width, .height]
@@ -242,15 +261,15 @@ final class ZoomableImageNSView: NSView {
     }
 
     private func computePanBounds() -> (maxX: CGFloat, maxY: CGFloat) {
-        guard let img = imageView.image, scale > 1.0 else {
+        guard imagePixelSize.width > 0, imagePixelSize.height > 0, scale > 1.0 else {
             return (0, 0)
         }
         let viewW = bounds.width
         let viewH = bounds.height
         guard viewW > 0, viewH > 0 else { return (0, 0) }
 
-        let imgW = img.size.width
-        let imgH = img.size.height
+        let imgW = imagePixelSize.width
+        let imgH = imagePixelSize.height
         guard imgW > 0, imgH > 0 else { return (0, 0) }
 
         let imgAspect = imgW / imgH
@@ -285,7 +304,7 @@ final class ZoomableImageNSView: NSView {
     }
 
     private func clampPanToBounds() {
-        guard scale > 1.0, imageView.image != nil else {
+        guard scale > 1.0, imagePixelSize.width > 0, imagePixelSize.height > 0 else {
             panOffset = .zero
             return
         }
@@ -320,19 +339,29 @@ extension CGFloat {
 }
 
 struct ZoomableImageView: NSViewRepresentable {
-    let image: NSImage?
+    let decoded: DecodedImage
     var dbId: Int = 0
     var onTapWhenUnzoomed: (() -> Void)?
 
     func makeNSView(context: Context) -> ZoomableImageNSView {
         let view = ZoomableImageNSView()
-        view.setImage(image, dbId: dbId)
         view.onTapWhenUnzoomed = onTapWhenUnzoomed
+        apply(to: view)
         return view
     }
 
     func updateNSView(_ nsView: ZoomableImageNSView, context: Context) {
         nsView.onTapWhenUnzoomed = onTapWhenUnzoomed
-        nsView.setImage(image, dbId: dbId)
+        apply(to: nsView)
+    }
+
+    private func apply(to view: ZoomableImageNSView) {
+        if let surface = decoded.surface {
+            view.setSurface(surface,
+                            pixelSize: CGSize(width: surface.pixelWidth, height: surface.pixelHeight),
+                            dbId: dbId)
+        } else if let image = decoded.image {
+            view.setImage(image, dbId: dbId)
+        }
     }
 }

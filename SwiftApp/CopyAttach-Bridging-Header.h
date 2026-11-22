@@ -60,10 +60,11 @@ void clipboard_purge_stale_drag_images(void);
 uint8_t* clipboard_get_image_thumb_by_db_id(int64_t db_id, int32_t* out_len);
 uint8_t* clipboard_get_image_full_by_db_id(int64_t db_id, int32_t* out_len);
 
-uint8_t* clipboard_decode_preview_by_db_id(int64_t db_id, int32_t max_dim,
-                                           int32_t* out_len, int32_t* out_w, int32_t* out_h,
-                                           int32_t* out_is_gif);
-void clipboard_preview_buffer_release(uint8_t* ptr, int32_t len);
+int32_t clipboard_preview_dims(int32_t width, int32_t height, int32_t max_dim,
+                               int32_t* out_w, int32_t* out_h);
+int32_t clipboard_decode_preview_into(int64_t db_id, int32_t max_dim,
+                                      uint8_t* dst, int32_t dst_len, int32_t stride,
+                                      int32_t* out_w, int32_t* out_h, int32_t* out_is_gif);
 
 void clipboard_set_source_app(const char* name, const char* bundle_id, int32_t pid);
 int32_t clipboard_set_ignore_rules(const char* app_bundle_ids, int32_t ignore_text, int32_t ignore_images, int32_t min_text_characters, int32_t ignore_sensitive);

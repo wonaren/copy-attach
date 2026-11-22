@@ -94,7 +94,7 @@ struct ItemRowView: View {
                 case .image(_, let dbId, let width, let height, _, let customLabel, _, _, _):
                     if isEditingRemark {
                         HStack(spacing: 4) {
-                            Image(systemName: "photo.fill")
+                            Image(systemName: "photo.fill").accessibilityHidden(true)
                                 .font(.system(size: 11))
                                 .foregroundColor(Color(nsColor: .systemOrange))
                             InlineRemarkField(
@@ -123,7 +123,7 @@ struct ItemRowView: View {
                     } else if !customLabel.isEmpty {
                         let markColor = remarkAccent ?? textColor(true)
                         HStack(spacing: 5) {
-                            Image(systemName: "photo.fill")
+                            Image(systemName: "photo.fill").accessibilityHidden(true)
                                 .font(.system(size: 11.5))
                                 .foregroundColor(markColor)
                                 .help(width > 0 && height > 0 ? "图片 (\(width)×\(height))" : "图片")
@@ -136,7 +136,7 @@ struct ItemRowView: View {
             }
             Spacer(minLength: 2)
             if item.hasCustomLabel {
-                Image(systemName: "tag.fill")
+                Image(systemName: "tag.fill").accessibilityHidden(true)
                     .font(.system(size: 9.5))
                     .foregroundColor(remarkAccent ?? textColor(true))
                     .frame(width: 14, alignment: .center)
@@ -145,7 +145,7 @@ struct ItemRowView: View {
                     .transition(.scale(scale: 0.9).combined(with: .opacity))
             }
             if isFavorite {
-                Image(systemName: "star.fill")
+                Image(systemName: "star.fill").accessibilityHidden(true)
                     .font(.system(size: 10))
                     .foregroundColor(Color(nsColor: .systemYellow))
                     .frame(width: 16, alignment: .center)
@@ -154,7 +154,7 @@ struct ItemRowView: View {
             }
             queueToggleControl
             if isSelected && isDeleteModifierPressed {
-                Image(systemName: "delete.left.fill")
+                Image(systemName: "delete.left.fill").accessibilityHidden(true)
                     .font(.system(size: 13))
                     .foregroundColor(Color.white)
                     .frame(minWidth: 20, alignment: .center)
@@ -297,6 +297,7 @@ struct ItemRowView: View {
             } else {
                 Image(systemName: "app.fill").resizable().frame(width: 14, height: 14)
                     .foregroundColor(mutedText)
+                    .accessibilityHidden(true)
             }
         }
         .frame(width: 20, height: 20).foregroundColor(.white)

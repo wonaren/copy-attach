@@ -74,7 +74,9 @@ class PreviewWindow: NSPanel {
     private static let miniMaxWidth: CGFloat = 300
     private static let miniMaxHeight: CGFloat = 280
     private static let miniPadding: CGFloat = 6
-    static let miniMaxPixel: Int = 800
+    static func miniMaxPixel(scale: CGFloat) -> Int {
+        Int((miniMaxWidth * scale).rounded(.up))
+    }
     private static let miniGap: CGFloat = 10
     private static let miniMinSideSpace: CGFloat = 120
 
@@ -82,8 +84,9 @@ class PreviewWindow: NSPanel {
     private var currentItem: ClipboardItem
     private var centerAnchor: NSPoint
     private var hostingView: PreviewHostingView?
+    private var miniState: MiniPreviewState?
     private var currentItemId: Int = 0
-    private var miniImage: NSImage?
+    private var miniPreview: DecodedImage?
     private let dismissState = PreviewDismissState()
     private let hoverState = PreviewHoverState()
 
@@ -105,6 +108,10 @@ class PreviewWindow: NSPanel {
     override var canBecomeKey: Bool { false }
 
     var itemId: Int { currentItemId }
+
+    private var previewScreenScale: CGFloat {
+        (self.screen ?? NSScreen.main)?.backingScaleFactor ?? 2
+    }
 
     init(item: ClipboardItem,
          centerAt screenCenter: NSPoint,
@@ -134,7 +141,7 @@ class PreviewWindow: NSPanel {
         )
 
         configureWindow()
-        installContent(item: item, initialImage: nil)
+        installContent(item: item, initialPreview: nil)
     }
 
     init(miniItem item: ClipboardItem, frame: NSRect) {
@@ -151,7 +158,7 @@ class PreviewWindow: NSPanel {
         )
 
         configureWindow()
-        installContent(item: item, initialImage: nil)
+        installContent(item: item, initialPreview: nil)
     }
 
     private func configureWindow() {
@@ -164,8 +171,16 @@ class PreviewWindow: NSPanel {
         self.isMovableByWindowBackground = presentation == .large
     }
 
-    private func installContent(item: ClipboardItem, initialImage: NSImage?) {
-        let hosting = PreviewHostingView(rootView: makeContent(item: item, initialImage: initialImage))
+    private func installContent(item: ClipboardItem, initialPreview: DecodedImage?) {
+        let hosting: PreviewHostingView
+        if presentation == .mini {
+            let state = MiniPreviewState(item: item)
+            miniState = state
+            hosting = PreviewHostingView(rootView: makeMiniContent(state: state))
+        } else {
+            miniState = nil
+            hosting = PreviewHostingView(rootView: makeContent(item: item, initialPreview: initialPreview))
+        }
         hosting.sizingOptions = []
         let contentRect = self.contentRect(forFrameRect: self.frame)
         let container = SquircleMaskView(frame: NSRect(origin: .zero, size: contentRect.size))
@@ -207,8 +222,23 @@ class PreviewWindow: NSPanel {
         path.closeSubpath()
         return path
     }
+    private func makeMiniContent(state: MiniPreviewState) -> AnyView {
+        AnyView(PreviewContent(
+            miniState: state,
+            maxPixelOverride: Self.miniMaxPixel(scale: previewScreenScale),
+            onTapWhenUnzoomed: { [weak self] in self?.onExpand?() },
+            onImageLoaded: { [weak self] image in
+                guard let self, self.currentItemId == state.item.id else { return }
+                self.miniPreview = image
+            },
+            showsZoomHint: true,
+            hoverState: hoverState,
+            dismissState: dismissState
+        ))
+    }
+
     private func makeContent(item: ClipboardItem,
-                             initialImage: NSImage?,
+                             initialPreview: DecodedImage?,
                              expandStartHeight: CGFloat? = nil,
                              expandEndHeight: CGFloat? = nil) -> AnyView {
         let content: PreviewContent
@@ -216,12 +246,12 @@ class PreviewWindow: NSPanel {
         case .mini:
             content = PreviewContent(
                 item: item,
-                initialImage: initialImage,
-                maxPixelOverride: Self.miniMaxPixel,
+                initialPreview: initialPreview,
+                maxPixelOverride: Self.miniMaxPixel(scale: previewScreenScale),
                 onTapWhenUnzoomed: { [weak self] in self?.onExpand?() },
                 onImageLoaded: { [weak self] image in
                     guard let self, self.currentItemId == item.id else { return }
-                    self.miniImage = image
+                    self.miniPreview = image
                 },
                 showsZoomHint: true,
                 hoverState: hoverState,
@@ -233,7 +263,7 @@ class PreviewWindow: NSPanel {
                 : { [weak self] in self?.onDismiss?() }
             content = PreviewContent(
                 item: item,
-                initialImage: initialImage,
+                initialPreview: initialPreview,
                 maxPixelOverride: nil,
                 onTapWhenUnzoomed: dismiss,
                 onPaste: onPaste,
@@ -289,10 +319,12 @@ class PreviewWindow: NSPanel {
         if currentItemId != item.id {
             currentItemId = item.id
             currentItem = item
-            miniImage = nil
-            hostingView?.rootView = makeContent(item: item, initialImage: nil)
+            miniPreview = nil
+            miniState?.item = item
         }
-        animateFrame(frame, duration: 0.15)
+        let currentOrigin = self.frame.origin
+        setFrame(NSRect(origin: currentOrigin, size: frame.size), display: true)
+        animateFrame(NSRect(origin: frame.origin, size: frame.size), duration: 0.15)
     }
 
     func expandToLarge(item: ClipboardItem, centerAt point: NSPoint, completion: (@MainActor () -> Void)? = nil) {
@@ -300,6 +332,7 @@ class PreviewWindow: NSPanel {
         currentItem = item
         currentItemId = item.id
         presentation = .large
+        miniState = nil
         centerAnchor = point
         isMovableByWindowBackground = true
         hoverState.isHovering = false
@@ -320,7 +353,7 @@ class PreviewWindow: NSPanel {
             let startHeight = frame.height
             if let hosting = hostingView {
                 hosting.rootView = makeContent(item: item,
-                                               initialImage: miniImage,
+                                               initialPreview: miniPreview,
                                                expandStartHeight: startHeight,
                                                expandEndHeight: size.height)
             }
@@ -336,7 +369,7 @@ class PreviewWindow: NSPanel {
                      duration: 0.24,
                      timing: CAMediaTimingFunction(name: .easeInEaseOut)) { [weak self] in
             guard let self, self.isVisible, let hosting = self.hostingView else { return }
-            hosting.rootView = self.makeContent(item: self.currentItem, initialImage: self.miniImage)
+            hosting.rootView = self.makeContent(item: self.currentItem, initialPreview: self.miniPreview)
             completion?()
         }
     }
@@ -347,7 +380,7 @@ class PreviewWindow: NSPanel {
         currentItemId = item.id
         currentItem = item
 
-        hostingView?.rootView = makeContent(item: item, initialImage: nil)
+        hostingView?.rootView = makeContent(item: item, initialPreview: nil)
         resizeToFitContent(for: item)
     }
 

@@ -1,25 +1,39 @@
 import AppKit
 import CoreGraphics
+import IOSurface
 
-final class DecodedImage: @unchecked Sendable {
-    let image: NSImage
+final class PreviewSurface: @unchecked Sendable {
+    let surface: IOSurface
+    let pixelWidth: Int
+    let pixelHeight: Int
 
-    init(image: NSImage) {
-        self.image = image
+    init(surface: IOSurface, pixelWidth: Int, pixelHeight: Int) {
+        self.surface = surface
+        self.pixelWidth = pixelWidth
+        self.pixelHeight = pixelHeight
     }
+
+    var pixelCost: Int { pixelWidth * pixelHeight * 4 }
 }
 
-private final class PreviewBufferBox: @unchecked Sendable {
-    let ptr: UnsafeMutableRawPointer
-    let len: Int32
+final class DecodedImage: @unchecked Sendable {
+    let surface: PreviewSurface?
+    let image: NSImage?
 
-    init(ptr: UnsafeMutableRawPointer, len: Int32) {
-        self.ptr = ptr
-        self.len = len
+    init(surface: PreviewSurface) {
+        self.surface = surface
+        self.image = nil
     }
 
-    deinit {
-        clipboard_preview_buffer_release(ptr, len)
+    init(image: NSImage) {
+        self.surface = nil
+        self.image = image
+    }
+
+    var pixelCost: Int {
+        if let surface { return surface.pixelCost }
+        if let image { return Int(image.size.width * image.size.height * 4) }
+        return 0
     }
 }
 
@@ -46,8 +60,7 @@ enum ImageDecode {
 
     @MainActor private static let previewCache: NSCache<NSString, DecodedImage> = {
         let cache = NSCache<NSString, DecodedImage>()
-        cache.countLimit = 8
-        cache.totalCostLimit = 24 * 1024 * 1024
+        cache.countLimit = 2
         return cache
     }()
 
@@ -71,7 +84,10 @@ enum ImageDecode {
     }
 
     @MainActor
-    static func previewImageAsync(dbId: Int, maxPixel: Int) async -> DecodedImage? {
+    static func previewImageAsync(dbId: Int,
+                                  sourceWidth: Int,
+                                  sourceHeight: Int,
+                                  maxPixel: Int) async -> DecodedImage? {
         guard let session = previewSession, !Task.isCancelled else { return nil }
         let key = "\(dbId):\(maxPixel)" as NSString
         if let cached = previewCache.object(forKey: key) { return cached }
@@ -80,56 +96,56 @@ enum ImageDecode {
         guard !Task.isCancelled, previewSession == session else { return nil }
         if let cached = previewCache.object(forKey: key) { return cached }
         let decoded = await Task.detached(priority: .userInitiated) { () -> DecodedImage? in
-            previewImage(dbId: dbId, maxPixel: maxPixel)
+            previewImage(dbId: dbId,
+                         sourceWidth: sourceWidth,
+                         sourceHeight: sourceHeight,
+                         maxPixel: maxPixel)
         }.value
         guard !Task.isCancelled, previewSession == session else { return nil }
         if let decoded {
-            let cost = Int(decoded.image.size.width * decoded.image.size.height * 4)
-            previewCache.setObject(decoded, forKey: key, cost: cost)
+            previewCache.setObject(decoded, forKey: key, cost: decoded.pixelCost)
         }
         return decoded
     }
 
-    private static func previewImage(dbId: Int, maxPixel: Int) -> DecodedImage? {
-        guard dbId != 0 else { return nil }
-        var len: Int32 = 0, w: Int32 = 0, h: Int32 = 0, isGif: Int32 = 0
-        let ptr = clipboard_decode_preview_by_db_id(Int64(dbId), Int32(maxPixel),
-                                                    &len, &w, &h, &isGif)
+    private static func previewImage(dbId: Int,
+                                     sourceWidth: Int,
+                                     sourceHeight: Int,
+                                     maxPixel: Int) -> DecodedImage? {
+        guard dbId != 0, sourceWidth > 0, sourceHeight > 0 else { return nil }
+        var dw: Int32 = 0
+        var dh: Int32 = 0
+        guard clipboard_preview_dims(Int32(sourceWidth), Int32(sourceHeight), Int32(maxPixel), &dw, &dh) != 0,
+              dw > 0, dh > 0 else { return nil }
+
+        let properties: [IOSurfacePropertyKey: Any] = [
+            .width: Int(dw),
+            .height: Int(dh),
+            .bytesPerElement: 4,
+            .pixelFormat: 0x42475241,
+        ]
+        guard let surface = IOSurface(properties: properties) else { return nil }
+
+        surface.lock(options: [], seed: nil)
+        defer { surface.unlock(options: [], seed: nil) }
+
+        let stride = surface.bytesPerRow
+        var outW: Int32 = 0
+        var outH: Int32 = 0
+        var isGif: Int32 = 0
+        let filled = clipboard_decode_preview_into(Int64(dbId), Int32(maxPixel),
+                                                   surface.baseAddress.assumingMemoryBound(to: UInt8.self),
+                                                   Int32(stride * Int(dh)), Int32(stride),
+                                                   &outW, &outH, &isGif)
 
         if isGif != 0 {
             guard let data = ClipboardBackend.getImageFullByDbId(dbId),
                   let image = NSImage(data: data) else { return nil }
             return DecodedImage(image: image)
         }
-
-        guard let ptr, len > 0, w > 0, h > 0 else { return nil }
-        return makeImage(ptr: ptr, len: len, width: Int(w), height: Int(h))
-    }
-
-    private static func makeImage(ptr: UnsafeMutableRawPointer, len: Int32,
-                                  width: Int, height: Int) -> DecodedImage? {
-        let box = PreviewBufferBox(ptr: ptr, len: len)
-        let retained = Unmanaged.passRetained(box).toOpaque()
-        guard let provider = CGDataProvider(dataInfo: retained, data: ptr, size: Int(len),
-                                            releaseData: { info, _, _ in
-            guard let info else { return }
-            Unmanaged<PreviewBufferBox>.fromOpaque(info).release()
-        }) else {
-            Unmanaged<PreviewBufferBox>.fromOpaque(retained).release()
-            return nil
-        }
-        guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) else {
-            return nil
-        }
-        let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.last.rawValue)
-        guard let cg = CGImage(width: width, height: height,
-                               bitsPerComponent: 8, bitsPerPixel: 32,
-                               bytesPerRow: width * 4, space: colorSpace,
-                               bitmapInfo: bitmapInfo, provider: provider,
-                               decode: nil, shouldInterpolate: true,
-                               intent: .defaultIntent) else {
-            return nil
-        }
-        return DecodedImage(image: NSImage(cgImage: cg, size: NSSize(width: width, height: height)))
+        guard filled != 0, outW == dw, outH == dh else { return nil }
+        return DecodedImage(surface: PreviewSurface(surface: surface,
+                                                    pixelWidth: Int(dw),
+                                                    pixelHeight: Int(dh)))
     }
 }

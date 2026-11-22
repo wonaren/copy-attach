@@ -201,7 +201,8 @@ struct QuickSlotSettings: View {
             if let item {
                 let size = PreviewWindow.miniSize(for: item)
                 PreviewContent(item: item,
-                               maxPixelOverride: PreviewWindow.miniMaxPixel,
+                               maxPixelOverride: PreviewWindow.miniMaxPixel(
+                                   scale: NSScreen.main?.backingScaleFactor ?? 2),
                                showsZoomHint: true,
                                embedded: true)
                     .frame(width: size.width, height: size.height)

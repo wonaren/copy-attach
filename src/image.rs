@@ -478,6 +478,163 @@ pub(crate) fn hash_and_thumbnail_streaming(png: &[u8]) -> Option<StreamedRgba8> 
     Some(StreamedRgba8 { width, height, hash, thumb_png, thumb_w, thumb_h })
 }
 
+pub(crate) fn stream_png_dims(png: &[u8]) -> Option<(u32, u32)> {
+    use png::{BitDepth, ColorType, Decoder, Transformations};
+
+    let mut decoder = Decoder::new(std::io::Cursor::new(png));
+    decoder.set_transformations(Transformations::EXPAND | Transformations::ALPHA);
+    let reader = decoder.read_info().ok()?;
+    let info = reader.info();
+    if info.interlaced || info.width == 0 || info.height == 0 {
+        return None;
+    }
+    match reader.output_color_type() {
+        (ColorType::Rgba, BitDepth::Eight) | (ColorType::GrayscaleAlpha, BitDepth::Eight) => {
+            Some((info.width, info.height))
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn stream_resize_preview_into(
+    png: &[u8],
+    dst_w: u32,
+    dst_h: u32,
+    dst: &mut [u8],
+    stride: usize,
+) -> Option<()> {
+    use png::{BitDepth, ColorType, Decoder, Transformations};
+
+    if dst_w == 0 || dst_h == 0 {
+        return None;
+    }
+    let row_bytes = (dst_w as usize) * 4;
+    if stride < row_bytes || dst.len() < stride * (dst_h as usize - 1) + row_bytes {
+        return None;
+    }
+    let mut decoder = Decoder::new(std::io::Cursor::new(png));
+    decoder.set_transformations(Transformations::EXPAND | Transformations::ALPHA);
+    let mut reader = decoder.read_info().ok()?;
+    let (width, height, gray_alpha) = {
+        let info = reader.info();
+        if info.interlaced || info.width == 0 || info.height == 0 {
+            return None;
+        }
+        match reader.output_color_type() {
+            (ColorType::Rgba, BitDepth::Eight) => (info.width, info.height, false),
+            (ColorType::GrayscaleAlpha, BitDepth::Eight) => (info.width, info.height, true),
+            _ => return None,
+        }
+    };
+
+    let line_size = (width as usize) * 4;
+    let mut row = crate::backend::MarkBlobReusableOnDrop(vec![0u8; line_size]);
+    if !crate::backend::claim_pages(row.0.as_ptr(), row.0.capacity()) {
+        crate::error_log!("CopyAttach: preview stream row cap={} could not be claimed", row.0.capacity());
+        return None;
+    }
+    let mut gray_row = if gray_alpha {
+        let r = crate::backend::MarkBlobReusableOnDrop(vec![0u8; (width as usize) * 2]);
+        if !crate::backend::claim_pages(r.0.as_ptr(), r.0.capacity()) {
+            crate::error_log!("CopyAttach: preview stream gray cap={} could not be claimed", r.0.capacity());
+            return None;
+        }
+        Some(r)
+    } else {
+        None
+    };
+    macro_rules! read_next_row {
+        () => {{
+            if let Some(g) = gray_row.as_mut() {
+                reader.read_row(&mut g.0).ok()??;
+                for (px, out) in g.0.chunks_exact(2).zip(row.0.chunks_exact_mut(4)) {
+                    out[0] = px[0];
+                    out[1] = px[0];
+                    out[2] = px[0];
+                    out[3] = px[1];
+                }
+            } else {
+                reader.read_row(&mut row.0).ok()??;
+            }
+        }};
+    }
+
+    let mut ring = crate::backend::MarkBlobReusableOnDrop(vec![0u8; row_bytes * RESIZE_RING_ROWS]);
+    if !crate::backend::claim_pages(ring.0.as_ptr(), ring.0.capacity()) {
+        crate::error_log!("CopyAttach: preview stream ring cap={} could not be claimed", ring.0.capacity());
+        return None;
+    }
+    let mut ring_valid = [-1i64; RESIZE_RING_ROWS];
+    let scale_x = width as f32 / dst_w as f32;
+    let scale_y = height as f32 / dst_h as f32;
+    let mut decoded: u32 = 0;
+
+    for y in 0..dst_h as usize {
+        let center = (y as f32 + 0.5) * scale_y - 0.5;
+        let base = center.floor() as i64;
+        let need_through = (base + 2).clamp(0, height as i64 - 1) as u32;
+        while decoded <= need_through {
+            read_next_row!();
+            let slot = (decoded as usize) % RESIZE_RING_ROWS;
+            let ring_row = &mut ring.0[slot * row_bytes..(slot + 1) * row_bytes];
+            for x in 0..dst_w as usize {
+                let cx = (x as f32 + 0.5) * scale_x - 0.5;
+                sample_catmull_row(&row.0, width, cx, &mut ring_row[x * 4..]);
+            }
+            ring_valid[slot] = decoded as i64;
+            decoded += 1;
+        }
+        let out_row = &mut dst[y * stride..y * stride + row_bytes];
+        for x in 0..dst_w as usize {
+            let mut acc = [0f32; 4];
+            let mut wsum = 0f32;
+            for i in 0..4 {
+                let src_y = base - 1 + i as i64;
+                let wt = catmull_rom(center - src_y as f32);
+                if wt == 0.0 {
+                    continue;
+                }
+                let cy = src_y.clamp(0, height as i64 - 1);
+                let slot = (cy as usize) % RESIZE_RING_ROWS;
+                if ring_valid[slot] != cy {
+                    return None;
+                }
+                wsum += wt;
+                let p = &ring.0[slot * row_bytes + x * 4..];
+                acc[0] += wt * p[0] as f32;
+                acc[1] += wt * p[1] as f32;
+                acc[2] += wt * p[2] as f32;
+                acc[3] += wt * p[3] as f32;
+            }
+            let o = &mut out_row[x * 4..];
+            if wsum > 0.0 {
+                let r = (acc[0] / wsum).round().clamp(0.0, 255.0) as u8;
+                let g = (acc[1] / wsum).round().clamp(0.0, 255.0) as u8;
+                let b = (acc[2] / wsum).round().clamp(0.0, 255.0) as u8;
+                let a = (acc[3] / wsum).round().clamp(0.0, 255.0) as u8;
+                write_bgra_premultiplied(o, r, g, b, a);
+            } else {
+                let cy = (center.round() as i64).clamp(0, height as i64 - 1) as usize;
+                let slot = cy % RESIZE_RING_ROWS;
+                if ring_valid[slot] != cy as i64 {
+                    return None;
+                }
+                let p = &ring.0[slot * row_bytes + x * 4..];
+                write_bgra_premultiplied(o, p[0], p[1], p[2], p[3]);
+            }
+        }
+    }
+    Some(())
+}
+
+fn write_bgra_premultiplied(out: &mut [u8], r: u8, g: u8, b: u8, a: u8) {
+    let premultiply = |v: u8| -> u8 { ((v as u32 * a as u32 + 127) / 255) as u8 };
+    out[0] = premultiply(b);
+    out[1] = premultiply(g);
+    out[2] = premultiply(r);
+    out[3] = a;
+}
+
 #[cfg(test)]
 pub(crate) fn resize_rgba_reference(
     src: &[u8], width: u32, height: u32, dst_w: u32, dst_h: u32,

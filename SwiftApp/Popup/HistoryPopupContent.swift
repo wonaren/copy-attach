@@ -67,6 +67,10 @@ struct SelectedRowAnchor: Equatable {
     let rect: CGRect
 }
 
+final class SelectedRowAnchorBox {
+    var value: SelectedRowAnchor?
+}
+
 private struct SelectedRowAnchorPreferenceKey: PreferenceKey {
     static let defaultValue: SelectedRowAnchor? = nil
     static func reduce(value: inout SelectedRowAnchor?, nextValue: () -> SelectedRowAnchor?) {
@@ -102,7 +106,11 @@ struct HistoryPopupContent: View {
     @State var hoverPreviewItem: ClipboardItem?
     @State var hoverPreviewSource: HoverPreviewSource?
     @State var keyboardPreviewTargetId: Int?
-    @State var selectedRowAnchor: SelectedRowAnchor?
+    @State var selectedRowAnchorBox = SelectedRowAnchorBox()
+    var selectedRowAnchor: SelectedRowAnchor? {
+        get { selectedRowAnchorBox.value }
+        nonmutating set { selectedRowAnchorBox.value = newValue }
+    }
     @State var hoverPreviewPendingItem: ClipboardItem?
     @State var hoverPreviewPendingRect: NSRect?
     @State var hoverPreviewShowTask: Task<Void, Never>?

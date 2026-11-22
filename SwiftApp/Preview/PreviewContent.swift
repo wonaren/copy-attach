@@ -10,13 +10,35 @@ final class PreviewDismissState {
     var blur: CGFloat = 16.0
 }
 
+@Observable
+final class MiniPreviewState {
+    var item: ClipboardItem
+
+    init(item: ClipboardItem) {
+        self.item = item
+    }
+}
+
 struct PreviewContent: View {
-    let item: ClipboardItem
+    private enum ItemSource {
+        case fixed(ClipboardItem)
+        case mini(MiniPreviewState)
+
+        var item: ClipboardItem {
+            switch self {
+            case .fixed(let item): return item
+            case .mini(let state): return state.item
+            }
+        }
+    }
+
+    private let source: ItemSource
+    var item: ClipboardItem { source.item }
     private let maxPixelOverride: Int?
     private let onTapWhenUnzoomed: (() -> Void)?
     private let onPaste: ((Int) -> Void)?
     private let onClose: (() -> Void)?
-    private let onImageLoaded: ((NSImage) -> Void)?
+    private let onImageLoaded: ((DecodedImage) -> Void)?
     private let showsZoomHint: Bool
     private let hoverState: PreviewHoverState?
     private let dismissState: PreviewDismissState?
@@ -24,26 +46,78 @@ struct PreviewContent: View {
     private let expandEndHeight: CGFloat?
     private let embedded: Bool
 
-    @State private var image: NSImage?
+    @State private var decoded: DecodedImage?
+    @State private var imageDbId: Int?
     @State private var hasFailed = false
     @State private var hasAppeared = false
     @Environment(\.appTheme) private var theme
     @Environment(\.colorScheme) private var colorScheme
 
     init(item: ClipboardItem,
-         initialImage: NSImage? = nil,
+         initialPreview: DecodedImage? = nil,
          maxPixelOverride: Int? = nil,
          onTapWhenUnzoomed: (() -> Void)? = nil,
          onPaste: ((Int) -> Void)? = nil,
          onClose: (() -> Void)? = nil,
-         onImageLoaded: ((NSImage) -> Void)? = nil,
+         onImageLoaded: ((DecodedImage) -> Void)? = nil,
          showsZoomHint: Bool = false,
          hoverState: PreviewHoverState? = nil,
          dismissState: PreviewDismissState? = nil,
          expandStartHeight: CGFloat? = nil,
          expandEndHeight: CGFloat? = nil,
          embedded: Bool = false) {
-        self.item = item
+        self.init(source: .fixed(item),
+                  initialPreview: initialPreview,
+                  maxPixelOverride: maxPixelOverride,
+                  onTapWhenUnzoomed: onTapWhenUnzoomed,
+                  onPaste: onPaste,
+                  onClose: onClose,
+                  onImageLoaded: onImageLoaded,
+                  showsZoomHint: showsZoomHint,
+                  hoverState: hoverState,
+                  dismissState: dismissState,
+                  expandStartHeight: expandStartHeight,
+                  expandEndHeight: expandEndHeight,
+                  embedded: embedded)
+    }
+
+    init(miniState: MiniPreviewState,
+         maxPixelOverride: Int? = nil,
+         onTapWhenUnzoomed: (() -> Void)? = nil,
+         onImageLoaded: ((DecodedImage) -> Void)? = nil,
+         showsZoomHint: Bool = false,
+         hoverState: PreviewHoverState? = nil,
+         dismissState: PreviewDismissState? = nil) {
+        self.init(source: .mini(miniState),
+                  initialPreview: nil,
+                  maxPixelOverride: maxPixelOverride,
+                  onTapWhenUnzoomed: onTapWhenUnzoomed,
+                  onPaste: nil,
+                  onClose: nil,
+                  onImageLoaded: onImageLoaded,
+                  showsZoomHint: showsZoomHint,
+                  hoverState: hoverState,
+                  dismissState: dismissState,
+                  expandStartHeight: nil,
+                  expandEndHeight: nil,
+                  embedded: false)
+    }
+
+    private init(source: ItemSource,
+                 initialPreview: DecodedImage?,
+                 maxPixelOverride: Int?,
+                 onTapWhenUnzoomed: (() -> Void)?,
+                 onPaste: ((Int) -> Void)?,
+                 onClose: (() -> Void)?,
+                 onImageLoaded: ((DecodedImage) -> Void)?,
+                 showsZoomHint: Bool,
+                 hoverState: PreviewHoverState?,
+                 dismissState: PreviewDismissState?,
+                 expandStartHeight: CGFloat?,
+                 expandEndHeight: CGFloat?,
+                 embedded: Bool) {
+        self.source = source
+        let item = source.item
         self.maxPixelOverride = maxPixelOverride
         self.onTapWhenUnzoomed = onTapWhenUnzoomed
         self.onPaste = onPaste
@@ -55,15 +129,15 @@ struct PreviewContent: View {
         self.expandStartHeight = expandStartHeight
         self.expandEndHeight = expandEndHeight
         self.embedded = embedded
-        let seeded: NSImage?
-        if let initialImage {
-            seeded = initialImage
-        } else if case .image(_, let dbId, _, _, _, _, _, _, _) = item {
-            seeded = ClipboardBackend.shared.cachedThumbnail(dbId: dbId)
-        } else {
-            seeded = nil
+        let dbId: Int? = {
+            if case .image(_, let dbId, _, _, _, _, _, _, _) = item { return dbId }
+            return nil
+        }()
+        let seeded = initialPreview ?? dbId.flatMap { id in
+            ClipboardBackend.shared.cachedThumbnail(dbId: id).map { DecodedImage(image: $0) }
         }
-        self._image = State(initialValue: seeded)
+        self._decoded = State(initialValue: seeded)
+        self._imageDbId = State(initialValue: seeded == nil ? nil : dbId)
     }
 
     private struct ImageLoadKey: Hashable {
@@ -206,7 +280,8 @@ struct PreviewContent: View {
             await loadImage(dbId: dbId)
         }
         .onDisappear {
-            image = nil
+            decoded = nil
+            imageDbId = nil
             hasFailed = false
         }
     }
@@ -237,16 +312,23 @@ struct PreviewContent: View {
 
     @ViewBuilder
     private var miniImageContent: some View {
-        if let img = image {
-            Image(nsImage: img)
-                .resizable()
-                .interpolation(.high)
-                .aspectRatio(contentMode: .fit)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .clipShape(RoundedRectangle(cornerRadius: embedded ? 0 : 11, style: .continuous))
-                .padding(embedded ? 0 : 3)
-                .contentShape(Rectangle())
-                .onTapGesture { onTapWhenUnzoomed?() }
+        if let decoded {
+            if let surface = decoded.surface {
+                SurfaceImageView(surface: surface,
+                                 cornerRadius: embedded ? 0 : 11,
+                                 onTap: onTapWhenUnzoomed)
+                    .padding(embedded ? 0 : 3)
+            } else if let img = decoded.image {
+                Image(nsImage: img)
+                    .resizable()
+                    .interpolation(.high)
+                    .aspectRatio(contentMode: .fit)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .clipShape(RoundedRectangle(cornerRadius: embedded ? 0 : 11, style: .continuous))
+                    .padding(embedded ? 0 : 3)
+                    .contentShape(Rectangle())
+                    .onTapGesture { onTapWhenUnzoomed?() }
+            }
         } else if hasFailed {
             Image(systemName: "photo.badge.exclamationmark")
                 .font(.system(size: 24))
@@ -259,8 +341,8 @@ struct PreviewContent: View {
 
     @ViewBuilder
     private func largeImageBody(dbId: Int) -> some View {
-        if let img = image {
-            ZoomableImageView(image: img, dbId: dbId, onTapWhenUnzoomed: onTapWhenUnzoomed)
+        if let decoded {
+            ZoomableImageView(decoded: decoded, dbId: dbId, onTapWhenUnzoomed: onTapWhenUnzoomed)
         } else if hasFailed {
             Image(systemName: "photo.badge.exclamationmark")
                 .font(.system(size: 24))
@@ -320,8 +402,9 @@ struct PreviewContent: View {
         .frame(width: 20, height: 20)
     }
 
-    private func applyImage(_ newImage: NSImage) {
-        image = newImage
+    private func applyImage(_ newImage: DecodedImage) {
+        decoded = newImage
+        imageDbId = currentDbId
         onImageLoaded?(newImage)
     }
 
@@ -332,12 +415,14 @@ struct PreviewContent: View {
         perfLoad?.data = "cancelled"
         defer { perfLoad?.end() }
 
-        if let image {
-            onImageLoaded?(image)
+        if imageDbId != dbId {
+            decoded = ClipboardBackend.shared.cachedThumbnail(dbId: dbId).map { DecodedImage(image: $0) }
+            imageDbId = dbId
+            hasFailed = false
         }
 
-        if image == nil, let cached = ClipboardBackend.shared.cachedThumbnail(dbId: dbId) {
-            applyImage(cached)
+        if let decoded {
+            onImageLoaded?(decoded)
         }
 
         let screenSize = NSScreen.main?.visibleFrame.size ?? NSSize(width: 1440, height: 900)
@@ -346,15 +431,18 @@ struct PreviewContent: View {
         let maxPixel = maxPixelOverride
             ?? ImageDecode.previewBudget(width: size.w, height: size.h,
                                          screenSize: screenSize, scale: scale)
-        let decoded = await ImageDecode.previewImageAsync(dbId: dbId, maxPixel: maxPixel)
+        let loaded = await ImageDecode.previewImageAsync(dbId: dbId,
+                                                         sourceWidth: size.w,
+                                                         sourceHeight: size.h,
+                                                         maxPixel: maxPixel)
 
         guard currentDbId == dbId, !Task.isCancelled else { return }
 
-        if let decoded {
-            applyImage(decoded.image)
+        if let loaded {
+            applyImage(loaded)
             hasFailed = false
             perfLoad?.data = showsZoomHint ? "mini" : "large"
-        } else if image == nil {
+        } else if decoded == nil {
             hasFailed = true
             perfLoad?.data = "unavailable"
         }
