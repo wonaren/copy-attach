@@ -36,7 +36,7 @@ extension HistoryPopupContent {
     }
 
     func switchFilterTab(direction: String) {
-        let modes = FilterMode.allCases
+        let modes = visibleTabOrder
         let current = pendingFilterMode ?? filterMode
         guard let idx = modes.firstIndex(of: current) else { return }
         let target: FilterMode
@@ -47,6 +47,7 @@ extension HistoryPopupContent {
             guard idx < modes.count - 1 else { return }
             target = modes[idx + 1]
         }
+        debugLog("switchFilterTab \(direction): \(current.rawValue) -> \(target.rawValue) order=\(modes.map(\.rawValue).joined(separator: ","))")
         switchToFilterTab(target)
     }
 }

@@ -227,6 +227,14 @@ PopupHostingView 的 `.scrollWheel` local monitor 在 ScrollView 消费事件之
 
 **行级过渡**：条目按 `entry_id` 保持稳定身份。剪贴板历史更新时，进出场行使用透明度与 0.96 缩放，弹簧响应为 0.28s；选中高亮滑动的弹簧响应为 0.18s。分类胶囊在 SwiftUI 中独立过渡。
 
+### 标签顺序可调 / 可隐藏（`Popup/FilterTabStrip.swift`）
+
+标签条从 `Button` 换成自绘手势（`DragGesture(minimumDistance: 0)`）：按下后位移 <3pt 且**松手时仍在胶囊内**才算点击（`onSelect`），水平位移 ≥3pt 且横向占优才起拖，拖动中竖直位移不误触排序；被拖胶囊的偏移在 `disablesAnimations` 事务里更新（不能跟手动画，否则追不上指针）。位置不靠 `ForEach` 重排，而是**按槽位偏移**：`HStack` 始终按已提交顺序布局，每颗胶囊用 `.offset` 挪到目标槽位，因此布局在拖动期间不变、`frames` 量出的槽位坐标始终有效（`.offset` 是渲染期变换，`GeometryReader` 读到的仍是布局几何，不会把自己拖动的位移二次计入）；插入位由「拖动中心越过相邻槽位中心的中点」判定（半槽位移即换位，且阈值只依赖固定槽位，不随邻居移动而抖动），越过时用 `withAnimation` 让邻居弹簧让位并发 `.alignment` 触感反馈。松手时把 `order` 与偏移在同一 `withAnimation` 事务里一起改：偏移归零与布局位移同步插值，两者相互抵消，邻居不会二次跳动，被拖胶囊则弹入新槽位。
+
+**选中胶囊不能带 `matchedGeometryEffect` 拖动**：`.offset` 是渲染期变换，`matchedGeometryEffect` 用的是布局期几何，拖动选中标签时蓝底会钉在旧槽位、看着像选中了别的标签（实测视频逐帧可见）。所以 `isLifted` 时去掉该修饰符，直接画同色底（视觉上连续，松手后修饰符回来也不跳）。
+
+顺序与隐藏集合分开持久化：`FilterTabOrder`（`FilterTabOrder` key，`[String]`）保存全量顺序，`FilterTabHiddenTabs` 保存隐藏集合。**隐藏不删顺序位**：可见序列排序后用 `FilterTabOrder.merged` 填回原顺序的可见槽位，隐藏项留在原位，重新显示即回到原处。可见数低于 2 时禁止再隐藏；`FilterTabHiddenTabs` 若解析出「全部隐藏」视为无效。每次打开弹窗回到 `全部`（被隐藏时回落到第一个可见标签，`FilterTabOrder.initialSelection` 是唯一来源，`onAppear` 也必须用它，不能再写死 `.all`）。键盘 `←/→` 与触控板横滑走 `visibleTabOrder`（跳过隐藏项），隐藏当前选中标签时回落到第一个可见标签，仍走 `switchToFilterTab` 的「先滚到顶再切 filter」。
+
 **切换 = 先滚到顶、再切 filter**（单一主流程）：先把 `scrollTarget` 指向列表顶部锚点（`listTopAnchorID`，LazyVStack 上方恒 0 高普通视图——始终被布局，不依赖未物化行的行高估算），再在下一个 runloop turn 切换 `filterMode`。原因：滚动与内容变化同事务时，scrollPosition 与 LazyVStack 行高估算和 ScrollView 偏移保持竞速——实测滚动完全丢失或反复振荡（offset 1261→0→541→0→289），按住 ↓ 深滚后立刻切换可稳定复现。切标签后 `onChange(of: filterMode)`：关预览；`selectedIndex != 0` 时重置为新列表第一条，空列表落回搜索栏。滚动靠 `.scrollPosition(id: $scrollTarget)`，无 ScrollViewReader/`scrollTo`。
 
 ### 右键上下文菜单

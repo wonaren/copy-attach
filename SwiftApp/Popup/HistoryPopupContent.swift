@@ -130,15 +130,18 @@ struct HistoryPopupContent: View {
     @State var scrollTarget: Int?
     let listTopAnchorID = 0
 
-    @State var filterMode: FilterMode = .all
+    @State var filterMode: FilterMode = FilterTabOrder.initialSelection
     @State var pendingFilterMode: FilterMode?
     @State var filterSwitchGeneration = 0
+    @State var tabOrder: [FilterMode] = FilterTabOrder.saved
+    @State var hiddenTabs: Set<FilterMode> = FilterTabOrder.savedHidden
+
+    var visibleTabOrder: [FilterMode] { FilterTabOrder.visible(tabOrder, hidden: hiddenTabs) }
 
     @State private var contextMenuArmed = false
     @State private var pendingContextMenuRequest: PopupContextMenuRequest?
 
     @Namespace private var selectionNamespace
-    @Namespace private var filterTabNamespace
 
     @State var isDismissing: Bool = false
 
@@ -482,7 +485,7 @@ struct HistoryPopupContent: View {
             searchResultsGeneration &+= 1
             searchTask?.cancel()
             searchTask = nil
-            filterMode = .all
+            filterMode = FilterTabOrder.initialSelection
             pendingFilterMode = nil
             filterSwitchGeneration &+= 1
             showPreview = false
@@ -876,50 +879,13 @@ struct HistoryPopupContent: View {
 
     private var filterModeTabs: some View {
         HStack(spacing: 8) {
-            ForEach(FilterMode.allCases, id: \.self) { mode in
-                Button(action: {
-                    switchToFilterTab(mode)
-                }) {
-                    Image(systemName: mode.icon)
-                        .font(.system(size: 13, weight: .medium))
-                        .frame(height: 16)
-                        .foregroundColor(mode == filterMode
-                            ? Color(nsColor: .controlAccentColor)
-                            : theme.popupFilterTabInactive)
-                        .scaleEffect(mode == filterMode ? 1.06 : 1.0)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 4)
-                        .background {
-                            if mode == filterMode {
-                                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                    .fill(theme.popupFilterTabBackgroundSelected)
-                                    .overlay(
-                                        RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                            .strokeBorder(
-                                                Color(nsColor: .controlAccentColor).opacity(0.35),
-                                                lineWidth: 1
-                                            )
-                                    )
-                                    .matchedGeometryEffect(id: "activeFilterPill", in: filterTabNamespace)
-                            } else {
-                                toolbarButtonBackground
-                            }
-                        }
-                }
-                .buttonStyle(AppleTactileButtonStyle(scale: 0.94))
-                .help(mode.title)
+            FilterTabStrip(order: $tabOrder, hidden: $hiddenTabs, selected: filterMode) { mode in
+                switchToFilterTab(mode)
             }
-            Spacer()
             updateBadgeButton
         }
         .padding(.vertical, 2)
         .animation(AppleMotion.snappy, value: filterMode)
-    }
-
-    private var toolbarButtonBackground: some View {
-        let shape = RoundedRectangle(cornerRadius: 6, style: .continuous)
-        return shape.fill(theme.popupFilterTabBackground)
-            .overlay(shape.strokeBorder(theme.popupRowBorder, lineWidth: 1))
     }
 
     @ViewBuilder
