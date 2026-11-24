@@ -7,6 +7,38 @@ final class PreviewHoverState {
     var isHovering = false
 }
 
+enum PreviewShellGeometry {
+    static let cornerRadius: CGFloat = 20
+
+    static func fullPath(cornerRadius radius: CGFloat, rect: CGRect) -> CGPath {
+        if #available(macOS 26.0, *) {
+            return ConcentricRectangle(uniformTopCorners: .fixed(radius),
+                                       uniformBottomCorners: .fixed(radius)).path(in: rect).cgPath
+        }
+        return RoundedRectangle(cornerRadius: radius, style: .continuous).path(in: rect).cgPath
+    }
+
+    static func bottomRoundedPath(cornerRadius radius: CGFloat, rect: CGRect) -> CGPath {
+        if #available(macOS 26.0, *) {
+            return ConcentricRectangle(topLeadingCorner: .fixed(0),
+                                       topTrailingCorner: .fixed(0),
+                                       bottomLeadingCorner: .fixed(radius),
+                                       bottomTrailingCorner: .fixed(radius)).path(in: rect).cgPath
+        }
+        return UnevenRoundedRectangle(bottomLeadingRadius: radius,
+                                      bottomTrailingRadius: radius,
+                                      style: .continuous).path(in: rect).cgPath
+    }
+}
+
+struct PreviewBottomRoundedClip: Shape {
+    var cornerRadius: CGFloat = PreviewShellGeometry.cornerRadius
+
+    func path(in rect: CGRect) -> Path {
+        Path(PreviewShellGeometry.bottomRoundedPath(cornerRadius: cornerRadius, rect: rect))
+    }
+}
+
 final class SquircleMaskView: NSView {
     private let maskLayer = CAShapeLayer()
 
@@ -22,9 +54,12 @@ final class SquircleMaskView: NSView {
 
     override func layout() {
         super.layout()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
         maskLayer.frame = bounds
-        let radius = min(19, max(0, min(bounds.width, bounds.height) / 2))
-        maskLayer.path = PreviewWindow.squirclePath(bounds, radius: radius, exponent: 2.4)
+        let radius = min(PreviewShellGeometry.cornerRadius, max(0, min(bounds.width, bounds.height) / 2))
+        maskLayer.path = PreviewShellGeometry.fullPath(cornerRadius: radius, rect: bounds)
+        CATransaction.commit()
     }
 }
 
@@ -73,7 +108,6 @@ class PreviewWindow: NSPanel {
 
     private static let miniMaxWidth: CGFloat = 300
     private static let miniMaxHeight: CGFloat = 280
-    private static let miniPadding: CGFloat = 6
     static func miniMaxPixel(scale: CGFloat) -> Int {
         Int((miniMaxWidth * scale).rounded(.up))
     }
@@ -199,29 +233,6 @@ class PreviewWindow: NSPanel {
         self.hostingView = hosting
     }
 
-    static func squirclePath(_ rect: CGRect, radius a: CGFloat, exponent n: CGFloat, steps: Int = 160) -> CGPath {
-        let path = CGMutablePath()
-        let e = 2 / n
-        func cosE(_ t: CGFloat) -> CGFloat { pow(abs(cos(t)), e) }
-        func sinE(_ t: CGFloat) -> CGFloat { pow(abs(sin(t)), e) }
-        func arc(cx: CGFloat, cy: CGFloat, sx: CGFloat, sy: CGFloat, from: CGFloat, to: CGFloat) {
-            for i in 0...steps {
-                let t = from + (to - from) * CGFloat(i) / CGFloat(steps)
-                path.addLine(to: CGPoint(x: cx + sx * a * cosE(t), y: cy + sy * a * sinE(t)))
-            }
-        }
-        path.move(to: CGPoint(x: rect.minX + a, y: rect.maxY))
-        path.addLine(to: CGPoint(x: rect.maxX - a, y: rect.maxY))
-        arc(cx: rect.maxX - a, cy: rect.maxY - a, sx: 1, sy: 1, from: .pi / 2, to: 0)
-        path.addLine(to: CGPoint(x: rect.maxX, y: rect.minY + a))
-        arc(cx: rect.maxX - a, cy: rect.minY + a, sx: 1, sy: -1, from: 0, to: .pi / 2)
-        path.addLine(to: CGPoint(x: rect.minX + a, y: rect.minY))
-        arc(cx: rect.minX + a, cy: rect.minY + a, sx: -1, sy: -1, from: .pi / 2, to: 0)
-        path.addLine(to: CGPoint(x: rect.minX, y: rect.maxY - a))
-        arc(cx: rect.minX + a, cy: rect.maxY - a, sx: -1, sy: 1, from: 0, to: .pi / 2)
-        path.closeSubpath()
-        return path
-    }
     private func makeMiniContent(state: MiniPreviewState) -> AnyView {
         AnyView(PreviewContent(
             miniState: state,
@@ -422,7 +433,7 @@ class PreviewWindow: NSPanel {
         guard let screenFrame = targetScreen?.visibleFrame, screenFrame.width > 0 else { return }
         let newSize = Self.contentSize(for: item, screenFrame: screenFrame)
         let oldSize = self.frame.size
-        guard abs(newSize.width - oldSize.width) > 2 || abs(newSize.height - oldSize.height) > 2 else { return }
+        guard abs(newSize.width - oldSize.width) > 0.5 || abs(newSize.height - oldSize.height) > 0.5 else { return }
         let newOrigin = NSPoint(
             x: centerAnchor.x - newSize.width / 2,
             y: centerAnchor.y - newSize.height / 2
@@ -459,11 +470,9 @@ class PreviewWindow: NSPanel {
         switch item {
         case .image(_, _, let w, let h, _, _, _, _, _):
             guard w > 0, h > 0 else { return NSSize(width: 220, height: 160) }
-            let boxW = miniMaxWidth - miniPadding
-            let boxH = miniMaxHeight - miniPadding
-            let scale = min(boxW / CGFloat(w), boxH / CGFloat(h), 2)
-            return NSSize(width: CGFloat(w) * scale + miniPadding,
-                          height: CGFloat(h) * scale + miniPadding)
+            let scale = min(miniMaxWidth / CGFloat(w), miniMaxHeight / CGFloat(h), 2)
+            return NSSize(width: CGFloat(w) * scale,
+                          height: CGFloat(h) * scale)
         case .text(_, _, _, _, _, _, let preview, _):
             return miniTextSize(preview)
         }
@@ -476,12 +485,17 @@ class PreviewWindow: NSPanel {
             ? .systemFont(ofSize: 12)
             : .monospacedSystemFont(ofSize: 12, weight: .regular)
         let rect = (prepared.displayText as NSString).boundingRect(
-            with: NSSize(width: width - 24, height: .greatestFiniteMagnitude),
+            with: NSSize(width: width - 18, height: .greatestFiniteMagnitude),
             options: [.usesLineFragmentOrigin, .usesFontLeading],
             attributes: [.font: font]
         )
         let contentHeight = min(ceil(rect.height), 96)
-        return NSSize(width: width, height: contentHeight + 24)
+        return NSSize(width: width, height: contentHeight + 18)
+    }
+
+    private static func alignedWidth(_ width: CGFloat) -> CGFloat {
+        let scale = NSScreen.main?.backingScaleFactor ?? 2
+        return (width * scale).rounded() / scale
     }
 
     private static func contentSize(for item: ClipboardItem, screenFrame: NSRect) -> NSSize {
@@ -491,7 +505,7 @@ class PreviewWindow: NSPanel {
         switch item {
         case .text(let entryId, _, _, _, _, _, let text, _):
             let prepared = PreviewTextLayout.prepare(text)
-            let pad: CGFloat = 32
+            let pad: CGFloat = 26
             let maxErgonomicWidth: CGFloat = (prepared.kind == .prose) ? 680 : 880
             let effectiveMaxW = min(maxErgonomicWidth, maxW)
             let widthLimit = effectiveMaxW - pad
@@ -508,7 +522,7 @@ class PreviewWindow: NSPanel {
             let textWidth = min(max(longestLineWidth + pad, minW), effectiveMaxW)
             let containerW = textWidth - pad
 
-            let verticalOverhead: CGFloat = 54
+            let verticalOverhead: CGFloat = 51
             let maxTextH = max(maxH - verticalOverhead, 50)
             let textH = calculateTextHeight(
                 prepared.displayText,
@@ -522,16 +536,15 @@ class PreviewWindow: NSPanel {
 
         case .image(_, _, let w, let h, _, _, _, _, _):
             guard w > 0, h > 0 else {
-                return NSSize(width: 360, height: 160)
+                return NSSize(width: PreviewFooterBar.minimumWidth, height: 160)
             }
-            let padX: CGFloat = 6
-            let chrome: CGFloat = 3 + 1 + PreviewFooterBar.height
-            let maxContentW = maxW - padX
+            let chrome: CGFloat = 1 + PreviewFooterBar.height
+            let maxContentW = maxW
             let maxContentH = max(min(maxH - chrome, 720), 50)
             let scale = min(1, maxContentW / CGFloat(w), maxContentH / CGFloat(h))
-            let displayW = CGFloat(w) * scale
+            let displayW = Self.alignedWidth(CGFloat(w) * scale)
             let displayH = CGFloat(h) * scale
-            return NSSize(width: min(max(displayW + padX, 360), maxW),
+            return NSSize(width: max(displayW, PreviewFooterBar.minimumWidth),
                           height: max(displayH + chrome, 110))
         }
     }

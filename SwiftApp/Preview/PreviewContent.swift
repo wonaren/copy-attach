@@ -221,12 +221,7 @@ struct PreviewContent: View {
                     onTap: onTapWhenUnzoomed
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(
-                    RoundedRectangle(cornerRadius: 11, style: .continuous)
-                        .fill(theme.previewBackground)
-                )
-                .padding(.horizontal, 3)
-                .padding(.top, 3)
+                .background(theme.previewBackground)
 
                 Divider()
                     .opacity(isDark ? 0.12 : 0.08)
@@ -250,10 +245,9 @@ struct PreviewContent: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .padding(9)
             .background(
-                RoundedRectangle(cornerRadius: embedded ? 0 : 11, style: .continuous)
+                Rectangle()
                     .fill(theme.previewBackground)
             )
-            .padding(embedded ? 0 : 3)
             .contentShape(Rectangle())
             .onTapGesture { onTapWhenUnzoomed?() }
     }
@@ -290,10 +284,8 @@ struct PreviewContent: View {
         VStack(spacing: 0) {
             largeImageBody(dbId: dbId)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
-                .padding(.horizontal, 3)
-                .padding(.top, 3)
-                .padding(.bottom, 3 * (1 - t))
+                .background(theme.previewBackground)
+                .clipShape(PreviewBottomRoundedClip())
 
             Divider()
                 .opacity((colorScheme == .dark ? 0.12 : 0.08) * t)
@@ -303,7 +295,8 @@ struct PreviewContent: View {
                 item: item,
                 details: .image(width: imagePixelSize.w, height: imagePixelSize.h),
                 onPaste: onPaste,
-                onClose: onClose
+                onClose: onClose,
+                collapsing: t < 1
             )
             .frame(height: PreviewFooterBar.height * t)
             .opacity(t)
@@ -315,17 +308,14 @@ struct PreviewContent: View {
         if let decoded {
             if let surface = decoded.surface {
                 SurfaceImageView(surface: surface,
-                                 cornerRadius: embedded ? 0 : 11,
+                                 cornerRadius: 0,
                                  onTap: onTapWhenUnzoomed)
-                    .padding(embedded ? 0 : 3)
             } else if let img = decoded.image {
                 Image(nsImage: img)
                     .resizable()
                     .interpolation(.high)
                     .aspectRatio(contentMode: .fit)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .clipShape(RoundedRectangle(cornerRadius: embedded ? 0 : 11, style: .continuous))
-                    .padding(embedded ? 0 : 3)
                     .contentShape(Rectangle())
                     .onTapGesture { onTapWhenUnzoomed?() }
             }
@@ -339,23 +329,28 @@ struct PreviewContent: View {
         }
     }
 
-    @ViewBuilder
     private func largeImageBody(dbId: Int) -> some View {
-        if let decoded {
-            ZoomableImageView(decoded: decoded, dbId: dbId, onTapWhenUnzoomed: onTapWhenUnzoomed)
-        } else if hasFailed {
-            Image(systemName: "photo.badge.exclamationmark")
-                .font(.system(size: 24))
-                .foregroundColor(theme.previewSecondaryText)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else {
-            imageLoadingPlaceholder
+        let aspect = imagePixelSize.h > 0
+            ? CGFloat(imagePixelSize.w) / CGFloat(imagePixelSize.h)
+            : 1
+        return Group {
+            if let decoded {
+                ZoomableImageView(decoded: decoded, dbId: dbId, onTapWhenUnzoomed: onTapWhenUnzoomed)
+            } else if hasFailed {
+                Image(systemName: "photo.badge.exclamationmark")
+                    .font(.system(size: 24))
+                    .foregroundColor(theme.previewSecondaryText)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                imageLoadingPlaceholder
+            }
         }
+        .aspectRatio(aspect, contentMode: .fit)
     }
 
     private var imageLoadingPlaceholder: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: 11, style: .continuous)
+            Rectangle()
                 .fill(theme.previewBackground)
             VStack(spacing: 12) {
                 Image(systemName: "photo")

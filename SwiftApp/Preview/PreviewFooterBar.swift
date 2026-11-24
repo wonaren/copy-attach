@@ -9,21 +9,41 @@ struct PreviewFooterBar: View {
 
     static let height: CGFloat = 28
 
+    private static let horizontalPadding: CGFloat = 14
+    private static let iconSide: CGFloat = 14
+    private static let columnSpacing: CGFloat = 8
+    private static let spacerMinimum: CGFloat = 8
+
+    private static func textWidth(_ text: String, size: CGFloat, weight: NSFont.Weight) -> CGFloat {
+        (text as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: size, weight: weight)]).width
+    }
+
+    private static var actionButtonWidth: CGFloat {
+        14 + textWidth("x", size: 9, weight: .semibold) + 3 + textWidth("粘贴", size: 10, weight: .semibold)
+    }
+
+    static var minimumWidth: CGFloat {
+        horizontalPadding * 2 + iconSide + columnSpacing + spacerMinimum + actionButtonWidth * 2 + 6
+    }
+
     let item: ClipboardItem
     let details: Details
     let onPaste: ((Int) -> Void)?
     let onClose: (() -> Void)?
+    let collapsing: Bool
     @Environment(\.appTheme) private var theme
     @Environment(\.colorScheme) private var colorScheme
 
     init(item: ClipboardItem,
          details: Details,
          onPaste: ((Int) -> Void)? = nil,
-         onClose: (() -> Void)? = nil) {
+         onClose: (() -> Void)? = nil,
+         collapsing: Bool = false) {
         self.item = item
         self.details = details
         self.onPaste = onPaste
         self.onClose = onClose
+        self.collapsing = collapsing
     }
 
     private var appIcon: NSImage? {
@@ -34,22 +54,30 @@ struct PreviewFooterBar: View {
     }
 
     var body: some View {
-        ViewThatFits(in: .horizontal) {
-            row(showName: true, showStats: true)
-            row(showName: true, showStats: false)
-            row(showName: false, showStats: false)
+        Group {
+            if collapsing {
+                Color.clear
+            } else {
+                ViewThatFits(in: .horizontal) {
+                    row(showName: true, showStats: true, showTimestamp: true)
+                    row(showName: true, showStats: false, showTimestamp: true)
+                    row(showName: false, showStats: false, showTimestamp: true)
+                    row(showName: false, showStats: false, showTimestamp: false)
+                }
+            }
         }
-        .padding(.horizontal, 14)
+        .padding(.horizontal, Self.horizontalPadding)
         .frame(height: Self.height)
         .background(
             colorScheme == .dark
                 ? Color.black.opacity(0.18)
                 : Color.black.opacity(0.03)
         )
+        .clipped()
     }
 
-    private func row(showName: Bool, showStats: Bool) -> some View {
-        HStack(alignment: .center, spacing: 8) {
+    private func row(showName: Bool, showStats: Bool, showTimestamp: Bool) -> some View {
+        HStack(alignment: .center, spacing: Self.columnSpacing) {
             HStack(spacing: 5) {
                 if let icon = appIcon {
                     Image(nsImage: icon)
@@ -66,17 +94,19 @@ struct PreviewFooterBar: View {
                 }
             }
 
-            Spacer(minLength: 8)
+            Spacer(minLength: Self.spacerMinimum)
 
             if showStats {
                 statsView
             }
 
-            Text("最近使用 \(Self.formatTimestamp(item.timestamp))")
-                .font(.system(size: 10))
-                .foregroundColor(theme.previewSecondaryText)
-                .lineLimit(1)
-                .fixedSize()
+            if showTimestamp {
+                Text("最近使用 \(Self.formatTimestamp(item.timestamp))")
+                    .font(.system(size: 10))
+                    .foregroundColor(theme.previewSecondaryText)
+                    .lineLimit(1)
+                    .fixedSize()
+            }
 
             if onPaste != nil || onClose != nil {
                 HStack(spacing: 6) {

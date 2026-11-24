@@ -118,11 +118,11 @@ enum ImageDecode {
         guard clipboard_preview_dims(Int32(sourceWidth), Int32(sourceHeight), Int32(maxPixel), &dw, &dh) != 0,
               dw > 0, dh > 0 else { return nil }
 
-        let properties: [IOSurfacePropertyKey: Any] = [
-            .width: Int(dw),
-            .height: Int(dh),
-            .bytesPerElement: 4,
-            .pixelFormat: 0x42475241,
+        let properties = [
+            IOSurfacePropertyKey.width: Int(dw),
+            IOSurfacePropertyKey.height: Int(dh),
+            IOSurfacePropertyKey.bytesPerElement: 4,
+            IOSurfacePropertyKey.pixelFormat: 0x42475241,
         ]
         guard let surface = IOSurface(properties: properties) else { return nil }
 
