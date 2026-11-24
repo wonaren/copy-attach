@@ -53,8 +53,8 @@ extension View {
 final class SpotlightOverlayWindow: NSPanel {
     private static let dimAlpha: CGFloat = 0.38
     private static let cutoutPadding: CGFloat = 4
-    private static let revealDuration: TimeInterval = 0.34
-    private static let travelDuration: TimeInterval = 0.32
+    private static var revealDuration: TimeInterval { ReduceMotion.duration(0.34) }
+    private static var travelDuration: TimeInterval { ReduceMotion.duration(0.32) }
     private static let fadeInDuration: TimeInterval = 0.22
 
     private let scrimView = NSView()
@@ -199,6 +199,7 @@ final class SpotlightOverlayWindow: NSPanel {
             step.layer.add(animation, forKey: "path")
         }
 
+        guard !ReduceMotion.isOn else { return }
         let pulse = CABasicAnimation(keyPath: "opacity")
         pulse.fromValue = 0.3
         pulse.toValue = 1.0

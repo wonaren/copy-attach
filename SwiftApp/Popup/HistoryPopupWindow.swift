@@ -35,7 +35,7 @@ class HistoryPopupWindow: NSPanel {
     static let dragParkLeftZoneRatio: CGFloat = 0.45
     static let dragParkRightZoneRatio: CGFloat = 0.55
     static let dragParkMargin: CGFloat = 12
-    static let dragParkDuration: TimeInterval = 0.22
+    static var dragParkDuration: TimeInterval { ReduceMotion.duration(0.22) }
 
     static let continuousDragDefaultsKey = "ContinuousDrag"
 
@@ -187,7 +187,7 @@ class HistoryPopupWindow: NSPanel {
         hosting.layer?.anchorPoint = CGPoint(x: 0, y: 0)
         hosting.layer?.position = .zero
 
-        applyContentScale(1.06, to: hosting, layer: hosting.layer!)
+        applyContentScale(ReduceMotion.scale(1.06), to: hosting, layer: hosting.layer!)
 
         resetDragParking()
         centerOnScreen()
@@ -407,11 +407,15 @@ class HistoryPopupWindow: NSPanel {
     func setContentScale(_ scale: CGFloat) {
         guard let host = popupHostingView, let layer = host.layer else { return }
         layer.removeAnimation(forKey: "contentScale")
-        applyContentScale(scale, to: host, layer: layer)
+        applyContentScale(ReduceMotion.scale(scale), to: host, layer: layer)
     }
 
     func animateContentScale(to scale: CGFloat, response: TimeInterval, damping: CGFloat) {
         guard let host = popupHostingView, let layer = host.layer else { return }
+        guard !ReduceMotion.isOn else {
+            setContentScale(scale)
+            return
+        }
         let size = host.bounds.size
         let animation = CASpringAnimation(keyPath: "transform")
         animation.fromValue = centerAnchoredTransform(scale: currentContentScale(of: layer), size: size)

@@ -1,23 +1,102 @@
 import AppKit
 import SwiftUI
 
+@Observable
+final class ReduceMotionState: @unchecked Sendable {
+    static let shared = ReduceMotionState()
+
+    private(set) var isOn: Bool = ReduceMotionState.readPreference()
+
+    private var observer: NSObjectProtocol?
+
+    private init() {
+        observer = NotificationCenter.default.addObserver(
+            forName: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            MainActor.assumeIsolated {
+                ReduceMotionState.shared.refresh()
+            }
+        }
+    }
+
+    private static func readPreference() -> Bool {
+        CFPreferencesCopyAppValue("reduceMotion" as CFString,
+                                  "com.apple.universalaccess" as CFString) as? Bool ?? false
+    }
+
+    private func refresh() {
+        let value = ReduceMotionState.readPreference()
+        guard value != isOn else { return }
+        isOn = value
+    }
+}
+
+enum ReduceMotion {
+    static var isOn: Bool {
+        ReduceMotionState.shared.isOn
+    }
+
+    static func duration(_ value: TimeInterval) -> TimeInterval {
+        isOn ? 0 : value
+    }
+
+    static func animation(_ animation: Animation) -> Animation? {
+        isOn ? nil : animation
+    }
+
+    static func transition(_ transition: AnyTransition) -> AnyTransition {
+        isOn ? .opacity : transition
+    }
+
+    static func scale(_ value: CGFloat) -> CGFloat {
+        isOn ? 1 : value
+    }
+
+    static func blur(_ value: CGFloat) -> CGFloat {
+        isOn ? 0 : value
+    }
+}
+
+extension View {
+    @ViewBuilder
+    func reduceMotionSymbol<E: DiscreteSymbolEffect & SymbolEffect, T: Equatable>(_ effect: E, value: T) -> some View {
+        if ReduceMotion.isOn {
+            self
+        } else {
+            symbolEffect(effect, value: value)
+        }
+    }
+
+    @ViewBuilder
+    func reduceMotionSymbol<E: IndefiniteSymbolEffect & SymbolEffect>(_ effect: E, isActive: Bool = true) -> some View {
+        if ReduceMotion.isOn {
+            self
+        } else {
+            symbolEffect(effect, isActive: isActive)
+        }
+    }
+}
+
 enum AppleMotion {
-    static var snappy: Animation {
-        .spring(response: 0.22, dampingFraction: 0.78, blendDuration: 0)
+    static var snappy: Animation? {
+        ReduceMotion.isOn ? nil : .spring(response: 0.22, dampingFraction: 0.78, blendDuration: 0)
     }
 
-    static var smooth: Animation {
-        .spring(response: 0.30, dampingFraction: 0.82, blendDuration: 0)
+    static var smooth: Animation? {
+        ReduceMotion.isOn ? nil : .spring(response: 0.30, dampingFraction: 0.82, blendDuration: 0)
     }
 
-    static var tactilePress: Animation {
-        .spring(response: 0.16, dampingFraction: 0.70, blendDuration: 0)
+    static var tactilePress: Animation? {
+        ReduceMotion.isOn ? nil : .spring(response: 0.16, dampingFraction: 0.70, blendDuration: 0)
     }
 }
 
 extension AnyTransition {
     static var appleScaleFade: AnyTransition {
-        .asymmetric(
+        if ReduceMotion.isOn { return .opacity }
+        return .asymmetric(
             insertion: .scale(scale: 0.992).combined(with: .opacity),
             removal: .scale(scale: 0.992).combined(with: .opacity)
         )
@@ -29,7 +108,7 @@ struct AppleTactileButtonStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .scaleEffect(configuration.isPressed ? scale : 1.0)
+            .scaleEffect(configuration.isPressed ? ReduceMotion.scale(scale) : 1.0)
             .animation(AppleMotion.tactilePress, value: configuration.isPressed)
     }
 }
@@ -39,10 +118,12 @@ struct LinearShimmerModifier: ViewModifier {
     var isActive: Bool = true
     var duration: Double = 1.35
 
+    private var active: Bool { isActive && !ReduceMotion.isOn }
+
     func body(content: Content) -> some View {
         content
             .overlay {
-                if isActive {
+                if active {
                     GeometryReader { geo in
                         let width = max(geo.size.width, 1)
                         LinearGradient(
@@ -97,7 +178,7 @@ struct ShimmerPlaceholderCard: View {
                 Image(systemName: iconName)
                     .font(.system(size: 15))
                     .foregroundColor(theme.popupSecondaryText)
-                    .symbolEffect(.pulse)
+                    .reduceMotionSymbol(.pulse)
 
                 Text(title)
                     .font(.system(size: 11, weight: .medium))

@@ -59,14 +59,14 @@ extension InlineSettingsView {
                 Group {
                     if updater.phase.isBusy {
                         updateProgressCard
-                            .transition(.scale(scale: 0.95).combined(with: .opacity))
+                            .transition(ReduceMotion.transition(.scale(scale: 0.95).combined(with: .opacity)))
                     } else {
                         updateButtonsRow
-                            .transition(.scale(scale: 0.95).combined(with: .opacity))
+                            .transition(ReduceMotion.transition(.scale(scale: 0.95).combined(with: .opacity)))
                     }
                 }
-                .animation(.easeOut(duration: 0.2), value: updater.phase.isBusy)
-                .animation(.easeOut(duration: 0.2), value: updateState)
+                .animation(ReduceMotion.animation(.easeOut(duration: 0.2)), value: updater.phase.isBusy)
+                .animation(ReduceMotion.animation(.easeOut(duration: 0.2)), value: updateState)
                 .padding(.top, 4)
 
                 if case .failed(let message) = updater.phase {
@@ -192,7 +192,7 @@ extension InlineSettingsView {
                     .cornerRadius(6)
                 }
                 .buttonStyle(.plain)
-                .transition(.scale(scale: 0.85).combined(with: .opacity))
+                .transition(ReduceMotion.transition(.scale(scale: 0.85).combined(with: .opacity)))
             }
         }
     }

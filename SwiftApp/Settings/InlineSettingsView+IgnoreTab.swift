@@ -170,7 +170,7 @@ extension InlineSettingsView {
                 RoundedRectangle(cornerRadius: 8)
                     .stroke(isDraggingOverIgnoreSheet ? Color.accentColor : theme.cardBorder, lineWidth: isDraggingOverIgnoreSheet ? 1.5 : 1)
             )
-            .animation(.easeInOut(duration: 0.15), value: isDraggingOverIgnoreSheet)
+            .animation(ReduceMotion.animation(.easeInOut(duration: 0.15)), value: isDraggingOverIgnoreSheet)
             .onDrop(of: [UTType.fileURL.identifier], isTargeted: $isDraggingOverIgnoreSheet) { providers in
                 handleDropIgnoredApplications(providers)
             }
@@ -242,7 +242,7 @@ extension InlineSettingsView {
             Spacer()
 
             Button {
-                withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
+                withAnimation(ReduceMotion.animation(.spring(response: 0.25, dampingFraction: 0.8))) {
                     ignoredAppBundleIDs.removeAll { $0 == bundleID }
                     persistIgnoreRules()
                 }
@@ -267,7 +267,7 @@ extension InlineSettingsView {
                         ForEach(running, id: \.processIdentifier) { app in
                             Button {
                                 if let id = app.bundleIdentifier {
-                                    withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
+                                    withAnimation(ReduceMotion.animation(.spring(response: 0.25, dampingFraction: 0.8))) {
                                         ignoredAppBundleIDs.append(id)
                                         persistIgnoreRules()
                                     }
@@ -360,7 +360,7 @@ extension InlineSettingsView {
                 guard let bundle = Bundle(url: url), let bundleID = bundle.bundleIdentifier else { return }
                 DispatchQueue.main.async {
                     if !self.ignoredAppBundleIDs.contains(bundleID) {
-                        withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
+                        withAnimation(ReduceMotion.animation(.spring(response: 0.25, dampingFraction: 0.8))) {
                             self.ignoredAppBundleIDs.append(bundleID)
                             self.persistIgnoreRules()
                         }

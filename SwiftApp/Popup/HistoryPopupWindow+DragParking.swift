@@ -40,13 +40,17 @@ extension HistoryPopupWindow {
         lastParkTickX = origin.x
         parkSlideStallTicks = 0
         debugLog("Drag parking: \(side == .left ? "left" : "right") edge")
+        let target = NSRect(x: clampedX, y: origin.y, width: self.frame.width, height: self.frame.height)
+        let duration = Self.dragParkDuration
+        guard duration > 0 else {
+            setFrame(target, display: true)
+            pendingParkTargetX = nil
+            return
+        }
         NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = Self.dragParkDuration
+            ctx.duration = duration
             ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
-            self.animator().setFrame(
-                NSRect(x: clampedX, y: origin.y, width: self.frame.width, height: self.frame.height),
-                display: true
-            )
+            self.animator().setFrame(target, display: true)
         }
     }
 
@@ -79,13 +83,16 @@ extension HistoryPopupWindow {
         let centeredX = visible.minX + (visible.size.width - self.frame.width) / 2
         let origin = self.frame.origin
         guard abs(origin.x - centeredX) > 1 else { return }
+        let target = NSRect(x: centeredX, y: origin.y, width: self.frame.width, height: self.frame.height)
+        let duration = Self.dragParkDuration
+        guard duration > 0 else {
+            setFrame(target, display: true)
+            return
+        }
         NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = Self.dragParkDuration
+            ctx.duration = duration
             ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
-            self.animator().setFrame(
-                NSRect(x: centeredX, y: origin.y, width: self.frame.width, height: self.frame.height),
-                display: true
-            )
+            self.animator().setFrame(target, display: true)
         }
     }
 

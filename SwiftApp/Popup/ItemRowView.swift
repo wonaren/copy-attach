@@ -141,16 +141,16 @@ struct ItemRowView: View {
                     .foregroundColor(remarkAccent ?? textColor(true))
                     .frame(width: 14, alignment: .center)
                     .help("备注: \(item.customLabel)")
-                    .symbolEffect(.bounce, value: item.hasCustomLabel)
-                    .transition(.scale(scale: 0.9).combined(with: .opacity))
+                    .reduceMotionSymbol(.bounce, value: item.hasCustomLabel)
+                    .transition(ReduceMotion.transition(.scale(scale: 0.9).combined(with: .opacity)))
             }
             if isFavorite {
                 Image(systemName: "star.fill").accessibilityHidden(true)
                     .font(.system(size: 10))
                     .foregroundColor(Color(nsColor: .systemYellow))
                     .frame(width: 16, alignment: .center)
-                    .symbolEffect(.bounce, value: isFavorite)
-                    .transition(.scale(scale: 0.9).combined(with: .opacity))
+                    .reduceMotionSymbol(.bounce, value: isFavorite)
+                    .transition(ReduceMotion.transition(.scale(scale: 0.9).combined(with: .opacity)))
             }
             queueToggleControl
             if isSelected && isDeleteModifierPressed {
@@ -159,8 +159,8 @@ struct ItemRowView: View {
                     .foregroundColor(Color.white)
                     .frame(minWidth: 20, alignment: .center)
                     .padding(.trailing, 6)
-                    .symbolEffect(.pulse, isActive: isDeleteModifierPressed)
-                    .transition(.scale(scale: 0.9).combined(with: .opacity))
+                    .reduceMotionSymbol(.pulse, isActive: isDeleteModifierPressed)
+                    .transition(ReduceMotion.transition(.scale(scale: 0.9).combined(with: .opacity)))
             } else if let hint = shortcutHint {
                 shortcutBadge(hint)
             } else if let slot = quickSlot {
@@ -175,15 +175,15 @@ struct ItemRowView: View {
                     .padding(.horizontal, 2)
                     .padding(.vertical, 1.5)
                     .background(Capsule().fill(isSelected ? Color.clear : theme.popupTagBackground))
-                    .transition(.scale(scale: 0.9).combined(with: .opacity))
+                    .transition(ReduceMotion.transition(.scale(scale: 0.9).combined(with: .opacity)))
             }
         }
         .padding(.horizontal, 2)
         .padding(.vertical, 3)
-        .animation(.easeOut(duration: 0.1), value: isSelected)
-        .animation(.easeOut(duration: 0.15), value: isFavorite)
-        .animation(.easeOut(duration: 0.15), value: quickSlot)
-        .animation(.easeOut(duration: 0.15), value: item.hasCustomLabel)
+        .animation(ReduceMotion.animation(.easeOut(duration: 0.1)), value: isSelected)
+        .animation(ReduceMotion.animation(.easeOut(duration: 0.15)), value: isFavorite)
+        .animation(ReduceMotion.animation(.easeOut(duration: 0.15)), value: quickSlot)
+        .animation(ReduceMotion.animation(.easeOut(duration: 0.15)), value: item.hasCustomLabel)
         .background(selectionBackground)
         .background(RowHoverDetector { hovering, screenRect, moved in
             isHovering = hovering
@@ -197,7 +197,7 @@ struct ItemRowView: View {
             .monospacedDigit()
             .foregroundColor(isSelected ? sourceNameColor(true) : Color(nsColor: .controlAccentColor))
             .lineLimit(1)
-            .transition(.scale(scale: 0.9).combined(with: .opacity))
+            .transition(ReduceMotion.transition(.scale(scale: 0.9).combined(with: .opacity)))
     }
 
     @ViewBuilder
@@ -213,7 +213,7 @@ struct ItemRowView: View {
                             .background(
                                 Circle().fill(isSelected ? Color.white : Color(nsColor: .controlAccentColor))
                             )
-                            .transition(.scale(scale: 0.85).combined(with: .opacity))
+                            .transition(ReduceMotion.transition(.scale(scale: 0.85).combined(with: .opacity)))
                     } else if isHovering {
                         Circle()
                             .fill(queueToggleCircleFill)
@@ -224,10 +224,10 @@ struct ItemRowView: View {
                                 )
                             )
                             .frame(width: 13.5, height: 13.5)
-                            .transition(.scale(scale: 0.85).combined(with: .opacity))
+                            .transition(ReduceMotion.transition(.scale(scale: 0.85).combined(with: .opacity)))
                     }
                 }
-                .scaleEffect(isQueueToggleHovered ? 1.08 : 1.0)
+                .scaleEffect(isQueueToggleHovered ? ReduceMotion.scale(1.08) : 1.0)
                 .frame(width: 18, height: 18)
                 .background(
                     Circle()
@@ -239,7 +239,7 @@ struct ItemRowView: View {
             .buttonStyle(.plain)
             .allowsHitTesting(queueOrder != nil || isHovering)
             .onHover { hovering in
-                withAnimation(.easeOut(duration: 0.12)) {
+                withAnimation(ReduceMotion.animation(.easeOut(duration: 0.12))) {
                     isQueueToggleHovered = hovering
                 }
             }

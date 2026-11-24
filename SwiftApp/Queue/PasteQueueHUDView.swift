@@ -37,7 +37,7 @@ struct PasteQueueHUDView: View {
             HStack(spacing: 1) {
                 Text("\(manager.currentIndex + 1)")
                     .font(.system(size: 11, weight: .bold, design: .rounded))
-                    .contentTransition(.numericText())
+                    .contentTransition(ReduceMotion.isOn ? .identity : .numericText())
                 Text("/")
                     .font(.system(size: 10, weight: .regular))
                     .opacity(0.8)
@@ -105,7 +105,7 @@ struct PasteQueueHUDView: View {
                 .font(.system(size: 14, weight: .bold))
                 .foregroundColor(manager.failedSkipCount > 0
                                  ? Color(nsColor: .systemOrange) : Color(nsColor: .systemGreen))
-                .symbolEffect(.bounce, value: manager.isFinished)
+                .reduceMotionSymbol(.bounce, value: manager.isFinished)
             Text(manager.failedSkipCount > 0
                  ? "已跳过 \(manager.failedSkipCount) 个失效项"
                  : "全部粘贴完成")

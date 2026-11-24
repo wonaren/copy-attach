@@ -288,7 +288,7 @@ struct HistoryPopupContent: View {
 
     var maxIndex: Int { displayItems.count }
 
-    private static var inlineEditAnimation: Animation { .easeOut(duration: 0.12) }
+    private static var inlineEditAnimation: Animation? { ReduceMotion.animation(.easeOut(duration: 0.12)) }
 
     func startInlineEditing(for item: ClipboardItem) {
         if showPreview { closePreview() }
@@ -378,7 +378,7 @@ struct HistoryPopupContent: View {
                         .padding(.horizontal, 5)
 
                     filterPageContent
-                        .animation(.easeOut(duration: 0.18), value: displayItems.isEmpty)
+                        .animation(ReduceMotion.animation(.easeOut(duration: 0.18)), value: displayItems.isEmpty)
                 }
                 .padding(.all, 3)
                 .transition(.appleScaleFade)
@@ -394,10 +394,10 @@ struct HistoryPopupContent: View {
                 .zIndex(999)
             }
         }
-        .blur(radius: isDismissing ? 16.0 : 0.0)
+        .blur(radius: isDismissing ? ReduceMotion.blur(16.0) : 0.0)
         .opacity(isDismissing ? 0.0 : 1.0)
         .frame(width: popupWidth, height: popupHeight)
-        .animation(.easeOut(duration: 0.18), value: backend.items.isEmpty)
+        .animation(ReduceMotion.animation(.easeOut(duration: 0.18)), value: backend.items.isEmpty)
         .onPreferenceChange(SpotlightFramePreferenceKey.self) { geometry in
             OnboardingGuide.shared.updateSpotlightGeometry(geometry)
         }
@@ -728,7 +728,7 @@ struct HistoryPopupContent: View {
             if !newValue.isEmpty { OnboardingGuide.shared.record(.searched) }
             searchTask?.cancel()
             if newValue.isEmpty {
-                withAnimation(.easeInOut(duration: 0.25)) {
+                withAnimation(ReduceMotion.animation(.easeInOut(duration: 0.25))) {
                     effectiveSearchText = ""
                 }
                 searchResults = []
@@ -768,7 +768,7 @@ struct HistoryPopupContent: View {
                     perfSearch?.val = Int64(filtered.count)
                     perfSearch?.data = hasCJK ? "cjk" : "ascii"
                     perfSearch?.end()
-                    withAnimation(.easeInOut(duration: 0.25)) {
+                    withAnimation(ReduceMotion.animation(.easeInOut(duration: 0.25))) {
                         effectiveSearchText = query
                         searchResults = filtered
                         searchResultsGeneration &+= 1
@@ -815,7 +815,7 @@ struct HistoryPopupContent: View {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 11, weight: .medium))
                 .foregroundColor(selectedIndex == 0 ? Color(nsColor: .controlAccentColor) : theme.popupMutedText)
-                .scaleEffect(selectedIndex == 0 ? 1.08 : 1.0)
+                .scaleEffect(selectedIndex == 0 ? ReduceMotion.scale(1.08) : 1.0)
                 .animation(AppleMotion.snappy, value: selectedIndex == 0)
 
             TextField("搜索", text: $searchText)
@@ -836,7 +836,7 @@ struct HistoryPopupContent: View {
                         .foregroundColor(theme.popupMutedText)
                 }
                 .buttonStyle(AppleTactileButtonStyle(scale: 0.90))
-                .transition(.scale(scale: 0.85).combined(with: .opacity))
+                .transition(ReduceMotion.transition(.scale(scale: 0.85).combined(with: .opacity)))
             }
         }
         .padding(.horizontal, 7)
@@ -859,7 +859,7 @@ struct HistoryPopupContent: View {
             selectedIndex = 0
             isSearchFocused = true
         }
-        .animation(.easeOut(duration: 0.15), value: searchText.isEmpty)
+        .animation(ReduceMotion.animation(.easeOut(duration: 0.15)), value: searchText.isEmpty)
         .reportSpotlightFrame(.searchField)
     }
 
@@ -982,7 +982,7 @@ struct HistoryPopupContent: View {
     }
 
     private static var rowChangeTransition: AnyTransition {
-        .opacity.combined(with: .scale(scale: 0.96))
+        ReduceMotion.transition(.opacity.combined(with: .scale(scale: 0.96)))
     }
 
     private var itemsListScrollView: some View {
@@ -1087,10 +1087,10 @@ struct HistoryPopupContent: View {
             }
             .compositingGroup()
             .padding(.all, 2)
-            .animation(.spring(response: 0.18, dampingFraction: 0.82, blendDuration: 0),
+            .animation(ReduceMotion.animation(.spring(response: 0.18, dampingFraction: 0.82, blendDuration: 0)),
                        value: selectedIndex)
             .animation(rowsReadyForAnimation
-                       ? .spring(response: 0.28, dampingFraction: 0.82, blendDuration: 0)
+                       ? ReduceMotion.animation(.spring(response: 0.28, dampingFraction: 0.82, blendDuration: 0))
                        : nil,
                        value: backend.itemsGeneration)
         }
@@ -1283,8 +1283,8 @@ struct HistoryPopupContent: View {
             Text("\(memo.items.count)")
                 .font(.system(size: 10, weight: .medium))
                 .foregroundColor(theme.popupSecondaryText)
-                .contentTransition(.numericText())
-                .animation(.easeOut(duration: 0.18), value: memo.items.count)
+                .contentTransition(ReduceMotion.isOn ? .identity : .numericText())
+                .animation(ReduceMotion.animation(.easeOut(duration: 0.18)), value: memo.items.count)
                 .drawingGroup()
             Text(" 项")
                 .font(.system(size: 10, weight: .medium))

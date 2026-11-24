@@ -236,6 +236,11 @@ final class ZoomableImageNSView: NSView {
     }
 
     private func commitTransformAnimated(duration: CFTimeInterval = 0.35) {
+        guard !ReduceMotion.isOn else {
+            imageView.layer?.removeAnimation(forKey: transformAnimationKey)
+            commitTransform()
+            return
+        }
         let currentTransform = imageView.layer?.presentation()?.transform
             ?? imageView.layer?.transform
             ?? CATransform3DIdentity

@@ -217,7 +217,7 @@ extension InlineSettingsView {
                 RoundedRectangle(cornerRadius: 8)
                     .stroke(isDraggingOverRichTextCard ? Color.accentColor : theme.cardBorder, lineWidth: isDraggingOverRichTextCard ? 1.5 : 1)
             )
-            .animation(.easeInOut(duration: 0.15), value: isDraggingOverRichTextCard)
+            .animation(ReduceMotion.animation(.easeInOut(duration: 0.15)), value: isDraggingOverRichTextCard)
             .onDrop(of: [UTType.fileURL.identifier], isTargeted: $isDraggingOverRichTextCard) { providers in
                 handleDropApplications(providers)
             }
@@ -308,7 +308,7 @@ extension InlineSettingsView {
             Spacer()
 
             Button {
-                withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
+                withAnimation(ReduceMotion.animation(.spring(response: 0.25, dampingFraction: 0.8))) {
                     richTextDragApps.removeAll { $0 == bundleID }
                     persistRichTextDragApps()
                 }
@@ -333,7 +333,7 @@ extension InlineSettingsView {
                         ForEach(running, id: \.processIdentifier) { app in
                             Button {
                                 if let id = app.bundleIdentifier {
-                                    withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
+                                    withAnimation(ReduceMotion.animation(.spring(response: 0.25, dampingFraction: 0.8))) {
                                         richTextDragApps.append(id)
                                         persistRichTextDragApps()
                                     }
@@ -435,7 +435,7 @@ extension InlineSettingsView {
                 guard let bundle = Bundle(url: url), let bundleID = bundle.bundleIdentifier else { return }
                 DispatchQueue.main.async {
                     if !self.richTextDragApps.contains(bundleID) {
-                        withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
+                        withAnimation(ReduceMotion.animation(.spring(response: 0.25, dampingFraction: 0.8))) {
                             self.richTextDragApps.append(bundleID)
                             self.persistRichTextDragApps()
                         }

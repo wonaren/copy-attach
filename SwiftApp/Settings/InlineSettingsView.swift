@@ -203,7 +203,7 @@ struct InlineSettingsView: View {
             Spacer()
             ForEach(tabTitles.indices, id: \.self) { i in
                 Button {
-                    withAnimation(.smooth(duration: 0.3)) {
+                    withAnimation(ReduceMotion.animation(.smooth(duration: 0.3))) {
                         selectedTab = i
                     }
                     if i == 5 { updateBadge.markSeen() }
@@ -238,7 +238,7 @@ struct InlineSettingsView: View {
                 tabButtons
             }
         }
-        .animation(.easeInOut(duration: 0.15), value: hoveredTab)
+        .animation(ReduceMotion.animation(.easeInOut(duration: 0.15)), value: hoveredTab)
         .padding(.top, 8)
         .background(theme.tabBackground)
     }

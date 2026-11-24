@@ -243,6 +243,31 @@ PopupHostingView 的 `.scrollWheel` local monitor 在 ScrollView 消费事件之
 
 菜单项 handler 用 `ContextMenuItemTarget`（`NSMenuItem.target` 是 weak，靠 `representedObject` 强持有）；动作一律 `currentIndex(of:)` 按稳定 entry_id 重新解析行。菜单 tracking 期间（`isMenuTracking`）Esc/←/→/⌘Z 全让位。图片行含「另存为…」（NSSavePanel 写 PNG）：保存面板是本应用的模态窗口，必然从非激活弹窗夺走 key——弹窗靠 `isPresentingModalPanel` 屏蔽这次 resign-key 的关闭（弹窗留在面板后方继续显示），`runModal()` 返回后 `makeKey()` 交还 key 状态。**不得在调起面板前 `close()`/`onClose()` 收起弹窗**（0.100.10 曾如此，实为把弹窗在保存过程中异步销毁）。
 
+### 减弱动态效果（Reduce Motion）
+
+系统「辅助功能 → 显示 → 减弱动态效果」开启时，所有动画统一走 `ReduceMotion`（`Utility/AppleMotion.swift`），**唯一来源**，不要在调用点各写一遍判断：
+
+| 入口 | 语义 |
+|---|---|
+| `ReduceMotion.isOn` | 当前开关状态 |
+| `ReduceMotion.duration(x)` | 时长 → 0（位移、形变、窗口 frame 动画） |
+| `ReduceMotion.animation(a)` | 动画 → `nil`（`withAnimation` / `.animation(_:value:)`） |
+| `ReduceMotion.transition(t)` | 过渡 → `.opacity`（`scale` / `move` 类位移过渡降级为纯淡入淡出） |
+| `ReduceMotion.scale(x)` / `ReduceMotion.blur(x)` | 缩放 → 1、模糊 → 0 |
+| `.reduceMotionSymbol(.bounce/.pulse, ...)` | 关闭 `symbolEffect`（`SymbolEffectOptions` 没有 `disable`，只能整体不施加） |
+
+`AppleMotion.snappy/smooth/tactilePress` 自身在开关开启时返回 `nil`，所以调用点仍写 `withAnimation(AppleMotion.snappy)` 即可，不必逐个改。
+
+**取值必须读 `CFPreferencesCopyAppValue("reduceMotion", "com.apple.universalaccess")`，不能读 `NSWorkspace.shared.accessibilityDisplayShouldReduceMotion`**：后者在进程内**缓存到进程退出**，实测用 `defaults write` 翻转偏好并 `killall -HUP cfprefsd` 后轮询 8 秒恒为旧值（同一个探针里 CFPreferences 1 秒内就变了），意味着用户在设置里切换开关后必须重启 App 才生效。`ReduceMotionState`（`@Observable`，单例）在 `NSWorkspace.accessibilityDisplayOptionsDidChangeNotification` 里重读偏好并改 `isOn`，SwiftUI 侧因为读的是 observable 属性，会自动重新求值。实测（独立探针 app，非 CopyAttach）：`isOn` 从 false→true、`duration(0.24)`→0、`scale(1.06)`→1.0，且 SwiftUI `withObservationTracking` 的 `onChange` 确实触发。
+
+**保留动画的部分**：纯透明度淡入淡出（弹窗开合 alpha、HUD、更新完成窗）与颜色/边框过渡不降级——Apple 的规范是「用交叉淡化替代位移」，而不是「什么都不动」。所以 `HistoryPopupWindow` 的 `fadeInDuration`/`fadeOutDuration`、`SpotlightOverlayWindow.fadeInDuration`、`UpdateCompleteWindow` 的 alpha 动画保持原样，只有 `dragParkDuration`（窗口横向滑动）、`OnboardingGuidePanel` 的 morph/slide、`PreviewWindow.animateFrame`（窗口形变）、`SpotlightOverlayWindow` 的 reveal/travel 归零。
+
+**窗口 frame 动画不能只把时长设成 0**：`NSAnimationContext` 的 0 时长仍走一遍动画事务，`PreviewWindow.animateFrame` 与 `HistoryPopupWindow+DragParking` 里都改成了「时长为 0 时直接 `setFrame` 并同步调 completion」，否则 `completion` 里的内容安装（mini→large 展开）会晚一拍。
+
+**`CABasicAnimation` 的时长设 0 会被 CA 当成「用默认 0.25s」**，所以 `ZoomableImageView.commitTransformAnimated` 与 `SpotlightOverlayWindow.fadeScrimIn` 都是「开关开启时移除动画 + 直接落到终态」，不是改时长。
+
+`FilterTabStrip` 的拖动排序、`QuickSlotSettings` 的槽位交换原本各自用 `@Environment(\.accessibilityReduceMotion)` 判断，现统一改走 `ReduceMotion`（拖动本身是直接操作，保留跟手；只去掉让位弹簧与触感缩放）。
+
 ## 许可证体系
 
 - **激活庆祝时序**（三方协作）：激活成功且从未许可→有许可时，`LicenseManager.perform` 设置 `celebration` 并调 `licenseCelebrationDidStart()`，暂不关窗；`LicenseGateView` 观察到 celebration 后隐藏表单、窗口内播 `LicenseCelebrationView`（约 2s）；结束后 `finishCelebration()` → `AppDelegate.licenseCelebrationFinished()` 只启动 Rust 后端、不关窗——门禁回到激活确认视图，用户手动关闭（已许可时关闭不退出）。`startEntitlementTimer` 在 celebration 期间跳过维护续租。

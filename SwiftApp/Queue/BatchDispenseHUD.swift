@@ -119,7 +119,7 @@ struct BatchDispenseHUDView: View {
         .clipShape(Capsule())
         .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.35 : 0.14), radius: 8, x: 0, y: 3)
         .padding(BatchDispenseHUDWindow.windowPadding)
-        .animation(.easeOut(duration: 0.16), value: runner.phase)
+        .animation(ReduceMotion.animation(.easeOut(duration: 0.16)), value: runner.phase)
     }
 
     @ViewBuilder
@@ -132,7 +132,7 @@ struct BatchDispenseHUDView: View {
                 .padding(.horizontal, 7)
                 .padding(.vertical, 3.5)
                 .background(Capsule().fill(Color(nsColor: .controlAccentColor)))
-                .contentTransition(.numericText())
+                .contentTransition(ReduceMotion.isOn ? .identity : .numericText())
             Text("批量粘贴")
                 .font(.system(size: 11.5, weight: .semibold))
                 .foregroundColor(theme.popupPrimaryText)

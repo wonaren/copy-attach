@@ -305,9 +305,9 @@ class PreviewWindow: NSPanel {
                          blur: CGFloat = 16.0) {
         guard isVisible else { close(); return }
         dismissState.duration = duration
-        dismissState.scale = scale
-        dismissState.blur = blur
-        withAnimation(.easeOut(duration: duration)) {
+        dismissState.scale = ReduceMotion.scale(scale)
+        dismissState.blur = ReduceMotion.blur(blur)
+        withAnimation(ReduceMotion.animation(.easeOut(duration: duration))) {
             dismissState.isDismissing = true
         }
         NSAnimationContext.runAnimationGroup({ ctx in
@@ -335,7 +335,7 @@ class PreviewWindow: NSPanel {
         }
         let currentOrigin = self.frame.origin
         setFrame(NSRect(origin: currentOrigin, size: frame.size), display: true)
-        animateFrame(NSRect(origin: frame.origin, size: frame.size), duration: 0.15)
+        animateFrame(NSRect(origin: frame.origin, size: frame.size), duration: ReduceMotion.duration(0.15))
     }
 
     func expandToLarge(item: ClipboardItem, centerAt point: NSPoint, completion: (@MainActor () -> Void)? = nil) {
@@ -369,7 +369,7 @@ class PreviewWindow: NSPanel {
                                                expandEndHeight: size.height)
             }
             animateFrame(target,
-                         duration: 0.24,
+                         duration: ReduceMotion.duration(0.24),
                          timing: CAMediaTimingFunction(name: .easeInEaseOut)) { [weak self] in
                 guard let self, self.isVisible, self.hostingView != nil else { return }
                 completion?()
@@ -377,7 +377,7 @@ class PreviewWindow: NSPanel {
             return
         }
         animateFrame(target,
-                     duration: 0.24,
+                     duration: ReduceMotion.duration(0.24),
                      timing: CAMediaTimingFunction(name: .easeInEaseOut)) { [weak self] in
             guard let self, self.isVisible, let hosting = self.hostingView else { return }
             hosting.rootView = self.makeContent(item: self.currentItem, initialPreview: self.miniPreview)
@@ -403,6 +403,12 @@ class PreviewWindow: NSPanel {
             completion?()
             return
         }
+        let duration = ReduceMotion.duration(duration)
+        guard duration > 0 else {
+            setFrame(target, display: true)
+            completion?()
+            return
+        }
         NSAnimationContext.runAnimationGroup({ ctx in
             ctx.duration = duration
             ctx.timingFunction = timing
@@ -416,9 +422,9 @@ class PreviewWindow: NSPanel {
 
     override func close() {
         dismissState.isDismissing = false
-        dismissState.duration = 0.15
-        dismissState.scale = 1.04
-        dismissState.blur = 16.0
+        dismissState.duration = ReduceMotion.duration(0.15)
+        dismissState.scale = ReduceMotion.scale(1.04)
+        dismissState.blur = ReduceMotion.blur(16.0)
 
         hostingView?.rootView = AnyView(EmptyView())
         hostingView = nil
@@ -439,11 +445,9 @@ class PreviewWindow: NSPanel {
             y: centerAnchor.y - newSize.height / 2
         )
         let newFrame = NSRect(origin: newOrigin, size: newSize)
-        NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = 0.2
-            ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-            self.animator().setFrame(newFrame, display: true)
-        }
+        animateFrame(newFrame,
+                     duration: 0.2,
+                     timing: CAMediaTimingFunction(name: .easeInEaseOut))
     }
 
     static func miniFrame(for item: ClipboardItem, anchorRow: NSRect, popupFrame: NSRect) -> NSRect? {

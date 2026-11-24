@@ -172,7 +172,7 @@ struct StressTestPanel: View {
                 .background(Color(NSColor.textBackgroundColor))
                 .cornerRadius(4)
                 .onChange(of: vm.logLines.count) {
-                    withAnimation { proxy.scrollTo("log_bottom", anchor: .bottom) }
+                    withAnimation(ReduceMotion.animation(.easeOut(duration: 0.2))) { proxy.scrollTo("log_bottom", anchor: .bottom) }
                 }
             }
         }

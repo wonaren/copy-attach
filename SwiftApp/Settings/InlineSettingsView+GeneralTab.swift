@@ -35,7 +35,7 @@ extension InlineSettingsView {
             if !backend.permissionGranted && !showDragGuide {
                 Button(action: {
                     backend.openPreferences()
-                    withAnimation(.spring(response: 0.35, dampingFraction: 0.72)) {
+                    withAnimation(ReduceMotion.animation(.spring(response: 0.35, dampingFraction: 0.72))) {
                         showDragGuide = true
                     }
                 }) {
@@ -48,11 +48,11 @@ extension InlineSettingsView {
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(Color.accentColor)
-                .transition(.opacity.combined(with: .move(edge: .top)))
+                .transition(ReduceMotion.transition(.opacity.combined(with: .move(edge: .top))))
             }
             if showDragGuide && !backend.permissionGranted {
                 dragGuideContent
-                    .transition(.opacity.combined(with: .move(edge: .top)))
+                    .transition(ReduceMotion.transition(.opacity.combined(with: .move(edge: .top))))
             }
         }
         .padding(16)
@@ -63,11 +63,11 @@ extension InlineSettingsView {
             RoundedRectangle(cornerRadius: 12)
                 .stroke(backend.permissionGranted ? Color(nsColor: .systemGreen).opacity(0.28) : Color(nsColor: .systemOrange).opacity(0.28), lineWidth: 1)
         )
-        .animation(.spring(response: 0.3, dampingFraction: 0.72), value: showDragGuide)
-        .animation(.spring(response: 0.3, dampingFraction: 0.72), value: backend.permissionGranted)
+        .animation(ReduceMotion.animation(.spring(response: 0.3, dampingFraction: 0.72)), value: showDragGuide)
+        .animation(ReduceMotion.animation(.spring(response: 0.3, dampingFraction: 0.72)), value: backend.permissionGranted)
         .onChange(of: backend.permissionGranted) { _, granted in
             if granted {
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.72)) {
+                withAnimation(ReduceMotion.animation(.spring(response: 0.3, dampingFraction: 0.72))) {
                     showDragGuide = false
                 }
             }
@@ -101,9 +101,9 @@ extension InlineSettingsView {
                                 .offset(x: 5, y: -5)
                                 .allowsHitTesting(false)
                         }
-                        .scaleEffect(isHoveringDragIcon ? 1.05 : 1.0)
+                        .scaleEffect(isHoveringDragIcon ? ReduceMotion.scale(1.05) : 1.0)
                         .onHover { hovering in
-                            withAnimation(.easeInOut(duration: 0.2)) {
+                            withAnimation(ReduceMotion.animation(.easeInOut(duration: 0.2))) {
                                 isHoveringDragIcon = hovering
                             }
                         }
@@ -133,7 +133,7 @@ extension InlineSettingsView {
                 Spacer()
 
                 Button(action: {
-                    withAnimation(.spring(response: 0.3, dampingFraction: 0.72)) {
+                    withAnimation(ReduceMotion.animation(.spring(response: 0.3, dampingFraction: 0.72))) {
                         showDragGuide = false
                     }
                 }) {

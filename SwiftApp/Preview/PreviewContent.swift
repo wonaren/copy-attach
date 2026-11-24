@@ -189,14 +189,15 @@ struct PreviewContent: View {
                 miniHoverHint
             }
         }
-        .scaleEffect(showsZoomHint && !hasAppeared ? 0.97 : 1.0)
+        .scaleEffect(showsZoomHint && !hasAppeared ? ReduceMotion.scale(0.97) : 1.0)
         .scaleEffect(dismissState?.isDismissing == true ? (dismissState?.scale ?? 1.04) : 1.0, anchor: .center)
         .blur(radius: dismissState?.isDismissing == true ? (dismissState?.blur ?? 16.0) : 0.0)
         .opacity(dismissState?.isDismissing == true ? 0.0 : 1.0)
-        .animation(.easeOut(duration: dismissState?.duration ?? 0.15), value: dismissState?.isDismissing)
+        .animation(.easeOut(duration: dismissState?.duration ?? 0.15),
+                   value: dismissState?.isDismissing)
         .onAppear {
             guard showsZoomHint else { return }
-            withAnimation(.spring(response: 0.18, dampingFraction: 0.86)) {
+            withAnimation(ReduceMotion.animation(.spring(response: 0.18, dampingFraction: 0.86))) {
                 hasAppeared = true
             }
         }
@@ -356,7 +357,7 @@ struct PreviewContent: View {
                 Image(systemName: "photo")
                     .font(.system(size: 32))
                     .foregroundColor(theme.previewSecondaryText)
-                    .symbolEffect(.pulse)
+                    .reduceMotionSymbol(.pulse)
                 Text("载入预览中…")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundColor(theme.previewSecondaryText)
@@ -380,8 +381,8 @@ struct PreviewContent: View {
                 .padding(8)
         }
         .opacity(isHoveringBubble ? 1 : 0)
-        .scaleEffect(isHoveringBubble ? 1 : 0.94)
-        .animation(.easeOut(duration: 0.12), value: isHoveringBubble)
+        .scaleEffect(isHoveringBubble ? 1 : ReduceMotion.scale(0.94))
+        .animation(ReduceMotion.animation(.easeOut(duration: 0.12)), value: isHoveringBubble)
         .allowsHitTesting(false)
     }
 

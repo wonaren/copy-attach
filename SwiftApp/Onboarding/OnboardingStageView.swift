@@ -14,7 +14,7 @@ struct OnboardingStageView: View {
                     .transition(.opacity)
             }
         }
-        .animation(.easeInOut(duration: 0.26), value: guide.phase)
+        .animation(ReduceMotion.animation(.easeInOut(duration: 0.26)), value: guide.phase)
     }
 }
 

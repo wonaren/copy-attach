@@ -96,7 +96,6 @@ struct FilterTabStrip: View {
 
     @Environment(\.appTheme) private var theme
     @Environment(\.colorScheme) private var colorScheme
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @Namespace private var pillNamespace
 
@@ -176,22 +175,22 @@ struct FilterTabStrip: View {
             .foregroundColor(isSelected
                              ? Color(nsColor: .controlAccentColor)
                              : theme.popupFilterTabInactive)
-            .scaleEffect(isSelected ? 1.06 : 1.0)
+            .scaleEffect(isSelected ? ReduceMotion.scale(1.06) : 1.0)
             .padding(.horizontal, 10)
             .padding(.vertical, 4)
             .background {
                 chipBackground(isSelected: isSelected, isLifted: isLifted, isHovered: isHovered)
             }
             .contentShape(Rectangle())
-            .scaleEffect(isLifted ? Self.liftScale : (isPressed ? Self.pressScale : 1.0))
+            .scaleEffect(isLifted ? ReduceMotion.scale(Self.liftScale) : (isPressed ? ReduceMotion.scale(Self.pressScale) : 1.0))
             .shadow(color: isLifted
                     ? Color.black.opacity(colorScheme == .dark ? 0.50 : 0.22)
                     : Color.clear,
                     radius: isLifted ? 7 : 0,
                     y: isLifted ? 3 : 0)
             .animation(AppleMotion.tactilePress, value: isPressed)
-            .animation(reduceMotion ? nil : AppleMotion.snappy, value: isLifted)
-            .animation(.easeOut(duration: 0.12), value: isHovered)
+            .animation(AppleMotion.snappy, value: isLifted)
+            .animation(ReduceMotion.animation(.easeOut(duration: 0.12)), value: isHovered)
             .onHover { hovering in
                 guard draggingMode == nil else { return }
                 if hovering {
@@ -291,7 +290,7 @@ struct FilterTabStrip: View {
             }
         }
         guard target != (dragOrder.firstIndex(of: mode) ?? home) else { return }
-        withAnimation(reduceMotion ? nil : AppleMotion.snappy) {
+        withAnimation(AppleMotion.snappy) {
             dragOrder = FilterTabOrder.moving(visible, from: home, to: target)
         }
         NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .default)
@@ -311,7 +310,7 @@ struct FilterTabStrip: View {
         if next != order {
             FilterTabOrder.persist(next)
         }
-        withAnimation(reduceMotion ? nil : AppleMotion.snappy) {
+        withAnimation(AppleMotion.snappy) {
             order = next
             draggingMode = nil
             dragOrder = []
@@ -353,7 +352,7 @@ struct FilterTabStrip: View {
         let nextVisible = FilterTabOrder.moving(visible, from: index, to: target)
         let next = FilterTabOrder.merged(visible: nextVisible, into: order, hidden: hidden)
         FilterTabOrder.persist(next)
-        withAnimation(reduceMotion ? nil : AppleMotion.snappy) {
+        withAnimation(AppleMotion.snappy) {
             order = next
         }
         NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .default)
@@ -367,7 +366,7 @@ struct FilterTabStrip: View {
         if mode == selected, let fallback = order.first(where: { !next.contains($0) }) {
             onSelect(fallback)
         }
-        withAnimation(reduceMotion ? nil : AppleMotion.snappy) {
+        withAnimation(AppleMotion.snappy) {
             hidden = next
         }
     }
@@ -377,7 +376,7 @@ struct FilterTabStrip: View {
         var next = hidden
         next.remove(mode)
         FilterTabOrder.persistHidden(next)
-        withAnimation(reduceMotion ? nil : AppleMotion.snappy) {
+        withAnimation(AppleMotion.snappy) {
             hidden = next
         }
     }
@@ -385,7 +384,7 @@ struct FilterTabStrip: View {
     private func showAllTabs() {
         guard !hidden.isEmpty else { return }
         FilterTabOrder.resetHidden()
-        withAnimation(reduceMotion ? nil : AppleMotion.snappy) {
+        withAnimation(AppleMotion.snappy) {
             hidden = []
         }
     }
@@ -394,7 +393,7 @@ struct FilterTabStrip: View {
         FilterTabOrder.reset()
         let next = FilterTabOrder.defaultOrder
         guard next != order else { return }
-        withAnimation(reduceMotion ? nil : AppleMotion.snappy) {
+        withAnimation(AppleMotion.snappy) {
             order = next
         }
     }

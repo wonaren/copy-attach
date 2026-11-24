@@ -13,8 +13,8 @@ final class OnboardingGuidePanel: NSPanel {
     static let welcomeSize = NSSize(width: 380, height: 272)
 
     private static let screenMargin: CGFloat = 20
-    private static let morphDuration: TimeInterval = 0.42
-    private static let slideDuration: TimeInterval = 0.28
+    private static var morphDuration: TimeInterval { ReduceMotion.duration(0.42) }
+    private static var slideDuration: TimeInterval { ReduceMotion.duration(0.28) }
 
     private var hostingView: OnboardingHostingView?
 
@@ -56,6 +56,10 @@ final class OnboardingGuidePanel: NSPanel {
             return
         }
         guard target.size != frame.size || target.origin != frame.origin else { return }
+        guard !ReduceMotion.isOn else {
+            setFrame(target, display: true)
+            return
+        }
 
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = morph ? Self.morphDuration : Self.slideDuration

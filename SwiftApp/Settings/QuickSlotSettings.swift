@@ -66,7 +66,7 @@ struct QuickSlotSettings: View {
             grid(owners: owners)
             if draggingSlot != nil {
                 trashZone
-                    .transition(.opacity.combined(with: .scale(scale: 0.96)))
+                    .transition(ReduceMotion.transition(.opacity.combined(with: .scale(scale: 0.96))))
             }
             footer
             if boundCount > 0 && !backend.permissionGranted {
@@ -262,13 +262,13 @@ struct QuickSlotSettings: View {
             if reduceMotion {
                 swapProgress = 1
             } else {
-                withAnimation(.timingCurve(0.45, 0, 0.2, 1, duration: travel)) {
+                withAnimation(ReduceMotion.animation(.timingCurve(0.45, 0, 0.2, 1, duration: travel))) {
                     swapProgress = 1
                 }
             }
             try? await Task.sleep(nanoseconds: UInt64((travel + 0.06) * 1_000_000_000))
             guard swapGeneration == generation else { return }
-            withAnimation(.easeOut(duration: 0.12)) {
+            withAnimation(ReduceMotion.animation(.easeOut(duration: 0.12))) {
                 swapVisible = false
             }
             try? await Task.sleep(nanoseconds: 160_000_000)

@@ -361,7 +361,9 @@ fn test_streaming_still_falls_back_for_sixteen_bit_png() {
 }
 
 fn to_bgra_premultiplied(rgba: &[u8]) -> Vec<u8> {
-    rgba.chunks_exact(4)
+    rgba.as_chunks::<4>()
+        .0
+        .iter()
         .flat_map(|p| {
             let a = p[3] as u32;
             let pm = |v: u8| ((v as u32 * a + 127) / 255) as u8;

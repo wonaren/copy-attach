@@ -411,11 +411,11 @@ extension InlineSettingsView {
     }
 
     private func showBackupStatus(_ message: String) {
-        withAnimation(.easeInOut(duration: 0.2)) {
+        withAnimation(ReduceMotion.animation(.easeInOut(duration: 0.2))) {
             backupStatusMessage = message
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) {
-            withAnimation(.easeInOut(duration: 0.3)) {
+            withAnimation(ReduceMotion.animation(.easeInOut(duration: 0.3))) {
                 if backupStatusMessage == message {
                     backupStatusMessage = nil
                 }
@@ -572,7 +572,7 @@ private struct StorageActionTile: View {
         }
         .buttonStyle(StorageTileButtonStyle())
         .onHover { hovering in
-            withAnimation(.easeInOut(duration: 0.15)) {
+            withAnimation(ReduceMotion.animation(.easeInOut(duration: 0.15))) {
                 isHovered = hovering
             }
         }
@@ -582,7 +582,7 @@ private struct StorageActionTile: View {
 private struct StorageTileButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .scaleEffect(configuration.isPressed ? 0.985 : 1.0)
-            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+            .scaleEffect(configuration.isPressed ? ReduceMotion.scale(0.985) : 1.0)
+            .animation(ReduceMotion.animation(.easeOut(duration: 0.12)), value: configuration.isPressed)
     }
 }

@@ -10,7 +10,7 @@ struct DateSeparatorView: View {
             Text(parts.date)
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundColor(theme.popupSecondaryText)
-                .contentTransition(.numericText())
+                .contentTransition(ReduceMotion.isOn ? .identity : .numericText())
             if let relative = parts.relative {
                 Text(relative)
                     .font(.system(size: 11, weight: .semibold))
