@@ -52,13 +52,15 @@ final class BatchDispenseHUDWindow: NSPanel {
             hostingView?.rootView = content
         }
 
+        let fadeIn = ReduceMotion.duration(0.18)
         if !isVisible {
             positionAtTopCenter()
-            alphaValue = 0
+            alphaValue = fadeIn > 0 ? 0 : 1
             orderFrontRegardless()
         }
+        guard fadeIn > 0 else { return }
         NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = 0.18
+            ctx.duration = fadeIn
             ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
             animator().alphaValue = 1.0
         }
@@ -68,8 +70,16 @@ final class BatchDispenseHUDWindow: NSPanel {
         visibilityGeneration &+= 1
         let generation = visibilityGeneration
 
+        let fadeOut = ReduceMotion.duration(0.16)
+        guard fadeOut > 0 else {
+            alphaValue = 0
+            orderOut(nil)
+            contentView = nil
+            hostingView = nil
+            return
+        }
         NSAnimationContext.runAnimationGroup({ ctx in
-            ctx.duration = 0.16
+            ctx.duration = fadeOut
             ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
             animator().alphaValue = 0
         }, completionHandler: { [weak self] in

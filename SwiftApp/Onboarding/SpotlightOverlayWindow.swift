@@ -55,7 +55,7 @@ final class SpotlightOverlayWindow: NSPanel {
     private static let cutoutPadding: CGFloat = 4
     private static var revealDuration: TimeInterval { ReduceMotion.duration(0.34) }
     private static var travelDuration: TimeInterval { ReduceMotion.duration(0.32) }
-    private static let fadeInDuration: TimeInterval = 0.22
+    private static var fadeInDuration: TimeInterval { ReduceMotion.duration(0.22) }
 
     private let scrimView = NSView()
     private let fillLayer = CAShapeLayer()
@@ -150,10 +150,15 @@ final class SpotlightOverlayWindow: NSPanel {
     private func fadeScrimIn() {
         guard let layer = scrimView.layer else { return }
         layer.opacity = 1
+        let duration = Self.fadeInDuration
+        guard duration > 0 else {
+            layer.removeAnimation(forKey: "fadeIn")
+            return
+        }
         let fade = CABasicAnimation(keyPath: "opacity")
         fade.fromValue = 0
         fade.toValue = 1
-        fade.duration = Self.fadeInDuration
+        fade.duration = duration
         fade.timingFunction = CAMediaTimingFunction(name: .easeOut)
         layer.add(fade, forKey: "fadeIn")
     }

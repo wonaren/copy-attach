@@ -1,41 +1,38 @@
 import AppKit
 import SwiftUI
 
-@Observable
 final class ReduceMotionState: @unchecked Sendable {
     static let shared = ReduceMotionState()
 
-    private(set) var isOn: Bool = ReduceMotionState.readPreference()
+    private static let cacheLifetime: CFAbsoluteTime = 0.25
 
-    private var observer: NSObjectProtocol?
+    private let lock = NSLock()
 
-    private init() {
-        observer = NotificationCenter.default.addObserver(
-            forName: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
-            object: nil,
-            queue: .main
-        ) { _ in
-            MainActor.assumeIsolated {
-                ReduceMotionState.shared.refresh()
-            }
-        }
-    }
+    private var isOn: Bool = ReduceMotionState.readPreference()
 
-    private static func readPreference() -> Bool {
+    private var lastRead: CFAbsoluteTime = CFAbsoluteTimeGetCurrent()
+
+    private init() {}
+
+    static func readPreference() -> Bool {
         CFPreferencesCopyAppValue("reduceMotion" as CFString,
                                   "com.apple.universalaccess" as CFString) as? Bool ?? false
     }
 
-    private func refresh() {
-        let value = ReduceMotionState.readPreference()
-        guard value != isOn else { return }
-        isOn = value
+    func current() -> Bool {
+        let now = CFAbsoluteTimeGetCurrent()
+        lock.lock()
+        defer { lock.unlock() }
+        guard now - lastRead > Self.cacheLifetime else { return isOn }
+        lastRead = now
+        isOn = ReduceMotionState.readPreference()
+        return isOn
     }
 }
 
 enum ReduceMotion {
     static var isOn: Bool {
-        ReduceMotionState.shared.isOn
+        ReduceMotionState.shared.current()
     }
 
     static func duration(_ value: TimeInterval) -> TimeInterval {

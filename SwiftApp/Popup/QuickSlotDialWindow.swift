@@ -32,13 +32,14 @@ final class QuickSlotDialWindow {
         x = min(x, visible.maxX - Self.dialSize.width - 4)
         y = max(visible.minY + 4, min(y, visible.maxY - Self.dialSize.height - 4))
         panel.setFrame(NSRect(origin: NSPoint(x: x, y: y), size: Self.dialSize), display: true)
+        let fadeIn = appearing ? ReduceMotion.duration(0.12) : 0
         if appearing {
-            panel.alphaValue = 0
+            panel.alphaValue = fadeIn > 0 ? 0 : 1
         }
         panel.orderFrontRegardless()
-        if appearing {
+        if appearing && fadeIn > 0 {
             NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = 0.12
+                ctx.duration = fadeIn
                 panel.animator().alphaValue = 1
             }
         }

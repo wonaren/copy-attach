@@ -258,9 +258,13 @@ PopupHostingView 的 `.scrollWheel` local monitor 在 ScrollView 消费事件之
 
 `AppleMotion.snappy/smooth/tactilePress` 自身在开关开启时返回 `nil`，所以调用点仍写 `withAnimation(AppleMotion.snappy)` 即可，不必逐个改。
 
-**取值必须读 `CFPreferencesCopyAppValue("reduceMotion", "com.apple.universalaccess")`，不能读 `NSWorkspace.shared.accessibilityDisplayShouldReduceMotion`**：后者在进程内**缓存到进程退出**，实测用 `defaults write` 翻转偏好并 `killall -HUP cfprefsd` 后轮询 8 秒恒为旧值（同一个探针里 CFPreferences 1 秒内就变了），意味着用户在设置里切换开关后必须重启 App 才生效。`ReduceMotionState`（`@Observable`，单例）在 `NSWorkspace.accessibilityDisplayOptionsDidChangeNotification` 里重读偏好并改 `isOn`，SwiftUI 侧因为读的是 observable 属性，会自动重新求值。实测（独立探针 app，非 CopyAttach）：`isOn` 从 false→true、`duration(0.24)`→0、`scale(1.06)`→1.0，且 SwiftUI `withObservationTracking` 的 `onChange` 确实触发。
+**取值必须读 `CFPreferencesCopyAppValue("reduceMotion", "com.apple.universalaccess")`，不能读 `NSWorkspace.shared.accessibilityDisplayShouldReduceMotion`**：后者在进程内**缓存到进程退出**，实测用 `defaults write` 翻转偏好并 `killall -HUP cfprefsd` 后轮询 8 秒恒为旧值（同一个探针里 CFPreferences 1 秒内就变了），意味着用户在设置里切换开关后必须重启 App 才生效。
 
-**保留动画的部分**：纯透明度淡入淡出（弹窗开合 alpha、HUD、更新完成窗）与颜色/边框过渡不降级——Apple 的规范是「用交叉淡化替代位移」，而不是「什么都不动」。所以 `HistoryPopupWindow` 的 `fadeInDuration`/`fadeOutDuration`、`SpotlightOverlayWindow.fadeInDuration`、`UpdateCompleteWindow` 的 alpha 动画保持原样，只有 `dragParkDuration`（窗口横向滑动）、`OnboardingGuidePanel` 的 morph/slide、`PreviewWindow.animateFrame`（窗口形变）、`SpotlightOverlayWindow` 的 reveal/travel 归零。
+**不能只靠通知刷新**：第一版（0.113.7-dev）在 `NSWorkspace.accessibilityDisplayOptionsDidChangeNotification` 里重读偏好，实测**用户从系统设置打开开关后弹窗依旧带动画**——通知在 `defaults write` 路径下完全不发（探针监听 40s 无回调），真实系统设置路径也未能确认送达。现改为 **250ms TTL 缓存 + 每次读都校验新鲜度**（`ReduceMotionState.current()`，`NSLock` 保护）：绝大多数调用只做一次时间比较（实测 37ns + 16ns 锁），过期才真正读一次 CFPreferences（实测 314–499ns）。代价是开关切换后最多 250ms 生效，收益是**完全不依赖任何通知送达**。实测（同一份代码的独立探针）：进程以 `reduceMotion=false` 启动，外部改偏好后 t=1.5s 时 `isOn` 变 true、`duration(0.2)` 变 0、`scale(1.06)` 变 1.0。因为不再是 `@Observable`，SwiftUI 侧不做属性级重算——但所有调用点都在**动画决策点**（`withAnimation` 参数、`ctx.duration`、`body` 里的 `animation(_:)` 参数），届时读到的就是新鲜值。
+
+**`@Environment(\.accessibilityReduceMotion)` 同样是 stale 的，不能用来替代 `ReduceMotion`**：实测（探针 app）进程以 `reduceMotion=false` 启动、外部把偏好改成 true 后，**连新建的 `NSHostingView` 视图树里该 environment 值仍然是 false**；只有「以 pref=true 启动」时才正确。也就是说它和 `NSWorkspace.accessibilityDisplayShouldReduceMotion` 同源、同样在进程内缓存到退出。`QuickSlotSettings` 原来用它，属于同类缺陷，已统一改走 `ReduceMotion`。
+
+**纯透明度淡入淡出也归零**：第一版（0.113.7-dev）按 Apple「用交叉淡化替代位移」的说法保留了 alpha 动画（弹窗开合 0.2s/0.15s、侧边预览 0.14s、HUD、更新完成窗、聚光灯 scrim），结果用户打开开关后仍能明显看到弹窗淡入——这正是「呼出窗口时还是有动画」的直接来源。现全部走 `ReduceMotion.duration(_:)` 归零。`NSAnimationContext` 时长为 0 时 completion 仍会立刻回调（实测 0.0001s），所以 `lifecycleState = .open` 等状态机不受影响。
 
 **窗口 frame 动画不能只把时长设成 0**：`NSAnimationContext` 的 0 时长仍走一遍动画事务，`PreviewWindow.animateFrame` 与 `HistoryPopupWindow+DragParking` 里都改成了「时长为 0 时直接 `setFrame` 并同步调 completion」，否则 `completion` 里的内容安装（mini→large 展开）会晚一拍。
 

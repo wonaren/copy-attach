@@ -542,7 +542,7 @@ struct HistoryPopupContent: View {
             QuickSlotDialWindow.shared.hide()
             closeHoverPreview()
             popupWindow?.animateContentScale(to: 1.04, response: 0.15, damping: 1)
-            withAnimation(.easeOut(duration: 0.15)) {
+            withAnimation(ReduceMotion.animation(.easeOut(duration: 0.15))) {
                 isDismissing = true
             }
         }
@@ -554,7 +554,7 @@ struct HistoryPopupContent: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: popupCancelDismissNotification)) { _ in
             popupWindow?.animateContentScale(to: 1.0, response: 0.15, damping: 1)
-            withAnimation(.easeOut(duration: 0.15)) {
+            withAnimation(ReduceMotion.animation(.easeOut(duration: 0.15))) {
                 isDismissing = false
             }
             if selectedIndex == 0 {
@@ -569,7 +569,7 @@ struct HistoryPopupContent: View {
         .onReceive(NotificationCenter.default.publisher(for: controlKeyNotification)) { note in
             let pressed = (note.object as? Bool) ?? NSEvent.modifierFlags.contains(.control)
             if pressed != isControlPressed {
-                withAnimation(.easeInOut(duration: 0.15)) {
+                withAnimation(ReduceMotion.animation(.easeInOut(duration: 0.15))) {
                     isControlPressed = pressed
                 }
             }
@@ -589,7 +589,7 @@ struct HistoryPopupContent: View {
         .onReceive(NotificationCenter.default.publisher(for: commandKeyNotification)) { note in
             let pressed = (note.object as? Bool) ?? NSEvent.modifierFlags.contains(.command)
             if pressed != isCommandPressed {
-                withAnimation(.easeInOut(duration: 0.15)) {
+                withAnimation(ReduceMotion.animation(.easeInOut(duration: 0.15))) {
                     isCommandPressed = pressed
                 }
             }
@@ -597,7 +597,7 @@ struct HistoryPopupContent: View {
         .onReceive(NotificationCenter.default.publisher(for: rightCommandKeyNotification)) { note in
             let pressed = (note.object as? Bool) ?? false
             if pressed != isRightCommandPressed {
-                withAnimation(.easeInOut(duration: 0.15)) {
+                withAnimation(ReduceMotion.animation(.easeInOut(duration: 0.15))) {
                     isRightCommandPressed = pressed
                 }
             }

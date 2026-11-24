@@ -56,9 +56,9 @@ class HistoryPopupWindow: NSPanel {
         lifecycleState == .open || lifecycleState == .opening
     }
 
-    private static let fadeInDuration: TimeInterval = 0.2
+    private static var fadeInDuration: TimeInterval { ReduceMotion.duration(0.2) }
 
-    private static let fadeOutDuration: TimeInterval = 0.15
+    private static var fadeOutDuration: TimeInterval { ReduceMotion.duration(0.15) }
 
     private var closeSessionGeneration: UInt64 = 0
 
@@ -160,7 +160,10 @@ class HistoryPopupWindow: NSPanel {
         closeGuaranteeTimer?.invalidate()
         closeGuaranteeTimer = nil
 
-        self.alphaValue = 0
+        let reduceMotion = ReduceMotion.isOn
+        let fadeIn = reduceMotion ? 0 : 0.2
+        self.alphaValue = fadeIn > 0 ? 0 : 1
+        debugLog("show(): reduceMotion=\(reduceMotion) fadeIn=\(fadeIn)")
 
         let contentView = AnyView(HistoryPopupContent(onClose: { [weak self] in
             debugLog("HistoryPopupContent onClose callback")
@@ -187,7 +190,7 @@ class HistoryPopupWindow: NSPanel {
         hosting.layer?.anchorPoint = CGPoint(x: 0, y: 0)
         hosting.layer?.position = .zero
 
-        applyContentScale(ReduceMotion.scale(1.06), to: hosting, layer: hosting.layer!)
+        applyContentScale(reduceMotion ? 1.0 : 1.06, to: hosting, layer: hosting.layer!)
 
         resetDragParking()
         centerOnScreen()
@@ -198,18 +201,22 @@ class HistoryPopupWindow: NSPanel {
         self.orderFrontRegardless()
         self.makeKey()
 
-        NSAnimationContext.runAnimationGroup({ ctx in
-            ctx.duration = Self.fadeInDuration
-            ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
-            self.animator().alphaValue = 1
-        }, completionHandler: { [weak self] in
-            MainActor.assumeIsolated {
-                guard let self = self, self.closeSessionGeneration == session, self.lifecycleState == .opening else { return }
-                self.lifecycleState = .open
-            }
-        })
+        if fadeIn > 0 {
+            NSAnimationContext.runAnimationGroup({ ctx in
+                ctx.duration = fadeIn
+                ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                self.animator().alphaValue = 1
+            }, completionHandler: { [weak self] in
+                MainActor.assumeIsolated {
+                    guard let self = self, self.closeSessionGeneration == session, self.lifecycleState == .opening else { return }
+                    self.lifecycleState = .open
+                }
+            })
+        } else {
+            self.lifecycleState = .open
+        }
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.fadeInDuration + 0.1) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + fadeIn + 0.1) { [weak self] in
             guard let self, self.closeSessionGeneration == session,
                   self.lifecycleState == .opening,
                   self.closeGuaranteeTimer == nil,
@@ -262,7 +269,7 @@ class HistoryPopupWindow: NSPanel {
 
         if let pv = previewPanel {
             NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = 0.1
+                ctx.duration = ReduceMotion.duration(0.1)
                 pv.animator().alphaValue = 1
             }
         }
@@ -274,18 +281,24 @@ class HistoryPopupWindow: NSPanel {
             _ = hosting.becomeFirstResponder()
         }
 
-        NSAnimationContext.runAnimationGroup({ ctx in
-            ctx.duration = Self.fadeInDuration
-            ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
-            self.animator().alphaValue = 1.0
-        }, completionHandler: { [weak self] in
-            MainActor.assumeIsolated {
-                guard let self = self, self.closeSessionGeneration == session, self.lifecycleState == .opening else { return }
-                self.lifecycleState = .open
-            }
-        })
+        let fadeIn = Self.fadeInDuration
+        if fadeIn > 0 {
+            NSAnimationContext.runAnimationGroup({ ctx in
+                ctx.duration = fadeIn
+                ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                self.animator().alphaValue = 1.0
+            }, completionHandler: { [weak self] in
+                MainActor.assumeIsolated {
+                    guard let self = self, self.closeSessionGeneration == session, self.lifecycleState == .opening else { return }
+                    self.lifecycleState = .open
+                }
+            })
+        } else {
+            self.alphaValue = 1
+            self.lifecycleState = .open
+        }
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.fadeInDuration + 0.1) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + fadeIn + 0.1) { [weak self] in
             guard let self, self.closeSessionGeneration == session,
                   self.lifecycleState == .opening,
                   self.closeGuaranteeTimer == nil,
@@ -460,27 +473,34 @@ class HistoryPopupWindow: NSPanel {
 
         NotificationCenter.default.post(name: popupWillDismissNotification, object: nil)
 
-        NSAnimationContext.runAnimationGroup({ ctx in
-            ctx.duration = Self.fadeOutDuration
-            ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
-            self.animator().alphaValue = 0
-        }, completionHandler: { [weak self] in
-            MainActor.assumeIsolated {
-                guard let self = self, self.closeSessionGeneration == session, self.lifecycleState == .closing else { return }
-                self.close()
-            }
-        })
+        let fadeOut = Self.fadeOutDuration
+        if fadeOut > 0 {
+            NSAnimationContext.runAnimationGroup({ ctx in
+                ctx.duration = fadeOut
+                ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                self.animator().alphaValue = 0
+            }, completionHandler: { [weak self] in
+                MainActor.assumeIsolated {
+                    guard let self = self, self.closeSessionGeneration == session, self.lifecycleState == .closing else { return }
+                    self.close()
+                }
+            })
+        } else {
+            self.alphaValue = 0
+            self.close()
+            return
+        }
 
         if let pv = preview {
             NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = 0.1
+                ctx.duration = ReduceMotion.duration(0.1)
                 pv.animator().alphaValue = 0
             }
         }
 
         if let hp = hoverPreviewPanel {
             NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = 0.1
+                ctx.duration = ReduceMotion.duration(0.1)
                 hp.animator().alphaValue = 0
             }
         }

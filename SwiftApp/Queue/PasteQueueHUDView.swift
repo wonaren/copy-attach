@@ -73,10 +73,10 @@ struct PasteQueueHUDView: View {
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .transition(.asymmetric(
+                .transition(ReduceMotion.transition(.asymmetric(
                     insertion: .move(edge: .trailing).combined(with: .opacity),
                     removal: .move(edge: .leading).combined(with: .opacity)
-                ))
+                )))
                 .id(item.id)
             } else {
                 Spacer()

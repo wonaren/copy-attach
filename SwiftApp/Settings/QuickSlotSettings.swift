@@ -26,7 +26,6 @@ struct QuickSlotSettings: View {
     let backend: ClipboardBackend
 
     @Environment(\.appTheme) private var theme
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var confirmClear = false
     @State private var showFailure = false
     @State private var draggingSlot: Int?
@@ -56,7 +55,7 @@ struct QuickSlotSettings: View {
     private var boundCount: Int { backend.slotByEntryId.count }
 
     private var changeAnimation: Animation? {
-        reduceMotion ? nil : .smooth(duration: 0.22)
+        ReduceMotion.animation(.smooth(duration: 0.22))
     }
 
     var body: some View {
@@ -255,6 +254,7 @@ struct QuickSlotSettings: View {
         swapChips = chips
         swapProgress = 0
         swapVisible = true
+        let reduceMotion = ReduceMotion.isOn
         let travel: TimeInterval = reduceMotion ? 0.14 : 0.3
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 16_000_000)

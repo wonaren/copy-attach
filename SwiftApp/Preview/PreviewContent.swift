@@ -193,7 +193,7 @@ struct PreviewContent: View {
         .scaleEffect(dismissState?.isDismissing == true ? (dismissState?.scale ?? 1.04) : 1.0, anchor: .center)
         .blur(radius: dismissState?.isDismissing == true ? (dismissState?.blur ?? 16.0) : 0.0)
         .opacity(dismissState?.isDismissing == true ? 0.0 : 1.0)
-        .animation(.easeOut(duration: dismissState?.duration ?? 0.15),
+        .animation(ReduceMotion.animation(.easeOut(duration: dismissState?.duration ?? 0.15)),
                    value: dismissState?.isDismissing)
         .onAppear {
             guard showsZoomHint else { return }

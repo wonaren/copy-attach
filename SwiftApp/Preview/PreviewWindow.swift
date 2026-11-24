@@ -288,6 +288,11 @@ class PreviewWindow: NSPanel {
     }
 
     func fadeIn(duration: TimeInterval = 0.14) {
+        let duration = ReduceMotion.duration(duration)
+        guard duration > 0 else {
+            alphaValue = 1
+            return
+        }
         alphaValue = 0
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = duration
@@ -304,11 +309,17 @@ class PreviewWindow: NSPanel {
                          scale: CGFloat = 1.04,
                          blur: CGFloat = 16.0) {
         guard isVisible else { close(); return }
+        let duration = ReduceMotion.duration(duration)
         dismissState.duration = duration
         dismissState.scale = ReduceMotion.scale(scale)
         dismissState.blur = ReduceMotion.blur(blur)
         withAnimation(ReduceMotion.animation(.easeOut(duration: duration))) {
             dismissState.isDismissing = true
+        }
+        guard duration > 0 else {
+            alphaValue = 0
+            close()
+            return
         }
         NSAnimationContext.runAnimationGroup({ ctx in
             ctx.duration = duration

@@ -53,14 +53,16 @@ final class PasteQueueHUDWindow: NSPanel {
             hostingView?.rootView = content
         }
 
+        let fadeIn = ReduceMotion.duration(0.22)
         if !isVisible {
             positionAtTopCenter()
-            alphaValue = 0
+            alphaValue = fadeIn > 0 ? 0 : 1
             orderFrontRegardless()
         }
+        guard fadeIn > 0 else { return }
 
         NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = 0.22
+            ctx.duration = fadeIn
             ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
             self.animator().alphaValue = 1.0
         }
@@ -70,8 +72,16 @@ final class PasteQueueHUDWindow: NSPanel {
         visibilityGeneration &+= 1
         let generation = visibilityGeneration
 
+        let fadeOut = ReduceMotion.duration(0.18)
+        guard fadeOut > 0 else {
+            alphaValue = 0
+            orderOut(nil)
+            contentView = nil
+            hostingView = nil
+            return
+        }
         NSAnimationContext.runAnimationGroup({ ctx in
-            ctx.duration = 0.18
+            ctx.duration = fadeOut
             ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
             self.animator().alphaValue = 0
         }, completionHandler: { [weak self] in
