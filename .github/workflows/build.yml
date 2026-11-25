@@ -257,6 +257,11 @@ jobs:
             }
           ' CHANGELOG.md > "$NOTES_FILE"
           test -s "$NOTES_FILE"
+          # 稳定入口：dl.abovepast.shop/lanzou 每次 302 到当前可用的蓝奏域名，
+          # 蓝奏轮换域名时无需改动本文件或重发 Release。
+          # 这一行与上传步骤解耦：上传可能因限速跑十几分钟甚至失败，
+          # 发布说明不能等它，更不能因它缺失。
+          printf '\n---\n### 国内下载\n- [蓝奏云下载](https://dl.abovepast.shop/lanzou)（提取码：`1234`）\n' >> "$NOTES_FILE"
           echo "Release notes prepared for v${VERSION}"
 
       - name: Download DMG artifact
@@ -265,28 +270,9 @@ jobs:
           name: CopyAttach-${{ needs.build.outputs.version }}
           path: build/
 
-      # 蓝奏云上传已完成本地和 CI 验证。tag 发布自动上传；手动运行时需要显式勾选 lanzou_upload。
-      - name: Upload to Lanzou Cloud
-        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.lanzou_upload)
-        env:
-          LANZOU_COOKIE: ${{ secrets.LANZOU_COOKIE }}
-          VERSION: ${{ needs.build.outputs.version }}
-          DMG_NAME: ${{ needs.build.outputs.dmg_name }}
-          NOTES_FILE: ${{ runner.temp }}/release-notes.md
-        run: |
-          test -n "$LANZOU_COOKIE" || { echo "::error::未配置 LANZOU_COOKIE secret"; exit 1; }
-          python3 -m pip install --user -r scripts/requirements-lanzou.txt
-          ZIP_NAME="${DMG_NAME%.dmg}.zip"
-          ZIP_PATH="build/${ZIP_NAME}"
-          zip -j "$ZIP_PATH" build/CopyAttach-*.dmg
-          python3 scripts/lanzou_uploader.py "$ZIP_PATH" \
-            --folder-name "copyattach" \
-            --password "1234"
-          # 稳定入口：dl.abovepast.shop/lanzou 每次 302 到当前可用的蓝奏域名，
-          # 蓝奏轮换域名时无需改动本文件或重发 Release。
-          printf '\n---\n### 国内下载\n- [蓝奏云下载](https://dl.abovepast.shop/lanzou)（提取码：`1234`）\n' >> "$NOTES_FILE"
-
       # 发布到源码仓库本身。仓库已公开，GITHUB_TOKEN 创建的 Release 对所有人可见。
+      # 必须排在蓝奏云上传之前：上传链路会偶发被限速（实测 3.3MB 用过 351s，
+      # 历史基线 5–7s），GitHub Release 不能跟着一起等。
       - name: Create or update release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -325,3 +311,23 @@ jobs:
           fi
           gh api repos/wonaren/homebrew-tap/dispatches -f event_type=release
           echo "Homebrew tap update dispatched for v${VERSION}"
+
+      # 放在最后且不阻断：蓝奏云上传已完成本地和 CI 验证，但链路会被偶发限速
+      # （v0.114.0 实测 351s vs 基线 5–7s，10-09/10-18 也各出现过 86s/57s）。
+      # tag 发布自动上传；手动运行时需要显式勾选 lanzou_upload。
+      - name: Upload to Lanzou Cloud
+        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.lanzou_upload)
+        continue-on-error: true
+        env:
+          LANZOU_COOKIE: ${{ secrets.LANZOU_COOKIE }}
+          VERSION: ${{ needs.build.outputs.version }}
+          DMG_NAME: ${{ needs.build.outputs.dmg_name }}
+        run: |
+          test -n "$LANZOU_COOKIE" || { echo "::error::未配置 LANZOU_COOKIE secret"; exit 1; }
+          python3 -m pip install --user -r scripts/requirements-lanzou.txt
+          ZIP_NAME="${DMG_NAME%.dmg}.zip"
+          ZIP_PATH="build/${ZIP_NAME}"
+          zip -j "$ZIP_PATH" build/CopyAttach-*.dmg
+          python3 scripts/lanzou_uploader.py "$ZIP_PATH" \
+            --folder-name "copyattach" \
+            --password "1234"
