@@ -60,6 +60,8 @@ class ClipboardBackend {
     private let reloadGeneration = OSAllocatedUnfairLock(initialState: 0)
     private var pasteTargetPID: pid_t?
     private(set) var sourceAppBundleID: String?
+
+    var pasteTargetProcessID: pid_t? { pasteTargetPID }
     private var lastImageEncodingCounter: UInt64 = 0
     private var lastHistoryRevision: UInt64 = 0
     private var popupOpenPerfUs: UInt64 = 0

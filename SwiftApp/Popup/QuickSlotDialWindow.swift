@@ -28,8 +28,11 @@ final class QuickSlotDialWindow {
         let visible = (NSScreen.screens.first(where: { $0.frame.intersects(popupFrame) }) ?? NSScreen.main)?
             .visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
         var x = popupFrame.maxX + Self.gap
+        if x + Self.dialSize.width > visible.maxX - 4 {
+            x = popupFrame.minX - Self.gap - Self.dialSize.width
+        }
         var y = anchorY - Self.dialSize.height / 2
-        x = min(x, visible.maxX - Self.dialSize.width - 4)
+        x = max(visible.minX + 4, min(x, visible.maxX - Self.dialSize.width - 4))
         y = max(visible.minY + 4, min(y, visible.maxY - Self.dialSize.height - 4))
         panel.setFrame(NSRect(origin: NSPoint(x: x, y: y), size: Self.dialSize), display: true)
         let fadeIn = appearing ? ReduceMotion.duration(0.12) : 0

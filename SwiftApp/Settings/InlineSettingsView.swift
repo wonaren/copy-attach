@@ -32,6 +32,7 @@ struct InlineSettingsView: View {
     )
     @AppStorage(HistoryPopupContent.undoEvictionWarningKey) var undoEvictionWarningDisabled = true
     @State var continuousDrag = HistoryPopupWindow.continuousDragEnabled
+    @State var popupAnchoredToCaret = HistoryPopupWindow.caretAnchoredEnabled
     @State var richTextDragApps = ClipboardBackend.richTextDragAppBundleIDs
     @State var isDraggingOverRichTextCard = false
     @State var showRichTextListSheet = false

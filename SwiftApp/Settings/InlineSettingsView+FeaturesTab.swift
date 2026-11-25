@@ -28,6 +28,19 @@ extension InlineSettingsView {
             }
             sectionDivider().padding(.vertical, 7)
             settingToggleRow(
+                icon: popupAnchoredToCaret ? "character.cursor.ibeam" : "rectangle.center.inset.filled",
+                iconColor: popupAnchoredToCaret ? Color.accentColor : theme.secondaryText,
+                title: "在光标位置呼出",
+                desc: popupAnchoredToCaret
+                    ? "弹窗出现在正在输入的文字旁边，不挡住这一行。"
+                    : "弹窗出现在鼠标所在屏幕的正中央。",
+                isOn: $popupAnchoredToCaret
+            )
+            .onChange(of: popupAnchoredToCaret) { _, newValue in
+                UserDefaults.standard.set(newValue, forKey: HistoryPopupWindow.caretAnchoredDefaultsKey)
+            }
+            sectionDivider().padding(.vertical, 7)
+            settingToggleRow(
                 icon: "cursorarrow.click",
                 iconColor: singleClickUsesItem ? Color.accentColor : theme.secondaryText,
                 title: "单击使用条目",

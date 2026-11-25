@@ -416,6 +416,12 @@ pub(crate) fn simulate_cmd_v(pid: i32) -> bool {
         crate::error_log!("CopyAttach: simulate_cmd_v: no target PID (frontmost app unknown)");
         return false;
     }
+    if !check_permission() {
+        crate::error_log!(
+            "CopyAttach: simulate_cmd_v: accessibility permission missing (AXIsProcessTrusted=false) — ⌘V to pid {pid} would be dropped by the system"
+        );
+        return false;
+    }
     if unsafe { kill(pid, 0) != 0 } {
         let err = std::io::Error::last_os_error();
         if err.raw_os_error() == Some(3) {

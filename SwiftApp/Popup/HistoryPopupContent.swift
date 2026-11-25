@@ -348,7 +348,7 @@ struct HistoryPopupContent: View {
     }
 
     private let popupWidth: CGFloat = 500
-    private let popupHeight: CGFloat = 720
+    let popupHeight: CGFloat
 
     var popupWindow: HistoryPopupWindow? {
         NSApp.windows.first(where: { $0 is HistoryPopupWindow }) as? HistoryPopupWindow

@@ -43,6 +43,20 @@ class HistoryPopupWindow: NSPanel {
         UserDefaults.standard.object(forKey: continuousDragDefaultsKey) as? Bool ?? false
     }
 
+    static let caretAnchoredDefaultsKey = "PopupAnchoredToCaret"
+
+    static var caretAnchoredEnabled: Bool {
+        UserDefaults.standard.object(forKey: caretAnchoredDefaultsKey) as? Bool ?? false
+    }
+
+    private static let caretAnchorGap: CGFloat = 10
+
+    private static let preferredSize = NSSize(width: 500, height: 720)
+
+    private static let minimumHeight: CGFloat = 260
+
+    private(set) var anchorOrigin: NSPoint
+
     enum LifecycleState: Equatable {
         case closed
         case opening
@@ -81,10 +95,11 @@ class HistoryPopupWindow: NSPanel {
         let mouseLoc = NSEvent.mouseLocation
         let targetScreen = NSScreen.screens.first(where: { NSMouseInRect(mouseLoc, $0.frame, false) }) ?? NSScreen.main
         let screenFrame = targetScreen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 800, height: 600)
-        let popupWidth: CGFloat = 500
-        let popupHeight: CGFloat = 720
+        let popupWidth = Self.preferredSize.width
+        let popupHeight = Self.preferredSize.height
         let x = screenFrame.origin.x + (screenFrame.size.width - popupWidth) / 2
         let y = screenFrame.origin.y + (screenFrame.size.height - popupHeight) / 2
+        self.anchorOrigin = NSPoint(x: x, y: y)
 
         super.init(
             contentRect: NSRect(x: x, y: y, width: popupWidth, height: popupHeight),
@@ -111,18 +126,80 @@ class HistoryPopupWindow: NSPanel {
 
     override var canBecomeKey: Bool { return true }
 
-    private func centerOnScreen() {
-        let mouseLoc = NSEvent.mouseLocation
-        let targetScreen = NSScreen.screens.first(where: { NSMouseInRect(mouseLoc, $0.frame, false) }) ?? NSScreen.main
-        if let screen = targetScreen {
-            let screenFrame = screen.visibleFrame
-            let windowFrame = self.frame
-            let rawX = screenFrame.origin.x + (screenFrame.size.width - windowFrame.size.width) / 2
-            let rawY = screenFrame.origin.y + (screenFrame.size.height - windowFrame.size.height) / 2
-            let clampedX = max(screenFrame.minX, min(rawX, screenFrame.maxX - windowFrame.size.width))
-            let clampedY = max(screenFrame.minY, min(rawY, screenFrame.maxY - windowFrame.size.height))
-            self.setFrameOrigin(NSPoint(x: clampedX, y: clampedY))
+    private static func screen(containingPoint point: NSPoint) -> NSScreen? {
+        NSScreen.screens.first(where: { $0.frame.contains(point) }) ?? NSScreen.screens.first
+    }
+
+    private static func screen(containing rect: NSRect) -> NSScreen? {
+        screen(containingPoint: NSPoint(x: rect.midX, y: rect.midY))
+    }
+
+    private static func clampedOrigin(_ origin: NSPoint, size: NSSize, in visible: NSRect) -> NSPoint {
+        NSPoint(x: max(visible.minX, min(origin.x, visible.maxX - size.width)),
+                y: max(visible.minY, min(origin.y, visible.maxY - size.height)))
+    }
+
+    private static func centeredOrigin(size: NSSize, in visible: NSRect) -> NSPoint {
+        clampedOrigin(NSPoint(x: visible.minX + (visible.size.width - size.width) / 2,
+                              y: visible.minY + (visible.size.height - size.height) / 2),
+                      size: size,
+                      in: visible)
+    }
+
+    private static func originNear(_ anchor: NSRect, size: NSSize, in visible: NSRect) -> NSRect {
+        let gap = caretAnchorGap
+        let spaceBelow = anchor.minY - gap - visible.minY
+        let spaceAbove = visible.maxY - anchor.maxY - gap
+        let useBelow: Bool
+        if spaceBelow >= minimumHeight {
+            useBelow = true
+        } else if spaceAbove >= minimumHeight {
+            useBelow = false
+        } else {
+            useBelow = spaceBelow >= spaceAbove
         }
+        let space = useBelow ? spaceBelow : spaceAbove
+        let height = min(size.height, max(space, minimumHeight))
+        let width = size.width
+        var x = anchor.minX
+        if x + width > visible.maxX {
+            x = anchor.width > 0 ? anchor.maxX - width : anchor.minX - gap - width
+        }
+        x = max(visible.minX, min(x, visible.maxX - width))
+        var y = useBelow ? anchor.minY - gap - height : anchor.maxY + gap
+        y = max(visible.minY, min(y, visible.maxY - height))
+        return NSRect(x: x, y: y, width: width, height: height)
+    }
+
+    private func positionForPresentation() {
+        let preferred = Self.preferredSize
+        let enabled = Self.caretAnchoredEnabled
+        let locateStart = CACurrentMediaTime()
+        let anchor: CaretAnchor? = enabled
+            ? ClipboardBackend.shared.pasteTargetProcessID.flatMap { CaretAnchor.locate(in: $0) }
+            : nil
+        let locateMs = Int((CACurrentMediaTime() - locateStart) * 1000)
+        let pointer = NSEvent.mouseLocation
+        let screen = anchor.flatMap { Self.screen(containing: $0.rect) } ?? Self.screen(containingPoint: pointer)
+        guard let screen else { return }
+        let visible = screen.visibleFrame
+        let frame: NSRect
+        let mode: String
+        if let anchor {
+            frame = Self.originNear(anchor.rect, size: preferred, in: visible)
+            mode = "caret"
+        } else if enabled {
+            frame = Self.originNear(NSRect(origin: pointer, size: .zero), size: preferred, in: visible)
+            mode = "pointer"
+        } else {
+            let height = min(preferred.height, visible.height)
+            let size = NSSize(width: preferred.width, height: height)
+            frame = NSRect(origin: Self.centeredOrigin(size: size, in: visible), size: size)
+            mode = "center"
+        }
+        anchorOrigin = frame.origin
+        self.setFrame(frame, display: false)
+        debugLog("positionForPresentation: frame=(\(Int(frame.minX)),\(Int(frame.minY)),\(Int(frame.width))x\(Int(frame.height))) locateMs=\(locateMs) enabled=\(enabled) pid=\(ClipboardBackend.shared.pasteTargetProcessID ?? -1) caret=\(anchor.map { "(\(Int($0.rect.minX)),\(Int($0.rect.minY)),\(Int($0.rect.width))x\(Int($0.rect.height))) \($0.source)" } ?? "none") mode=\(mode)")
     }
 
     func beginItemDrag() {
@@ -157,6 +234,9 @@ class HistoryPopupWindow: NSPanel {
 
         ClipboardBackend.shared.setPopupVisible(true)
 
+        resetDragParking()
+        positionForPresentation()
+
         closeGuaranteeTimer?.invalidate()
         closeGuaranteeTimer = nil
 
@@ -168,7 +248,7 @@ class HistoryPopupWindow: NSPanel {
         let contentView = AnyView(HistoryPopupContent(onClose: { [weak self] in
             debugLog("HistoryPopupContent onClose callback")
             self?.close()
-        }).withAppTheme())
+        }, popupHeight: self.frame.height).withAppTheme())
         let hosting = PopupHostingView(rootView: contentView)
         popupHostingView = hosting
         hosting.safeAreaRegions = []
@@ -191,9 +271,6 @@ class HistoryPopupWindow: NSPanel {
         hosting.layer?.position = .zero
 
         applyContentScale(reduceMotion ? 1.0 : 1.06, to: hosting, layer: hosting.layer!)
-
-        resetDragParking()
-        centerOnScreen()
 
         self.level = .floating
         self.acceptsMouseMovedEvents = true

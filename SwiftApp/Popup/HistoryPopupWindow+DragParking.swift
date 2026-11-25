@@ -78,12 +78,10 @@ extension HistoryPopupWindow {
 
     func restoreFromParking() {
         resetDragParking()
-        guard let screen = self.screen ?? NSScreen.main else { return }
-        let visible = screen.visibleFrame
-        let centeredX = visible.minX + (visible.size.width - self.frame.width) / 2
+        let targetX = anchorOrigin.x
         let origin = self.frame.origin
-        guard abs(origin.x - centeredX) > 1 else { return }
-        let target = NSRect(x: centeredX, y: origin.y, width: self.frame.width, height: self.frame.height)
+        guard abs(origin.x - targetX) > 1 else { return }
+        let target = NSRect(x: targetX, y: origin.y, width: self.frame.width, height: self.frame.height)
         let duration = Self.dragParkDuration
         guard duration > 0 else {
             setFrame(target, display: true)

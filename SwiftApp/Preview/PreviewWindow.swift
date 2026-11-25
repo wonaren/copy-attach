@@ -165,10 +165,7 @@ class PreviewWindow: NSPanel {
         self.centerAnchor = screenCenter
 
         super.init(
-            contentRect: NSRect(x: screenCenter.x - size.width / 2,
-                                y: screenCenter.y - size.height / 2,
-                                width: size.width,
-                                height: size.height),
+            contentRect: Self.anchoredFrame(centeredAt: screenCenter, size: size, in: screenFrame),
             styleMask: [.borderless, .nonactivatingPanel, .fullSizeContentView],
             backing: .buffered,
             defer: false
@@ -367,10 +364,7 @@ class PreviewWindow: NSPanel {
         let targetScreen = NSScreen.screens.first(where: { NSPointInRect(point, $0.frame) }) ?? NSScreen.main
         let screenFrame = targetScreen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 800, height: 600)
         let size = Self.contentSize(for: currentItem, screenFrame: screenFrame)
-        let target = NSRect(x: point.x - size.width / 2,
-                            y: point.y - size.height / 2,
-                            width: size.width,
-                            height: size.height)
+        let target = Self.anchoredFrame(centeredAt: point, size: size, in: screenFrame)
         if case .image = item {
             let startHeight = frame.height
             if let hosting = hostingView {
@@ -451,11 +445,7 @@ class PreviewWindow: NSPanel {
         let newSize = Self.contentSize(for: item, screenFrame: screenFrame)
         let oldSize = self.frame.size
         guard abs(newSize.width - oldSize.width) > 0.5 || abs(newSize.height - oldSize.height) > 0.5 else { return }
-        let newOrigin = NSPoint(
-            x: centerAnchor.x - newSize.width / 2,
-            y: centerAnchor.y - newSize.height / 2
-        )
-        let newFrame = NSRect(origin: newOrigin, size: newSize)
+        let newFrame = Self.anchoredFrame(centeredAt: centerAnchor, size: newSize, in: screenFrame)
         animateFrame(newFrame,
                      duration: 0.2,
                      timing: CAMediaTimingFunction(name: .easeInEaseOut))
@@ -511,6 +501,13 @@ class PreviewWindow: NSPanel {
     private static func alignedWidth(_ width: CGFloat) -> CGFloat {
         let scale = NSScreen.main?.backingScaleFactor ?? 2
         return (width * scale).rounded() / scale
+    }
+
+    private static func anchoredFrame(centeredAt anchor: NSPoint, size: NSSize, in visible: NSRect) -> NSRect {
+        NSRect(x: max(visible.minX, min(anchor.x - size.width / 2, visible.maxX - size.width)),
+               y: max(visible.minY, min(anchor.y - size.height / 2, visible.maxY - size.height)),
+               width: size.width,
+               height: size.height)
     }
 
     private static func contentSize(for item: ClipboardItem, screenFrame: NSRect) -> NSSize {
