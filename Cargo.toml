@@ -1,6 +1,6 @@
 [package]
 name = "copy-attach"
-version = "0.113.10-dev"
+version = "0.114.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
 
