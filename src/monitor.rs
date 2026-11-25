@@ -284,7 +284,7 @@ fn ingest_decoded_png(
         let mut pooled = crate::backend::ImageDecodeBuffer::acquire();
         match crate::image::decode_png_rgba8_into(&img_bytes, pooled.as_mut_vec()) {
             Some((w, h)) => {
-                is_native_png = true;
+                is_native_png = crate::image::stream_png_dims(&img_bytes).is_some();
                 Ok((pooled, w, h))
             }
             None => {

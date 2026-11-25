@@ -242,7 +242,7 @@ class PreviewWindow: NSPanel {
             showsZoomHint: true,
             hoverState: hoverState,
             dismissState: dismissState
-        ))
+        ).withAppTheme())
     }
 
     private func makeContent(item: ClipboardItem,
