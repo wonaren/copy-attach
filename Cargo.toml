@@ -1,6 +1,6 @@
 [package]
 name = "copy-attach"
-version = "0.114.0"
+version = "0.114.9-dev"
 edition = "2021"
 license = "GPL-3.0-or-later"
 
@@ -9,7 +9,7 @@ crate-type = ["cdylib", "rlib"]
 name = "copy_attach"
 
 [dependencies]
-arboard = "3.6"
+arboard = "3.7"
 objc2 = "0.6"
 objc2-core-graphics = "0.3"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff"] }
