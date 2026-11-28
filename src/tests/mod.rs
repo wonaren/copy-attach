@@ -10,7 +10,6 @@ mod image;
 mod search;
 mod cleanup;
 mod db;
-mod migration;
 mod backend;
 mod backup;
 mod soft_delete;

@@ -111,7 +111,7 @@ Homebrew cask 维护在独立仓库 `wonaren/homebrew-tap`（安装命令 `brew 
 | 模块 | 职责 |
 |---|---|
 | `ffi/` | FFI 导出主目录（8 个子模块，68 个函数）：`snapshot.rs` / `search.rs` / `init.rs` / `accessors.rs` / `paste.rs` / `history.rs` / `backup.rs` / `stress.rs`（另有 2 个在 `backend.rs`、4 个在 `perf.rs`） |
-| `db/` | SQLite write-through：`schema.rs`（连接/FTS5/`user_version` 迁移/目录解析 `COPYATTACH_DATA_DIR`）、`migration.rs`（legacy `history.json` → SQLite 导入，feature-gated）、`crud.rs`（load/insert/dedup/trim）、`search.rs`（FTS/LIKE）、`backup.rs`（导出/校验/覆盖/合并）。禁用 mmap，4MB LRU page cache；FTS 索引上限 512K 字符，超限行走 LIKE 兜底；text/image hash 均为稳定 FNV-1a 64 |
+| `db/` | SQLite write-through：`schema.rs`（连接/FTS5/`user_version` 迁移/目录解析 `COPYATTACH_DATA_DIR`）、`crud.rs`（load/insert/dedup/trim）、`search.rs`（FTS/LIKE）、`backup.rs`（导出/校验/覆盖/合并）。禁用 mmap，4MB LRU page cache；FTS 索引上限 512K 字符，超限行走 LIKE 兜底；text/image hash 均为稳定 FNV-1a 64 |
 | `monitor.rs` | 后台线程每 500ms 轮询剪贴板，changeCount 轻量检测，write-through DB，ignore rules 过滤。图片 Phase 2 单 worker + 单槽有界队列（背压） |
 | `ignore.rs` | 捕获时忽略规则：按 app bundle ID、类型、短文本阈值过滤 |
 | `image.rs` | 解码 PNG/JPEG/GIF/WebP/BMP/TIFF，**编码只有 PNG**（存储 blob 恒为 PNG），CatmullRom 缩略图（等比 fit 进行显示框 920×200px），FNV-1a 内容哈希 |
@@ -120,7 +120,7 @@ Homebrew cask 维护在独立仓库 `wonaren/homebrew-tap`（安装命令 `brew 
 | `types.rs` | 核心领域模型（ClipboardEntry / HistoryItem 等） |
 | `macos.rs` | NSPasteboard changeCount + 文件 URL 读写，CGEventPost Cmd+V，AXIsProcessTrusted。cfg-gated，非 macOS 用空桩 |
 | `history.rs` | `add_to_history()` — 去重 + 头部插入，纯函数式 |
-| `tests/` | 单元测试目录模块（cfg-gated，11 个子模块）：`backend` / `backup` / `cleanup` / `db` / `history` / `image` / `migration` / `quick_slots` / `search` / `soft_delete` / `soft_delete_real` |
+| `tests/` | 单元测试目录模块（cfg-gated，10 个子模块）：`backend` / `backup` / `cleanup` / `db` / `history` / `image` / `quick_slots` / `search` / `soft_delete` / `soft_delete_real` |
 | `bench_tests/` | 基准/内存探针测试目录模块（cfg-gated on `test` + `stress-test`，4 个子模块）：`thresholds` / `images` / `memory_probe` / `side_table` |
 | `stress/` | 应力测试（feature-gated behind `stress-test`）：数据生成 + 注入 + 基准测试 |
 | `demo/` | 演示数据（feature-gated behind `demo-data`）：一套人工挑选的文本 + Unsplash 实拍图（首次生成时下载并缓存到 gitignored 的 `demo-data/images/`），按生产 schema/hash/缩略图辅助函数写入独立 DB。`src/bin/` 下含 `demo_gen.rs`、`stress_gen.rs`、`bench.rs`，`./videos/demo.sh` 负责与个人库换位 |
