@@ -33,8 +33,8 @@ struct InlineSettingsView: View {
     @AppStorage(HistoryPopupContent.undoEvictionWarningKey) var undoEvictionWarningDisabled = true
     @State var continuousDrag = HistoryPopupWindow.continuousDragEnabled
     @State var popupAnchoredToCaret = HistoryPopupWindow.caretAnchoredEnabled
-    @State var popupAnimationEnabled = HistoryPopupWindow.popupAnimationEnabled
-    @State var systemReduceMotion = ReduceMotion.isOn
+    @State var appReduceMotion = ReduceMotion.userOverrideEnabled
+    @State var systemReduceMotion = ReduceMotion.systemEnabled
     @State var copySoundEnabled = SoundFeedback.copyEnabled
     @State var pasteSoundEnabled = SoundFeedback.pasteEnabled
     @State var copySoundChoice = SoundFeedback.copySound
@@ -94,11 +94,11 @@ struct InlineSettingsView: View {
             }
         }
         .onAppear {
-            systemReduceMotion = ReduceMotion.isOn
+            systemReduceMotion = ReduceMotion.systemEnabled
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             backend.refreshPermission()
-            systemReduceMotion = ReduceMotion.isOn
+            systemReduceMotion = ReduceMotion.systemEnabled
         }
     }
 
@@ -170,7 +170,7 @@ struct InlineSettingsView: View {
         } else if hoveredTab == index {
             RoundedRectangle(cornerRadius: tabCornerRadius, style: .continuous)
                 .fill(theme.popupRowHover)
-                .transition(.opacity)
+                .transition(ReduceMotion.transition(.opacity))
         }
     }
 
@@ -264,7 +264,7 @@ struct InlineSettingsView: View {
             else { aboutTab }
         }
         .id(selectedTab)
-        .transition(.opacity)
+        .transition(ReduceMotion.transition(.opacity))
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 

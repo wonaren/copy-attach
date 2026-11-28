@@ -8,10 +8,10 @@ struct OnboardingStageView: View {
         ZStack {
             if guide.phase == .welcome {
                 OnboardingWelcomeView(guide: guide)
-                    .transition(.opacity)
+                    .transition(ReduceMotion.transition(.opacity))
             } else {
                 OnboardingGuideView(guide: guide)
-                    .transition(.opacity)
+                    .transition(ReduceMotion.transition(.opacity))
             }
         }
         .animation(ReduceMotion.animation(.easeInOut(duration: 0.26)), value: guide.phase)

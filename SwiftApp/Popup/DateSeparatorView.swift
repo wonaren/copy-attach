@@ -15,7 +15,7 @@ struct DateSeparatorView: View {
                 Text(relative)
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundColor(theme.popupSecondaryText)
-                    .transition(.opacity)
+                    .transition(ReduceMotion.transition(.opacity))
             }
             Rectangle()
                 .fill(theme.popupRowBorder)

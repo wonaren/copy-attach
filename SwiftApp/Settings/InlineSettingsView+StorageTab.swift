@@ -383,7 +383,7 @@ extension InlineSettingsView {
                             .font(.system(size: 11, weight: .medium))
                             .foregroundColor(Color(nsColor: .systemGreen))
                     }
-                    .transition(.opacity)
+                    .transition(ReduceMotion.transition(.opacity))
                 }
 
                 Spacer()

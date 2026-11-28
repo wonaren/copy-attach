@@ -502,7 +502,7 @@ struct HistoryPopupContent: View {
             editingItemId = nil
             editingText = ""
             rowsReadyForAnimation = false
-            let animatePopup = HistoryPopupWindow.shouldAnimatePresentation
+            let animatePopup = !ReduceMotion.isOn
             popupWindow?.setContentScale(animatePopup ? 1.06 : 1.0)
             isDismissing = false
             toastDismissTask?.cancel()
@@ -554,7 +554,7 @@ struct HistoryPopupContent: View {
         .onReceive(NotificationCenter.default.publisher(for: popupWillDismissNotification)) { _ in
             QuickSlotDialWindow.shared.hide()
             closeHoverPreview()
-            guard HistoryPopupWindow.shouldAnimatePresentation else { return }
+            guard !ReduceMotion.isOn else { return }
             popupWindow?.animateContentScale(to: 1.04, response: 0.15, damping: 1)
             withAnimation(ReduceMotion.animation(.easeOut(duration: 0.15))) {
                 isDismissing = true
@@ -567,7 +567,7 @@ struct HistoryPopupContent: View {
             closeHoverPreview()
         }
         .onReceive(NotificationCenter.default.publisher(for: popupCancelDismissNotification)) { _ in
-            if HistoryPopupWindow.shouldAnimatePresentation {
+            if !ReduceMotion.isOn {
                 popupWindow?.animateContentScale(to: 1.0, response: 0.15, damping: 1)
                 withAnimation(ReduceMotion.animation(.easeOut(duration: 0.15))) {
                     isDismissing = false
@@ -893,7 +893,7 @@ struct HistoryPopupContent: View {
                 .foregroundColor(theme.popupPrimaryText)
             Spacer()
         }
-        .transition(.opacity)
+        .transition(ReduceMotion.transition(.opacity))
     }
 
     private var filterModeTabs: some View {
@@ -965,7 +965,7 @@ struct HistoryPopupContent: View {
                 itemsList
                 bottomBar
             }
-            .transition(.opacity)
+            .transition(ReduceMotion.transition(.opacity))
         }
     }
 
@@ -1372,6 +1372,6 @@ struct HistoryPopupContent: View {
                 .foregroundColor(theme.popupMutedText)
             Spacer()
         }
-        .transition(.opacity)
+        .transition(ReduceMotion.transition(.opacity))
     }
 }

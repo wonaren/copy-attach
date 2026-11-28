@@ -193,6 +193,7 @@ class PreviewWindow: NSPanel {
     }
 
     private func configureWindow() {
+        self.animationBehavior = .none
         self.isOpaque = false
         self.backgroundColor = .clear
         self.level = .floating

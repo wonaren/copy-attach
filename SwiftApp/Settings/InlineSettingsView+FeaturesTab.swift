@@ -75,22 +75,21 @@ extension InlineSettingsView {
     }
 
     private var popupAnimationRow: some View {
-        let disabled = systemReduceMotion
-        let effectiveOn = !disabled && popupAnimationEnabled
+        let effectiveOn = systemReduceMotion || appReduceMotion
         return HStack(spacing: 12) {
-            Image(systemName: effectiveOn ? "sparkles" : "bolt.fill")
+            Image(systemName: effectiveOn ? "bolt.slash.fill" : "sparkles")
                 .font(.system(size: 15))
                 .foregroundColor(effectiveOn ? Color.accentColor : theme.secondaryText)
                 .frame(width: 22)
             VStack(alignment: .leading, spacing: 3) {
-                Text("窗口呼出动画")
+                Text("减弱动态效果")
                     .font(.system(size: 13, weight: .medium))
                     .foregroundColor(theme.primaryText)
-                Text(disabled
-                     ? "系统已开启「减弱动态效果」，呼出动画保持关闭。"
-                     : popupAnimationEnabled
-                        ? "呼出与关闭弹窗时播放淡入缩放动画。"
-                        : "呼出与关闭弹窗即时响应，无需跟随系统设置。")
+                Text(systemReduceMotion
+                     ? "系统已开启「减弱动态效果」，App 内动画全部取消。"
+                     : appReduceMotion
+                        ? "弹窗、预览与列表等动画全部取消，界面即时响应。"
+                        : "取消 App 内几乎全部动画，与系统设置效果一致。")
                     .font(.system(size: 11.5))
                     .foregroundColor(theme.secondaryText)
             }
@@ -98,14 +97,14 @@ extension InlineSettingsView {
             Toggle("", isOn: Binding(
                 get: { effectiveOn },
                 set: { newValue in
-                    popupAnimationEnabled = newValue
-                    UserDefaults.standard.set(newValue, forKey: HistoryPopupWindow.popupAnimationDefaultsKey)
+                    appReduceMotion = newValue
+                    ReduceMotion.userOverrideEnabled = newValue
                 }
             ))
             .labelsHidden()
             .toggleStyle(.switch)
             .controlSize(.small)
-            .disabled(disabled)
+            .disabled(systemReduceMotion)
         }
         .padding(.vertical, 4)
     }
@@ -160,7 +159,7 @@ extension InlineSettingsView {
                     Spacer()
                 }
                 .padding(.leading, 34)
-                .transition(.opacity)
+                .transition(ReduceMotion.transition(.opacity))
             }
         }
         .padding(.vertical, 4)

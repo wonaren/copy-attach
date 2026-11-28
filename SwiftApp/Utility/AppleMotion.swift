@@ -1,38 +1,21 @@
 import AppKit
 import SwiftUI
 
-final class ReduceMotionState: @unchecked Sendable {
-    static let shared = ReduceMotionState()
+enum ReduceMotion {
+    static let userOverrideDefaultsKey = "AppReduceMotion"
 
-    private static let cacheLifetime: CFAbsoluteTime = 0.25
-
-    private let lock = NSLock()
-
-    private var isOn: Bool = ReduceMotionState.readPreference()
-
-    private var lastRead: CFAbsoluteTime = CFAbsoluteTimeGetCurrent()
-
-    private init() {}
-
-    static func readPreference() -> Bool {
+    static var systemEnabled: Bool {
         CFPreferencesCopyAppValue("reduceMotion" as CFString,
                                   "com.apple.universalaccess" as CFString) as? Bool ?? false
     }
 
-    func current() -> Bool {
-        let now = CFAbsoluteTimeGetCurrent()
-        lock.lock()
-        defer { lock.unlock() }
-        guard now - lastRead > Self.cacheLifetime else { return isOn }
-        lastRead = now
-        isOn = ReduceMotionState.readPreference()
-        return isOn
+    static var userOverrideEnabled: Bool {
+        get { UserDefaults.standard.bool(forKey: userOverrideDefaultsKey) }
+        set { UserDefaults.standard.set(newValue, forKey: userOverrideDefaultsKey) }
     }
-}
 
-enum ReduceMotion {
     static var isOn: Bool {
-        ReduceMotionState.shared.current()
+        systemEnabled || userOverrideEnabled
     }
 
     static func duration(_ value: TimeInterval) -> TimeInterval {
@@ -44,7 +27,7 @@ enum ReduceMotion {
     }
 
     static func transition(_ transition: AnyTransition) -> AnyTransition {
-        isOn ? .opacity : transition
+        isOn ? .identity : transition
     }
 
     static func scale(_ value: CGFloat) -> CGFloat {
@@ -78,21 +61,21 @@ extension View {
 
 enum AppleMotion {
     static var snappy: Animation? {
-        ReduceMotion.isOn ? nil : .spring(response: 0.22, dampingFraction: 0.78, blendDuration: 0)
+        ReduceMotion.animation(.spring(response: 0.22, dampingFraction: 0.78, blendDuration: 0))
     }
 
     static var smooth: Animation? {
-        ReduceMotion.isOn ? nil : .spring(response: 0.30, dampingFraction: 0.82, blendDuration: 0)
+        ReduceMotion.animation(.spring(response: 0.30, dampingFraction: 0.82, blendDuration: 0))
     }
 
     static var tactilePress: Animation? {
-        ReduceMotion.isOn ? nil : .spring(response: 0.16, dampingFraction: 0.70, blendDuration: 0)
+        ReduceMotion.animation(.spring(response: 0.16, dampingFraction: 0.70, blendDuration: 0))
     }
 }
 
 extension AnyTransition {
     static var appleScaleFade: AnyTransition {
-        if ReduceMotion.isOn { return .opacity }
+        if ReduceMotion.isOn { return .identity }
         return .asymmetric(
             insertion: .scale(scale: 0.992).combined(with: .opacity),
             removal: .scale(scale: 0.992).combined(with: .opacity)

@@ -70,7 +70,7 @@ struct QuickSlotSettings: View {
             footer
             if boundCount > 0 && !backend.permissionGranted {
                 permissionNotice
-                    .transition(.opacity)
+                    .transition(ReduceMotion.transition(.opacity))
             }
         }
         .animation(changeAnimation, value: draggingSlot)
