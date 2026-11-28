@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use crate::backend::{set_backend, Backend, DEFAULT_CLEANUP_THRESHOLD, MAX_CLEANUP_THRESHOLD, MIN_CLEANUP_THRESHOLD};
-use crate::db::{bump_entry_id_watermark, ensure_history_table, entry_id_watermark, get_persist_dir, load_history_from_db, migrate_from_json_to_db, open_db, seed_first_launch_tips, trim_db_history};
+use crate::db::{bump_entry_id_watermark, ensure_history_table, entry_id_watermark, get_persist_dir, load_history_from_db, open_db, seed_first_launch_tips, trim_db_history};
 use crate::ignore::IgnoreRules;
 use crate::monitor::clipboard_monitor;
 use crate::types::ClipboardEntry;
@@ -102,7 +102,7 @@ fn clipboard_init_inner(threshold: Option<c_int>, legacy_favorites: &[u64]) -> c
         return 1;
     }
 
-    let mut conn = match open_db() {
+    let conn = match open_db() {
         Ok(c) => c,
         Err(crate::db::DbFailure::Corrupt) => {
             crate::error_log!("CopyAttach: database is not usable, init aborted");
@@ -134,8 +134,6 @@ fn clipboard_init_inner(threshold: Option<c_int>, legacy_favorites: &[u64]) -> c
             }
         }
     }
-
-    migrate_from_json_to_db(&mut conn);
 
     seed_first_launch_tips(&conn);
 
