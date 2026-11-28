@@ -502,7 +502,8 @@ struct HistoryPopupContent: View {
             editingItemId = nil
             editingText = ""
             rowsReadyForAnimation = false
-            popupWindow?.setContentScale(1.06)
+            let animatePopup = HistoryPopupWindow.shouldAnimatePresentation
+            popupWindow?.setContentScale(animatePopup ? 1.06 : 1.0)
             isDismissing = false
             toastDismissTask?.cancel()
             toastDismissTask = nil
@@ -514,17 +515,29 @@ struct HistoryPopupContent: View {
             isCommandPressed = commandSides.left
             isRightCommandPressed = commandSides.right
 
-            let openDuration = 0.2
-            popupWindow?.animateContentScale(to: 1.0, response: openDuration, damping: 0.85)
-
-            DispatchQueue.main.asyncAfter(deadline: .now() + openDuration + 0.05) {
-                self.rowsReadyForAnimation = true
-                if self.backend.items.isEmpty {
-                    self.isContainerFocused = true
-                } else if self.selectedIndex == 0 {
-                    self.isSearchFocused = true
-                } else {
-                    self.isContainerFocused = true
+            if animatePopup {
+                let openDuration = 0.2
+                popupWindow?.animateContentScale(to: 1.0, response: openDuration, damping: 0.85)
+                DispatchQueue.main.asyncAfter(deadline: .now() + openDuration + 0.05) {
+                    self.rowsReadyForAnimation = true
+                    if self.backend.items.isEmpty {
+                        self.isContainerFocused = true
+                    } else if self.selectedIndex == 0 {
+                        self.isSearchFocused = true
+                    } else {
+                        self.isContainerFocused = true
+                    }
+                }
+            } else {
+                DispatchQueue.main.async {
+                    self.rowsReadyForAnimation = true
+                    if self.backend.items.isEmpty {
+                        self.isContainerFocused = true
+                    } else if self.selectedIndex == 0 {
+                        self.isSearchFocused = true
+                    } else {
+                        self.isContainerFocused = true
+                    }
                 }
             }
         }
@@ -541,6 +554,7 @@ struct HistoryPopupContent: View {
         .onReceive(NotificationCenter.default.publisher(for: popupWillDismissNotification)) { _ in
             QuickSlotDialWindow.shared.hide()
             closeHoverPreview()
+            guard HistoryPopupWindow.shouldAnimatePresentation else { return }
             popupWindow?.animateContentScale(to: 1.04, response: 0.15, damping: 1)
             withAnimation(ReduceMotion.animation(.easeOut(duration: 0.15))) {
                 isDismissing = true
@@ -553,8 +567,13 @@ struct HistoryPopupContent: View {
             closeHoverPreview()
         }
         .onReceive(NotificationCenter.default.publisher(for: popupCancelDismissNotification)) { _ in
-            popupWindow?.animateContentScale(to: 1.0, response: 0.15, damping: 1)
-            withAnimation(ReduceMotion.animation(.easeOut(duration: 0.15))) {
+            if HistoryPopupWindow.shouldAnimatePresentation {
+                popupWindow?.animateContentScale(to: 1.0, response: 0.15, damping: 1)
+                withAnimation(ReduceMotion.animation(.easeOut(duration: 0.15))) {
+                    isDismissing = false
+                }
+            } else {
+                popupWindow?.setContentScale(1.0)
                 isDismissing = false
             }
             if selectedIndex == 0 {

@@ -4,6 +4,7 @@
 
 uint64_t clipboard_wait_for_history_change(uint64_t since, uint64_t timeout_ms);
 int32_t clipboard_history_counters(uint64_t* out_revision, uint64_t* out_image_encoding);
+void clipboard_set_capture_callback(void (*cb)(void));
 
 int32_t clipboard_set_perf_enabled(int32_t state);
 int32_t clipboard_perf_enabled(void);

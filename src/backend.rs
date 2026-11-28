@@ -126,6 +126,35 @@ pub(crate) static HISTORY_REVISION: AtomicU64 = AtomicU64::new(0);
 static HISTORY_EVENT: OnceLock<Arc<(Mutex<u64>, Condvar)>> = OnceLock::new();
 const NO_EVENT: u64 = u64::MAX;
 
+static CAPTURE_CALLBACK: Mutex<Option<extern "C" fn()>> = Mutex::new(None);
+
+pub(crate) fn notify_capture_completed() {
+    let cb = {
+        let guard = CAPTURE_CALLBACK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *guard
+    };
+    if let Some(cb) = cb {
+        cb();
+    }
+}
+
+pub(crate) fn clear_capture_callback() {
+    let mut guard = CAPTURE_CALLBACK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    *guard = None;
+}
+
+#[no_mangle]
+pub extern "C" fn clipboard_set_capture_callback(cb: Option<extern "C" fn()>) {
+    let mut guard = CAPTURE_CALLBACK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    *guard = cb;
+}
+
 fn history_event() -> &'static (Mutex<u64>, Condvar) {
     HISTORY_EVENT.get_or_init(|| Arc::new((Mutex::new(NO_EVENT), Condvar::new())))
 }

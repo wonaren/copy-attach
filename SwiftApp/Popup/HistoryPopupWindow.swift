@@ -49,6 +49,16 @@ class HistoryPopupWindow: NSPanel {
         UserDefaults.standard.object(forKey: caretAnchoredDefaultsKey) as? Bool ?? false
     }
 
+    static let popupAnimationDefaultsKey = "PopupAnimationEnabled"
+
+    static var popupAnimationEnabled: Bool {
+        UserDefaults.standard.object(forKey: popupAnimationDefaultsKey) as? Bool ?? true
+    }
+
+    static var shouldAnimatePresentation: Bool {
+        popupAnimationEnabled && !ReduceMotion.isOn
+    }
+
     private static let caretAnchorGap: CGFloat = 10
 
     private static let preferredSize = NSSize(width: 500, height: 720)
@@ -70,9 +80,9 @@ class HistoryPopupWindow: NSPanel {
         lifecycleState == .open || lifecycleState == .opening
     }
 
-    private static var fadeInDuration: TimeInterval { ReduceMotion.duration(0.2) }
+    private static var fadeInDuration: TimeInterval { shouldAnimatePresentation ? 0.2 : 0 }
 
-    private static var fadeOutDuration: TimeInterval { ReduceMotion.duration(0.15) }
+    private static var fadeOutDuration: TimeInterval { shouldAnimatePresentation ? 0.15 : 0 }
 
     private var closeSessionGeneration: UInt64 = 0
 
@@ -241,9 +251,11 @@ class HistoryPopupWindow: NSPanel {
         closeGuaranteeTimer = nil
 
         let reduceMotion = ReduceMotion.isOn
-        let fadeIn = reduceMotion ? 0 : 0.2
+        let popupAnimation = Self.popupAnimationEnabled
+        let animate = popupAnimation && !reduceMotion
+        let fadeIn: TimeInterval = animate ? 0.2 : 0
         self.alphaValue = fadeIn > 0 ? 0 : 1
-        debugLog("show(): reduceMotion=\(reduceMotion) fadeIn=\(fadeIn)")
+        debugLog("show(): reduceMotion=\(reduceMotion) popupAnimation=\(popupAnimation) fadeIn=\(fadeIn)")
 
         let contentView = AnyView(HistoryPopupContent(onClose: { [weak self] in
             debugLog("HistoryPopupContent onClose callback")
@@ -270,7 +282,7 @@ class HistoryPopupWindow: NSPanel {
         hosting.layer?.anchorPoint = CGPoint(x: 0, y: 0)
         hosting.layer?.position = .zero
 
-        applyContentScale(reduceMotion ? 1.0 : 1.06, to: hosting, layer: hosting.layer!)
+        applyContentScale(animate ? 1.06 : 1.0, to: hosting, layer: hosting.layer!)
 
         self.level = .floating
         self.acceptsMouseMovedEvents = true
@@ -497,12 +509,12 @@ class HistoryPopupWindow: NSPanel {
     func setContentScale(_ scale: CGFloat) {
         guard let host = popupHostingView, let layer = host.layer else { return }
         layer.removeAnimation(forKey: "contentScale")
-        applyContentScale(ReduceMotion.scale(scale), to: host, layer: layer)
+        applyContentScale(Self.shouldAnimatePresentation ? scale : 1.0, to: host, layer: layer)
     }
 
     func animateContentScale(to scale: CGFloat, response: TimeInterval, damping: CGFloat) {
         guard let host = popupHostingView, let layer = host.layer else { return }
-        guard !ReduceMotion.isOn else {
+        guard Self.shouldAnimatePresentation else {
             setContentScale(scale)
             return
         }

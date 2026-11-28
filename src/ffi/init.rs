@@ -382,6 +382,7 @@ fn spawn_metadata_migration(b: &'static crate::backend::Backend) {
 
 #[no_mangle]
 pub extern "C" fn clipboard_cleanup() {
+    crate::backend::clear_capture_callback();
     if let Some(b) = crate::backend::try_backend() {
         b.running.store(false, Ordering::SeqCst);
         if let Ok(mut handle) = b.monitor_handle.lock() {

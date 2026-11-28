@@ -33,6 +33,12 @@ struct InlineSettingsView: View {
     @AppStorage(HistoryPopupContent.undoEvictionWarningKey) var undoEvictionWarningDisabled = true
     @State var continuousDrag = HistoryPopupWindow.continuousDragEnabled
     @State var popupAnchoredToCaret = HistoryPopupWindow.caretAnchoredEnabled
+    @State var popupAnimationEnabled = HistoryPopupWindow.popupAnimationEnabled
+    @State var systemReduceMotion = ReduceMotion.isOn
+    @State var copySoundEnabled = SoundFeedback.copyEnabled
+    @State var pasteSoundEnabled = SoundFeedback.pasteEnabled
+    @State var copySoundChoice = SoundFeedback.copySound
+    @State var pasteSoundChoice = SoundFeedback.pasteSound
     @State var richTextDragApps = ClipboardBackend.richTextDragAppBundleIDs
     @State var isDraggingOverRichTextCard = false
     @State var showRichTextListSheet = false
@@ -87,8 +93,12 @@ struct InlineSettingsView: View {
                 backend.refreshPermission()
             }
         }
+        .onAppear {
+            systemReduceMotion = ReduceMotion.isOn
+        }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             backend.refreshPermission()
+            systemReduceMotion = ReduceMotion.isOn
         }
     }
 

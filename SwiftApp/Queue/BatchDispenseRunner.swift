@@ -66,6 +66,7 @@ final class BatchDispenseRunner {
                     UInt64(item.id),
                     targetPID: targetPID,
                     refreshAfter: false,
+                    playSound: false,
                     perfName: "paste.batch_item"
                 ) {
                 case .pasted:
@@ -110,6 +111,9 @@ final class BatchDispenseRunner {
             finalNotice = "\(notice ?? "已中止") · 剩余 \(remaining) 条"
         }
         ClipboardBackend.shared.reloadItems()
+        if sent > 0 && finalNotice == nil {
+            SoundFeedback.playPaste()
+        }
         phase = .finished(sent: sent, total: total, notice: finalNotice)
         debugLog("BatchDispense: finished sent=\(sent)/\(total) remaining=\(remaining) notice=\(finalNotice ?? "none")")
 

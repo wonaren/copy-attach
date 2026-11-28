@@ -154,11 +154,13 @@ class ClipboardBackend {
         refreshPermission()
         refresh()
         syncQuickSlotTap()
+        SoundFeedback.syncCaptureCallback()
 
         return .started
     }
 
     func stop() {
+        clipboard_set_capture_callback(nil)
         stopHistoryWaiter()
         clearThumbnailCache()
         if let observer = sourceAppObserver {
@@ -435,6 +437,7 @@ class ClipboardBackend {
         }
         if mode == .clipboardOnly {
             debugLog("performQuickPaste: slot \(slot) copied to the pasteboard (clipboard-only mode)")
+            SoundFeedback.playCopy()
             return
         }
         guard prepared > 0 else {
@@ -443,6 +446,8 @@ class ClipboardBackend {
         }
         if clipboard_send_paste(prepared) == 0 {
             errorLog("performQuickPaste: ⌘V delivery failed for slot \(slot) (pid \(prepared))")
+        } else {
+            SoundFeedback.playPaste()
         }
     }
 
@@ -683,6 +688,7 @@ class ClipboardBackend {
                         dismiss: () -> Void = {},
                         targetPID: Int32? = nil,
                         refreshAfter: Bool = true,
+                        playSound: Bool = true,
                         perfName: String = "paste.queue_keystroke") -> PasteOutcome {
         let perfPaste = PerfSpan.start("swift", perfName)
         let mode = PasteDeliveryMode.current
@@ -697,6 +703,9 @@ class ClipboardBackend {
         dismiss()
 
         if mode == .clipboardOnly {
+            if playSound {
+                SoundFeedback.playCopy()
+            }
             perfPaste?.end()
             if refreshAfter {
                 reloadItems()
@@ -719,7 +728,11 @@ class ClipboardBackend {
         }
 
         let delivered = clipboard_send_paste(pid) != 0
-        if !delivered {
+        if delivered {
+            if playSound {
+                SoundFeedback.playPaste()
+            }
+        } else {
             errorLog("pasteEntryById: ⌘V delivery failed for entry \(entryId) (pid \(pid))")
         }
 

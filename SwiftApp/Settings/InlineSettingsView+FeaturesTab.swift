@@ -40,6 +40,8 @@ extension InlineSettingsView {
                 UserDefaults.standard.set(newValue, forKey: HistoryPopupWindow.caretAnchoredDefaultsKey)
             }
             sectionDivider().padding(.vertical, 7)
+            popupAnimationRow
+            sectionDivider().padding(.vertical, 7)
             settingToggleRow(
                 icon: "cursorarrow.click",
                 iconColor: singleClickUsesItem ? Color.accentColor : theme.secondaryText,
@@ -51,6 +53,8 @@ extension InlineSettingsView {
             )
             sectionDivider().padding(.vertical, 7)
             sidePreviewToggleRow
+            sectionDivider().padding(.vertical, 7)
+            soundFeedbackRow
             sectionDivider().padding(.vertical, 7)
             settingToggleRow(
                 icon: continuousDrag ? "hand.draw.fill" : "hand.draw",
@@ -67,6 +71,140 @@ extension InlineSettingsView {
         }
         .sheet(isPresented: $showRichTextListSheet) {
             richTextAppListSheet
+        }
+    }
+
+    private var popupAnimationRow: some View {
+        let disabled = systemReduceMotion
+        let effectiveOn = !disabled && popupAnimationEnabled
+        return HStack(spacing: 12) {
+            Image(systemName: effectiveOn ? "sparkles" : "bolt.fill")
+                .font(.system(size: 15))
+                .foregroundColor(effectiveOn ? Color.accentColor : theme.secondaryText)
+                .frame(width: 22)
+            VStack(alignment: .leading, spacing: 3) {
+                Text("窗口呼出动画")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(theme.primaryText)
+                Text(disabled
+                     ? "系统已开启「减弱动态效果」，呼出动画保持关闭。"
+                     : popupAnimationEnabled
+                        ? "呼出与关闭弹窗时播放淡入缩放动画。"
+                        : "呼出与关闭弹窗即时响应，无需跟随系统设置。")
+                    .font(.system(size: 11.5))
+                    .foregroundColor(theme.secondaryText)
+            }
+            Spacer()
+            Toggle("", isOn: Binding(
+                get: { effectiveOn },
+                set: { newValue in
+                    popupAnimationEnabled = newValue
+                    UserDefaults.standard.set(newValue, forKey: HistoryPopupWindow.popupAnimationDefaultsKey)
+                }
+            ))
+            .labelsHidden()
+            .toggleStyle(.switch)
+            .controlSize(.small)
+            .disabled(disabled)
+        }
+        .padding(.vertical, 4)
+    }
+
+    private var soundFeedbackRow: some View {
+        let anySoundOn = copySoundEnabled || pasteSoundEnabled
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 12) {
+                Image(systemName: anySoundOn ? "speaker.wave.2.fill" : "speaker.slash")
+                    .font(.system(size: 15))
+                    .foregroundColor(anySoundOn ? Color.accentColor : theme.secondaryText)
+                    .frame(width: 22)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("提示音效")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(theme.primaryText)
+                    Text("复制或粘贴完成时播放提示音。")
+                        .font(.system(size: 11.5))
+                        .foregroundColor(theme.secondaryText)
+                }
+                Spacer()
+                HStack(spacing: 12) {
+                    HStack(spacing: 5) {
+                        Text("复制")
+                            .font(.system(size: 11.5))
+                            .foregroundColor(theme.secondaryText)
+                        Toggle("", isOn: $copySoundEnabled)
+                            .labelsHidden()
+                            .toggleStyle(.switch)
+                            .controlSize(.small)
+                    }
+                    HStack(spacing: 5) {
+                        Text("粘贴")
+                            .font(.system(size: 11.5))
+                            .foregroundColor(theme.secondaryText)
+                        Toggle("", isOn: $pasteSoundEnabled)
+                            .labelsHidden()
+                            .toggleStyle(.switch)
+                            .controlSize(.small)
+                    }
+                }
+            }
+
+            if anySoundOn {
+                HStack(spacing: 14) {
+                    if copySoundEnabled {
+                        soundChoicePicker(label: "复制音效", selection: $copySoundChoice)
+                    }
+                    if pasteSoundEnabled {
+                        soundChoicePicker(label: "粘贴音效", selection: $pasteSoundChoice)
+                    }
+                    Spacer()
+                }
+                .padding(.leading, 34)
+                .transition(.opacity)
+            }
+        }
+        .padding(.vertical, 4)
+        .animation(ReduceMotion.animation(.easeOut(duration: 0.16)), value: copySoundEnabled)
+        .animation(ReduceMotion.animation(.easeOut(duration: 0.16)), value: pasteSoundEnabled)
+        .onChange(of: copySoundEnabled) { _, newValue in
+            SoundFeedback.copyEnabled = newValue
+            if newValue {
+                SoundFeedback.preview(copySoundChoice)
+            }
+        }
+        .onChange(of: pasteSoundEnabled) { _, newValue in
+            SoundFeedback.pasteEnabled = newValue
+            if newValue {
+                SoundFeedback.preview(pasteSoundChoice)
+            }
+        }
+        .onChange(of: copySoundChoice) { _, newValue in
+            SoundFeedback.copySound = newValue
+            SoundFeedback.preview(newValue)
+        }
+        .onChange(of: pasteSoundChoice) { _, newValue in
+            SoundFeedback.pasteSound = newValue
+            SoundFeedback.preview(newValue)
+        }
+    }
+
+    private func soundChoicePicker(
+        label: String,
+        selection: Binding<SoundFeedback.SoundChoice>
+    ) -> some View {
+        HStack(spacing: 6) {
+            Text(label)
+                .font(.system(size: 11))
+                .foregroundColor(theme.secondaryText)
+            Picker("", selection: selection) {
+                ForEach(SoundFeedback.SoundChoice.allCases) { choice in
+                    Text(choice.displayName).tag(choice)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .controlSize(.small)
+            .fixedSize()
         }
     }
 

@@ -110,7 +110,7 @@ Homebrew cask 维护在独立仓库 `wonaren/homebrew-tap`（安装命令 `brew 
 
 | 模块 | 职责 |
 |---|---|
-| `ffi/` | FFI 导出主目录（8 个子模块，68 个函数）：`snapshot.rs` / `search.rs` / `init.rs` / `accessors.rs` / `paste.rs` / `history.rs` / `backup.rs` / `stress.rs`（另有 2 个在 `backend.rs`、4 个在 `perf.rs`） |
+| `ffi/` | FFI 导出主目录（8 个子模块，68 个函数）：`snapshot.rs` / `search.rs` / `init.rs` / `accessors.rs` / `paste.rs` / `history.rs` / `backup.rs` / `stress.rs`（另有 3 个在 `backend.rs`、4 个在 `perf.rs`） |
 | `db/` | SQLite write-through：`schema.rs`（连接/FTS5/`user_version` 迁移/目录解析 `COPYATTACH_DATA_DIR`）、`migration.rs`（legacy `history.json` → SQLite 导入，feature-gated）、`crud.rs`（load/insert/dedup/trim）、`search.rs`（FTS/LIKE）、`backup.rs`（导出/校验/覆盖/合并）。禁用 mmap，4MB LRU page cache；FTS 索引上限 512K 字符，超限行走 LIKE 兜底；text/image hash 均为稳定 FNV-1a 64 |
 | `monitor.rs` | 后台线程每 500ms 轮询剪贴板，changeCount 轻量检测，write-through DB，ignore rules 过滤。图片 Phase 2 单 worker + 单槽有界队列（背压） |
 | `ignore.rs` | 捕获时忽略规则：按 app bundle ID、类型、短文本阈值过滤 |
@@ -135,6 +135,7 @@ Homebrew cask 维护在独立仓库 `wonaren/homebrew-tap`（安装命令 `brew 
 - **更新完成小窗（`Update/UpdateCompleteWindow.swift`）**：`UpdateDownloader.install()` 在替换 bundle 后写 `PendingUpdateVersion`，并在下载开始时抓取 GitHub Release `body` 存 `PendingUpdateNotes`；下次启动 `AppDelegate.showPendingUpdateCompletion()` 剥离 `-dev` 后缀按 `currentBase == pending` 精确比对才弹窗（版本不匹配就丢弃，避免手工改 defaults 造成误报）。日志从本地读、不依赖网络，取不到就明示「更新日志暂不可用」。Esc 与关闭按钮都关窗，不自动消失。
 - **db_id 不变量**：内存条目的 `db_id` 必须指向 DB 中该条目的行，且赋值使用该条目的写库结果、绝不按头部位置
 - **Suppress re-capture**：select_and_paste 通过 `pending_self_write` 标记自身写入，监控线程跳过匹配的 changeCount
+- **复制/粘贴提示音（`SwiftApp/Utility/SoundFeedback.swift`）**：播放一律走 `AudioServicesPlaySystemSound`（系统声音服务异步执行，调用开销 ~0.2ms）——`NSSound.play()` 实测每次阻塞调用线程 15–35ms（冷启动 110ms），在 `.onChange` 里同步调用必掉帧，禁用。音效列表动态扫描 `/System/Library/Sounds/*.aiff`，UserDefaults 存文件名。后台复制捕获音靠 Rust 侧 `clipboard_set_capture_callback`（`src/backend.rs` 静态槽，`monitor.rs` 落库释放锁后触发，关闭时置 nil 零开销）；粘贴音在 Swift 各送达路径播。右键复制用 `suppressMonitorCopyUntil` 抑制紧随的同一次 monitor 重捕，避免双响。
 - **undo 删除（软删除，0.109.2 起）**：删除 = 在 `clipboard_deleted` 侧表插一行 `(row_id, entry_id, deleted_at 微秒, was_favorite, was_slot)` + 删掉该条的 `clipboard_favorites` 与 `clipboard_quick_slots` 行；载荷行留在 `clipboard_history` 原地不动。撤销栈因此**由数据库派生**，没有内存栈、没有临时文件——深度只受保留期（`UNDO_RETENTION_SECS` 7 天）与**可配置上限**约束。上限编码在 `clipboard_meta.undo_budget_bytes` 单个 i64（键名沿用）：`>0` = 字节预算、`<0` = 条数上限（`-N`，即保留 N 条）、`0` = 不限制；**默认 `DEFAULT_UNDO_LIMIT` = -1（1 条）**，设置页可选「1 条 / 16MB / 64MB / 256MB / 不限制」；超限按 `deleted_at` 升序丢最老的删除。**淘汰前必须先问用户**（`UndoEvictionWarningDisabled` 默认 **true**，即默认不提醒）：`clipboard_undo_eviction_preview` 在删除**之前**算出会挤掉几条（删除后就没得报了），Swift 侧据此弹「继续删除/取消 + 不再提醒」。撤销 = 读回该行载荷 → 走 `insert_entry_to_db` + `delete_matching_entry`（dedup）→ 删掉旧行 → 按 `was_favorite` 与 `was_slot` 恢复收藏和快捷槽位（目标槽位未被他人占用时），因此「删 A → 再复制 A → 删 A → ⌘Z×2」只留一行，重启也不重复（旧实现不去重，会留两行）。**侧表而非列**是实测决定的：`UPDATE clipboard_history SET deleted_at=?` 会整行重写，图片行的多 MB blob 被读出来再写回，34 次删除实测 +24MB 滞留 RSS（`shrink_memory` 不回落）；换成侧表后同样的 34 次删除是 **+0KB `written`**。所有活行查询用 `id NOT IN (SELECT row_id FROM clipboard_deleted)`（`load_history_from_db` / `trim_db_history` / `search_history` 的 FTS+LIKE+metadata 三路 / `set_favorite` / `update_entry_custom_label` / `clipboard_get_storage_breakdown` / 备份导出与合并）。`clipboard_clear_history` 与备份覆盖恢复都硬删（**含 `clipboard_deleted` 侧表行**，两者的确认框都承诺「无法撤销」）——侧表按 `row_id == clipboard_history.id` 寻址，恢复会按归档自己的 id 重写该表，残留侧表行会把一条刚恢复的条目变成「已删除」。
 
 ### Swift 前端（`SwiftApp/`，LSUIElement agent app）
@@ -202,7 +203,7 @@ SwiftApp/（共 68 个 .swift 文件）
 
 ## FFI 接口
 
-`SwiftApp/CopyAttach-Bridging-Header.h` 声明 **74 个** `extern "C"` 函数（与 Rust 导出 1:1 匹配：68 个在 `src/ffi/` 8 个子模块，2 个在 `src/backend.rs`，4 个在 `src/perf.rs`），涵盖生命周期、查询、快照、图片加载/预览解码、粘贴、快捷槽位、权限、删除/撤销/收藏/备注、ignore rules、备份/恢复、存储统计、历史变更事件与性能仪表。新接口需同步 `src/ffi/`（或所属 Rust 模块）、Bridging Header 与 `ClipboardBackend.swift`。
+`SwiftApp/CopyAttach-Bridging-Header.h` 声明 **75 个** `extern "C"` 函数（与 Rust 导出 1:1 匹配：68 个在 `src/ffi/` 8 个子模块，3 个在 `src/backend.rs`，4 个在 `src/perf.rs`），涵盖生命周期、查询、快照、图片加载/预览解码、粘贴、快捷槽位、权限、删除/撤销/收藏/备注、ignore rules、备份/恢复、存储统计、历史变更事件与性能仪表。新接口需同步 `src/ffi/`（或所属 Rust 模块）、Bridging Header 与 `ClipboardBackend.swift`。
 
 ## 代码签名与数据隔离
 

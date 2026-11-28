@@ -46,6 +46,7 @@ extension HistoryPopupContent {
                            title: item.isImage ? "复制图片" : "复制内容",
                            symbol: item.isImage ? "photo" : "doc.on.doc") {
             if self.copyItemContent(item) {
+                SoundFeedback.playCopy(fromMenuCopy: true)
                 self.showToast("已复制到剪贴板", icon: "checkmark.circle.fill")
             }
         }

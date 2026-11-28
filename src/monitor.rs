@@ -99,6 +99,9 @@ fn persist_image_phase2(job: ImagePhase2Job) {
             publish_persisted_entry(&mut hist, item, row_id, &removed);
             crate::backend::mark_history_changed();
             crate::backend::IMAGE_ENCODING_COUNTER.fetch_add(1, Ordering::Relaxed);
+            drop(hist);
+            drop(conn);
+            crate::backend::notify_capture_completed();
         }
         Err(()) => crate::error_log!("CopyAttach: Phase 2 DB insert failed for image {entry_id}"),
     }
@@ -127,6 +130,9 @@ fn persist_captured_text(
             publish_persisted_entry(&mut hist, item, row_id, &removed);
             crate::backend::mark_history_changed();
             crate::perf::perf_instant("rust", "capture.text", Some("text"));
+            drop(hist);
+            drop(conn);
+            crate::backend::notify_capture_completed();
         }
         Err(()) => crate::error_log!("CopyAttach: failed to insert text entry to DB"),
     }
@@ -498,5 +504,45 @@ mod tests {
         assert_eq!(memory, disk);
         assert_eq!(memory.len(), 100);
         assert_eq!((memory[0].0, memory[1].0), (103, 101));
+    }
+
+    #[test]
+    fn test_capture_callback_fires_for_text_and_image_and_clears() {
+        let _shared = crate::tests::shared_state_guard();
+        static HITS: AtomicUsize = AtomicUsize::new(0);
+        extern "C" fn on_capture() {
+            HITS.fetch_add(1, Ordering::SeqCst);
+        }
+
+        HITS.store(0, Ordering::SeqCst);
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::ensure_history_table(&conn).unwrap();
+        let db = Arc::new(Mutex::new(conn));
+        let history = Arc::new(Mutex::new(Vec::new()));
+        let threshold = Arc::new(AtomicUsize::new(100));
+
+        crate::backend::clipboard_set_capture_callback(Some(on_capture));
+
+        let entry = ClipboardEntry::text_entry(1, "hello", 10, String::new(), String::new(), 0);
+        persist_captured_text(&db, &history, &threshold, entry, "hello");
+        assert_eq!(HITS.load(Ordering::SeqCst), 1);
+
+        let rgba = [1, 2, 3, 255];
+        let png = crate::image::encode_png(1, 1, &rgba).unwrap();
+        history.lock().unwrap().push(ClipboardEntry::Image {
+            id: 2, width: 1, height: 1, thumb_width: 1, thumb_height: 1,
+            hash: crate::image::image_hash(&rgba, 1, 1), custom_label: String::new(),
+            timestamp: 11, source_name: String::new(), source_bundle_id: String::new(), db_id: 0,
+        });
+        persist_image_phase2(ImagePhase2Job {
+            payload: ImagePhase2Payload::ExistingPng(png.clone()), entry_id: 2, thumb_data: png,
+            thumb_w: 1, thumb_h: 1, history: history.clone(), db: db.clone(), cleanup_threshold: threshold.clone(),
+        });
+        assert_eq!(HITS.load(Ordering::SeqCst), 2);
+
+        crate::backend::clipboard_set_capture_callback(None);
+        let entry2 = ClipboardEntry::text_entry(3, "after clear", 12, String::new(), String::new(), 0);
+        persist_captured_text(&db, &history, &threshold, entry2, "after clear");
+        assert_eq!(HITS.load(Ordering::SeqCst), 2);
     }
 }
